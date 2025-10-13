@@ -1,0 +1,550 @@
+
+/* Header Styles */
+.header {
+    background-color: white;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.nav-link {
+    color: #4a5568;
+    padding: 0.5rem 1rem;
+    transition: color 0.2s ease;
+}
+
+.nav-link:hover {
+    color: #00c853;
+}
+
+.nav-link.active {
+    color: #00c853;
+    font-weight: 600;
+}
+
+/* Hero Banner Styles */
+.hero-banner {
+    background-image: linear-gradient(rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0.5)), url('https://images.unsplash.com/photo-1506484381205-f7945653044d?ixlib=rb-1.2.1&auto=format&fit=crop&w=1950&q=80');
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    color: white;
+    position: relative;
+}
+
+.hero-content {
+    position: relative;
+    z-index: 10;
+}
+
+.hero-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(90deg, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.4) 100%);
+}
+
+/* Food Card Styles */
+.food-card {
+    background-color: white;
+    border-radius: 0.5rem;
+    overflow: hidden;
+    transition: all 0.3s ease;
+}
+
+.food-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+.food-card-image {
+    height: 200px;
+    object-fit: cover;
+    width: 100%;
+}
+
+.food-card-content {
+    padding: 1.5rem;
+}
+
+.food-card-footer {
+    padding: 1rem 1.5rem;
+    border-top: 1px solid #e2e8f0;
+    background-color: #f8fafc;
+}
+
+/* Category Card Styles */
+.category-card {
+    position: relative;
+    overflow: hidden;
+    border-radius: 0.5rem;
+    transition: all 0.3s ease;
+    cursor: pointer;
+}
+
+.category-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+.category-card-image {
+    width: 100%;
+    height: 180px;
+    object-fit: cover;
+}
+
+.category-card-overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(to top, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.3) 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem;
+}
+
+.category-card-content {
+    color: white;
+    text-align: center;
+}
+
+.category-item-count {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    background-color: rgba(255, 255, 255, 0.2);
+    border-radius: 9999px;
+    font-size: 0.875rem;
+}
+
+/* Community Card Styles */
+.community-card {
+    overflow: hidden;
+    border-radius: 0.5rem;
+    transition: all 0.3s ease;
+}
+
+.community-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+.community-image {
+    height: 180px;
+    width: 100%;
+    object-fit: cover;
+    transition: transform 0.5s ease;
+}
+
+.community-card:hover .community-image {
+    transform: scale(1.05);
+}
+
+.community-content {
+    padding: 1.5rem;
+}
+
+/* Badge Styles */
+.badge {
+    padding: 0.25rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.badge-fresh {
+    background-color: #c6f6d5;
+    color: #22543d;
+}
+
+.badge-warning {
+    background-color: #feebc8;
+    color: #744210;
+}
+
+.badge-expired {
+    background-color: #fed7d7;
+    color: #742a2a;
+}
+
+/* Button Styles */
+.btn-primary {
+    background-color: #00c853;
+    color: white;
+    padding: 0.5rem 1rem;
+    border-radius: 0.375rem;
+    transition: background-color 0.2s ease;
+}
+
+.btn-primary:hover {
+    background-color: #00b34a;
+}
+
+.btn-secondary {
+    background-color: #e2e8f0;
+    color: #4a5568;
+    padding: 0.5rem 1rem;
+    border-radius: 0.375rem;
+    transition: background-color 0.2s ease;
+}
+
+.btn-secondary:hover {
+    background-color: #cbd5e0;
+}
+
+/* Avatar Styles */
+.avatar {
+    border-radius: 50%;
+    object-fit: cover;
+}
+
+.avatar-sm {
+    width: 2rem;
+    height: 2rem;
+}
+
+.avatar-md {
+    width: 3rem;
+    height: 3rem;
+}
+
+.avatar-lg {
+    width: 4rem;
+    height: 4rem;
+}
+
+/* Form Styles */
+.form-input {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.375rem;
+    transition: border-color 0.2s ease;
+}
+
+.form-input:focus {
+    outline: none;
+    border-color: #00c853;
+}
+
+/* Admin Dashboard Styles */
+.admin-card {
+    transition: all 0.3s ease;
+}
+
+.admin-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+.admin-stat-card {
+    border-left: 4px solid;
+}
+
+.admin-stat-card.users {
+    border-color: #3b82f6;
+}
+
+.admin-stat-card.listings {
+    border-color: #10b981;
+}
+
+.admin-stat-card.trades {
+    border-color: #8b5cf6;
+}
+
+.admin-stat-card.reports {
+    border-color: #ef4444;
+}
+
+.admin-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.admin-table th {
+    background-color: #f9fafb;
+    font-weight: 600;
+    text-align: left;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.admin-table td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.admin-table tr:hover {
+    background-color: #f9fafb;
+}
+
+/* AI Assistant Styles */
+.assistant-button {
+    position: fixed;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    width: 3.5rem;
+    height: 3.5rem;
+    background-color: #00c853;
+    color: white;
+    border-radius: 9999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    transition: all 0.3s ease;
+    z-index: 40;
+}
+
+.assistant-button:hover {
+    background-color: #00b34a;
+    transform: scale(1.05);
+}
+
+.assistant-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(0, 0, 0, 0.5);
+}
+
+.assistant-container {
+    background-color: white;
+    border-radius: 0.5rem;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    width: 100%;
+    max-width: 28rem;
+    margin: 0 1rem;
+    display: flex;
+    flex-direction: column;
+}
+
+.assistant-header {
+    background-color: #00c853;
+    color: white;
+    padding: 0.75rem 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-top-left-radius: 0.5rem;
+    border-top-right-radius: 0.5rem;
+}
+
+.assistant-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+    background-color: #f9fafb;
+}
+
+.assistant-message {
+    margin-bottom: 1rem;
+    display: flex;
+}
+
+.assistant-message-user {
+    justify-content: flex-end;
+}
+
+.assistant-message-content {
+    border-radius: 0.5rem;
+    padding: 0.75rem 1rem;
+    max-width: 80%;
+}
+
+.assistant-message-user .assistant-message-content {
+    background-color: #00c853;
+    color: white;
+}
+
+.assistant-message-ai .assistant-message-content {
+    background-color: white;
+    border: 1px solid #e2e8f0;
+}
+
+.assistant-input {
+    padding: 1rem;
+    border-top: 1px solid #e2e8f0;
+    background-color: white;
+    border-bottom-left-radius: 0.5rem;
+    border-bottom-right-radius: 0.5rem;
+}
+
+.assistant-input-container {
+    position: relative;
+}
+
+.assistant-input input {
+    width: 100%;
+    padding: 0.5rem 3rem 0.5rem 1rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 9999px;
+}
+
+.assistant-input input:focus {
+    outline: none;
+    border-color: #00c853;
+    box-shadow: 0 0 0 3px rgba(0, 200, 83, 0.1);
+}
+
+.assistant-send-button {
+    position: absolute;
+    right: 0.5rem;
+    top: 50%;
+    transform: translateY(-50%);
+    background-color: #00c853;
+    color: white;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 9999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.assistant-send-button:disabled {
+    background-color: #a0aec0;
+}
+
+.assistant-quick-questions {
+    padding: 0.5rem 1rem;
+    background-color: #f9fafb;
+    border-top: 1px solid #e2e8f0;
+    overflow-x: auto;
+    white-space: nowrap;
+}
+
+.assistant-quick-question {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    background-color: white;
+    color: #00c853;
+    border: 1px solid #c6f6d5;
+    border-radius: 9999px;
+    margin-right: 0.5rem;
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.assistant-quick-question:hover {
+    background-color: #f0fff4;
+}
+
+/* Recipe Card Styles */
+.recipe-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 0.5rem;
+    overflow: hidden;
+    margin-bottom: 1.5rem;
+}
+
+.recipe-card-header {
+    padding: 1rem;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.recipe-card-title {
+    font-size: 1.125rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+
+.recipe-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.recipe-card-meta-item {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.25rem 0.5rem;
+    background-color: #f0fff4;
+    color: #22543d;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+}
+
+.recipe-card-content {
+    padding: 1rem;
+}
+
+.recipe-card-section {
+    margin-bottom: 1rem;
+}
+
+.recipe-card-section-title {
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    font-size: 0.875rem;
+    color: #4a5568;
+}
+
+.recipe-card-ingredients {
+    list-style-type: disc;
+    padding-left: 1.25rem;
+    margin-bottom: 1rem;
+}
+
+.recipe-card-ingredient {
+    font-size: 0.875rem;
+    margin-bottom: 0.25rem;
+    color: #4a5568;
+}
+
+.recipe-card-instructions {
+    font-size: 0.875rem;
+    color: #4a5568;
+    white-space: pre-line;
+}
+
+/* Storage Tips Card Styles */
+.storage-tips-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 0.5rem;
+    overflow: hidden;
+    margin-bottom: 1.5rem;
+}
+
+.storage-tips-header {
+    padding: 0.75rem 1rem;
+    background-color: #f0fff4;
+    border-bottom: 1px solid #c6f6d5;
+}
+
+.storage-tips-title {
+    font-weight: 600;
+    color: #22543d;
+}
+
+.storage-tips-content {
+    padding: 1rem;
+}
+
+.storage-tips-list {
+    list-style-type: none;
+    padding: 0;
+    margin: 0;
+}
+
+.storage-tips-item {
+    display: flex;
+    align-items: flex-start;
+    margin-bottom: 0.5rem;
+    font-size: 0.875rem;
+    color: #4a5568;
+}
+
+.storage-tips-icon {
+    color: #00c853;
+    margin-right: 0.5rem;
+    flex-shrink: 0;
+    margin-top: 0.25rem;
+}
