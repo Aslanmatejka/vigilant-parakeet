@@ -282,8 +282,10 @@ function HomePage() {
                                 {communities.map((community) => (
                                     <Card
                                         key={community.id}
-                                        className="overflow-hidden hover:shadow-lg transition-shadow"
+                                        className="overflow-hidden"
                                         role="listitem"
+                                        hoverable={true}
+                                        onClick={() => handleNavigation(`/community/${community.id}`)}
                                     >
                                         <img
                                             src={community.image}
