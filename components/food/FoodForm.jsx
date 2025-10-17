@@ -19,6 +19,7 @@ function FoodForm({
         donor_zip: '',
         donor_city: '',
         donor_state: '',
+    school_district: '',
         latitude: null,
         longitude: null,
         image: null,
@@ -196,6 +197,24 @@ function FoodForm({
                         required
                         maxLength={50}
                         helperText="Enter your state."
+                    />
+                    <Input
+                        label="School District"
+                        name="school_district"
+                        type="select"
+                        value={formData.school_district}
+                        onChange={handleChange}
+                        error={errors.school_district}
+                        options={[
+                            { value: '', label: 'Select school district' },
+                            { value: 'Do Good Warehouse', label: 'Do Good Warehouse' },
+                            { value: 'Ruby Bridges Elementary CC', label: 'Ruby Bridges Elementary CC' },
+                            { value: 'NEA/ACLC CC', label: 'NEA/ACLC CC' },
+                            { value: 'Academy of Alameda CC', label: 'Academy of Alameda CC' },
+                            { value: 'Island HS CC', label: 'Island HS CC' },
+                            { value: 'Encinal Jr Sr High School', label: 'Encinal Jr Sr High School' }
+                        ]}
+                        helperText="If this donation is for a school, choose the district or school."
                     />
                     <Input
                         label="Email"
