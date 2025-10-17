@@ -15,6 +15,7 @@ import ProfilePage from './pages/ProfilePage';
 import UserDashboard from './pages/UserDashboard';
 import ShareFoodPage from './pages/ShareFoodPage';
 import CommunityPage from './pages/CommunityPage';
+import CommunityFoodPage from './pages/CommunityFoodPage';
 import UserSettings from './pages/UserSettings';
 import Notifications from './pages/Notifications';
 import UserListings from './pages/UserListings';
@@ -76,6 +77,7 @@ function AppContent() {
                 <Route path="/share" element={<ProtectedRoute><ShareFoodPage /></ProtectedRoute>} />
                 <Route path="/claim" element={<ProtectedRoute><ClaimFoodForm /></ProtectedRoute>} />
                 <Route path="/community" element={<ProtectedRoute><CommunityPage /></ProtectedRoute>} />
+                <Route path="/community/:id" element={<ProtectedRoute><CommunityFoodPage /></ProtectedRoute>} />
                 <Route path="/settings" element={<ProtectedRoute><UserSettings /></ProtectedRoute>} />
                 <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
                 <Route path="/listings" element={<ProtectedRoute><UserListings /></ProtectedRoute>} />
