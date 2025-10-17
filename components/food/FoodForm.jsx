@@ -156,97 +156,7 @@ function FoodForm({
         }
         setErrors(newErrors);
         return Object.keys(newErrors).length === 0;
-    };
-                <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <Input
-                        label="Name / Organization"
-                        name="donor_name"
-                        value={formData.donor_name}
-                        onChange={handleChange}
-                        error={errors.donor_name}
-                        required
-                        maxLength={100}
-                        helperText="Enter your full name or organization name."
-                    />
-                    <Input
-                        label="ZIP Code"
-                        name="donor_zip"
-                        value={formData.donor_zip}
-                        onChange={handleChange}
-                        error={errors.donor_zip}
-                        required
-                        maxLength={10}
-                        helperText="Enter your ZIP code."
-                    />
-                    <Input
-                        label="City"
-                        name="donor_city"
-                        value={formData.donor_city}
-                        onChange={handleChange}
-                        error={errors.donor_city}
-                        required
-                        maxLength={50}
-                        helperText="Enter your city."
-                    />
-                    <Input
-                        label="State"
-                        name="donor_state"
-                        value={formData.donor_state}
-                        onChange={handleChange}
-                        error={errors.donor_state}
-                        required
-                        maxLength={50}
-                        helperText="Enter your state."
-                    />
-                    <Input
-                        label="School District"
-                        name="school_district"
-                        type="select"
-                        value={formData.school_district}
-                        onChange={handleChange}
-                        error={errors.school_district}
-                        options={[
-                            { value: '', label: 'Select school district' },
-                            { value: 'Do Good Warehouse', label: 'Do Good Warehouse' },
-                            { value: 'Ruby Bridges Elementary CC', label: 'Ruby Bridges Elementary CC' },
-                            { value: 'NEA/ACLC CC', label: 'NEA/ACLC CC' },
-                            { value: 'Academy of Alameda CC', label: 'Academy of Alameda CC' },
-                            { value: 'Island HS CC', label: 'Island HS CC' },
-                            { value: 'Encinal Jr Sr High School', label: 'Encinal Jr Sr High School' }
-                        ]}
-                        helperText="If this donation is for a school, choose the district or school."
-                    />
-                    <Input
-                        label="Email"
-                        name="donor_email"
-                        type="email"
-                        value={formData.donor_email}
-                        onChange={handleChange}
-                        error={errors.donor_email}
-                        maxLength={100}
-                        helperText="Enter your email address."
-                    />
-                    <Input
-                        label="Phone"
-                        name="donor_phone"
-                        type="tel"
-                        value={formData.donor_phone}
-                        onChange={handleChange}
-                        error={errors.donor_phone}
-                        maxLength={20}
-                        helperText="Enter your phone number."
-                    />
-                    <Input
-                        label="Occupation"
-                        name="donor_occupation"
-                        value={formData.donor_occupation}
-                        onChange={handleChange}
-                        error={errors.donor_occupation}
-                        required
-                        maxLength={100}
-                        helperText="Enter your occupation."
-                    />
-                </div>
+    }
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -327,6 +237,24 @@ function FoodForm({
                         required
                         maxLength={50}
                         helperText="Enter your state."
+                    />
+                    <Input
+                        label="School District"
+                        name="school_district"
+                        type="select"
+                        value={formData.school_district}
+                        onChange={handleChange}
+                        error={errors.school_district}
+                        options={[
+                            { value: '', label: 'Select school district' },
+                            { value: 'Do Good Warehouse', label: 'Do Good Warehouse' },
+                            { value: 'Ruby Bridges Elementary CC', label: 'Ruby Bridges Elementary CC' },
+                            { value: 'NEA/ACLC CC', label: 'NEA/ACLC CC' },
+                            { value: 'Academy of Alameda CC', label: 'Academy of Alameda CC' },
+                            { value: 'Island HS CC', label: 'Island HS CC' },
+                            { value: 'Encinal Jr Sr High School', label: 'Encinal Jr Sr High School' }
+                        ]}
+                        helperText="If this donation is for a school, choose the district or school."
                     />
                     <Input
                         label="Email"
