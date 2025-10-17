@@ -561,34 +561,7 @@ export const useFileUpload = () => {
   }
 }
 
-// Search hook
-export const useSearch = () => {
-  const [results, setResults] = useState([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(null)
-
-  const search = useCallback(async (searchTerm, filters = {}) => {
-    try {
-      setLoading(true)
-      setError(null)
-      const data = await dataService.searchFoodListings(searchTerm, filters)
-      setResults(data)
-      return data
-    } catch (error) {
-      setError(error.message)
-      throw error
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  return {
-    results,
-    loading,
-    error,
-    search
-  }
-}
+// Note: `useSearch` (server-side/search hook) removed — client-side filtering is used where needed.
 
 // Admin hooks
 export const useAdminStats = () => {

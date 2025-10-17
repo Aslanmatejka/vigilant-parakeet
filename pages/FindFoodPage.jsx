@@ -5,7 +5,7 @@ import Button from "../components/common/Button";
 import Input from "../components/common/Input";
 import FoodCard from "../components/food/FoodCard";
 import { toast } from "react-toastify";
-import { useFoodListings, useSearch } from "../utils/hooks/useSupabase";
+import { useFoodListings } from "../utils/hooks/useSupabase";
 import { useGeoLocation } from "../utils/hooks/useLocation";
 
 // Category mapping for URL parameters
@@ -32,7 +32,9 @@ function FindFoodPage({ initialCategory }) {
     const routerLocation = useRouterLocation();
     
     const { listings: foods, loading: foodsLoading, error: foodsError, fetchListings } = useFoodListings({ status: 'approved' });
-    const { search, results: searchResults, loading: searchLoading } = useSearch();
+    // Local client-side search results (replaces removed useSearch hook)
+    const [searchResults, setSearchResults] = useState([]);
+    const [searchLoading, setSearchLoading] = useState(false);
     const { 
         location: currentLocation, 
         loading: geoLoading, 
@@ -76,15 +78,36 @@ function FindFoodPage({ initialCategory }) {
     const handleSearch = async () => {
         if (!searchTerm.trim()) {
             setIsSearchActive(false);
+            setSearchResults([]);
             return;
         }
-        
+
         setIsSearchActive(true);
+        setSearchLoading(true);
         try {
-            await search(searchTerm, filters);
+            // Simple client-side search over currently loaded foods
+            const term = searchTerm.toLowerCase();
+            const results = (foods || []).filter(food => {
+                return (
+                    (food.title && food.title.toLowerCase().includes(term)) ||
+                    (food.description && food.description.toLowerCase().includes(term)) ||
+                    (food.location && typeof food.location === 'string' && food.location.toLowerCase().includes(term))
+                );
+            });
+
+            // Apply category/type filters similarly to main filteredFoods logic
+            const filtered = results.filter(food => {
+                if (filters.category && food.category !== filters.category) return false;
+                if (filters.type && filters.type !== 'all' && food.type !== filters.type) return false;
+                return true;
+            });
+
+            setSearchResults(filtered);
         } catch (error) {
             toast.error('Search failed. Please try again.');
             setIsSearchActive(false);
+        } finally {
+            setSearchLoading(false);
         }
     };
 
