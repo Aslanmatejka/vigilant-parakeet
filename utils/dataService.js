@@ -1,5 +1,6 @@
 import supabase from './supabaseClient.js'
 import { reportError } from './helpers.js'
+import communities from './communities.js'
 
 class DataService {
   // Get food claims by status (for admin dashboard)
@@ -409,6 +410,15 @@ class DataService {
           longitude: listingData.longitude
         } : null
       };
+
+      // Persist school_district and map to a community_id when possible
+      if (listingData.school_district) {
+        listing.school_district = listingData.school_district;
+        const matched = communities.find(c => c.name === listingData.school_district || c.id === Number(listingData.school_district));
+        if (matched) {
+          listing.community_id = matched.id;
+        }
+      }
 
       // Remove other donor fields that are stored in users table
       delete listing.donor_name;
