@@ -348,9 +348,8 @@ class DataService {
   // Food Listings
   async getFoodListings(filters = {}) {
     try {
-      let query = supabase
-        .from('food_listings')
-        .select(`
+      // Try selecting with community_id, but some schemas may not have that column.
+      const selectWithCommunity = `
           id,
           title,
           description,
@@ -382,38 +381,45 @@ class DataService {
             organization,
             email
           )
-        `)
-        .eq('status', filters.status || 'pending')
+        `;
 
-      // Apply filters
-      if (filters.category) {
-        query = query.eq('category', filters.category)
-      }
-      if (filters.listing_type) {
-        query = query.eq('listing_type', filters.listing_type)
-      }
-      if (filters.location) {
-        query = query.ilike('location', `%${filters.location}%`)
-      }
-      if (filters.user_id) {
-        query = query.eq('user_id', filters.user_id)
-      }
+      const selectWithoutCommunity = selectWithCommunity.replace(/\n\s*community_id,?/, '\n');
 
-      // Pagination
-      if (filters.page && filters.limit) {
-        const from = (filters.page - 1) * filters.limit;
-        const to = from + filters.limit - 1;
-        query = query.range(from, to);
+      // Helper to build query given a select string
+      const buildQuery = (selectStr) => {
+        let q = supabase
+          .from('food_listings')
+          .select(selectStr)
+          .eq('status', filters.status || 'pending');
+
+        if (filters.category) q = q.eq('category', filters.category);
+        if (filters.listing_type) q = q.eq('listing_type', filters.listing_type);
+        if (filters.location) q = q.ilike('location', `%${filters.location}%`);
+        if (filters.user_id) q = q.eq('user_id', filters.user_id);
+        if (filters.page && filters.limit) {
+          const from = (filters.page - 1) * filters.limit;
+          const to = from + filters.limit - 1;
+          q = q.range(from, to);
+        }
+        return q;
+      };
+
+      // First attempt: include community_id
+      try {
+        const q1 = buildQuery(selectWithCommunity);
+        const { data, error } = await q1.order('created_at', { ascending: false });
+        if (error) throw error;
+        return data.map(listing => ({ ...listing, donor: listing.users }));
+      } catch (err) {
+        // If community_id column doesn't exist, retry without it
+        if (err && err.code === '42703') {
+          const q2 = buildQuery(selectWithoutCommunity);
+          const { data: data2, error: error2 } = await q2.order('created_at', { ascending: false });
+          if (error2) throw error2;
+          return data2.map(listing => ({ ...listing, donor: listing.users }));
+        }
+        throw err;
       }
-
-      const { data, error } = await query.order('created_at', { ascending: false })
-
-      if (error) throw error
-
-      return data.map(listing => ({
-        ...listing,
-        donor: listing.users
-      }))
     } catch (error) {
       console.error('Get food listings error:', error)
       reportError(error)
