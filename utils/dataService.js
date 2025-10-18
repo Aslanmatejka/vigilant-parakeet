@@ -41,30 +41,62 @@ class DataService {
       console.log('Fetching impact data...');
       
       // First, get all approved food claims with their associated food listings
-      const { data: claims, error: claimsError } = await supabase
-        .from('food_claims')
-        .select(`
-          id,
-          food_id, 
-          members_count, 
-          people, 
-          school_staff, 
-          students,
-          created_at,
-          food_listings(
+      // Some deployments may not have the `people` column. Try the full select first
+      // and if Postgres returns a column-not-found error (42703) retry without that column.
+      let claims = [];
+      try {
+        const res = await supabase
+          .from('food_claims')
+          .select(`
             id,
-            quantity,
-            unit,
-            category,
-            donor_type,
-            created_at
-          )
-        `)
-        .eq('status', 'approved');
-        
-      if (claimsError) {
-        console.error('Error fetching claims:', claimsError);
-        throw claimsError;
+            food_id, 
+            members_count, 
+            people, 
+            school_staff, 
+            students,
+            created_at,
+            food_listings(
+              id,
+              quantity,
+              unit,
+              category,
+              donor_type,
+              created_at
+            )
+          `)
+          .eq('status', 'approved');
+
+        if (res.error) throw res.error;
+        claims = res.data || [];
+      } catch (err) {
+        // If people column doesn't exist, retry excluding it
+        if (err && err.code === '42703') {
+          const res2 = await supabase
+            .from('food_claims')
+            .select(`
+              id,
+              food_id, 
+              members_count, 
+              school_staff, 
+              students,
+              created_at,
+              food_listings(
+                id,
+                quantity,
+                unit,
+                category,
+                donor_type,
+                created_at
+              )
+            `)
+            .eq('status', 'approved');
+
+          if (res2.error) throw res2.error;
+          claims = res2.data || [];
+        } else {
+          console.error('Error fetching claims:', err);
+          throw err;
+        }
       }
       
       // Get all food listings that have been shared (even if not claimed)
@@ -1294,17 +1326,25 @@ class DataService {
     try {
       const fileExt = file.name.split('.').pop()
       const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`
-      const filePath = `${bucket}/${fileName}`
+      // Use the file name at the root of the bucket (avoid duplicate bucket segments)
+      const filePath = `${fileName}`
 
-      const { error: uploadError } = await supabase.storage
+      // Ensure user is authenticated; storage may enforce RLS
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('User must be authenticated to upload files')
+
+      const uploadRes = await supabase.storage
         .from(bucket)
         .upload(filePath, file)
 
-      if (uploadError) throw uploadError
+      if (uploadRes.error) throw uploadRes.error
 
-      const { data: { publicUrl } } = supabase.storage
-        .from(bucket)
-        .getPublicUrl(filePath)
+      // getPublicUrl may return different shapes across SDK versions
+      const pub = await supabase.storage.from(bucket).getPublicUrl(filePath)
+      let publicUrl = null
+      if (pub) {
+        publicUrl = pub.data?.publicUrl || pub.data?.public_url || pub.data?.publicUrl || pub.publicURL || null
+      }
 
       return { success: true, url: publicUrl }
     } catch (error) {
