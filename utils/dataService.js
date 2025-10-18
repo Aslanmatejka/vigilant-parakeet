@@ -453,6 +453,13 @@ class DataService {
 
   async updateFoodListing(id, updates) {
     try {
+      // If school_district provided in updates, map it to community_id when possible
+      if (updates && updates.school_district) {
+        const matched = communities.find(c => c.name === updates.school_district || c.id === Number(updates.school_district));
+        if (matched) {
+          updates.community_id = matched.id;
+        }
+      }
       const { data, error } = await supabase
         .from('food_listings')
         .update(updates)
