@@ -338,6 +338,7 @@ class DataService {
           donor_zip,
           donor_occupation,
           donor_type,
+          community_id,
           latitude,
           longitude,
           created_at,
@@ -411,13 +412,14 @@ class DataService {
         } : null
       };
 
-      // Persist school_district and map to a community_id when possible
+      // Map school_district (user-facing select) to internal community_id when possible
       if (listingData.school_district) {
-        listing.school_district = listingData.school_district;
-        const matched = communities.find(c => c.name === listingData.school_district || c.id === Number(listingData.school_district));
-        if (matched) {
-          listing.community_id = matched.id;
+        const match = communities.find(c => c.name === listingData.school_district || String(c.id) === String(listingData.school_district));
+        if (match) {
+          listing.community_id = match.id;
         }
+        // keep school_district on the object if you want to store it as well; otherwise remove
+        delete listing.school_district;
       }
 
       // Remove other donor fields that are stored in users table
@@ -453,16 +455,19 @@ class DataService {
 
   async updateFoodListing(id, updates) {
     try {
-      // If school_district provided in updates, map it to community_id when possible
-      if (updates && updates.school_district) {
-        const matched = communities.find(c => c.name === updates.school_district || c.id === Number(updates.school_district));
-        if (matched) {
-          updates.community_id = matched.id;
+      const toUpdate = { ...updates };
+      // Map school_district to community_id on update
+      if (toUpdate.school_district) {
+        const match = communities.find(c => c.name === toUpdate.school_district || String(c.id) === String(toUpdate.school_district));
+        if (match) {
+          toUpdate.community_id = match.id;
         }
+        delete toUpdate.school_district;
       }
+
       const { data, error } = await supabase
         .from('food_listings')
-        .update(updates)
+        .update(toUpdate)
         .eq('id', id)
         .select()
         .single()
