@@ -66,42 +66,35 @@ function AdminDashboard() {
         loading ? (
           <div>Loading...</div>
         ) : (
-          <div className="grid gap-6 grid-cols-1 md:grid-cols-3">
+          <div className="grid gap-6 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
             {foods.map(food => (
-              <div key={food.id} className="bg-white shadow-sm rounded-lg overflow-hidden hover:shadow-md transition-shadow">
+              <div key={food.id} className="bg-white shadow rounded p-4 flex flex-col items-center">
                 {food.image_url && (
-                  <div className="relative h-64">
-                    <img src={food.image_url} alt={food.title || food.name} className="w-full h-full object-cover" />
-                  </div>
+                  <img src={food.image_url} alt={food.title || food.name} className="w-32 h-32 object-cover mb-2 rounded" />
                 )}
-                <div className="p-4">
-                  <h2 className="text-lg font-semibold mb-2">{food.title || food.name}</h2>
-                  {food.description && <p className="mb-3 text-gray-600 text-sm">{food.description}</p>}
-                  <div className="mb-3 space-y-1 text-sm text-gray-600">
-                    {food.category && <div><span className="font-medium">Category:</span> {food.category}</div>}
-                    {food.quantity && <div><span className="font-medium">Quantity:</span> {food.quantity} {food.unit || ''}</div>}
-                    {food.expiry_date && <div><span className="font-medium">Expiry:</span> {food.expiry_date}</div>}
-                    {food.location && <div><span className="font-medium">Location:</span> {food.location}</div>}
-                  </div>
-                  <div className="mb-4">
-                    <span className="text-sm">Status: </span>
-                    <span className="font-semibold text-yellow-600">{food.status}</span>
-                  </div>
+                <h2 className="text-lg font-semibold mb-2">{food.title || food.name}</h2>
+                {food.description && <p className="mb-2 text-gray-700 text-center">{food.description}</p>}
+                <div className="mb-2 text-sm text-gray-600">
+                  {food.category && <span className="mr-2"><strong>Category:</strong> {food.category}</span>}
+                  {food.quantity && <span className="mr-2"><strong>Quantity:</strong> {food.quantity} {food.unit || ''}</span>}
+                  {food.expiry_date && <span className="mr-2"><strong>Expiry:</strong> {food.expiry_date}</span>}
+                  {food.location && <span className="mr-2"><strong>Location:</strong> {food.location}</span>}
                 </div>
-                <div className="px-4 py-3 bg-gray-50 border-t flex gap-2 justify-end">
+                <p className="mb-4">Status: <span className="font-bold text-yellow-600">{food.status}</span></p>
+                <div className="flex gap-2">
                   <button
-                    className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 text-sm"
+                    className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
                     onClick={() => handleAction(food.id, 'approved')}
                     disabled={food.status !== 'pending' || actionStatus[food.id] === 'loading'}
                   >Approve</button>
                   <button
-                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 text-sm"
+                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
                     onClick={() => handleAction(food.id, 'declined')}
                     disabled={food.status !== 'pending' || actionStatus[food.id] === 'loading'}
                   >Decline</button>
-                  {actionStatus[food.id] === 'approved' && <span className="text-green-600 text-sm">✓</span>}
-                  {actionStatus[food.id] === 'declined' && <span className="text-red-600 text-sm">✗</span>}
-                  {actionStatus[food.id] === 'error' && <span className="text-red-600 text-sm">Error</span>}
+                  {actionStatus[food.id] === 'approved' && <span className="text-green-600 ml-2">Approved</span>}
+                  {actionStatus[food.id] === 'declined' && <span className="text-red-600 ml-2">Declined</span>}
+                  {actionStatus[food.id] === 'error' && <span className="text-red-600 ml-2">Error</span>}
                 </div>
               </div>
             ))}
