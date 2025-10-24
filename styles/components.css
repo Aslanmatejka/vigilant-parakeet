@@ -58,7 +58,7 @@
 }
 
 .food-card-image {
-    height: 200px;
+    height: 256px;
     object-fit: cover;
     width: 100%;
 }
