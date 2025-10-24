@@ -112,7 +112,7 @@ function ProfileStats({
                 {impact.lastUpdated && (
                     <span className="inline-flex items-center px-3 py-1 bg-green-100 text-green-800 rounded-full text-xs font-semibold">
                         <span className="inline-block w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span>
-                        Live
+                        Live Updates
                     </span>
                 )}
             </div>
