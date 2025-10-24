@@ -75,11 +75,21 @@ function ShareFoodPageContent() {
                     // Create new listing
                     await createListing(listingData);
                 }
-                
+
                 // Immediately update the impact metrics
                 console.log('Food listing submitted, updating impact metrics...');
-                await fetchClaimImpact();
-                
+                setTimeout(async () => {
+                    try {
+                        await fetchClaimImpact();
+                        console.log('Impact metrics refreshed successfully');
+                    } catch (err) {
+                        console.error('Failed to refresh impact metrics:', err);
+                    }
+                }, 500);
+
+                // Trigger custom event for other components
+                window.dispatchEvent(new CustomEvent('foodShared'));
+
             } catch (apiError) {
                 // Show specific error for missing donor_type column
                 if (apiError.message && apiError.message.includes("donor_type")) {
@@ -152,26 +162,42 @@ function ShareFoodPageContent() {
 
     React.useEffect(() => {
         fetchClaimImpact();
-        
+
+        // Listen for custom events
+        const handleFoodShared = () => {
+            console.log('Food shared event detected, refreshing impact...');
+            setTimeout(() => fetchClaimImpact(), 1000);
+        };
+
+        const handleFoodClaimed = () => {
+            console.log('Food claimed event detected, refreshing impact...');
+            setTimeout(() => fetchClaimImpact(), 1000);
+        };
+
+        window.addEventListener('foodShared', handleFoodShared);
+        window.addEventListener('foodClaimed', handleFoodClaimed);
+
         // Subscribe to real-time claim updates
         const claimsSubscription = dataService.subscribeToClaims((payload) => {
             console.log('Food claim update detected:', payload.eventType);
-            fetchClaimImpact();
+            setTimeout(() => fetchClaimImpact(), 1000);
         });
-        
+
         // Subscribe to real-time food listing updates
         const listingsSubscription = dataService.subscribeToFoodListings((payload) => {
             console.log('Food listing update detected:', payload.eventType);
-            fetchClaimImpact();
+            setTimeout(() => fetchClaimImpact(), 1000);
         });
-        
-        // Refresh impact data every minute as a fallback
+
+        // Refresh impact data every 30 seconds for more frequent updates
         const intervalId = setInterval(() => {
             console.log('Auto-refreshing impact data...');
             fetchClaimImpact();
-        }, 60000); // 60 seconds
-        
+        }, 30000); // 30 seconds
+
         return () => {
+            window.removeEventListener('foodShared', handleFoodShared);
+            window.removeEventListener('foodClaimed', handleFoodClaimed);
             dataService.unsubscribe('food_claims');
             dataService.unsubscribe('food_listings');
             clearInterval(intervalId);
@@ -237,12 +263,27 @@ function ShareFoodPageContent() {
                 <div className="border-t border-gray-200 mt-8 pt-8 bg-gradient-to-br from-green-50 via-blue-50 to-emerald-50 rounded-b-2xl p-6">
                     <div className="flex items-center justify-between mb-6">
                         <h2 className="text-3xl font-bold text-gray-900">Community Impact</h2>
-                        {impact.lastUpdated && (
-                            <span className="inline-flex items-center px-4 py-2 bg-green-100 text-green-800 rounded-full text-sm font-semibold shadow-sm">
-                                <span className="inline-block w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span>
-                                Live Updates
-                            </span>
-                        )}
+                        <div className="flex items-center gap-3">
+                            {impact.lastUpdated && (
+                                <span className="inline-flex items-center px-4 py-2 bg-green-100 text-green-800 rounded-full text-sm font-semibold shadow-sm">
+                                    <span className="inline-block w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span>
+                                    Live
+                                </span>
+                            )}
+                            <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => {
+                                    setImpactLoading(true);
+                                    fetchClaimImpact();
+                                }}
+                                disabled={impactLoading}
+                                className="text-xs"
+                            >
+                                <i className={`fas fa-sync-alt mr-2 ${impactLoading ? 'animate-spin' : ''}`}></i>
+                                Refresh
+                            </Button>
+                        </div>
                     </div>
 
                     {impactLoading ? (

@@ -60,6 +60,10 @@ export default function ClaimFoodForm() {
             };
             await dataService.createFoodClaim(claimData);
             setSubmitted(true);
+
+            // Trigger custom event for impact refresh
+            console.log('Food claim submitted, triggering impact refresh...');
+            window.dispatchEvent(new CustomEvent('foodClaimed'));
         } catch (error) {
             setSubmitError('Failed to submit claim. Please try again.');
         } finally {

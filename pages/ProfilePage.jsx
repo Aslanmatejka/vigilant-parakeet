@@ -70,23 +70,39 @@ function ProfilePageContent() {
 
         fetchUserImpact();
 
+        // Listen for custom events
+        const handleFoodShared = () => {
+            console.log('Food shared event detected, refreshing user impact...');
+            setTimeout(() => fetchUserImpact(), 1000);
+        };
+
+        const handleFoodClaimed = () => {
+            console.log('Food claimed event detected, refreshing user impact...');
+            setTimeout(() => fetchUserImpact(), 1000);
+        };
+
+        window.addEventListener('foodShared', handleFoodShared);
+        window.addEventListener('foodClaimed', handleFoodClaimed);
+
         // Subscribe to real-time updates
         const claimsSubscription = dataService.subscribeToClaims(() => {
             console.log('Food claim update detected, refreshing user impact');
-            fetchUserImpact();
+            setTimeout(() => fetchUserImpact(), 1000);
         });
 
         const listingsSubscription = dataService.subscribeToFoodListings(() => {
             console.log('Food listing update detected, refreshing user impact');
-            fetchUserImpact();
+            setTimeout(() => fetchUserImpact(), 1000);
         });
 
-        // Refresh every 2 minutes as fallback
+        // Refresh every 30 seconds for more frequent updates
         const intervalId = setInterval(() => {
             fetchUserImpact();
-        }, 120000);
+        }, 30000);
 
         return () => {
+            window.removeEventListener('foodShared', handleFoodShared);
+            window.removeEventListener('foodClaimed', handleFoodClaimed);
             dataService.unsubscribe('food_claims');
             dataService.unsubscribe('food_listings');
             clearInterval(intervalId);
