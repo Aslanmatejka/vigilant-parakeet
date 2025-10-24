@@ -1,11 +1,9 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
 import AdminLayout from './AdminLayout';
 import Button from '../../components/common/Button';
 import Card from '../../components/common/Card';
-import Input from '../../components/common/Input';
-import { reportError } from '../../utils/helpers';
-import { toast } from 'react-toastify';
+import dataService from '../../utils/dataService';
+import supabase from '../../utils/supabaseClient';
 
 const formatDate = (dateString) => {
     if (!dateString) return '';
@@ -17,398 +15,276 @@ const formatDate = (dateString) => {
 };
 
 function FoodDistributionManagement() {
-    try {
-        const navigate = useNavigate();
-        const [distributions, setDistributions] = React.useState([]);
-        const [loading, setLoading] = React.useState(true);
-        const [submitting, setSubmitting] = React.useState(false);
-        const [error, setError] = React.useState(null);
-        const [showForm, setShowForm] = React.useState(false);
-        const [formData, setFormData] = React.useState({
-            title: '',
-            location: '',
-            date: '',
-            time: '',
-            capacity: '',
-            description: '',
-            status: 'scheduled'
-        });
+    const [listings, setListings] = React.useState([]);
+    const [loading, setLoading] = React.useState(true);
+    const [stats, setStats] = React.useState({
+        total: 0,
+        available: 0,
+        claimed: 0,
+        pending: 0
+    });
 
-        React.useEffect(() => {
-            loadDistributions();
-        }, []);
+    React.useEffect(() => {
+        fetchListings();
 
-        const validateForm = () => {
-            const errors = [];
-            
-            if (!formData.title.trim()) {
-                errors.push('Event title is required');
-            }
-            if (!formData.location.trim()) {
-                errors.push('Location is required');
-            }
-            if (!formData.date) {
-                errors.push('Date is required');
-            } else if (new Date(formData.date) < new Date().setHours(0, 0, 0, 0)) {
-                errors.push('Date cannot be in the past');
-            }
-            if (!formData.time.trim()) {
-                errors.push('Time is required');
-            }
-            if (!formData.capacity || formData.capacity < 1) {
-                errors.push('Capacity must be at least 1');
-            }
-            if (!formData.description.trim()) {
-                errors.push('Description is required');
-            }
-            
-            return errors;
+        const subscription = supabase
+            .channel('food-distribution')
+            .on(
+                'postgres_changes',
+                {
+                    event: '*',
+                    schema: 'public',
+                    table: 'food_listings'
+                },
+                () => {
+                    console.log('Food listings changed, refreshing...');
+                    fetchListings();
+                }
+            )
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(subscription);
         };
+    }, []);
 
-        const handleSubmit = async (e) => {
-            e.preventDefault();
-            const errors = validateForm();
-            if (errors.length > 0) {
-                errors.forEach(error => toast.error(error));
-                return;
-            }
+    const fetchListings = async () => {
+        try {
+            setLoading(true);
+            const data = await dataService.getFoodListings();
 
-            setSubmitting(true);
-            try {
-                // Simulated API call
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                
-                const newDistribution = {
-                    id: distributions.length + 1,
-                    ...formData,
-                    registered: 0
-                };
-                
-                setDistributions([...distributions, newDistribution]);
-                setShowForm(false);
-                setFormData({
-                    title: '',
-                    location: '',
-                    date: '',
-                    time: '',
-                    capacity: '',
-                    description: '',
-                    status: 'scheduled'
-                });
-                toast.success('Distribution event created successfully');
-            } catch (error) {
-                console.error('Create distribution error:', error);
-                toast.error('Failed to create distribution event');
-            } finally {
-                setSubmitting(false);
-            }
-        };
+            setListings(data);
 
-        const handleDelete = async (id) => {
-            const confirmed = window.confirm('Are you sure you want to delete this distribution event? This action cannot be undone.');
-            if (!confirmed) return;
-            
-            try {
-                setLoading(true);
-                // Simulated API call
-                await new Promise(resolve => setTimeout(resolve, 500));
-                setDistributions(distributions.filter(dist => dist.id !== id));
-                toast.success('Distribution event deleted successfully');
-            } catch (error) {
-                console.error('Delete distribution error:', error);
-                toast.error('Failed to delete distribution event');
-            } finally {
-                setLoading(false);
-            }
-        };
+            const total = data.length;
+            const available = data.filter(item => item.status === 'available').length;
+            const claimed = data.filter(item => item.status === 'claimed').length;
+            const pending = data.filter(item => item.status === 'pending').length;
 
-        const handleStatusChange = async (id, status) => {
-            try {
-                setLoading(true);
-                // Simulated API call
-                await new Promise(resolve => setTimeout(resolve, 500));
-                setDistributions(distributions.map(dist => 
-                    dist.id === id ? { ...dist, status } : dist
-                ));
-                toast.success(`Event status updated to ${status}`);
-            } catch (error) {
-                console.error('Update status error:', error);
-                toast.error('Failed to update status');
-            } finally {
-                setLoading(false);
-            }
-        };
+            setStats({ total, available, claimed, pending });
+        } catch (error) {
+            console.error('Error fetching listings:', error);
+            setListings([]);
+        } finally {
+            setLoading(false);
+        }
+    };
 
-        const getStatusBadge = (status) => {
-            const statusStyles = {
-                scheduled: 'bg-blue-100 text-blue-800',
-                full: 'bg-yellow-100 text-yellow-800',
-                completed: 'bg-green-100 text-green-800',
-                cancelled: 'bg-red-100 text-red-800'
-            };
-            
-            return (
-                <span className={`px-2 py-1 text-xs rounded-full ${statusStyles[status]}`}>
-                    {status.charAt(0).toUpperCase() + status.slice(1)}
-                </span>
-            );
+    const handleStatusChange = async (listingId, newStatus) => {
+        try {
+            await dataService.updateFoodListingStatus(listingId, newStatus);
+            await fetchListings();
+        } catch (error) {
+            console.error('Error updating status:', error);
+            alert('Failed to update status');
+        }
+    };
+
+    const handleDelete = async (listingId) => {
+        if (!confirm('Are you sure you want to delete this listing?')) return;
+
+        try {
+            const { error } = await supabase
+                .from('food_listings')
+                .delete()
+                .eq('id', listingId);
+
+            if (error) throw error;
+            await fetchListings();
+        } catch (error) {
+            console.error('Error deleting listing:', error);
+            alert('Failed to delete listing');
+        }
+    };
+
+    const getStatusBadge = (status) => {
+        const statusStyles = {
+            available: 'bg-green-100 text-green-800',
+            pending: 'bg-yellow-100 text-yellow-800',
+            claimed: 'bg-blue-100 text-blue-800',
+            approved: 'bg-green-100 text-green-800',
+            declined: 'bg-red-100 text-red-800'
         };
 
         return (
-            <AdminLayout active="distribution">
-                <div data-name="food-distribution-management" className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
-                    <div className="flex justify-between items-center mb-8">
-                        <div>
-                            <h1 className="text-3xl font-bold text-gray-900">Food Distribution Management</h1>
-                            <p className="mt-2 text-gray-600">
-                                Manage food distribution events and track attendance.
-                            </p>
+            <span className={`px-2 py-1 text-xs font-semibold rounded-full ${statusStyles[status] || 'bg-gray-100 text-gray-800'}`}>
+                {status ? status.charAt(0).toUpperCase() + status.slice(1) : 'Unknown'}
+            </span>
+        );
+    };
+
+    return (
+        <AdminLayout active="distribution">
+            <div className="p-6">
+                <div className="mb-6">
+                    <h1 className="text-2xl font-bold text-gray-900">Food Distribution Management</h1>
+                    <p className="mt-2 text-gray-600">Manage and track all food listings in the system</p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                    <div className="bg-white rounded-lg shadow p-6">
+                        <div className="flex items-center">
+                            <div className="flex-shrink-0 bg-blue-100 rounded-full p-3">
+                                <i className="fas fa-list text-blue-600 text-xl"></i>
+                            </div>
+                            <div className="ml-4">
+                                <p className="text-sm font-medium text-gray-500">Total Listings</p>
+                                <p className="text-2xl font-bold text-gray-900">{stats.total}</p>
+                            </div>
                         </div>
-                        <Button
-                            variant="primary"
-                            icon={<i className="fas fa-plus"></i>}
-                            onClick={() => setShowForm(!showForm)}
-                        >
-                            {showForm ? 'Cancel' : 'Create Event'}
-                        </Button>
                     </div>
 
-                    {showForm && (
-                        <Card className="mb-8">
-                            <form onSubmit={handleSubmit} className="p-6">
-                                <h2 className="text-xl font-semibold mb-6">Create Distribution Event</h2>
-                                
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-                                    <Input
-                                        label="Event Title"
-                                        name="title"
-                                        value={formData.title}
-                                        onChange={handleInputChange}
-                                        required
-                                    />
-                                    
-                                    <Input
-                                        label="Location"
-                                        name="location"
-                                        value={formData.location}
-                                        onChange={handleInputChange}
-                                        required
-                                    />
-                                    
-                                    <Input
-                                        label="Date"
-                                        name="date"
-                                        type="date"
-                                        value={formData.date}
-                                        onChange={handleInputChange}
-                                        required
-                                    />
-                                    
-                                    <Input
-                                        label="Time"
-                                        name="time"
-                                        value={formData.time}
-                                        onChange={handleInputChange}
-                                        placeholder="e.g. 10:00 AM - 2:00 PM"
-                                        required
-                                    />
-                                    
-                                    <Input
-                                        label="Capacity"
-                                        name="capacity"
-                                        type="number"
-                                        value={formData.capacity}
-                                        onChange={handleInputChange}
-                                        required
-                                    />
-                                    
-                                    <Input
-                                        label="Status"
-                                        name="status"
-                                        type="select"
-                                        value={formData.status}
-                                        onChange={handleInputChange}
-                                        options={[
-                                            { value: 'scheduled', label: 'Scheduled' },
-                                            { value: 'full', label: 'Full' },
-                                            { value: 'completed', label: 'Completed' },
-                                            { value: 'cancelled', label: 'Cancelled' }
-                                        ]}
-                                        required
-                                    />
-                                    
-                                    <div className="md:col-span-2">
-                                        <Input
-                                            label="Description"
-                                            name="description"
-                                            type="textarea"
-                                            value={formData.description}
-                                            onChange={handleInputChange}
-                                            required
-                                        />
-                                    </div>
-                                </div>
-                                
-                                <div className="flex justify-end space-x-4">
-                                    <Button
-                                        variant="secondary"
-                                        type="button"
-                                        onClick={() => setShowForm(false)}
-                                    >
-                                        Cancel
-                                    </Button>
-                                    <Button
-                                        variant="primary"
-                                        type="submit"
-                                        disabled={submitting}
-                                    >
-                                        {submitting ? 'Creating...' : 'Create Event'}
-                                    </Button>
-                                </div>
-                            </form>
-                        </Card>
-                    )}
+                    <div className="bg-white rounded-lg shadow p-6">
+                        <div className="flex items-center">
+                            <div className="flex-shrink-0 bg-green-100 rounded-full p-3">
+                                <i className="fas fa-check-circle text-green-600 text-xl"></i>
+                            </div>
+                            <div className="ml-4">
+                                <p className="text-sm font-medium text-gray-500">Available</p>
+                                <p className="text-2xl font-bold text-gray-900">{stats.available}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="bg-white rounded-lg shadow p-6">
+                        <div className="flex items-center">
+                            <div className="flex-shrink-0 bg-yellow-100 rounded-full p-3">
+                                <i className="fas fa-clock text-yellow-600 text-xl"></i>
+                            </div>
+                            <div className="ml-4">
+                                <p className="text-sm font-medium text-gray-500">Pending</p>
+                                <p className="text-2xl font-bold text-gray-900">{stats.pending}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="bg-white rounded-lg shadow p-6">
+                        <div className="flex items-center">
+                            <div className="flex-shrink-0 bg-red-100 rounded-full p-3">
+                                <i className="fas fa-hand-holding-heart text-red-600 text-xl"></i>
+                            </div>
+                            <div className="ml-4">
+                                <p className="text-sm font-medium text-gray-500">Claimed</p>
+                                <p className="text-2xl font-bold text-gray-900">{stats.claimed}</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="bg-white rounded-lg shadow overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-200">
+                        <h2 className="text-lg font-semibold">All Food Listings ({listings.length})</h2>
+                    </div>
 
                     {loading ? (
-                        <div className="space-y-4">
-                            {[1, 2, 3].map(i => (
-                                <div key={i} className="animate-pulse bg-gray-200 rounded-lg h-32"></div>
-                            ))}
+                        <div className="p-8 text-center">
+                            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-600 mx-auto"></div>
+                            <p className="mt-4 text-gray-600">Loading listings...</p>
                         </div>
-                    ) : error ? (
-                        <div className="text-center py-8">
-                            <i className="fas fa-exclamation-circle text-red-500 text-4xl mb-4"></i>
-                            <p className="text-gray-600">{error}</p>
-                            <Button
-                                variant="secondary"
-                                className="mt-4"
-                                onClick={loadDistributions}
-                            >
-                                Try Again
-                            </Button>
+                    ) : listings.length === 0 ? (
+                        <div className="p-8 text-center">
+                            <i className="fas fa-box-open text-gray-400 text-4xl mb-4"></i>
+                            <p className="text-gray-600">No food listings yet</p>
                         </div>
                     ) : (
                         <div className="overflow-x-auto">
-                            <table 
-                                className="min-w-full divide-y divide-gray-200"
-                                role="table"
-                                aria-label="Distribution Events"
-                            >
-                                <thead>
+                            <table className="min-w-full divide-y divide-gray-200">
+                                <thead className="bg-gray-50">
                                     <tr>
-                                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                            Event
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                            Food Item
                                         </th>
-                                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                            Date & Time
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                            Category
                                         </th>
-                                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                            Location
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                            Quantity
                                         </th>
-                                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                            Capacity
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                            Expiry Date
                                         </th>
-                                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                             Status
                                         </th>
-                                        <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                            Created
+                                        </th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                             Actions
                                         </th>
                                     </tr>
                                 </thead>
                                 <tbody className="bg-white divide-y divide-gray-200">
-                                    {distributions.map(dist => (
-                                        <tr key={dist.id}>
-                                            <td className="px-6 py-4 whitespace-nowrap">
-                                                <div className="font-medium text-gray-900">{dist.title}</div>
-                                                <div className="text-sm text-gray-500 truncate max-w-xs">
-                                                    {dist.description}
+                                    {listings.map(listing => (
+                                        <tr key={listing.id}>
+                                            <td className="px-6 py-4">
+                                                <div className="flex items-center">
+                                                    {listing.image_url && (
+                                                        <img
+                                                            src={listing.image_url}
+                                                            alt={listing.title || listing.name}
+                                                            className="h-10 w-10 rounded object-cover mr-3"
+                                                        />
+                                                    )}
+                                                    <div>
+                                                        <div className="text-sm font-medium text-gray-900">
+                                                            {listing.title || listing.name}
+                                                        </div>
+                                                        <div className="text-sm text-gray-500 line-clamp-1">
+                                                            {listing.description}
+                                                        </div>
+                                                    </div>
                                                 </div>
-                                            </td>
-                                            <td className="px-6 py-4 whitespace-nowrap">
-                                                <div className="text-sm text-gray-900">{formatDate(dist.date)}</div>
-                                                <div className="text-sm text-gray-500">{dist.time}</div>
                                             </td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                                {dist.location}
+                                                {listing.category || 'N/A'}
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                                {listing.quantity} {listing.unit || ''}
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                                {listing.expiry_date ? formatDate(listing.expiry_date) : 'N/A'}
                                             </td>
                                             <td className="px-6 py-4 whitespace-nowrap">
-                                                <div className="text-sm text-gray-900">
-                                                    {dist.registered} / {dist.capacity}
-                                                </div>
-                                                <div 
-                                                    className="w-full bg-gray-200 rounded-full h-2 mt-1"
-                                                    role="progressbar"
-                                                    aria-valuenow={dist.registered}
-                                                    aria-valuemin="0"
-                                                    aria-valuemax={dist.capacity}
-                                                    aria-label={`${dist.registered} out of ${dist.capacity} spots filled`}
-                                                >
-                                                    <div 
-                                                        className="bg-green-600 h-2 rounded-full" 
-                                                        style={{ width: `${(dist.registered / dist.capacity) * 100}%` }}
-                                                    ></div>
-                                                </div>
+                                                {getStatusBadge(listing.status)}
                                             </td>
-                                            <td className="px-6 py-4 whitespace-nowrap">
-                                                {getStatusBadge(dist.status)}
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                                {formatDate(listing.created_at)}
                                             </td>
-                                            <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                                                <div className="flex justify-end space-x-2">
-                                                    <Button
-                                                        variant="secondary"
-                                                        size="sm"
-                                                        icon={<i className="fas fa-users" aria-hidden="true"></i>}
-                                                        onClick={() => navigate(`/admin/distribution/${dist.id}/attendees`)}
-                                                        aria-label={`View attendees for ${dist.title}`}
-                                                    >
-                                                        Attendees
-                                                    </Button>
-                                                    
-                                                    <Button
-                                                        variant="secondary"
-                                                        size="sm"
-                                                        icon={<i className="fas fa-edit" aria-hidden="true"></i>}
-                                                        onClick={() => navigate(`/admin/distribution/${dist.id}/edit`)}
-                                                        aria-label={`Edit ${dist.title}`}
-                                                    >
-                                                        Edit
-                                                    </Button>
-                                                    
-                                                    {dist.status !== 'completed' && dist.status !== 'cancelled' && (
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                                                {listing.status === 'pending' && (
+                                                    <>
                                                         <Button
                                                             variant="primary"
                                                             size="sm"
-                                                            icon={<i className="fas fa-check-circle" aria-hidden="true"></i>}
-                                                            onClick={() => handleStatusChange(dist.id, 'completed')}
-                                                            aria-label={`Mark ${dist.title} as completed`}
+                                                            onClick={() => handleStatusChange(listing.id, 'approved')}
                                                         >
-                                                            Complete
+                                                            Approve
                                                         </Button>
-                                                    )}
-                                                    
-                                                    {dist.status !== 'cancelled' && (
                                                         <Button
                                                             variant="danger"
                                                             size="sm"
-                                                            icon={<i className="fas fa-ban" aria-hidden="true"></i>}
-                                                            onClick={() => handleStatusChange(dist.id, 'cancelled')}
-                                                            aria-label={`Cancel ${dist.title}`}
+                                                            onClick={() => handleStatusChange(listing.id, 'declined')}
                                                         >
-                                                            Cancel
+                                                            Decline
                                                         </Button>
-                                                    )}
-                                                    
+                                                    </>
+                                                )}
+                                                {listing.status === 'approved' && (
                                                     <Button
-                                                        variant="danger"
+                                                        variant="secondary"
                                                         size="sm"
-                                                        icon={<i className="fas fa-trash" aria-hidden="true"></i>}
-                                                        onClick={() => handleDelete(dist.id)}
-                                                        aria-label={`Delete ${dist.title}`}
+                                                        onClick={() => handleStatusChange(listing.id, 'available')}
                                                     >
-                                                        Delete
+                                                        Make Available
                                                     </Button>
-                                                </div>
+                                                )}
+                                                <Button
+                                                    variant="danger"
+                                                    size="sm"
+                                                    onClick={() => handleDelete(listing.id)}
+                                                >
+                                                    Delete
+                                                </Button>
                                             </td>
                                         </tr>
                                     ))}
@@ -417,13 +293,9 @@ function FoodDistributionManagement() {
                         </div>
                     )}
                 </div>
-            </AdminLayout>
-        );
-    } catch (error) {
-        console.error('FoodDistributionManagement error:', error);
-        reportError(error);
-        return null;
-    }
+            </div>
+        </AdminLayout>
+    );
 }
 
 export default FoodDistributionManagement;
