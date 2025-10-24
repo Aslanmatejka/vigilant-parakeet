@@ -24,6 +24,29 @@ function AdminDashboard() {
     if (activeTab === 'pending') {
       fetchPendingFoods();
     }
+
+    // Real-time subscription for food listings
+    const subscription = supabase
+      .channel('admin-food-listings')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'food_listings'
+        },
+        (payload) => {
+          console.log('Food listing changed:', payload);
+          if (activeTab === 'pending') {
+            fetchPendingFoods();
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(subscription);
+    };
   }, [activeTab]);
 
   async function fetchPendingFoods() {
