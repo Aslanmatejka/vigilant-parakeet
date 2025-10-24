@@ -3,18 +3,37 @@ import PropTypes from 'prop-types';
 import { useNavigate } from 'react-router-dom';
 import AdminSidebar from './AdminSidebar';
 import Avatar from '../../components/common/Avatar';
+import supabase from '../../utils/supabaseClient';
 
 function AdminLayout({ children, active }) {
     const navigate = useNavigate();
-    
+
     const [isMobileSidebarOpen, setIsMobileSidebarOpen] = React.useState(false);
     const [isUserDropdownOpen, setIsUserDropdownOpen] = React.useState(false);
+    const [adminUser, setAdminUser] = React.useState(null);
     const dropdownRef = React.useRef(null);
+
+    const handleNavigation = (path) => {
+        navigate(path);
+        setIsMobileSidebarOpen(false);
+    };
 
     React.useEffect(() => {
         // Authentication will be handled by Supabase Auth
         // Admin permissions will be checked by Supabase Auth
-        
+
+        // Fetch admin user data
+        const fetchAdminUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (user) {
+                setAdminUser({
+                    name: user.user_metadata?.name || 'Admin User',
+                    avatar: user.user_metadata?.avatar_url
+                });
+            }
+        };
+        fetchAdminUser();
+
         // Add click outside listener for dropdown
         const handleClickOutside = (event) => {
             if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {

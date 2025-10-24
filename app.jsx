@@ -26,6 +26,7 @@ import ContentModeration from './pages/admin/ContentModeration.jsx';
 import DistributionAttendees from './pages/admin/DistributionAttendees.jsx';
 import FoodDistributionManagement from './pages/admin/FoodDistributionManagement.jsx';
 import UserManagement from './pages/admin/UserManagement.jsx';
+import AdminContentManagement from './pages/admin/AdminContentManagement.jsx';
 import { AuthProvider, useAuthContext } from './utils/AuthContext';
 import { GoodsProvider } from './utils/stores/goodsStore.jsx';
 import AdminRoute from './components/admin/AdminRoute.jsx';
@@ -68,6 +69,11 @@ function AppContent() {
                 <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
                 <Route path="/listings" element={<ProtectedRoute><UserListings /></ProtectedRoute>} />
                 <Route path="/admin" element={<AdminRoute><AdminDashboard /></AdminRoute>} />
+                <Route path="/admin/posts" element={<AdminRoute><AdminContentManagement /></AdminRoute>} />
+                <Route path="/admin/content" element={<AdminRoute><ContentModeration /></AdminRoute>} />
+                <Route path="/admin/users" element={<AdminRoute><UserManagement /></AdminRoute>} />
+                <Route path="/admin/distribution" element={<AdminRoute><FoodDistributionManagement /></AdminRoute>} />
+                <Route path="/admin/attendees" element={<AdminRoute><DistributionAttendees /></AdminRoute>} />
                 <Route path="*" element={<div>Page Not Found</div>} />
             </Routes>
         </MainLayout>

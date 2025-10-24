@@ -1570,7 +1570,7 @@ class DataService {
 
   async getRecentUsers(limit = 10) {
     try {
-      const { data, error } = await supabase
+      const { data, error} = await supabase
         .from('users')
         .select('id, name, email, avatar_url, created_at, organization')
         .order('created_at', { ascending: false })
@@ -1584,6 +1584,218 @@ class DataService {
       reportError(error)
       throw error
     }
+  }
+
+  // Community Posts Methods
+  async getCommunityPosts(filters = {}) {
+    try {
+      let query = supabase
+        .from('community_posts')
+        .select(`
+          *,
+          users!community_posts_author_id_fkey (
+            id,
+            name,
+            avatar_url
+          )
+        `)
+        .eq('published', true)
+
+      if (filters.category) {
+        query = query.eq('category', filters.category)
+      }
+
+      if (filters.post_type) {
+        query = query.eq('post_type', filters.post_type)
+      }
+
+      const { data, error } = await query.order('created_at', { ascending: false })
+
+      if (error) throw error
+
+      return data || []
+    } catch (error) {
+      console.error('Get community posts error:', error)
+      reportError(error)
+      throw error
+    }
+  }
+
+  async createCommunityPost(postData) {
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error('User must be authenticated')
+
+      const { data, error } = await supabase
+        .from('community_posts')
+        .insert({
+          ...postData,
+          author_id: user.id,
+          published: true
+        })
+        .select(`
+          *,
+          users!community_posts_author_id_fkey (
+            id,
+            name,
+            avatar_url
+          )
+        `)
+        .single()
+
+      if (error) throw error
+
+      return data
+    } catch (error) {
+      console.error('Create community post error:', error)
+      reportError(error)
+      throw error
+    }
+  }
+
+  async updateCommunityPost(postId, updates) {
+    try {
+      const { data, error } = await supabase
+        .from('community_posts')
+        .update(updates)
+        .eq('id', postId)
+        .select(`
+          *,
+          users!community_posts_author_id_fkey (
+            id,
+            name,
+            avatar_url
+          )
+        `)
+        .single()
+
+      if (error) throw error
+
+      return data
+    } catch (error) {
+      console.error('Update community post error:', error)
+      reportError(error)
+      throw error
+    }
+  }
+
+  async deleteCommunityPost(postId) {
+    try {
+      const { error } = await supabase
+        .from('community_posts')
+        .delete()
+        .eq('id', postId)
+
+      if (error) throw error
+
+      return { success: true }
+    } catch (error) {
+      console.error('Delete community post error:', error)
+      reportError(error)
+      throw error
+    }
+  }
+
+  async togglePostLike(postId) {
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error('User must be authenticated to like posts')
+
+      // Check if user already liked the post
+      const { data: existingLike, error: checkError } = await supabase
+        .from('post_likes')
+        .select('id')
+        .eq('post_id', postId)
+        .eq('user_id', user.id)
+        .maybeSingle()
+
+      if (checkError) throw checkError
+
+      if (existingLike) {
+        // Unlike: remove the like
+        const { error: deleteError } = await supabase
+          .from('post_likes')
+          .delete()
+          .eq('id', existingLike.id)
+
+        if (deleteError) throw deleteError
+
+        return { liked: false }
+      } else {
+        // Like: add the like
+        const { error: insertError } = await supabase
+          .from('post_likes')
+          .insert({
+            post_id: postId,
+            user_id: user.id
+          })
+
+        if (insertError) throw insertError
+
+        return { liked: true }
+      }
+    } catch (error) {
+      console.error('Toggle post like error:', error)
+      reportError(error)
+      throw error
+    }
+  }
+
+  async getUserPostLikes(userId) {
+    try {
+      const { data, error } = await supabase
+        .from('post_likes')
+        .select('post_id')
+        .eq('user_id', userId)
+
+      if (error) throw error
+
+      return (data || []).map(like => like.post_id)
+    } catch (error) {
+      console.error('Get user post likes error:', error)
+      reportError(error)
+      throw error
+    }
+  }
+
+  subscribeToCommunityPosts(callback) {
+    console.log('Setting up community posts subscription')
+    const subscription = supabase
+      .channel('community_posts_changes')
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'community_posts'
+      }, (payload) => {
+        console.log('Community post change detected:', payload.eventType, payload.new?.id)
+        callback(payload)
+      })
+      .subscribe((status) => {
+        console.log('Community posts subscription status:', status)
+      })
+
+    this.subscriptions.set('community_posts', subscription)
+    return subscription
+  }
+
+  subscribeToPostLikes(callback) {
+    console.log('Setting up post likes subscription')
+    const subscription = supabase
+      .channel('post_likes_changes')
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'post_likes'
+      }, (payload) => {
+        console.log('Post like change detected:', payload.eventType)
+        callback(payload)
+      })
+      .subscribe((status) => {
+        console.log('Post likes subscription status:', status)
+      })
+
+    this.subscriptions.set('post_likes', subscription)
+    return subscription
   }
 }
 
