@@ -1,11 +1,25 @@
+import React from 'react';
 import { useNavigate } from "react-router-dom";
 import Card from "../components/common/Card";
 import Button from "../components/common/Button";
 import Avatar from "../components/common/Avatar";
 import ErrorBoundary from "../components/common/ErrorBoundary";
+import { useImpact } from "../utils/hooks/useImpact";
+import supabase from "../utils/supabaseClient";
 
 function SuccessContent() {
     const navigate = useNavigate();
+    const { impact, loading: impactLoading } = useImpact();
+    const [activeUsers, setActiveUsers] = React.useState(0);
+
+    React.useEffect(() => {
+        fetchActiveUsers();
+    }, []);
+
+    const fetchActiveUsers = async () => {
+        const { data } = await supabase.from('users').select('id', { count: 'exact' });
+        setActiveUsers(data?.length || 0);
+    };
     const stories = [
         {
             id: 1,
@@ -27,10 +41,10 @@ function SuccessContent() {
     ];
 
     const stats = {
-        totalMeals: 25000,
-        wasteReduced: 12500,
-        co2Saved: 18750,
-        activeUsers: 5000
+        totalMeals: impact.totalMeals,
+        wasteReduced: impact.wasteReduced,
+        co2Saved: impact.co2Saved,
+        activeUsers: activeUsers
     };
 
     const handleReadFullStory = (storyId) => {

@@ -4,6 +4,7 @@ import Button from "../components/common/Button";
 import Avatar from "../components/common/Avatar";
 import Card from "../components/common/Card";
 import { useAuth, useFoodListings, useNotifications } from "../utils/hooks/useSupabase";
+import { useImpact } from "../utils/hooks/useImpact";
 
 // Helper function for date formatting
 const formatDate = (date) => {
@@ -23,7 +24,8 @@ function UserDashboard() {
     const { listings: userListings, loading: listingsLoading, error: listingsError } = useFoodListings({ user_id: authUser?.id });
 
     const { notifications, loading: notificationsLoading, error: notificationsError } = useNotifications(authUser?.id);
-    
+    const { impact } = useImpact();
+
     const loading = listingsLoading || notificationsLoading;
     const error = listingsError || notificationsError;
     const user = authUser;
@@ -32,14 +34,18 @@ function UserDashboard() {
     const stats = React.useMemo(() => {
         if (!userListings) return {
             listings: 0,
-            donations: 0
+            donations: 0,
+            foodSaved: 0,
+            peopleHelped: 0
         };
-        
+
         return {
             listings: userListings.length,
-            donations: userListings.length
+            donations: userListings.length,
+            foodSaved: Math.round(impact.foodSavedKg),
+            peopleHelped: impact.peopleHelped
         };
-    }, [userListings]);
+    }, [userListings, impact]);
     const recentActivity = React.useMemo(() => {
         if (!userListings) return [];
         
