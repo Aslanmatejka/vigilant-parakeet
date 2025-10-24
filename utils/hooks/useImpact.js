@@ -15,25 +15,30 @@ export function useImpact() {
     const [error, setError] = useState(null);
 
     useEffect(() => {
+        console.log('[useImpact] Hook initialized, fetching initial data...');
         fetchImpact();
 
-        const subscription = impactService.subscribeToImpactUpdates(() => {
+        const channel = impactService.subscribeToImpactUpdates((payload) => {
+            console.log('[useImpact] 🔄 Real-time update triggered, refetching...', payload);
             fetchImpact();
         });
 
         return () => {
-            impactService.unsubscribeFromImpactUpdates(subscription);
+            console.log('[useImpact] Cleaning up subscription...');
+            impactService.unsubscribeFromImpactUpdates(channel);
         };
     }, []);
 
     const fetchImpact = async () => {
         try {
+            console.log('[useImpact] Fetching impact data...');
             setLoading(true);
             const data = await impactService.getAggregatedImpact();
+            console.log('[useImpact] ✅ Impact data updated:', data);
             setImpact(data);
             setError(null);
         } catch (err) {
-            console.error('Error fetching impact data:', err);
+            console.error('[useImpact] ❌ Error fetching impact data:', err);
             setError(err.message);
         } finally {
             setLoading(false);

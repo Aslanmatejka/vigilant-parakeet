@@ -3,11 +3,16 @@ import supabase from './supabaseClient';
 class ImpactService {
     async getAggregatedImpact() {
         try {
+            console.log('[ImpactService] Fetching impact data...');
             const { data, error } = await supabase
                 .from('impact_data')
                 .select('*');
 
-            if (error) throw error;
+            if (error) {
+                console.error('[ImpactService] Error fetching:', error);
+                throw error;
+            }
+            console.log('[ImpactService] Fetched', data?.length || 0, 'records');
 
             if (!data || data.length === 0) {
                 return {
@@ -39,9 +44,10 @@ class ImpactService {
                 partnerOrganizations: 0
             });
 
+            console.log('[ImpactService] Aggregated result:', aggregated);
             return aggregated;
         } catch (error) {
-            console.error('Error fetching aggregated impact:', error);
+            console.error('[ImpactService] Error in getAggregatedImpact:', error);
             return {
                 totalMeals: 0,
                 foodSavedKg: 0,
@@ -72,8 +78,9 @@ class ImpactService {
     }
 
     subscribeToImpactUpdates(callback) {
-        const subscription = supabase
-            .channel('impact-updates')
+        console.log('[ImpactService] Setting up real-time subscription...');
+        const channel = supabase
+            .channel('public:impact_data')
             .on(
                 'postgres_changes',
                 {
@@ -82,18 +89,21 @@ class ImpactService {
                     table: 'impact_data'
                 },
                 (payload) => {
-                    console.log('Impact data changed:', payload);
+                    console.log('[ImpactService] 🔥 Real-time update received!', payload);
                     callback(payload);
                 }
             )
-            .subscribe();
+            .subscribe((status) => {
+                console.log('[ImpactService] Subscription status:', status);
+            });
 
-        return subscription;
+        return channel;
     }
 
-    unsubscribeFromImpactUpdates(subscription) {
-        if (subscription) {
-            supabase.removeChannel(subscription);
+    unsubscribeFromImpactUpdates(channel) {
+        if (channel) {
+            console.log('[ImpactService] Unsubscribing from real-time updates');
+            supabase.removeChannel(channel);
         }
     }
 }
