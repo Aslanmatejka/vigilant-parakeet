@@ -1,4 +1,5 @@
 import React from 'react';
+import AdminLayout from './AdminLayout';
 
 const ContentModeration = () => {
   const mockContent = [
@@ -32,6 +33,7 @@ const ContentModeration = () => {
   ];
 
   return (
+    <AdminLayout active="content">
     <div className="p-6">
       <h1 className="text-2xl font-bold mb-6">Content Moderation</h1>
       
@@ -77,6 +79,7 @@ const ContentModeration = () => {
         </div>
       </div>
     </div>
+    </AdminLayout>
   );
 };
 

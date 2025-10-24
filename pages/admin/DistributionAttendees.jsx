@@ -1,4 +1,5 @@
 import React from 'react';
+import AdminLayout from './AdminLayout';
 
 const DistributionAttendees = () => {
   const mockAttendees = [
@@ -35,6 +36,7 @@ const DistributionAttendees = () => {
   ];
 
   return (
+    <AdminLayout active="attendees">
     <div className="p-6">
       <h1 className="text-2xl font-bold mb-6">Distribution Attendees</h1>
       
@@ -103,6 +105,7 @@ const DistributionAttendees = () => {
         </div>
       </div>
     </div>
+    </AdminLayout>
   );
 };
 

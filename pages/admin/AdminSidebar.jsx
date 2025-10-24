@@ -5,11 +5,12 @@ import { reportError } from '../../utils/helpers';
 function AdminSidebar({ active, onNavigate }) {
     try {
         const menuItems = [
-            { id: 'dashboard', label: 'Dashboard', icon: 'fa-tachometer-alt', path: '/admin/dashboard' },
+            { id: 'dashboard', label: 'Dashboard', icon: 'fa-tachometer-alt', path: '/admin' },
             { id: 'users', label: 'User Management', icon: 'fa-users', path: '/admin/users' },
             { id: 'content', label: 'Content Moderation', icon: 'fa-shield-alt', path: '/admin/content' },
             { id: 'posts', label: 'Posts & Blog', icon: 'fa-newspaper', path: '/admin/posts' },
             { id: 'distribution', label: 'Food Distribution', icon: 'fa-box-open', path: '/admin/distribution' },
+            { id: 'attendees', label: 'Distribution Attendees', icon: 'fa-users-cog', path: '/admin/attendees' },
             { id: 'reports', label: 'Reports & Analytics', icon: 'fa-chart-bar', path: '/admin/reports' },
             { id: 'settings', label: 'Settings', icon: 'fa-cog', path: '/admin/settings' }
         ];

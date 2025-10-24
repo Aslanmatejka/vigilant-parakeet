@@ -4,8 +4,9 @@ import Input from '../../components/common/Input';
 import Card from '../../components/common/Card';
 import dataService from '../../utils/dataService';
 import { reportError } from '../../utils/helpers';
+import AdminLayout from './AdminLayout';
 
-export default function AdminContentManagement() {
+function AdminContentManagement() {
     const [posts, setPosts] = React.useState([]);
     const [loading, setLoading] = React.useState(true);
     const [showForm, setShowForm] = React.useState(false);
@@ -140,7 +141,8 @@ export default function AdminContentManagement() {
     };
 
     return (
-        <div className="max-w-6xl mx-auto p-6">
+        <AdminLayout active="posts">
+            <div className="max-w-6xl mx-auto p-6">
             <div className="flex justify-between items-center mb-6">
                 <h1 className="text-3xl font-bold text-gray-900">Content Management</h1>
                 <Button
@@ -321,5 +323,8 @@ export default function AdminContentManagement() {
                 )}
             </div>
         </div>
+        </AdminLayout>
     );
 }
+
+export default AdminContentManagement;

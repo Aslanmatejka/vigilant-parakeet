@@ -1,10 +1,10 @@
-
 import React, { useEffect, useState } from 'react';
 import dataService from '../../utils/dataService';
 import AdminClaimDashboard from './AdminClaimDashboard';
 import supabase from '../../utils/supabaseClient';
 import { useAuthContext } from '../../utils/AuthContext';
 import { debugAuthState } from '../../utils/authDebug';
+import AdminLayout from '../../pages/admin/AdminLayout';
 
 function AdminDashboard() {
   const [foods, setFoods] = useState([]);
@@ -50,6 +50,7 @@ function AdminDashboard() {
   }
 
   return (
+    <AdminLayout active="dashboard">
     <div className="p-8">
       <h1 className="text-2xl font-bold mb-6">Admin Dashboard</h1>
       <div className="mb-6 flex gap-4">
@@ -104,6 +105,7 @@ function AdminDashboard() {
         <AdminClaimDashboard />
       )}
     </div>
+    </AdminLayout>
   );
 }
 
