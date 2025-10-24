@@ -29,6 +29,7 @@ import UserManagement from './pages/admin/UserManagement.jsx';
 import AdminContentManagement from './pages/admin/AdminContentManagement.jsx';
 import AdminSettings from './pages/admin/AdminSettings.jsx';
 import AdminReports from './pages/admin/AdminReports.jsx';
+import ImpactDataEntry from './pages/admin/ImpactDataEntry.jsx';
 import { AuthProvider, useAuthContext } from './utils/AuthContext';
 import { GoodsProvider } from './utils/stores/goodsStore.jsx';
 import AdminRoute from './components/admin/AdminRoute.jsx';
@@ -78,6 +79,7 @@ function AppContent() {
                 <Route path="/admin/attendees" element={<AdminRoute><DistributionAttendees /></AdminRoute>} />
                 <Route path="/admin/settings" element={<AdminRoute><AdminSettings /></AdminRoute>} />
                 <Route path="/admin/reports" element={<AdminRoute><AdminReports /></AdminRoute>} />
+                <Route path="/admin/impact" element={<AdminRoute><ImpactDataEntry /></AdminRoute>} />
                 <Route path="*" element={<div>Page Not Found</div>} />
             </Routes>
         </MainLayout>
