@@ -75,7 +75,9 @@ function AdminClaimDashboard() {
             <div key={claim.id} className="bg-white rounded shadow p-6 border">
               <div className="font-bold text-lg mb-2">{claim.food_listings?.title || 'Food Item'}</div>
               <div className="mb-2">{claim.food_listings?.description}</div>
-              <img src={claim.food_listings?.image_url} alt={claim.food_listings?.title} className="w-32 h-32 object-cover mb-2" />
+              <div className="relative h-48 mb-2">
+                <img src={claim.food_listings?.image_url} alt={claim.food_listings?.title} className="w-full h-full object-cover rounded-lg" />
+              </div>
               
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
                 <div className="bg-gray-50 p-4 rounded-lg">
