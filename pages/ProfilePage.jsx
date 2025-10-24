@@ -8,14 +8,18 @@ import { useAuthContext } from "../utils/AuthContext";
 import { useFoodListings, useUserProfile } from "../utils/hooks/useSupabase";
 import ErrorBoundary from "../components/common/ErrorBoundary";
 import { DonateVolunteerButtons } from "./CommunityPage";
+import dataService from '../utils/dataService';
+import { reportError } from '../utils/helpers';
 
 function ProfilePageContent() {
     const navigate = useNavigate();
     const { user: authUser, isAuthenticated, uploadAvatar } = useAuthContext();
     const { profile, loading: profileLoading, error: profileError } = useUserProfile(authUser?.id);
     const { listings, loading: listingsLoading, error: listingsError } = useFoodListings({ user_id: authUser?.id });
-    
+
     const [activeTab, setActiveTab] = React.useState('profile');
+    const [impact, setImpact] = React.useState(null);
+    const [impactLoading, setImpactLoading] = React.useState(true);
 
     React.useEffect(() => {
         if (!isAuthenticated) {
@@ -32,24 +36,62 @@ function ProfilePageContent() {
 
     const loading = profileLoading || listingsLoading;
 
-    const stats = React.useMemo(() => {
-        if (!listings) return { 
-            donations: 0, 
-            foodSaved: 0,
-            impact: 0 
+    const fetchUserImpact = React.useCallback(async () => {
+        if (!authUser?.id) return;
+
+        try {
+            setImpactLoading(true);
+            const impactData = await dataService.getUserImpact(authUser.id);
+            setImpact(impactData);
+        } catch (err) {
+            console.error('Error fetching user impact data:', err);
+            reportError(err);
+            setImpact({
+                totalListings: 0,
+                activeListings: 0,
+                pendingListings: 0,
+                claimedListings: 0,
+                totalFoodShared: 0,
+                foodClaimed: 0,
+                peopleHelped: 0,
+                studentsHelped: 0,
+                staffHelped: 0,
+                livesImpacted: 0,
+                co2Reduced: 0,
+                lastUpdated: null
+            });
+        } finally {
+            setImpactLoading(false);
+        }
+    }, [authUser]);
+
+    React.useEffect(() => {
+        if (!authUser?.id) return;
+
+        fetchUserImpact();
+
+        // Subscribe to real-time updates
+        const claimsSubscription = dataService.subscribeToClaims(() => {
+            console.log('Food claim update detected, refreshing user impact');
+            fetchUserImpact();
+        });
+
+        const listingsSubscription = dataService.subscribeToFoodListings(() => {
+            console.log('Food listing update detected, refreshing user impact');
+            fetchUserImpact();
+        });
+
+        // Refresh every 2 minutes as fallback
+        const intervalId = setInterval(() => {
+            fetchUserImpact();
+        }, 120000);
+
+        return () => {
+            dataService.unsubscribe('food_claims');
+            dataService.unsubscribe('food_listings');
+            clearInterval(intervalId);
         };
-        
-        const donations = listings.length;
-        const foodSaved = listings.reduce((total, l) => total + (l.quantity || 0), 0);
-        // Rough estimate: 1kg of food waste = 2.5 kg CO2 equivalent
-        const impact = foodSaved * 2.5;
-        
-        return { 
-            donations, 
-            foodSaved,
-            impact 
-        };
-    }, [listings]);
+    }, [fetchUserImpact, authUser]);
 
     const handleEditListing = (listing) => {
         navigate(`/share?edit=${listing.id}`);
@@ -135,7 +177,7 @@ function ProfilePageContent() {
                         </Button>
                     </div>
 
-                    <ProfileStats stats={stats} />
+                    <ProfileStats impact={impact} loading={impactLoading} />
                 </div>
             </div>
 

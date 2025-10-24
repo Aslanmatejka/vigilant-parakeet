@@ -139,6 +139,7 @@ class DataService {
       
       const neighborsHelped = claims.length;
       const activeListings = sharedFood.filter(item => item.status === 'approved').length;
+      const pendingListings = sharedFood.filter(item => item.status === 'pending').length;
       const donorsCount = new Set(sharedFood.map(item => item.user_id).filter(Boolean)).size;
       
       // Calculate people impact
@@ -160,18 +161,19 @@ class DataService {
         return acc;
       }, {});
       
-      const result = { 
+      const result = {
         foodWasteReduced,
         totalFoodShared,
         neighborsHelped,
         donorsCount,
         people,
-        schoolStaff, 
+        schoolStaff,
         students,
         co2Reduction,
         livesImpacted,
         sharingCount: sharedFood.length,
         activeListings,
+        pendingListings,
         categoryDistribution,
         lastUpdated: new Date().toISOString()
       };
@@ -184,6 +186,77 @@ class DataService {
       throw error;
     }
   }
+
+  async getUserImpact(userId) {
+    try {
+      console.log(`Fetching impact data for user ${userId}...`);
+
+      // Get user's food listings
+      const { data: userListings, error: listingsError } = await supabase
+        .from('food_listings')
+        .select('id, quantity, unit, category, status, created_at')
+        .eq('user_id', userId);
+
+      if (listingsError) throw listingsError;
+
+      // Get claims for this user's food listings
+      const listingIds = userListings.map(l => l.id);
+      let claims = [];
+
+      if (listingIds.length > 0) {
+        const { data: userClaims, error: claimsError } = await supabase
+          .from('food_claims')
+          .select('id, food_id, members_count, people, school_staff, students, status, created_at')
+          .in('food_id', listingIds)
+          .eq('status', 'approved');
+
+        if (claimsError) throw claimsError;
+        claims = userClaims || [];
+      }
+
+      // Calculate metrics
+      const totalListings = userListings.length;
+      const activeListings = userListings.filter(l => l.status === 'approved').length;
+      const pendingListings = userListings.filter(l => l.status === 'pending').length;
+      const claimedListings = claims.length;
+
+      const totalFoodShared = userListings.reduce((sum, l) => sum + (l.quantity || 0), 0);
+      const foodClaimed = claims.reduce((sum, c) => {
+        const listing = userListings.find(l => l.id === c.food_id);
+        return sum + (listing?.quantity || 0);
+      }, 0);
+
+      const peopleHelped = claims.reduce((sum, c) => sum + (c.members_count || 0), 0);
+      const studentsHelped = claims.reduce((sum, c) => sum + (c.students || 0), 0);
+      const staffHelped = claims.reduce((sum, c) => sum + (c.school_staff || 0), 0);
+      const livesImpacted = peopleHelped + studentsHelped + staffHelped;
+
+      const co2Reduced = foodClaimed * 2.5; // 1 lb food = 2.5 lb CO2
+
+      const result = {
+        totalListings,
+        activeListings,
+        pendingListings,
+        claimedListings,
+        totalFoodShared,
+        foodClaimed,
+        peopleHelped,
+        studentsHelped,
+        staffHelped,
+        livesImpacted,
+        co2Reduced,
+        lastUpdated: new Date().toISOString()
+      };
+
+      console.log('User impact data calculated:', result);
+      return result;
+    } catch (error) {
+      console.error('Error in getUserImpact:', error);
+      reportError(error);
+      throw error;
+    }
+  }
+
   // Admin: Approve or decline a food claim
   async reviewFoodClaim(claimId, approve) {
     try {

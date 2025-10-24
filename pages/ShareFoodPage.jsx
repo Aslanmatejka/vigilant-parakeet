@@ -234,98 +234,129 @@ function ShareFoodPageContent() {
                     </div>
                 </div>
                 {/* Impact Section */}
-                <div className="border-t border-gray-200 mt-8 pt-8 bg-gradient-to-r from-green-50 to-green-100 rounded-b-2xl">
-                    <h2 className="text-2xl font-bold text-green-700 mb-4 text-center">Community Impact</h2>
+                <div className="border-t border-gray-200 mt-8 pt-8 bg-gradient-to-br from-green-50 via-blue-50 to-emerald-50 rounded-b-2xl p-6">
+                    <div className="flex items-center justify-between mb-6">
+                        <h2 className="text-3xl font-bold text-gray-900">Community Impact</h2>
+                        {impact.lastUpdated && (
+                            <span className="inline-flex items-center px-4 py-2 bg-green-100 text-green-800 rounded-full text-sm font-semibold shadow-sm">
+                                <span className="inline-block w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span>
+                                Live Updates
+                            </span>
+                        )}
+                    </div>
+
                     {impactLoading ? (
-                        <div className="flex justify-center items-center py-8">
-                            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-700"></div>
-                            <span className="ml-2 text-green-700">Loading impact data...</span>
+                        <div className="flex justify-center items-center py-12">
+                            <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-green-600"></div>
+                            <span className="ml-3 text-lg text-gray-700">Loading impact data...</span>
                         </div>
                     ) : (
                         <>
-                            {/* Food Sharing Impact */}
-                            <div className="mb-6">
-                                <h3 className="text-xl font-semibold text-green-700 mb-3 text-center">Food Sharing Impact</h3>
-                                <div className="flex flex-col md:flex-row justify-center items-center gap-4 p-4">
-                                    <div className="flex flex-col items-center bg-white rounded-lg shadow-sm p-4 min-w-[120px]">
-                                        <span className="text-3xl font-extrabold text-green-600">{impact.totalFoodShared} lb</span>
-                                        <span className="text-md text-gray-700 mt-2 text-center">Total Food Shared</span>
+                            {/* Main Impact Cards */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+                                <div className="bg-gradient-to-br from-green-50 to-green-100 p-6 rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1">
+                                    <div className="flex items-start justify-between mb-4">
+                                        <i className="fas fa-utensils text-4xl text-green-600" aria-hidden="true"></i>
                                     </div>
-                                    <div className="flex flex-col items-center bg-white rounded-lg shadow-sm p-4 min-w-[120px]">
-                                        <span className="text-3xl font-extrabold text-green-600">{impact.foodWasteReduced} lb</span>
-                                        <span className="text-md text-gray-700 mt-2 text-center">Food Waste Reduced</span>
+                                    <div className="text-5xl font-extrabold text-gray-900 mb-2">{Math.round(impact.totalFoodShared)}<span className="text-2xl ml-1 text-gray-600">lb</span></div>
+                                    <div className="text-sm font-semibold text-gray-700">Total Food Shared</div>
+                                </div>
+
+                                <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-6 rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1">
+                                    <div className="flex items-start justify-between mb-4">
+                                        <i className="fas fa-recycle text-4xl text-blue-600" aria-hidden="true"></i>
                                     </div>
-                                    <div className="flex flex-col items-center bg-white rounded-lg shadow-sm p-4 min-w-[120px]">
-                                        <span className="text-3xl font-extrabold text-green-600">{impact.sharingCount}</span>
-                                        <span className="text-md text-gray-700 mt-2 text-center">Food Donations</span>
+                                    <div className="text-5xl font-extrabold text-gray-900 mb-2">{Math.round(impact.foodWasteReduced)}<span className="text-2xl ml-1 text-gray-600">lb</span></div>
+                                    <div className="text-sm font-semibold text-gray-700">Food Waste Reduced</div>
+                                </div>
+
+                                <div className="bg-gradient-to-br from-emerald-50 to-emerald-100 p-6 rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1">
+                                    <div className="flex items-start justify-between mb-4">
+                                        <i className="fas fa-leaf text-4xl text-emerald-600" aria-hidden="true"></i>
                                     </div>
-                                    <div className="flex flex-col items-center bg-white rounded-lg shadow-sm p-4 min-w-[120px]">
-                                        <span className="text-3xl font-extrabold text-green-600">{impact.donorsCount}</span>
-                                        <span className="text-md text-gray-700 mt-2 text-center">Donors</span>
+                                    <div className="text-5xl font-extrabold text-gray-900 mb-2">{impact.co2Reduction.toFixed(1)}<span className="text-2xl ml-1 text-gray-600">lb</span></div>
+                                    <div className="text-sm font-semibold text-gray-700">CO₂ Avoided</div>
+                                </div>
+
+                                <div className="bg-gradient-to-br from-red-50 to-red-100 p-6 rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1">
+                                    <div className="flex items-start justify-between mb-4">
+                                        <i className="fas fa-heart text-4xl text-red-600" aria-hidden="true"></i>
                                     </div>
-                                    <div className="flex flex-col items-center bg-white rounded-lg shadow-sm p-4 min-w-[120px]">
-                                        <span className="text-3xl font-extrabold text-green-600">{impact.activeListings}</span>
-                                        <span className="text-md text-gray-700 mt-2 text-center">Active Listings</span>
+                                    <div className="text-5xl font-extrabold text-gray-900 mb-2">{impact.livesImpacted}</div>
+                                    <div className="text-sm font-semibold text-gray-700">Lives Impacted</div>
+                                </div>
+                            </div>
+
+                            {/* Secondary Stats Grid */}
+                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+                                <div className="bg-white p-5 rounded-xl shadow-sm hover:shadow-md transition-shadow">
+                                    <div className="flex flex-col items-center text-center">
+                                        <i className="fas fa-boxes text-2xl text-green-600 mb-2" aria-hidden="true"></i>
+                                        <div className="text-3xl font-bold text-gray-900">{impact.sharingCount}</div>
+                                        <div className="text-xs font-medium text-gray-600 mt-1">Donations</div>
                                     </div>
-                                    <div className="flex flex-col items-center bg-white rounded-lg shadow-sm p-4 min-w-[120px]">
-                                        <span className="text-3xl font-extrabold text-amber-600">{impact.pendingListings}</span>
-                                        <span className="text-md text-gray-700 mt-2 text-center">Pending Listings</span>
+                                </div>
+
+                                <div className="bg-white p-5 rounded-xl shadow-sm hover:shadow-md transition-shadow">
+                                    <div className="flex flex-col items-center text-center">
+                                        <i className="fas fa-users text-2xl text-blue-600 mb-2" aria-hidden="true"></i>
+                                        <div className="text-3xl font-bold text-gray-900">{impact.donorsCount}</div>
+                                        <div className="text-xs font-medium text-gray-600 mt-1">Donors</div>
+                                    </div>
+                                </div>
+
+                                <div className="bg-white p-5 rounded-xl shadow-sm hover:shadow-md transition-shadow">
+                                    <div className="flex flex-col items-center text-center">
+                                        <i className="fas fa-check-circle text-2xl text-green-600 mb-2" aria-hidden="true"></i>
+                                        <div className="text-3xl font-bold text-gray-900">{impact.activeListings}</div>
+                                        <div className="text-xs font-medium text-gray-600 mt-1">Active</div>
+                                    </div>
+                                </div>
+
+                                <div className="bg-white p-5 rounded-xl shadow-sm hover:shadow-md transition-shadow">
+                                    <div className="flex flex-col items-center text-center">
+                                        <i className="fas fa-clock text-2xl text-amber-600 mb-2" aria-hidden="true"></i>
+                                        <div className="text-3xl font-bold text-gray-900">{impact.pendingListings}</div>
+                                        <div className="text-xs font-medium text-gray-600 mt-1">Pending</div>
+                                    </div>
+                                </div>
+
+                                <div className="bg-white p-5 rounded-xl shadow-sm hover:shadow-md transition-shadow">
+                                    <div className="flex flex-col items-center text-center">
+                                        <i className="fas fa-graduation-cap text-2xl text-purple-600 mb-2" aria-hidden="true"></i>
+                                        <div className="text-3xl font-bold text-gray-900">{impact.students}</div>
+                                        <div className="text-xs font-medium text-gray-600 mt-1">Students</div>
+                                    </div>
+                                </div>
+
+                                <div className="bg-white p-5 rounded-xl shadow-sm hover:shadow-md transition-shadow">
+                                    <div className="flex flex-col items-center text-center">
+                                        <i className="fas fa-chalkboard-teacher text-2xl text-indigo-600 mb-2" aria-hidden="true"></i>
+                                        <div className="text-3xl font-bold text-gray-900">{impact.schoolStaff}</div>
+                                        <div className="text-xs font-medium text-gray-600 mt-1">Staff</div>
                                     </div>
                                 </div>
                             </div>
-                            
-                            {/* Environmental Impact */}
-                            <div className="mb-6">
-                                <h3 className="text-xl font-semibold text-green-700 mb-3 text-center">Environmental Impact</h3>
-                                <div className="flex flex-col md:flex-row justify-center items-center gap-4 p-4">
-                                    <div className="flex flex-col items-center bg-white rounded-lg shadow-sm p-4 min-w-[120px]">
-                                        <span className="text-3xl font-extrabold text-green-600">{impact.co2Reduction.toFixed(1)} lb</span>
-                                        <span className="text-md text-gray-700 mt-2 text-center">CO₂ Emissions Avoided</span>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            {/* People Impact */}
-                            <div>
-                                <h3 className="text-xl font-semibold text-green-700 mb-3 text-center">People Impact</h3>
-                                <div className="flex flex-col md:flex-row justify-center items-center gap-4 p-4">
-                                    <div className="flex flex-col items-center bg-white rounded-lg shadow-sm p-4 min-w-[120px]">
-                                        <span className="text-3xl font-extrabold text-green-600">{impact.livesImpacted}</span>
-                                        <span className="text-md text-gray-700 mt-2 text-center">Lives Impacted</span>
-                                    </div>
-                                    <div className="flex flex-col items-center bg-white rounded-lg shadow-sm p-4 min-w-[120px]">
-                                        <span className="text-3xl font-extrabold text-green-600">{impact.neighborsHelped}</span>
-                                        <span className="text-md text-gray-700 mt-2 text-center">Neighbors Helped</span>
-                                    </div>
-                                    <div className="flex flex-col items-center bg-white rounded-lg shadow-sm p-4 min-w-[120px]">
-                                        <span className="text-3xl font-extrabold text-green-600">{impact.students}</span>
-                                        <span className="text-md text-gray-700 mt-2 text-center">Students</span>
-                                    </div>
-                                    <div className="flex flex-col items-center bg-white rounded-lg shadow-sm p-4 min-w-[120px]">
-                                        <span className="text-3xl font-extrabold text-green-600">{impact.schoolStaff}</span>
-                                        <span className="text-md text-gray-700 mt-2 text-center">School Staff</span>
+
+                            {/* Info Banner */}
+                            <div className="bg-white rounded-xl p-5 shadow-sm border-l-4 border-green-500">
+                                <div className="flex items-start">
+                                    <i className="fas fa-info-circle text-green-600 text-xl mr-3 mt-1" aria-hidden="true"></i>
+                                    <div className="flex-1">
+                                        <p className="text-sm text-gray-700 font-medium mb-1">Real-time community impact</p>
+                                        <p className="text-xs text-gray-600">
+                                            Data updates automatically when food is shared or claimed. Newly submitted items appear in "Pending" and move to "Active" after admin approval.
+                                        </p>
+                                        {impact.lastUpdated && (
+                                            <p className="text-xs text-gray-500 mt-2">
+                                                Last updated: {new Date(impact.lastUpdated).toLocaleString()}
+                                            </p>
+                                        )}
                                     </div>
                                 </div>
                             </div>
                         </>
                     )}
-                    <div className="text-center mt-4 text-sm text-gray-600 pb-4">
-                        <p>Real-time impact data based on all food shared and approved claims</p>
-                        {impact.lastUpdated && (
-                            <>
-                                <p className="mt-2">
-                                    <span className="inline-block px-2 py-1 bg-green-100 text-green-800 rounded-full text-xs font-semibold">
-                                        <span className="inline-block w-2 h-2 bg-green-500 rounded-full mr-1 animate-pulse"></span>
-                                        Auto-updating • Last updated: {new Date(impact.lastUpdated).toLocaleTimeString()}
-                                    </span>
-                                </p>
-                                <p className="mt-2 text-xs text-gray-500">
-                                    Note: Newly shared food items appear immediately in "Pending Listings" 
-                                    and will move to "Active Listings" after admin approval.
-                                </p>
-                            </>
-                        )}
-                    </div>
                 </div>
             </div>
         </div>
