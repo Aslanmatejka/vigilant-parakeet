@@ -56,7 +56,7 @@ function Card({
             aria-labelledby={title ? 'card-title' : undefined}
         >
             {image && !imageError && (
-                <div data-name="card-image" className="relative h-48">
+                <div data-name="card-image" className="relative h-64">
                     {imageLoading && (
                         <div className="absolute inset-0 bg-gray-200 animate-pulse" />
                     )}
