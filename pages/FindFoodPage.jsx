@@ -253,12 +253,12 @@ function FindFoodPage({ initialCategory }) {
     );
 
     return (
-        <div 
+        <div
             data-name="find-food-page"
-            className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"
+            className="container mx-auto px-4"
             role="main"
         >
-            <div className="max-w-4xl mx-auto py-10 px-4">
+            <div className="py-10">
                 <div className="mb-4 flex justify-end">
                     <Button onClick={() => navigate('/share')} variant="secondary" className="mr-2">Share Food</Button>
                 </div>
@@ -303,7 +303,7 @@ function FindFoodPage({ initialCategory }) {
                 </div>
                 <div className="mt-12">
                     <h2 className="text-2xl font-bold text-gray-800 mb-4">Available Food Listings</h2>
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         {foodsLoading ? (
                             <LoadingSpinner />
                         ) : foodsError ? (
