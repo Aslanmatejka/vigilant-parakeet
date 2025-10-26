@@ -2,3 +2,7 @@
 from = "/*"
 to = "/index.html"
 status = 200
+
+[build]
+command = "npx vite build"
+publish = "\u001b[33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.\u001b[39m\r\ndist"
