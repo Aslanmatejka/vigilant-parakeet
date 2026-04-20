@@ -100,3 +100,61 @@ describe('Header handleLogout (no premature localStorage clear)', () => {
     expect(beforeSignOut).not.toContain('localStorage.removeItem');
   });
 });
+
+describe('Header uses useAuthContext (not useAuth hook)', () => {
+  test('Header imports useAuthContext from AuthContext', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(
+      path.resolve(__dirname, '../components/common/Header.jsx'),
+      'utf-8'
+    );
+
+    expect(source).toContain('useAuthContext');
+    expect(source).not.toContain("from \"../../utils/hooks/useSupabase\"");
+  });
+});
+
+describe('AdminLayout uses authService signOut (not supabase directly)', () => {
+  test('AdminLayout does not call supabase.auth.signOut() directly', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(
+      path.resolve(__dirname, '../pages/admin/AdminLayout.jsx'),
+      'utf-8'
+    );
+
+    // Should NOT contain direct supabase.auth.signOut() call
+    expect(source).not.toContain('supabase.auth.signOut()');
+    // Should use signOut from context
+    expect(source).toContain('await signOut()');
+  });
+
+  test('AdminLayout does not use setTimeout for navigation after logout', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(
+      path.resolve(__dirname, '../pages/admin/AdminLayout.jsx'),
+      'utf-8'
+    );
+
+    const handleLogoutMatch = source.match(/const handleLogout[\s\S]*?navigate\(/);
+    expect(handleLogoutMatch).toBeTruthy();
+
+    // Should NOT use setTimeout hack
+    expect(handleLogoutMatch[0]).not.toContain('setTimeout');
+  });
+
+  test('AdminLayout does not manually clear localStorage in handleLogout', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(
+      path.resolve(__dirname, '../pages/admin/AdminLayout.jsx'),
+      'utf-8'
+    );
+
+    const handleLogoutMatch = source.match(/const handleLogout[\s\S]*?navigate\(/);
+    expect(handleLogoutMatch).toBeTruthy();
+    expect(handleLogoutMatch[0]).not.toContain('localStorage.removeItem');
+  });
+});

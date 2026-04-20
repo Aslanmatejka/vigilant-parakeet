@@ -1,7 +1,7 @@
 import React from "react";
 import Avatar from "./Avatar";
 import Button from "./Button";
-import { useAuth } from "../../utils/hooks/useSupabase";
+import { useAuthContext } from "../../utils/AuthContext";
 import { useNavigate } from 'react-router-dom';
 import { useTutorial } from '../../utils/TutorialContext';
 import PropTypes from 'prop-types';
@@ -23,7 +23,7 @@ function Header({
         { label: 'Contact', path: '/contact' }
     ]
 }) {
-    const { user: authUser, isAuthenticated, signOut } = useAuth();
+    const { user: authUser, isAuthenticated, signOut } = useAuthContext();
     const navigate = useNavigate();
     const { startTutorial } = useTutorial();
     

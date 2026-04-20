@@ -3,15 +3,20 @@ import PropTypes from 'prop-types';
 import { useNavigate } from 'react-router-dom';
 import AdminSidebar from './AdminSidebar';
 import Avatar from '../../components/common/Avatar';
-import supabase from '../../utils/supabaseClient';
+import { useAuthContext } from '../../utils/AuthContext';
 
 function AdminLayout({ children, active }) {
     const navigate = useNavigate();
+    const { user, signOut } = useAuthContext();
 
     const [isMobileSidebarOpen, setIsMobileSidebarOpen] = React.useState(false);
     const [isUserDropdownOpen, setIsUserDropdownOpen] = React.useState(false);
-    const [adminUser, setAdminUser] = React.useState(null);
     const dropdownRef = React.useRef(null);
+
+    const adminUser = user ? {
+        name: user.name || user.email || 'Admin User',
+        avatar: user.avatar_url || user.user_metadata?.avatar_url
+    } : null;
 
     const handleNavigation = (path) => {
         navigate(path);
@@ -20,21 +25,6 @@ function AdminLayout({ children, active }) {
     };
 
     React.useEffect(() => {
-        // Authentication will be handled by Supabase Auth
-        // Admin permissions will be checked by Supabase Auth
-
-        // Fetch admin user data
-        const fetchAdminUser = async () => {
-            const { data: { user } } = await supabase.auth.getUser();
-            if (user) {
-                setAdminUser({
-                    name: user.user_metadata?.name || 'Admin User',
-                    avatar: user.user_metadata?.avatar_url
-                });
-            }
-        };
-        fetchAdminUser();
-
         // Add click outside listener for dropdown
         const handleClickOutside = (event) => {
             if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
@@ -50,25 +40,12 @@ function AdminLayout({ children, active }) {
 
     const handleLogout = async () => {
         try {
-            await supabase.auth.signOut();
-
-            localStorage.removeItem('userAuthenticated');
-            localStorage.removeItem('currentUser');
-            localStorage.removeItem('adminAuthenticated');
-            localStorage.removeItem('adminUser');
-
-            setTimeout(() => {
-                navigate('/admin/login');
-            }, 100);
+            setIsUserDropdownOpen(false);
+            await signOut();
+            navigate('/admin/login', { replace: true });
         } catch (error) {
             console.error('Logout error:', error);
-
-            localStorage.removeItem('userAuthenticated');
-            localStorage.removeItem('currentUser');
-            localStorage.removeItem('adminAuthenticated');
-            localStorage.removeItem('adminUser');
-
-            navigate('/admin/login');
+            navigate('/admin/login', { replace: true });
         }
     };
 
