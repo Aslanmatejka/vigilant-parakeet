@@ -12,7 +12,6 @@ const DistributionAttendees = () => {
   const [error, setError] = React.useState(null);
   const [stats, setStats] = React.useState({
     totalClaims: 0,
-    totalPeople: 0,
     totalStudents: 0,
     totalStaff: 0
   });
@@ -112,13 +111,11 @@ const DistributionAttendees = () => {
       setAttendees(claimsData);
 
       const totalClaims = claimsData.length;
-      const totalPeople = claimsData.reduce((sum, claim) => sum + (claim.people || 0), 0);
       const totalStudents = claimsData.reduce((sum, claim) => sum + (claim.students || 0), 0);
       const totalStaff = claimsData.reduce((sum, claim) => sum + (claim.school_staff || 0), 0);
 
       setStats({
         totalClaims,
-        totalPeople,
         totalStudents,
         totalStaff
       });
@@ -151,7 +148,7 @@ const DistributionAttendees = () => {
     <div className="p-6">
       <h1 className="text-2xl font-bold mb-6">Distribution Attendees</h1>
 
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div className="bg-white rounded-lg shadow p-6">
           <div className="flex items-center">
             <div className="flex-shrink-0 bg-blue-100 rounded-full p-3">
@@ -160,18 +157,6 @@ const DistributionAttendees = () => {
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-500">Total Claims</p>
               <p className="text-2xl font-bold text-gray-900">{stats.totalClaims}</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-lg shadow p-6">
-          <div className="flex items-center">
-            <div className="flex-shrink-0 bg-[#2CABE3]/20 rounded-full p-3">
-              <i className="fas fa-users text-[#2CABE3] text-xl"></i>
-            </div>
-            <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">Total People</p>
-              <p className="text-2xl font-bold text-gray-900">{stats.totalPeople}</p>
             </div>
           </div>
         </div>
@@ -246,12 +231,6 @@ const DistributionAttendees = () => {
                     Community
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    People
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Breakdown
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Claimed At
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -296,13 +275,6 @@ const DistributionAttendees = () => {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       {claim.food_listing?.community_id ? (communities[claim.food_listing.community_id] || 'Unknown') : 'N/A'}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {claim.people || 0} people
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <div>Students: {claim.students || 0}</div>
-                      <div>Staff: {claim.school_staff || 0}</div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       {new Date(claim.created_at).toLocaleString()}
