@@ -4,10 +4,14 @@ import Footer from "../common/Footer";
 import AIChatPanel from "../assistant/AIChatPanel";
 import UserChatWidget from "../common/UserChatWidget";
 import Tutorial from "../common/Tutorial";
+import AIHealthBanner from "../common/AIHealthBanner";
 import { useTutorial } from "../../utils/TutorialContext";
+import { useAuthContext } from "../../utils/AuthContext";
+import receiptService from "../../utils/receiptService";
 
 // Module-level flag — survives re-mounts but resets on full page reload
 let tutorialAutoStartChecked = false;
+let receiptExpiryChecked = false;
 
 
 function MainLayout({ children }) {
@@ -18,6 +22,7 @@ function MainLayout({ children }) {
     // };
 
     const { isTutorialOpen, startTutorial } = useTutorial();
+    const { isAuthenticated } = useAuthContext();
 
     // Auto-start tutorial ONLY for first-time visitors.
     // Fires once per full page load; localStorage check prevents repeat visits.
@@ -33,6 +38,17 @@ function MainLayout({ children }) {
             return () => clearTimeout(timer);
         }
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Best-effort: once per page load, ask the DB to expire any receipts whose
+    // pickup_by has passed. This ensures receipts get marked expired even if
+    // the user never opens the Receipts page after the Friday deadline.
+    React.useEffect(() => {
+        if (!isAuthenticated || receiptExpiryChecked) return;
+        receiptExpiryChecked = true;
+        receiptService.expireOldReceipts().catch(() => {
+            // Silent — best-effort background task.
+        });
+    }, [isAuthenticated]);
 
     return (
         <div data-name="main-layout" className="min-h-screen flex flex-col bg-gradient-to-br from-cyan-50 via-white to-cyan-100">
@@ -52,6 +68,9 @@ function MainLayout({ children }) {
 
             {/* Global Tutorial Overlay */}
             <Tutorial />
+
+            {/* AI Self-Healing Status Banner */}
+            <AIHealthBanner />
         </div>
     );
 }

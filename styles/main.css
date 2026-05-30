@@ -122,6 +122,394 @@ body {
     overflow: hidden;
 }
 
+/* =====================================================================
+   AI Self-Healing — Futuristic Reconnect Animation
+   ===================================================================== */
+@keyframes ai-orbit-cw {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+}
+@keyframes ai-orbit-ccw {
+    from { transform: rotate(360deg); }
+    to   { transform: rotate(0deg); }
+}
+@keyframes ai-core-pulse {
+    0%, 100% { transform: scale(1);   opacity: 1;   box-shadow: 0 0 12px rgba(34,211,238,0.85), 0 0 28px rgba(139,92,246,0.55); }
+    50%      { transform: scale(1.18); opacity: 0.85; box-shadow: 0 0 22px rgba(34,211,238,1),    0 0 48px rgba(139,92,246,0.85); }
+}
+@keyframes ai-scan-sweep {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+@keyframes ai-dot-bounce {
+    0%, 80%, 100% { transform: translateY(0);    opacity: 0.4; }
+    40%           { transform: translateY(-4px); opacity: 1;   }
+}
+@keyframes ai-glow-breath {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(34,211,238,0.45), 0 8px 32px rgba(15,23,42,0.45); }
+    50%      { box-shadow: 0 0 0 6px rgba(34,211,238,0),    0 8px 40px rgba(139,92,246,0.55); }
+}
+@keyframes ai-border-flow {
+    0%   { background-position: 0% 50%; }
+    100% { background-position: 200% 50%; }
+}
+
+.ai-heal-card {
+    position: relative;
+    overflow: hidden;
+    border-radius: 16px;
+    background: linear-gradient(135deg, rgba(15,23,42,0.92) 0%, rgba(30,41,59,0.92) 100%);
+    backdrop-filter: blur(12px);
+    animation: ai-glow-breath 2.6s ease-in-out infinite;
+}
+.ai-heal-card::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border-radius: 17px;
+    padding: 1px;
+    background: linear-gradient(90deg, #22d3ee, #8b5cf6, #ec4899, #22d3ee);
+    background-size: 200% 100%;
+    animation: ai-border-flow 3s linear infinite;
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+            mask-composite: exclude;
+    pointer-events: none;
+    z-index: 0;
+}
+.ai-heal-scan {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    border-radius: 16px;
+}
+.ai-heal-scan::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 40%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(34,211,238,0.18), transparent);
+    animation: ai-scan-sweep 2.2s linear infinite;
+}
+.ai-heal-orbit-cw  { animation: ai-orbit-cw 3.2s linear infinite; }
+.ai-heal-orbit-ccw { animation: ai-orbit-ccw 4.4s linear infinite; }
+.ai-heal-core      { animation: ai-core-pulse 1.8s ease-in-out infinite; }
+.ai-heal-dot       { animation: ai-dot-bounce 1.2s ease-in-out infinite; }
+.ai-heal-dot:nth-child(2) { animation-delay: 0.15s; }
+.ai-heal-dot:nth-child(3) { animation-delay: 0.3s;  }
+
+/* --- Circuit-repair visual (the "something is being fixed" animation) --- */
+@keyframes ai-weld-fill {
+    0%       { stroke-dashoffset: 60; opacity: 0.4; }
+    45%      { stroke-dashoffset: 0;  opacity: 1;   }
+    55%      { stroke-dashoffset: 0;  opacity: 1;   }
+    100%     { stroke-dashoffset: 60; opacity: 0.4; }
+}
+@keyframes ai-weld-glow {
+    0%, 100% { filter: drop-shadow(0 0 1px #22d3ee); }
+    50%      { filter: drop-shadow(0 0 6px #22d3ee) drop-shadow(0 0 10px #a78bfa); }
+}
+@keyframes ai-spark-burst {
+    0%   { transform: translate(-50%, -50%) scale(0.3); opacity: 0; }
+    20%  { opacity: 1; }
+    100% { transform: translate(var(--spark-x, 8px), var(--spark-y, -8px)) scale(0.1); opacity: 0; }
+}
+@keyframes ai-spark-flash {
+    0%, 100% { opacity: 0;   transform: translate(-50%, -50%) scale(0.6); }
+    50%      { opacity: 0.9; transform: translate(-50%, -50%) scale(1.4); }
+}
+@keyframes ai-tool-orbit {
+    0%   { transform: rotate(0deg)   translateX(14px) rotate(0deg); }
+    100% { transform: rotate(360deg) translateX(14px) rotate(-360deg); }
+}
+@keyframes ai-tool-shake {
+    0%, 100% { transform: rotate(-12deg); }
+    50%      { transform: rotate(12deg);  }
+}
+@keyframes ai-node-pulse {
+    0%, 100% { filter: drop-shadow(0 0 2px rgba(34,211,238,0.7)); }
+    50%      { filter: drop-shadow(0 0 6px rgba(167,139,250,0.95)); }
+}
+
+.ai-heal-weld      { stroke-dasharray: 30 60; animation: ai-weld-fill 1.8s ease-in-out infinite, ai-weld-glow 1.8s ease-in-out infinite; }
+.ai-heal-node      { animation: ai-node-pulse 1.6s ease-in-out infinite; }
+.ai-heal-flash     { animation: ai-spark-flash 1.2s ease-in-out infinite; }
+.ai-heal-spark     { animation: ai-spark-burst 1s ease-out infinite; }
+.ai-heal-spark:nth-child(1) { --spark-x:  10px; --spark-y: -10px; animation-delay: 0s;    }
+.ai-heal-spark:nth-child(2) { --spark-x: -12px; --spark-y:  -6px; animation-delay: 0.2s;  }
+.ai-heal-spark:nth-child(3) { --spark-x:   6px; --spark-y:  12px; animation-delay: 0.45s; }
+.ai-heal-spark:nth-child(4) { --spark-x: -10px; --spark-y:   8px; animation-delay: 0.65s; }
+.ai-heal-tool-orbit { transform-origin: center; animation: ai-tool-orbit 2.4s linear infinite; }
+.ai-heal-tool-shake { display: inline-block; animation: ai-tool-shake 0.4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+    .ai-heal-card,
+    .ai-heal-card::before,
+    .ai-heal-scan::after,
+    .ai-heal-orbit-cw,
+    .ai-heal-orbit-ccw,
+    .ai-heal-core,
+    .ai-heal-dot,
+    .ai-heal-weld,
+    .ai-heal-node,
+    .ai-heal-flash,
+    .ai-heal-spark,
+    .ai-heal-tool-orbit,
+    .ai-heal-tool-shake { animation: none !important; }
+}
+
+/* =====================================================================
+   Voice Mode — animated orb, rings, equalizer bars, and aurora bg.
+   These power the immersive voice-conversation overlay; the JSX has
+   always referenced these classes but they were missing until now,
+   which left the orb visually static.
+   ===================================================================== */
+@keyframes voice-ring-expand {
+    0%   { transform: scale(0.6); opacity: 0.55; }
+    80%  { opacity: 0.05; }
+    100% { transform: scale(1.6); opacity: 0; }
+}
+@keyframes voice-speak-pulse {
+    0%, 100% { transform: scale(0.85); opacity: 0.35; }
+    50%      { transform: scale(1.15); opacity: 0.1;  }
+}
+@keyframes voice-bar-wave {
+    0%, 100% { transform: scaleY(0.35); }
+    50%      { transform: scaleY(1);    }
+}
+@keyframes voice-dot-breathe {
+    0%, 80%, 100% { transform: scale(0.7); opacity: 0.4; }
+    40%           { transform: scale(1);   opacity: 1;   }
+}
+@keyframes voice-aurora-drift {
+    0%   { transform: translate3d(-10%, -8%, 0) rotate(0deg);   }
+    50%  { transform: translate3d( 10%,  6%, 0) rotate(180deg); }
+    100% { transform: translate3d(-10%, -8%, 0) rotate(360deg); }
+}
+
+.animate-voice-ring-1 { animation: voice-ring-expand 2.2s cubic-bezier(0.16, 1, 0.3, 1) infinite; }
+.animate-voice-ring-2 { animation: voice-ring-expand 2.6s cubic-bezier(0.16, 1, 0.3, 1) infinite; animation-delay: 0.35s; }
+.animate-voice-ring-3 { animation: voice-ring-expand 3.0s cubic-bezier(0.16, 1, 0.3, 1) infinite; animation-delay: 0.7s;  }
+
+.animate-voice-speak-ring-1 { animation: voice-speak-pulse 2.4s ease-in-out infinite; }
+.animate-voice-speak-ring-2 { animation: voice-speak-pulse 3.2s ease-in-out infinite; animation-delay: 0.4s; }
+
+/* Equalizer bars while AI is speaking. Height is animated via scaleY so the
+   row stays vertically centered. transform-origin keeps both ends in sync. */
+.animate-voice-bar {
+    display: inline-block;
+    height: 28px;
+    transform-origin: center;
+    animation: voice-bar-wave 0.9s ease-in-out infinite;
+}
+
+.animate-voice-dot {
+    display: inline-block;
+    animation: voice-dot-breathe 1.4s ease-in-out infinite;
+}
+
+/* Slow drifting aurora behind the orb for "alive" idle state. */
+.voice-aurora {
+    position: absolute;
+    inset: -20%;
+    pointer-events: none;
+    background:
+        radial-gradient(circle at 30% 30%, rgba(34,211,238,0.18), transparent 50%),
+        radial-gradient(circle at 70% 70%, rgba(139,92,246,0.14), transparent 55%),
+        radial-gradient(circle at 50% 50%, rgba(20,184,166,0.10), transparent 60%);
+    filter: blur(40px);
+    animation: voice-aurora-drift 18s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .animate-voice-ring-1,
+    .animate-voice-ring-2,
+    .animate-voice-ring-3,
+    .animate-voice-speak-ring-1,
+    .animate-voice-speak-ring-2,
+    .animate-voice-bar,
+    .animate-voice-dot,
+    .voice-aurora,
+    .vls-mic-ring,
+    .vls-result-card { animation: none !important; transition: none !important; }
+}
+
+/* =====================================================================
+   Voice + GPS Food Finder (VoiceLocationSearch)
+   ===================================================================== */
+.vls-card {
+    position: relative;
+    background: linear-gradient(165deg, #f0f9ff 0%, #ffffff 42%, #f8fafc 100%);
+}
+
+.vls-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+        radial-gradient(circle at 12% 0%, rgba(44, 171, 227, 0.12), transparent 42%),
+        radial-gradient(circle at 88% 8%, rgba(16, 185, 129, 0.08), transparent 38%);
+}
+
+.vls-mic-zone {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1.25rem 1rem 1rem;
+    border-radius: 1rem;
+    background: rgba(255, 255, 255, 0.72);
+    border: 1px solid rgba(44, 171, 227, 0.15);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.vls-mic-orb-wrap {
+    position: relative;
+    width: 5.5rem;
+    height: 5.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.vls-mic-ring {
+    position: absolute;
+    inset: -0.35rem;
+    border-radius: 9999px;
+    border: 2px solid rgba(44, 171, 227, 0.35);
+    pointer-events: none;
+    transition: transform 120ms ease-out, opacity 200ms ease;
+}
+
+.vls-mic-orb {
+    position: relative;
+    z-index: 2;
+    width: 4.5rem;
+    height: 4.5rem;
+    border-radius: 9999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.35rem;
+    color: #fff;
+    background: linear-gradient(145deg, #2CABE3 0%, #1d8fbf 100%);
+    box-shadow:
+        0 10px 28px rgba(44, 171, 227, 0.35),
+        inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    transition: transform 120ms ease-out, box-shadow 200ms ease, background 200ms ease;
+}
+
+.vls-mic-orb:hover:not(:disabled) {
+    transform: scale(1.04);
+    box-shadow: 0 14px 32px rgba(44, 171, 227, 0.42);
+}
+
+.vls-mic-orb:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.vls-mic-orb--recording {
+    background: linear-gradient(145deg, #ef4444 0%, #dc2626 100%);
+    box-shadow: 0 10px 28px rgba(239, 68, 68, 0.38);
+}
+
+.vls-waveform {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 3px;
+    height: 1.25rem;
+}
+
+.vls-waveform-bar {
+    width: 4px;
+    height: 100%;
+    border-radius: 9999px;
+    background: linear-gradient(to top, #2CABE3, #67e8f9);
+    transform-origin: center bottom;
+    transition: transform 80ms ease-out;
+}
+
+.vls-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    border: 1px solid rgba(44, 171, 227, 0.2);
+    background: rgba(255, 255, 255, 0.9);
+    color: #0f766e;
+    transition: background 150ms ease, border-color 150ms ease, transform 150ms ease;
+}
+
+.vls-chip:hover:not(:disabled) {
+    background: #ecfeff;
+    border-color: rgba(44, 171, 227, 0.45);
+    transform: translateY(-1px);
+}
+
+.vls-chip:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.vls-radius-pill {
+    min-width: 2.75rem;
+    padding: 0.35rem 0.65rem;
+    border-radius: 9999px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    border: 1px solid #e5e7eb;
+    background: #fff;
+    color: #4b5563;
+    transition: all 150ms ease;
+}
+
+.vls-radius-pill--active {
+    border-color: #2CABE3;
+    background: #2CABE3;
+    color: #fff;
+    box-shadow: 0 4px 12px rgba(44, 171, 227, 0.28);
+}
+
+.vls-result-card {
+    transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.vls-result-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+    border-color: rgba(44, 171, 227, 0.35);
+}
+
+.vls-result-rank {
+    flex-shrink: 0;
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 9999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.625rem;
+    font-weight: 700;
+    background: #e0f2fe;
+    color: #0369a1;
+}
+
+.vls-result-rank--top {
+    background: linear-gradient(135deg, #2CABE3, #0ea5e9);
+    color: #fff;
+}
+
+
 .stat-card::after {
     content: '';
     position: absolute;

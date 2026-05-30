@@ -4,6 +4,7 @@ import Avatar from "../components/common/Avatar";
 import Button from "../components/common/Button";
 import ProfileStats from "../components/profile/ProfileStats";
 import ListingsTab from "../components/profile/ListingsTab";
+import RoleInsightsPanel from "../components/assistant/RoleInsightsPanel";
 import { useAuthContext } from "../utils/AuthContext";
 import { useFoodListings, useUserProfile } from "../utils/hooks/useSupabase";
 import ErrorBoundary from "../components/common/ErrorBoundary";
@@ -220,6 +221,24 @@ function ProfilePageContent() {
                                     <h1 className="text-2xl font-bold text-gray-900">{profile.name}</h1>
                                 </div>
                                 <p className="text-gray-600">{profile.email}</p>
+                                {profile.address && (
+                                    <p className="text-gray-500 text-sm mt-1">
+                                        <i className="fas fa-map-marker-alt mr-2" aria-hidden="true"></i>
+                                        {profile.address}
+                                    </p>
+                                )}
+                                {profile.phone && (
+                                    <p className="text-gray-500 text-sm mt-1">
+                                        <i className="fas fa-phone mr-2" aria-hidden="true"></i>
+                                        {profile.phone}
+                                    </p>
+                                )}
+                                {profile.community_role && (
+                                    <p className="text-gray-500 text-sm mt-1">
+                                        <i className="fas fa-user-tag mr-2" aria-hidden="true"></i>
+                                        <span className="capitalize">{profile.community_role}</span>
+                                    </p>
+                                )}
                             </div>
                         </div>
                         <Button
@@ -234,6 +253,8 @@ function ProfilePageContent() {
                     <ProfileStats impact={impact} loading={impactLoading} />
                 </div>
             </div>
+
+            <RoleInsightsPanel className="mb-6" />
 
             <div className="bg-white rounded-lg shadow-sm overflow-hidden">
                 <div className="border-b border-gray-200">

@@ -44,6 +44,7 @@ import AdminReports from './pages/admin/AdminReports.jsx';
 import ImpactDataEntry from './pages/admin/ImpactDataEntry.jsx';
 import ImpactContentManagement from './pages/admin/ImpactContentManagement.jsx';
 import AdminMessages from './pages/admin/AdminMessages.jsx';
+import AdminBroadcasts from './pages/admin/AdminBroadcasts.jsx';
 import UserFeedback from './pages/admin/UserFeedback.jsx';
 import VerificationManagement from './pages/admin/VerificationManagement.jsx';
 import ApprovalCodeManagement from './pages/admin/ApprovalCodeManagement.jsx';
@@ -51,6 +52,8 @@ import CommunityManagement from './pages/admin/CommunityManagement.jsx';
 import AdminShareFood from './pages/admin/AdminShareFood.jsx';
 import { AuthProvider, useAuthContext } from './utils/AuthContext';
 import { GoodsProvider } from './utils/stores/goodsStore.jsx';
+import { MapProvider } from './utils/MapContext.jsx';
+import { UIControlProvider } from './utils/UIControlContext.jsx';
 import AdminRoute from './components/admin/AdminRoute.jsx';
 import ErrorBoundary from './components/common/ErrorBoundary';
 
@@ -85,6 +88,7 @@ const ProtectedRoute = ({ children }) => {
 
 function AppContent() {
     const location = useLocation();
+    const navigate = useNavigate();
     
     // Scroll to top on route change (handles forward navigation, back button, and all route changes)
     React.useEffect(() => {
@@ -111,6 +115,7 @@ function AppContent() {
     }, [location.pathname, location.search, location.hash]);
 
     return (
+        <UIControlProvider navigate={navigate}>
         <MainLayout>
             <Routes>
                 <Route path="/" element={<HomePage />} />
@@ -155,6 +160,7 @@ function AppContent() {
                 <Route path="/admin/impact" element={<AdminRoute><ImpactDataEntry /></AdminRoute>} />
                 <Route path="/admin/impact-content" element={<AdminRoute><ImpactContentManagement /></AdminRoute>} />
                 <Route path="/admin/messages" element={<AdminRoute><AdminMessages /></AdminRoute>} />
+                <Route path="/admin/broadcasts" element={<AdminRoute><AdminBroadcasts /></AdminRoute>} />
                 <Route path="/admin/feedback" element={<AdminRoute><UserFeedback /></AdminRoute>} />
                 <Route path="/admin/verifications" element={<AdminRoute><VerificationManagement /></AdminRoute>} />
                 <Route path="/admin/approval-codes" element={<AdminRoute><ApprovalCodeManagement /></AdminRoute>} />
@@ -163,6 +169,7 @@ function AppContent() {
                 <Route path="*" element={<div>Page Not Found</div>} />
             </Routes>
         </MainLayout>
+        </UIControlProvider>
     );
 }
 
@@ -172,9 +179,11 @@ export default function App() {
             <AuthProvider>
                 <GoodsProvider>
                     <TutorialProvider>
-                        <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center"><div className="text-center"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#2CABE3] mx-auto mb-4"></div><p className="text-gray-600">Loading...</p></div></div>}>
-                            <AppContent />
-                        </React.Suspense>
+                        <MapProvider>
+                            <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center"><div className="text-center"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#2CABE3] mx-auto mb-4"></div><p className="text-gray-600">Loading...</p></div></div>}>
+                                <AppContent />
+                            </React.Suspense>
+                        </MapProvider>
                     </TutorialProvider>
                 </GoodsProvider>
             </AuthProvider>

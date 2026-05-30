@@ -287,13 +287,18 @@ class DataService {
   // Send notification to claimer when claim is approved or declined
   async sendClaimReviewNotification(claimId, approved) {
     try {
-      // Get the claim to find claimer info and food title
+      // Get the claim to find claimer info and food title.
+      // Use maybeSingle() so a missing claim returns null instead of throwing.
       const { data: claim, error: claimError } = await supabase
         .from('food_claims')
         .select('requester_name, requester_email, food_id')
         .eq('id', claimId)
-        .single();
-      if (claimError || !claim) throw claimError || new Error('Claim not found');
+        .maybeSingle();
+      if (claimError) throw claimError;
+      if (!claim) {
+        console.warn('sendClaimReviewNotification: claim not found, skipping', claimId);
+        return false;
+      }
 
       // Get food title
       let foodTitle = '';
@@ -302,7 +307,7 @@ class DataService {
           .from('food_listings')
           .select('title')
           .eq('id', claim.food_id)
-          .single();
+          .maybeSingle();
         if (!foodError && food) foodTitle = food.title;
       }
 
@@ -425,6 +430,13 @@ class DataService {
   // Food Listings
   async getFoodListings(filters = {}) {
     try {
+      // NOTE: The previous inline auto-expire UPDATE was removed because it
+      // mutated rows on every fetch, which fired Supabase realtime UPDATE
+      // events. Any component subscribed to food_listings changes that
+      // called getFoodListings in response would feedback-loop. Expiry is
+      // now handled at the query layer (the OR expiry_date filter below)
+      // and by a scheduled server-side job.
+
       // Try selecting with community_id, but some schemas may not have that column.
       const selectWithCommunity = `
           id,
@@ -506,6 +518,13 @@ class DataService {
         if (filters.listing_type) q = q.eq('listing_type', filters.listing_type);
         if (filters.location) q = q.ilike('location', `%${filters.location}%`);
         if (filters.user_id) q = q.eq('user_id', filters.user_id);
+
+        // Safety filter: exclude already-expired listings unless caller is viewing own listings.
+        // Items with null expiry_date are kept (no expiration set).
+        if (!filters.user_id && !filters.includeExpired) {
+          const todayStr = new Date().toISOString().slice(0, 10);
+          q = q.or(`expiry_date.is.null,expiry_date.gte.${todayStr}`);
+        }
         if (filters.page && filters.limit) {
           const from = (filters.page - 1) * filters.limit;
           const to = from + filters.limit - 1;
@@ -1487,6 +1506,18 @@ class DataService {
   // File upload
   async uploadFile(file, bucket = 'food-images') {
     try {
+      if (!file || typeof file.name !== 'string') {
+        throw new Error('Invalid file provided')
+      }
+      // Validate type + size up front. Without this any binary could be
+      // pushed into the bucket and quotas/CDN bandwidth would suffer.
+      if (!file.type || !file.type.startsWith('image/')) {
+        throw new Error('Only image files are allowed.')
+      }
+      const MAX_BYTES = 10 * 1024 * 1024
+      if (file.size > MAX_BYTES) {
+        throw new Error('Image is too large. Please choose a file under 10 MB.')
+      }
       const fileExt = file.name.split('.').pop()
       const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`
       // Use the file name at the root of the bucket (avoid duplicate bucket segments)
@@ -1527,6 +1558,14 @@ class DataService {
   // Search functionality
   async searchFoodListings(searchTerm, filters = {}) {
     try {
+      // Sanitize: PostgREST .or() uses commas, parens, and dots as syntax.
+      // Raw user input containing any of those characters returns HTTP 400
+      // ("failed to parse logic tree"), so strip them before interpolating.
+      const safeTerm = String(searchTerm || '')
+        .replace(/[,()*%]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+
       let query = supabase
         .from('food_listings')
         .select(`
@@ -1538,8 +1577,12 @@ class DataService {
             organization
           )
         `)
-        .eq('status', 'active')
-        .or(`title.ilike.%${searchTerm}%,description.ilike.%${searchTerm}%`)
+        .in('status', ['approved', 'active'])
+        .or(`title.ilike.%${safeTerm}%,description.ilike.%${safeTerm}%`)
+
+      // Exclude expired listings
+      const todayStr = new Date().toISOString().slice(0, 10);
+      query = query.or(`expiry_date.is.null,expiry_date.gte.${todayStr}`);
 
       // Apply additional filters
       if (filters.category) {

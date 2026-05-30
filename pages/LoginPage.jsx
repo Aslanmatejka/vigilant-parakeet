@@ -22,7 +22,7 @@ function LoginPage() {
     // Redirect if already authenticated
     React.useEffect(() => {
         if (!authLoading && isAuthenticated) {
-            const redirectPath = searchParams.get('redirect') || '/dashboard';
+            const redirectPath = searchParams.get('redirect') || '/';
             navigate(redirectPath, { replace: true });
         }
     }, [isAuthenticated, authLoading, navigate, searchParams]);

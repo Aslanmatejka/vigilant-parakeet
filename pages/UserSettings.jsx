@@ -7,6 +7,7 @@ import { useAuth } from "../utils/hooks/useSupabase";
 import DietaryPreferences from "../components/profile/DietaryPreferences";
 import { useTutorial } from "../utils/TutorialContext";
 import supabase from "../utils/supabaseClient";
+import { geocodeAddress } from "../utils/geocoding";
 
 function UserSettings() {
     const { resetTutorial } = useTutorial();
@@ -15,10 +16,15 @@ function UserSettings() {
     const [loading, setLoading] = React.useState(false);
     const [error, setError] = React.useState(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = React.useState(false);
+    const [originalAddress, setOriginalAddress] = React.useState('');
+    const [addressCoords, setAddressCoords] = React.useState({ latitude: null, longitude: null });
+    const [geocoding, setGeocoding] = React.useState(false);
     const [formData, setFormData] = React.useState({
         name: '',
         email: '',
+        address: '',
         phone: '',
+        community_role: '',
         sms_opt_in: false,
         sms_notifications_enabled: false,
         notifications: {
@@ -50,7 +56,9 @@ function UserSettings() {
                 setFormData({
                     name: authUser.name || profile?.name || '',
                     email: authUser.email || '',
+                    address: profile?.address || authUser.address || '',
                     phone: profile?.phone || '',
+                    community_role: profile?.community_role || '',
                     sms_opt_in: profile?.sms_opt_in || false,
                     sms_notifications_enabled: profile?.sms_notifications_enabled || false,
                     notifications: authUser.notifications || {
@@ -66,6 +74,11 @@ function UserSettings() {
                     dietary_preferences: profile?.dietary_preferences || [],
                     pickup_reminder_enabled: profile?.pickup_reminder_enabled !== false,
                     default_reminder_hours: profile?.default_reminder_hours || 24
+                });
+                setOriginalAddress(profile?.address || authUser.address || '');
+                setAddressCoords({
+                    latitude: profile?.latitude ?? null,
+                    longitude: profile?.longitude ?? null,
                 });
             }
         };
@@ -99,12 +112,21 @@ function UserSettings() {
         }));
     };
 
-    const handleDietaryChange = (dietaryData) => {
-        setFormData(prev => ({
-            ...prev,
-            ...dietaryData
-        }));
-    };
+    const handleDietaryChange = React.useCallback((dietaryData) => {
+        setFormData(prev => {
+            const next = { ...prev, ...dietaryData };
+            // Avoid unnecessary state updates that would re-trigger the child's effect
+            const same = Object.keys(dietaryData).every(k => {
+                const a = prev[k];
+                const b = dietaryData[k];
+                if (Array.isArray(a) && Array.isArray(b)) {
+                    return a.length === b.length && a.every((v, i) => v === b[i]);
+                }
+                return a === b;
+            });
+            return same ? prev : next;
+        });
+    }, []);
 
     const handleSaveSettings = async (section) => {
         setLoading(true);
@@ -157,6 +179,55 @@ function UserSettings() {
                     .eq('id', authUser.id);
 
                 if (updateError) throw updateError;
+            } else if (section === 'Account') {
+                const nextAddress = formData.address?.trim() || null;
+                const updates = {
+                    name: formData.name,
+                    address: nextAddress,
+                    phone: formData.phone?.trim() || null,
+                    community_role: formData.community_role?.trim() || null,
+                };
+
+                // Geocode whenever the address has changed (or coords are missing).
+                const addressChanged = (nextAddress || '') !== (originalAddress || '');
+                const coordsMissing = !addressCoords.latitude || !addressCoords.longitude;
+                if (nextAddress && (addressChanged || coordsMissing)) {
+                    try {
+                        setGeocoding(true);
+                        const geo = await geocodeAddress(nextAddress);
+                        if (geo) {
+                            updates.latitude = geo.latitude;
+                            updates.longitude = geo.longitude;
+                            updates.address_geocoded_at = new Date().toISOString();
+                            setAddressCoords({ latitude: geo.latitude, longitude: geo.longitude });
+                        } else {
+                            // Clear stale coords if the address can't be resolved.
+                            updates.latitude = null;
+                            updates.longitude = null;
+                            updates.address_geocoded_at = null;
+                            setAddressCoords({ latitude: null, longitude: null });
+                        }
+                    } catch (geoErr) {
+                        console.warn('Address geocoding failed:', geoErr);
+                    } finally {
+                        setGeocoding(false);
+                    }
+                } else if (!nextAddress) {
+                    updates.latitude = null;
+                    updates.longitude = null;
+                    updates.address_geocoded_at = null;
+                    setAddressCoords({ latitude: null, longitude: null });
+                }
+
+                const { error: updateError } = await supabase
+                    .from('users')
+                    .update(updates)
+                    .eq('id', authUser.id);
+                if (updateError) throw updateError;
+                setOriginalAddress(nextAddress || '');
+                if (updateProfile) {
+                    try { await updateProfile(updates); } catch (_) {}
+                }
             } else if (updateProfile) {
                 await updateProfile(formData);
             }
@@ -236,6 +307,7 @@ function UserSettings() {
                             <Input
                                 label="Email"
                                 value={formData.email}
+                                onChange={() => {}}
                                 disabled
                                 aria-label="Email address"
                             />
@@ -245,6 +317,65 @@ function UserSettings() {
                                 onChange={(e) => handleInputChange('name', e.target.value)}
                                 aria-label="Display name"
                             />
+                        </div>
+                        <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                                <Input
+                                    label="Address"
+                                    value={formData.address}
+                                    onChange={(e) => handleInputChange('address', e.target.value)}
+                                    placeholder="Street, City, State ZIP"
+                                    aria-label="Address"
+                                />
+                                <p className="mt-1 text-xs text-gray-500" aria-live="polite">
+                                    {geocoding && (
+                                        <span><i className="fas fa-spinner fa-spin mr-1"></i>Locating address…</span>
+                                    )}
+                                    {!geocoding && addressCoords.latitude && addressCoords.longitude && (
+                                        <span className="text-green-700">
+                                            <i className="fas fa-map-marker-alt mr-1"></i>
+                                            Used as fallback for map &amp; AI distance ({Number(addressCoords.latitude).toFixed(4)}, {Number(addressCoords.longitude).toFixed(4)})
+                                        </span>
+                                    )}
+                                    {!geocoding && formData.address && !(addressCoords.latitude && addressCoords.longitude) && (
+                                        <span className="text-amber-700">
+                                            <i className="fas fa-exclamation-triangle mr-1"></i>
+                                            Save to geocode this address so distance &amp; routing features can use it.
+                                        </span>
+                                    )}
+                                </p>
+                            </div>
+                            <Input
+                                label="Phone Number"
+                                type="tel"
+                                value={formData.phone}
+                                onChange={(e) => handleInputChange('phone', e.target.value)}
+                                placeholder="+1 (555) 123-4567"
+                                aria-label="Phone number"
+                            />
+                        </div>
+                        <div className="mt-6">
+                            <label htmlFor="community-role" className="block text-sm font-medium text-gray-700 mb-1">
+                                Community Role
+                            </label>
+                            <select
+                                id="community-role"
+                                value={formData.community_role || ''}
+                                onChange={(e) => handleInputChange('community_role', e.target.value)}
+                                className="w-full rounded-md border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#2CABE3] focus:border-transparent"
+                                aria-label="Community role"
+                            >
+                                <option value="">Select your role…</option>
+                                <option value="donor">Donor — I share food</option>
+                                <option value="recipient">Recipient — I receive food</option>
+                                <option value="volunteer">Volunteer — I help organize</option>
+                                <option value="driver">Driver — I deliver food</option>
+                                <option value="organizer">Organizer — I run distributions</option>
+                                <option value="sponsor">Sponsor — I support the community</option>
+                            </select>
+                            <p className="mt-1 text-xs text-gray-500">
+                                Helps the AI assistant tailor suggestions to how you participate.
+                            </p>
                         </div>
                         <div className="mt-6 flex justify-end">
                             <Button

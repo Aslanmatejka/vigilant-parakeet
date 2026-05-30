@@ -21,6 +21,79 @@ logger = logging.getLogger("ai_tools")
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN") or os.getenv("VITE_MAPBOX_TOKEN", "")
 MAPBOX_DIRECTIONS_URL = "https://api.mapbox.com/directions/v5/mapbox"
 
+_PERISHABLE_CATEGORY_MAX_AGE_HOURS = {
+    "prepared": 24,
+    "prepared food": 24,
+    "prepared foods": 24,
+    "dairy": 24,
+    "meat": 24,
+    "seafood": 24,
+    "bakery": 48,
+    "produce": 48,
+    "vegetables": 48,
+    "fruits": 48,
+    "beverages": 72,
+    "other": 72,
+    "pantry": 168,
+    "canned": 168,
+    "grains": 168,
+}
+
+
+def _parse_dt(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except Exception:
+        return None
+
+
+def _listing_is_fresh_enough(listing: dict, now: Optional[datetime] = None) -> bool:
+    """Return True when a listing is still safe enough for the AI to surface.
+
+    Rules:
+    - hide listings whose pickup_by has already passed
+    - hide listings whose expiry_date is already in the past
+    - if a listing has neither expiry_date nor pickup_by, apply a category-based
+      max age so the AI does not point users at old food that may have gone bad
+    """
+    now = now or datetime.now(timezone.utc)
+
+    pickup_by_dt = _parse_dt(listing.get("pickup_by"))
+    if pickup_by_dt and pickup_by_dt < now:
+        return False
+
+    expiry_value = listing.get("expiry_date")
+    if expiry_value:
+        expiry_dt = _parse_dt(expiry_value)
+        if expiry_dt:
+            if expiry_dt < now:
+                return False
+        else:
+            try:
+                expiry_date = datetime.fromisoformat(str(expiry_value)).date()
+                if expiry_date < now.date():
+                    return False
+            except Exception:
+                pass
+
+    if expiry_value or pickup_by_dt:
+        return True
+
+    created_dt = _parse_dt(listing.get("created_at"))
+    if not created_dt:
+        # If we cannot determine freshness at all, fail closed.
+        return False
+
+    category = str(listing.get("category") or "other").strip().lower()
+    max_age_hours = _PERISHABLE_CATEGORY_MAX_AGE_HOURS.get(category, 72)
+    age_hours = (now - created_dt).total_seconds() / 3600
+    return age_hours <= max_age_hours
+
 # ---------------------------------------------------------------------------
 # OpenAI function-calling tool definitions
 # ---------------------------------------------------------------------------
@@ -67,6 +140,36 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "get_recent_listings",
+            "description": (
+                "Check the newest food listings that were posted recently. "
+                "Use this when the user asks what's new, asks to check new listings, "
+                "or wants the latest available listings."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hours": {
+                        "type": "integer",
+                        "description": "How far back to look for newly posted listings (default 72 hours).",
+                        "default": 72,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of new listings to return (default 10).",
+                        "default": 10,
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Optional category filter for new listings.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_user_profile",
             "description": (
                 "Retrieve a user's profile information including name, location, "
@@ -79,6 +182,65 @@ TOOL_DEFINITIONS = [
                         "type": "string",
                         "description": "The UUID of the user",
                     },
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_user_profile",
+            "description": (
+                "Update fields on the authenticated user's profile. Only pass the "
+                "fields the user explicitly asked to change. Use this when the user "
+                "says things like 'update my address', 'change my phone', 'set my "
+                "dietary restrictions', 'opt me into SMS', etc. The user_id is taken "
+                "from the authenticated session — never from the model."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "The UUID of the authenticated user (auto-filled by the server).",
+                    },
+                    "name": {"type": "string", "description": "Display name."},
+                    "address": {
+                        "type": "string",
+                        "description": "Street address used as the default pickup/recipient address.",
+                    },
+                    "phone": {
+                        "type": "string",
+                        "description": "Phone number in E.164 or local format.",
+                    },
+                    "organization": {"type": "string"},
+                    "community_role": {
+                        "type": "string",
+                        "enum": ["donor", "recipient", "volunteer", "driver", "organizer", "sponsor"],
+                        "description": (
+                            "How the user participates in the community: "
+                            "donor (shares food), recipient (receives food), volunteer (helps organize), "
+                            "driver (delivers), organizer (runs distributions), sponsor (supports community)."
+                        ),
+                    },
+                    "dietary_restrictions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "e.g. ['vegetarian','gluten-free']",
+                    },
+                    "allergies": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "dietary_preferences": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "sms_opt_in": {"type": "boolean"},
+                    "sms_notifications_enabled": {"type": "boolean"},
+                    "pickup_reminder_enabled": {"type": "boolean"},
+                    "default_reminder_hours": {"type": "integer"},
                 },
                 "required": ["user_id"],
             },
@@ -488,6 +650,428 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ui_action",
+            "description": (
+                "Drive the DoGoods web UI on the user's behalf. Use this when "
+                "the user asks you to navigate, open something, close something, "
+                "or otherwise interact with the app. The frontend will execute "
+                "the action when it receives the response. Always confirm in "
+                "your reply what you did (e.g. 'I opened the Find Food page')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": (
+                            "The UI action to perform. Supported values: "
+                            "'navigate' (go to a route), "
+                            "'open_assistant' (open the AI chat panel), "
+                            "'close_assistant' (close the AI chat panel), "
+                            "'expand_assistant' (make the chat panel full-screen), "
+                            "'open_listing' (open a food listing's detail/claim view), "
+                            "'open_map' (navigate to the Find Food map view), "
+                            "'clear_map' (remove AI markers/route from the map), "
+                            "'scroll_to_top', 'scroll_to_bottom', "
+                            "'focus' (focus an input by data-ai-id attribute), "
+                            "'set_language' (change UI language)."
+                        ),
+                        "enum": [
+                            "navigate", "open_assistant", "close_assistant",
+                            "expand_assistant", "open_listing", "open_map",
+                            "clear_map", "scroll_to_top", "scroll_to_bottom",
+                            "focus", "set_language",
+                        ],
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "For 'navigate': route path. Common routes: "
+                            "'/' (home), '/find' (browse food), '/share' (share food), "
+                            "'/dashboard', '/profile', '/donate', "
+                            "'/notifications', '/recipes', '/donations' (distribution schedules), "
+                            "'/near-me', '/how-it-works', '/contact', '/blog', "
+                            "'/login', '/signup', '/listings' (my listings), '/settings'."
+                        ),
+                    },
+                    "listing_id": {
+                        "type": "string",
+                        "description": "For 'open_listing': UUID of the food listing to open.",
+                    },
+                    "target_id": {
+                        "type": "string",
+                        "description": (
+                            "For 'focus': data-ai-id of the element to focus "
+                            "(e.g. 'search-input', 'share-title-input')."
+                        ),
+                    },
+                    "lang": {
+                        "type": "string",
+                        "enum": ["en", "es"],
+                        "description": "For 'set_language': UI language code.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "Short human-readable reason shown to the user "
+                            "(e.g. 'Opening Find Food so you can browse listings near you')."
+                        ),
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_food_listing",
+            "description": (
+                "Create a new food donation listing for the authenticated user. "
+                "Use this when the user wants to share / post / donate / list food. "
+                "Confirm key fields (title, quantity, unit, category) with the user "
+                "before calling. Only call once the user clearly says yes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "UUID of the donor (the authenticated user).",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Short product name (e.g. '5 loaves of sourdough bread').",
+                    },
+                    "quantity": {
+                        "type": "number",
+                        "description": "Numeric quantity (must be > 0).",
+                    },
+                    "unit": {
+                        "type": "string",
+                        "description": "Unit for the quantity (e.g. 'items','loaves','kg','lbs','servings','boxes').",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["produce", "bakery", "dairy", "pantry", "meat", "prepared", "other"],
+                        "description": "Food category.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional details about condition, ingredients, packaging.",
+                    },
+                    "expiry_date": {
+                        "type": "string",
+                        "description": "Optional ISO date (YYYY-MM-DD) the food expires.",
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Optional pickup location / address hint.",
+                    },
+                    "dietary_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional tags like 'vegetarian','vegan','gluten-free','halal'.",
+                    },
+                    "allergens": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional allergens present (e.g. 'nuts','dairy','gluten').",
+                    },
+                },
+                "required": ["user_id", "title", "quantity", "unit", "category"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "claim_listing",
+            "description": (
+                "Claim a food listing on behalf of the authenticated user. Use this "
+                "when the user clearly wants to reserve / take / pick up / claim a "
+                "specific listing. You MUST already have the listing_id from a prior "
+                "search_food_near_user or get_recent_listings call — never invent one. "
+                "Confirm once before calling (e.g. 'Want me to claim X for you?')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "UUID of the recipient (the authenticated user).",
+                    },
+                    "listing_id": {
+                        "type": "string",
+                        "description": "UUID of the food listing to claim (from search results).",
+                    },
+                    "quantity": {
+                        "type": "integer",
+                        "description": "How many units to claim (default 1, must be <= listing's available quantity).",
+                    },
+                    "pickup_date": {
+                        "type": "string",
+                        "description": "Optional ISO date (YYYY-MM-DD) the user plans to pick up.",
+                    },
+                    "people": {
+                        "type": "integer",
+                        "description": "Optional number of people this claim will feed.",
+                    },
+                },
+                "required": ["user_id", "listing_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_claim",
+            "description": (
+                "Cancel/release a claim the authenticated user has made on a food "
+                "listing. Use when the user says things like 'cancel my claim', "
+                "'release it', 'I can't pick it up', 'never mind'. Provide either "
+                "claim_id (preferred) OR listing_id; if only listing_id is given "
+                "the tool will look up the user's active claim on that listing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "UUID of the authenticated user."},
+                    "claim_id": {"type": "string", "description": "UUID of the food_claims row to cancel."},
+                    "listing_id": {"type": "string", "description": "UUID of the food listing — used to find the user's claim if claim_id unknown."},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "confirm_claim",
+            "description": (
+                "Mark the authenticated user's claim as completed (pickup confirmed). "
+                "Use when the user says 'I got it', 'picked it up', 'confirm pickup', "
+                "or shares a confirmation code. Provide either claim_id (preferred) "
+                "OR listing_id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "UUID of the authenticated user."},
+                    "claim_id": {"type": "string", "description": "UUID of the food_claims row to confirm."},
+                    "listing_id": {"type": "string", "description": "UUID of the food listing — used to find the user's claim if claim_id unknown."},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "post_food_listing",
+            "description": (
+                "Alias of create_food_listing. Create a new food donation "
+                "listing for the authenticated user. Use whichever name the "
+                "system prompt refers to."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "quantity": {"type": "number"},
+                    "unit": {"type": "string"},
+                    "category": {
+                        "type": "string",
+                        "enum": ["produce", "bakery", "dairy", "pantry", "meat", "prepared", "other"],
+                    },
+                    "description": {"type": "string"},
+                    "expiry_date": {"type": "string", "description": "ISO date YYYY-MM-DD."},
+                    "location": {"type": "string"},
+                    "dietary_tags": {"type": "array", "items": {"type": "string"}},
+                    "allergens": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["user_id", "title", "quantity", "unit", "category"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bulk_import_listings",
+            "description": (
+                "Create multiple food donation listings in one shot for the "
+                "authenticated user. Accept either a CSV string (csv_text) "
+                "with columns title,quantity,unit,category[,description,"
+                "expiry_date,location] OR a pre-parsed listings array. Use "
+                "after the user confirms a bulk preview."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "csv_text": {"type": "string", "description": "Raw CSV. First row must be a header."},
+                    "listings": {
+                        "type": "array",
+                        "description": "Pre-parsed listings (alternative to csv_text).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "quantity": {"type": "number"},
+                                "unit": {"type": "string"},
+                                "category": {"type": "string"},
+                                "description": {"type": "string"},
+                                "expiry_date": {"type": "string"},
+                                "location": {"type": "string"},
+                            },
+                            "required": ["title", "quantity", "unit", "category"],
+                        },
+                    },
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_donor_expiring_listings",
+            "description": (
+                "List the authenticated donor's own active listings whose "
+                "expiry_date or pickup_by falls within the next N days "
+                "(default 2). Use when warning the donor about expiring food."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "days": {"type": "integer", "description": "Look-ahead window in days (default 2, max 14)."},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "attach_photos_to_listing",
+            "description": (
+                "Attach a photo (image URL) to one of the authenticated user's "
+                "food listings. Use after the user uploads/shares an image and "
+                "you have a public URL for it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "listing_id": {"type": "string"},
+                    "image_url": {"type": "string", "description": "Public URL of the uploaded image."},
+                },
+                "required": ["user_id", "listing_id", "image_url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "navigate_ui",
+            "description": "Alias of ui_action. Drive the DoGoods web UI on the user's behalf.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "path": {"type": "string"},
+                    "listing_id": {"type": "string"},
+                    "target_id": {"type": "string"},
+                    "lang": {"type": "string", "enum": ["en", "es"]},
+                    "reason": {"type": "string"},
+                    "target": {"type": "string", "description": "Alias for path when action='open'."},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "meal_suggestions",
+            "description": "Alias of get_recipes. Suggest meals for given ingredients.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ingredients": {"type": "array", "items": {"type": "string"}},
+                    "dietary_preferences": {"type": "string"},
+                },
+                "required": ["ingredients"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "post_food_request",
+            "description": (
+                "Post a food REQUEST on behalf of the authenticated recipient "
+                "(opposite of a donation). Use when the user says things like "
+                "'I need X', 'looking for Y', 'request food'. Confirm key "
+                "fields (title, quantity, when needed) with the user before "
+                "calling."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "title": {"type": "string", "description": "What's being requested (e.g. 'Baby formula', 'Rice')."},
+                    "quantity": {"type": "number"},
+                    "unit": {"type": "string"},
+                    "category": {
+                        "type": "string",
+                        "enum": ["produce", "bakery", "dairy", "pantry", "meat", "prepared", "other"],
+                    },
+                    "description": {"type": "string", "description": "Why it's needed / who it's for."},
+                    "needed_by": {"type": "string", "description": "ISO date (YYYY-MM-DD) — when the user needs it by."},
+                    "location": {"type": "string"},
+                    "people": {"type": "integer", "description": "Number of people this will feed."},
+                },
+                "required": ["user_id", "title", "quantity", "unit", "category"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bulk_post_food_listings",
+            "description": "Alias of bulk_import_listings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "csv_text": {"type": "string"},
+                    "listings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "quantity": {"type": "number"},
+                                "unit": {"type": "string"},
+                                "category": {"type": "string"},
+                                "description": {"type": "string"},
+                                "expiry_date": {"type": "string"},
+                                "location": {"type": "string"},
+                            },
+                            "required": ["title", "quantity", "unit", "category"],
+                        },
+                    },
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
 ]
 
 
@@ -499,7 +1083,9 @@ async def execute_tool(name: str, arguments: dict) -> dict:
     """Route a tool call to its handler and return the result."""
     handlers = {
         "search_food_near_user": _search_food_near_user,
+        "get_recent_listings": _get_recent_listings,
         "get_user_profile": _get_user_profile,
+        "update_user_profile": _update_user_profile,
         "get_pickup_schedule": _get_pickup_schedule,
         "create_reminder": _create_reminder,
         "get_mapbox_route": _get_mapbox_route,
@@ -512,6 +1098,19 @@ async def execute_tool(name: str, arguments: dict) -> dict:
         "get_user_notifications": _get_user_notifications,
         "send_notification": _send_notification,
         "mark_notifications_read": _mark_notifications_read,
+        "ui_action": _ui_action,
+        "create_food_listing": _create_food_listing,
+        "claim_listing": _claim_food_listing,
+        "cancel_claim": _cancel_claim,
+        "confirm_claim": _confirm_claim,
+        "post_food_listing": _create_food_listing,
+        "bulk_import_listings": _bulk_import_listings,
+        "get_donor_expiring_listings": _get_donor_expiring_listings,
+        "attach_photos_to_listing": _attach_photos_to_listing,
+        "navigate_ui": _navigate_ui,
+        "meal_suggestions": _get_recipes,
+        "post_food_request": _post_food_request,
+        "bulk_post_food_listings": _bulk_import_listings,
     }
 
     handler = handlers.get(name)
@@ -527,9 +1126,182 @@ async def execute_tool(name: str, arguments: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Haversine distance helper
+# Tool implementations
 # ---------------------------------------------------------------------------
 
+async def _get_recent_listings(
+    hours: int = 72,
+    limit: int = 10,
+    category: Optional[str] = None,
+) -> dict:
+    """Return newly posted, still-available food listings."""
+    from backend.ai_engine import supabase_get
+
+    logger.info(
+        "get_recent_listings: hours=%s limit=%s category=%s",
+        hours, limit, category,
+    )
+
+    safe_hours = max(1, min(int(hours), 24 * 14))
+    safe_limit = max(1, min(int(limit), 25))
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=safe_hours)).isoformat()
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    params: dict = {
+        "select": (
+            "id,title,description,category,quantity,unit,"
+            "latitude,longitude,full_address,donor_name,"
+            "expiry_date,pickup_by,status,dietary_tags,allergens,created_at"
+        ),
+        "status": "in.(approved,active)",
+        # Recipients see donations only; food REQUESTS are a separate feed.
+        "listing_type": "eq.donation",
+        "expiry_date": f"gte.{today_str}",
+        "created_at": f"gte.{cutoff_iso}",
+        "order": "created_at.desc",
+        "limit": str(safe_limit),
+    }
+    if category:
+        params["category"] = f"eq.{category}"
+
+    try:
+        rows = await supabase_get("food_listings", params)
+    except Exception as exc:
+        logger.error("Failed to fetch recent listings: %s", exc)
+        return {"error": f"Could not fetch recent listings: {str(exc)}"}
+
+    now = datetime.now(timezone.utc)
+    listings = []
+    for row in rows:
+        if not _listing_is_fresh_enough(row, now=now):
+            continue
+        created_at = row.get("created_at")
+        hours_ago = None
+        if created_at:
+            try:
+                created_dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                hours_ago = max(0, int((now - created_dt).total_seconds() // 3600))
+            except Exception:
+                hours_ago = None
+        listings.append({
+            "id": row.get("id"),
+            "title": row.get("title"),
+            "category": row.get("category"),
+            "quantity": row.get("quantity"),
+            "unit": row.get("unit"),
+            "latitude": row.get("latitude"),
+            "longitude": row.get("longitude"),
+            "address": row.get("full_address"),
+            "pickup_by": row.get("pickup_by"),
+            "expiry_date": row.get("expiry_date"),
+            "donor_name": row.get("donor_name"),
+            "created_at": created_at,
+            "hours_ago": hours_ago,
+        })
+
+    if not listings:
+        window_label = f"in the last {safe_hours} hour{'s' if safe_hours != 1 else ''}"
+        if category:
+            return {
+                "listings": [],
+                "total": 0,
+                "hours": safe_hours,
+                "summary": f"No new {category} listings were posted {window_label}.",
+            }
+        return {
+            "listings": [],
+            "total": 0,
+            "hours": safe_hours,
+            "summary": f"No new listings were posted {window_label}.",
+        }
+
+    summary = f"Found {len(listings)} new listing{'s' if len(listings) != 1 else ''} from the last {safe_hours} hour{'s' if safe_hours != 1 else ''}."
+    if category:
+        summary = f"Found {len(listings)} new {category} listing{'s' if len(listings) != 1 else ''} from the last {safe_hours} hour{'s' if safe_hours != 1 else ''}."
+
+    return {
+        "listings": listings,
+        "total": len(listings),
+        "hours": safe_hours,
+        "summary": summary,
+    }
+
+# Allowed UI navigation routes (mirrors the React Router config). Keeping this
+# server-side prevents the model from sending the user to bogus paths.
+_UI_ALLOWED_PATHS = {
+    "/", "/find", "/share", "/dashboard", "/profile",
+    "/donate", "/notifications", "/recipes", "/donations",
+    "/near-me", "/how-it-works", "/contact", "/blog", "/news", "/faqs",
+    "/login", "/signup", "/sponsors", "/featured",
+    "/testimonials", "/impact-story", "/terms", "/privacy",
+    "/cookies", "/listings", "/receipts", "/settings", "/success",
+}
+
+_UI_ALLOWED_ACTIONS = {
+    "navigate", "open_assistant", "close_assistant", "expand_assistant",
+    "open_listing", "open_map", "clear_map", "scroll_to_top",
+    "scroll_to_bottom", "focus", "set_language",
+}
+
+
+async def _ui_action(
+    action: str,
+    path: Optional[str] = None,
+    listing_id: Optional[str] = None,
+    target_id: Optional[str] = None,
+    lang: Optional[str] = None,
+    reason: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    """Validate a UI directive and echo it back for the frontend to execute.
+
+    The actual navigation/UI manipulation runs in the browser. The backend's
+    only job is to confirm the action is well-formed so GPT gets a reliable
+    signal it can talk about in its reply.
+    """
+    if action not in _UI_ALLOWED_ACTIONS:
+        return {"ok": False, "error": f"Unsupported UI action: {action}"}
+
+    payload = {"ok": True, "action": action}
+
+    if action == "navigate":
+        if not path or not isinstance(path, str):
+            return {"ok": False, "error": "navigate requires a 'path'"}
+        # Strip trailing slash (except root) and normalize
+        norm = path if path == "/" else path.rstrip("/")
+        if norm not in _UI_ALLOWED_PATHS:
+            return {
+                "ok": False,
+                "error": f"Path '{path}' is not a known route.",
+                "allowed_paths": sorted(_UI_ALLOWED_PATHS),
+            }
+        payload["path"] = norm
+
+    elif action == "open_listing":
+        if not listing_id:
+            return {"ok": False, "error": "open_listing requires 'listing_id'"}
+        payload["listing_id"] = listing_id
+
+    elif action == "focus":
+        if not target_id:
+            return {"ok": False, "error": "focus requires 'target_id'"}
+        payload["target_id"] = target_id
+
+    elif action == "set_language":
+        if lang not in ("en", "es"):
+            return {"ok": False, "error": "lang must be 'en' or 'es'"}
+        payload["lang"] = lang
+
+    if reason:
+        payload["reason"] = reason
+
+    logger.info("ui_action: %s %s", action, {k: v for k, v in payload.items() if k != "action"})
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Haversine distance helper
+# ---------------------------------------------------------------------------
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Distance in km between two lat/lng points."""
     R = 6371.0
@@ -569,26 +1341,39 @@ async def _search_food_near_user(
     )
 
     # --- 1. Get user location ---
+    # Prefer the geocoded latitude/longitude columns populated when the
+    # user saves their profile address. Fall back to the legacy `location`
+    # JSON column for older rows that pre-date geocoding.
     user_lat, user_lng = None, None
     try:
         user_rows = await supabase_get("users", {
             "id": f"eq.{user_id}",
-            "select": "id,name,organization,location,created_at",
+            "select": "id,name,organization,location,latitude,longitude,address,created_at",
         })
         if user_rows:
             profile = user_rows[0]
-            loc = profile.get("location")
-            if isinstance(loc, dict):
-                user_lat = loc.get("latitude")
-                user_lng = loc.get("longitude")
-            elif isinstance(loc, str):
-                # location might be stored as text; try parsing
+            # 1a) New canonical columns (numeric — PostgREST may return strings)
+            raw_lat = profile.get("latitude")
+            raw_lng = profile.get("longitude")
+            if raw_lat is not None and raw_lng is not None:
                 try:
-                    parsed = json.loads(loc)
-                    user_lat = parsed.get("latitude")
-                    user_lng = parsed.get("longitude")
-                except (ValueError, TypeError):
-                    pass
+                    user_lat = float(raw_lat)
+                    user_lng = float(raw_lng)
+                except (TypeError, ValueError):
+                    user_lat, user_lng = None, None
+            # 1b) Legacy JSON column fallback
+            if user_lat is None or user_lng is None:
+                loc = profile.get("location")
+                if isinstance(loc, dict):
+                    user_lat = loc.get("latitude")
+                    user_lng = loc.get("longitude")
+                elif isinstance(loc, str):
+                    try:
+                        parsed = json.loads(loc)
+                        user_lat = parsed.get("latitude")
+                        user_lng = parsed.get("longitude")
+                    except (ValueError, TypeError):
+                        pass
     except Exception as exc:
         logger.error("User lookup failed: %s", exc)
 
@@ -602,6 +1387,8 @@ async def _search_food_near_user(
             "dietary_tags,allergens,created_at"
         ),
         "status": "in.(approved,active)",
+        # Search returns donations only; requests live in their own feed.
+        "listing_type": "eq.donation",
         "expiry_date": f"gte.{today_str}",
         "order": "created_at.desc",
         "limit": "100",
@@ -633,8 +1420,11 @@ async def _search_food_near_user(
         return {"results": [], "total": 0, "error": f"Database query failed: {exc}"}
 
     # --- 3. Filter by distance ---
+    now = datetime.now(timezone.utc)
     results = []
     for listing in listings:
+        if not _listing_is_fresh_enough(listing, now=now):
+            continue
         lat = listing.get("latitude")
         lng = listing.get("longitude")
 
@@ -692,6 +1482,7 @@ async def _search_food_near_user(
 
     return {
         "results": results,
+        "listings": results,
         "total": len(results),
         "radius_km": radius_km,
         "user_location_available": user_lat is not None,
@@ -708,9 +1499,9 @@ async def _get_user_profile(user_id: str) -> dict:
         rows = await supabase_get("users", {
             "id": f"eq.{user_id}",
             "select": (
-                "id,name,email,phone,"
-                "is_admin,avatar_url,role,account_type,organization,"
-                "created_at"
+                "id,name,email,phone,location,"
+                "is_admin,avatar_url,role,account_type,organization,community_role,"
+                "created_at,address,latitude,longitude,address_geocoded_at"
             ),
         })
         if not rows:
@@ -737,16 +1528,28 @@ async def _get_user_profile(user_id: str) -> dict:
         except Exception:
             pass
 
+        # Normalise the geocoded coords (PostgREST returns numeric as strings).
+        try:
+            lat_val = float(profile["latitude"]) if profile.get("latitude") is not None else None
+            lng_val = float(profile["longitude"]) if profile.get("longitude") is not None else None
+        except (TypeError, ValueError):
+            lat_val, lng_val = None, None
+
         return {
             "user_id": user_id,
             "profile": {
                 "name": profile.get("name") or profile.get("email"),
                 "email": profile.get("email"),
                 "role": profile.get("role", "member"),
+                "community_role": profile.get("community_role"),
                 "account_type": profile.get("account_type"),
                 "organization": profile.get("organization"),
                 "is_admin": profile.get("is_admin", False),
                 "member_since": profile.get("created_at"),
+                "address": profile.get("address") or profile.get("location"),
+                "latitude": lat_val,
+                "longitude": lng_val,
+                "address_geocoded_at": profile.get("address_geocoded_at"),
             },
             "activity": {
                 "listings_shared": listings_count,
@@ -756,6 +1559,74 @@ async def _get_user_profile(user_id: str) -> dict:
     except Exception as exc:
         logger.error("Profile fetch failed: %s", exc)
         return {"user_id": user_id, "profile": None, "error": str(exc)}
+
+
+# Whitelisted columns the AI may write to via update_user_profile. Anything
+# not in this set is silently dropped to avoid privilege escalation
+# (is_admin, role, etc.) or accidental writes to schema-mismatched fields.
+_UPDATABLE_PROFILE_FIELDS = {
+    "name",
+    "address",
+    "phone",
+    "organization",
+    "community_role",
+    "dietary_restrictions",
+    "allergies",
+    "dietary_preferences",
+    "sms_opt_in",
+    "sms_notifications_enabled",
+    "pickup_reminder_enabled",
+    "default_reminder_hours",
+}
+
+
+async def _update_user_profile(user_id: str, **fields) -> dict:
+    """Update whitelisted profile fields for the authenticated user."""
+    from backend.ai_engine import supabase_patch
+
+    logger.info("update_user_profile: user=%s fields=%s", user_id, list(fields.keys()))
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    updates: dict = {}
+    rejected: list[str] = []
+    for key, value in fields.items():
+        if key not in _UPDATABLE_PROFILE_FIELDS:
+            rejected.append(key)
+            continue
+        # Normalize empty strings to NULL so the UI clears cleanly.
+        if isinstance(value, str):
+            value = value.strip() or None
+        updates[key] = value
+
+    # If user is opting in to SMS, stamp the consent date.
+    if updates.get("sms_opt_in") is True:
+        from datetime import datetime, timezone
+        updates.setdefault("sms_opt_in_date", datetime.now(timezone.utc).isoformat())
+
+    if not updates:
+        return {
+            "success": False,
+            "error": "no_updatable_fields",
+            "rejected_fields": rejected,
+            "allowed_fields": sorted(_UPDATABLE_PROFILE_FIELDS),
+        }
+
+    try:
+        rows = await supabase_patch(
+            "users",
+            {"id": f"eq.{user_id}"},
+            updates,
+        )
+        return {
+            "success": True,
+            "updated_fields": list(updates.keys()),
+            "rejected_fields": rejected,
+            "profile": (rows[0] if isinstance(rows, list) and rows else None),
+        }
+    except Exception as exc:
+        logger.error("update_user_profile failed: %s", exc)
+        return {"success": False, "error": str(exc), "rejected_fields": rejected}
 
 
 async def _get_pickup_schedule(
@@ -890,15 +1761,18 @@ async def _create_reminder(
 
     try:
         rows = await supabase_post("ai_reminders", data)
+        summary = f"Reminder set for {trigger_time}."
         return {
+            "success": True,
             "created": True,
             "reminder_id": rows[0].get("id") if rows else None,
             "trigger_time": trigger_time,
-            "message": f"Reminder set for {trigger_time}.",
+            "message": summary,
+            "summary": summary,
         }
     except Exception as exc:
         logger.error("Reminder creation failed: %s", exc)
-        return {"created": False, "error": str(exc)}
+        return {"success": False, "created": False, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -962,6 +1836,8 @@ async def _get_mapbox_route(
     route = routes[0]
     duration_sec = route.get("duration", 0)
     distance_m = route.get("distance", 0)
+    # Geometry as GeoJSON LineString for client-side rendering on a map
+    geometry = route.get("geometry")
 
     # Build step-by-step directions
     steps = []
@@ -1002,6 +1878,10 @@ async def _get_mapbox_route(
         "duration_text": time_str,
         "steps": steps[:20],  # cap to avoid huge payloads
         "summary": summary,
+        # Endpoints + geometry so the client can draw the route on a map
+        "origin": {"lat": origin_lat, "lng": origin_lng},
+        "destination": {"lat": dest_lat, "lng": dest_lng},
+        "geometry": geometry,
     }
 
 
@@ -1124,12 +2004,12 @@ async def _get_user_dashboard(user_id: str) -> dict:
 
     profile_q = _safe(supabase_get("users", {
         "id": f"eq.{user_id}",
-        "select": "id,name,email,phone,location,is_admin,role,organization,created_at",
+        "select": "id,name,email,phone,address,location,is_admin,role,organization,created_at",
     }))
     listings_q = _safe(supabase_get("food_listings", {
         "user_id": f"eq.{user_id}",
         "status": "in.(approved,active,pending)",
-        "select": "id,title,category,quantity,status,expiry_date",
+        "select": "id,title,category,quantity,status,expiry_date,pickup_by,created_at",
         "order": "created_at.desc",
         "limit": "5",
     }))
@@ -1178,6 +2058,7 @@ async def _get_user_dashboard(user_id: str) -> dict:
             "organization": p.get("organization"),
             "is_admin": p.get("is_admin", False),
             "member_since": p.get("created_at"),
+            "address": p.get("address") or p.get("location"),
         }
 
     # Active listings
@@ -1185,6 +2066,7 @@ async def _get_user_dashboard(user_id: str) -> dict:
         {"title": l.get("title"), "category": l.get("category"),
          "quantity": l.get("quantity"), "status": l.get("status")}
         for l in listings
+        if _listing_is_fresh_enough(l)
     ]
 
     # Pending claims — batch fetch food titles
@@ -1803,3 +2685,880 @@ async def _mark_notifications_read(
         summary = f"Marked {count} notification{'s' if count != 1 else ''} as read."
 
     return {"success": True, "updated_count": count, "summary": summary}
+
+
+# ---------------------------------------------------------------------------
+# create_food_listing — conversational donation post
+# ---------------------------------------------------------------------------
+
+_LISTING_CATEGORIES = {"produce", "bakery", "dairy", "pantry", "meat", "prepared", "other"}
+
+
+async def _create_food_listing(
+    user_id: str,
+    title: str,
+    quantity: float,
+    unit: str,
+    category: str,
+    description: Optional[str] = None,
+    expiry_date: Optional[str] = None,
+    location: Optional[str] = None,
+    dietary_tags: Optional[list] = None,
+    allergens: Optional[list] = None,
+    **_ignored,
+) -> dict:
+    """Insert a single food donation listing for the authenticated user."""
+    from backend.ai_engine import supabase_post
+
+    logger.info("create_food_listing: user=%s title=%s qty=%s", user_id, title, quantity)
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    title_s = (title or "").strip()
+    if not title_s:
+        return {"success": False, "error": "title is required"}
+    unit_s = (unit or "items").strip()[:40] or "items"
+
+    try:
+        qty = float(quantity)
+        if qty <= 0:
+            return {"success": False, "error": "quantity must be greater than 0"}
+    except (TypeError, ValueError):
+        return {"success": False, "error": "quantity must be a number"}
+
+    cat = str(category or "").strip().lower()
+    if cat not in _LISTING_CATEGORIES:
+        cat = "other"
+
+    row: dict = {
+        "user_id": str(user_id),
+        "title": title_s[:200],
+        "quantity": qty,
+        "unit": unit_s,
+        "category": cat,
+        "listing_type": "donation",
+        "status": "active",
+    }
+    if description:
+        row["description"] = str(description).strip()[:2000]
+    if expiry_date:
+        row["expiry_date"] = str(expiry_date).strip()[:40]
+    if location:
+        row["location"] = str(location).strip()[:200]
+    if isinstance(dietary_tags, list):
+        row["dietary_tags"] = [str(t).strip()[:40] for t in dietary_tags if str(t).strip()][:20]
+    if isinstance(allergens, list):
+        row["allergens"] = [str(t).strip()[:40] for t in allergens if str(t).strip()][:20]
+
+    try:
+        result = await supabase_post("food_listings", row)
+    except Exception as exc:
+        logger.error("create_food_listing insert failed: %s", exc)
+        return {"success": False, "error": f"Insert failed: {exc}"}
+
+    listing_id = None
+    if isinstance(result, list) and result:
+        listing_id = result[0].get("id")
+    if not listing_id:
+        return {"success": False, "error": "No row returned from database"}
+
+    return {
+        "success": True,
+        "listing_id": str(listing_id),
+        "title": row["title"],
+        "quantity": row["quantity"],
+        "unit": row["unit"],
+        "category": row["category"],
+        "summary": f"Posted '{row['title']}' ({row['quantity']} {row['unit']}, {row['category']}).",
+    }
+
+
+# ---------------------------------------------------------------------------
+# claim_food_listing — conversational claim flow
+# ---------------------------------------------------------------------------
+
+
+async def _claim_food_listing(
+    user_id: str,
+    listing_id: str,
+    quantity: Optional[int] = None,
+    pickup_date: Optional[str] = None,
+    people: Optional[int] = None,
+    **_ignored,
+) -> dict:
+    """Create a food_claims row for the authenticated user and decrement the listing."""
+    from backend.ai_engine import supabase_get, supabase_post, supabase_patch
+
+    logger.info(
+        "claim_food_listing: user=%s listing=%s qty=%s",
+        user_id, listing_id, quantity,
+    )
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+    if not listing_id or not isinstance(listing_id, str):
+        return {"success": False, "error": "missing listing_id"}
+
+    # --- 1. Fetch the listing to verify it exists and is claimable ---
+    try:
+        listings = await supabase_get("food_listings", {
+            "id": f"eq.{listing_id}",
+            "select": "id,title,quantity,unit,status,user_id,listing_type,expiry_date,pickup_by,full_address,location",
+            "limit": "1",
+        })
+    except Exception as exc:
+        logger.error("claim_food_listing: listing fetch failed: %s", exc)
+        return {"success": False, "error": f"Could not look up listing: {exc}"}
+
+    if not listings:
+        return {"success": False, "error": "Listing not found. Search for available food first."}
+    listing = listings[0]
+
+    # Only donations are claimable — requests are the opposite direction.
+    if str(listing.get("listing_type") or "donation").lower() == "request":
+        return {
+            "success": False,
+            "error": "That's a food request, not a donation — it can't be claimed.",
+        }
+
+    if str(listing.get("user_id") or "") == str(user_id):
+        return {"success": False, "error": "You cannot claim your own listing."}
+
+    status = str(listing.get("status") or "").lower()
+    if status in {"claimed", "completed", "expired", "cancelled", "declined"}:
+        return {
+            "success": False,
+            "error": f"Listing is no longer available (status: {status}).",
+        }
+    if status not in {"", "active", "approved", "available"}:
+        return {
+            "success": False,
+            "error": f"Listing is not available to claim yet (status: {status}).",
+        }
+
+    try:
+        available_qty = float(listing.get("quantity") or 0)
+    except (TypeError, ValueError):
+        available_qty = 0
+    if available_qty <= 0:
+        return {"success": False, "error": "Listing has no quantity left to claim."}
+
+    # --- 2. Normalize claim quantity (food_claims.quantity is INTEGER NOT NULL) ---
+    try:
+        requested_qty = int(quantity) if quantity is not None else 1
+    except (TypeError, ValueError):
+        requested_qty = 1
+    if requested_qty < 1:
+        requested_qty = 1
+    if requested_qty > int(available_qty):
+        requested_qty = int(available_qty) if available_qty >= 1 else 1
+
+    # --- 3. Fetch the claimant profile for requester_* fields ---
+    try:
+        users = await supabase_get("users", {
+            "id": f"eq.{user_id}",
+            "select": "id,name,email,phone",
+            "limit": "1",
+        })
+    except Exception as exc:
+        logger.error("claim_food_listing: user fetch failed: %s", exc)
+        users = []
+
+    user_row = users[0] if users else {}
+    requester_name = (
+        str(user_row.get("name") or "").strip()
+        or str(user_row.get("email") or "").strip()
+        or "Anonymous"
+    )[:200]
+
+    # --- 3b. Calculate the next-Friday pickup deadline (UTC) for the receipt ---
+    import datetime as _dt
+
+    def _next_friday_5pm_utc() -> str:
+        now_utc = _dt.datetime.utcnow()
+        # Approximate Pacific offset (-8 for PST; good enough for deadline calc)
+        now_pac = now_utc - _dt.timedelta(hours=8)
+        # Python weekday: Mon=0, Fri=4
+        days_until = (4 - now_pac.weekday()) % 7
+        if days_until == 0 and now_pac.hour >= 17:
+            days_until = 7
+        target_date = (now_pac + _dt.timedelta(days=days_until)).date() if days_until > 0 else now_pac.date()
+        friday_pac = _dt.datetime.combine(target_date, _dt.time(17, 0, 0))
+        friday_utc = friday_pac + _dt.timedelta(hours=8)
+        return friday_utc.strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+    pickup_deadline_utc = _next_friday_5pm_utc()
+
+    # --- 3c. Find or create a receipt for this user (so the claim appears in Receipts & Activity) ---
+    receipt_id = None
+    pickup_loc = listing.get("full_address") or listing.get("location") or None
+    try:
+        existing_receipts = await supabase_get("receipts", {
+            "user_id": f"eq.{user_id}",
+            "status": "eq.pending",
+            "select": "id",
+            "order": "created_at.desc",
+            "limit": "1",
+        })
+        if existing_receipts:
+            receipt_id = existing_receipts[0].get("id")
+        else:
+            receipt_row: dict = {
+                "user_id": str(user_id),
+                "status": "pending",
+                "pickup_by": pickup_deadline_utc,
+            }
+            if pickup_loc:
+                receipt_row["pickup_location"] = str(pickup_loc)[:255]
+                receipt_row["pickup_address"] = str(pickup_loc)[:500]
+            receipt_result = await supabase_post("receipts", receipt_row)
+            if isinstance(receipt_result, list) and receipt_result:
+                receipt_id = receipt_result[0].get("id")
+    except Exception as exc:
+        logger.warning("claim_food_listing: receipt create/lookup failed (non-fatal): %s", exc)
+
+    claim_row: dict = {
+        "food_id": listing_id,
+        "claimer_id": str(user_id),
+        "requester_name": requester_name,
+        "status": "approved",
+        "quantity": requested_qty,
+        "pickup_date": str(pickup_date).strip()[:40] if pickup_date else None,
+    }
+    if receipt_id:
+        claim_row["receipt_id"] = str(receipt_id)
+    if user_row.get("email"):
+        claim_row["requester_email"] = str(user_row["email"])[:200]
+    if user_row.get("phone"):
+        claim_row["requester_phone"] = str(user_row["phone"])[:40]
+    if not pickup_date:
+        claim_row.pop("pickup_date", None)
+    # `people` is an optional impact-tracking column that may not exist on all
+    # Supabase deployments. Skip it to avoid 400 errors on the insert.
+    # (The AI response text already conveys how many people will be fed.)
+
+    # --- 4. Insert the claim ---
+    try:
+        result = await supabase_post("food_claims", claim_row)
+    except Exception as exc:
+        logger.error("claim_food_listing: insert failed: %s", exc)
+        return {"success": False, "error": f"Could not create claim: {exc}"}
+
+    claim_id = None
+    if isinstance(result, list) and result:
+        claim_id = result[0].get("id")
+    if not claim_id:
+        return {"success": False, "error": "Claim insert returned no row."}
+
+    # --- 5. Decrement the listing quantity (or mark claimed if fully taken) ---
+    remaining = available_qty - requested_qty
+    patch_body = {"status": "claimed"} if remaining <= 0 else {"quantity": remaining}
+    try:
+        await supabase_patch("food_listings", {"id": f"eq.{listing_id}"}, patch_body)
+    except Exception as exc:
+        logger.warning("claim_food_listing: listing patch failed (non-fatal): %s", exc)
+
+    title = str(listing.get("title") or "the listing")
+    unit = str(listing.get("unit") or "")
+
+    summary_parts = [f"Claimed {requested_qty} {unit}".rstrip(), f"of '{title}'"]
+    summary = " ".join(p for p in summary_parts if p).strip() + "."
+    if pickup_loc:
+        summary += f" Pickup at {pickup_loc}."
+
+    return {
+        "success": True,
+        "claim_id": str(claim_id),
+        "receipt_id": str(receipt_id) if receipt_id else None,
+        "listing_id": str(listing_id),
+        "title": title,
+        "quantity": requested_qty,
+        "unit": unit,
+        "remaining_on_listing": max(remaining, 0),
+        "pickup_location": pickup_loc,
+        "pickup_deadline": pickup_deadline_utc,
+        "summary": summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Shared helper: find the user's most relevant active claim
+# ---------------------------------------------------------------------------
+
+
+async def _find_user_claim(
+    user_id: str,
+    claim_id: Optional[str],
+    listing_id: Optional[str],
+) -> Optional[dict]:
+    """Resolve a food_claims row for the user. Priority: claim_id > listing_id."""
+    from backend.ai_engine import supabase_get
+
+    select = "id,food_id,claimer_id,status,quantity,requester_name"
+    if claim_id:
+        rows = await supabase_get("food_claims", {
+            "id": f"eq.{claim_id}",
+            "claimer_id": f"eq.{user_id}",
+            "select": select,
+            "limit": "1",
+        })
+        return rows[0] if rows else None
+    if listing_id:
+        rows = await supabase_get("food_claims", {
+            "food_id": f"eq.{listing_id}",
+            "claimer_id": f"eq.{user_id}",
+            "status": "in.(approved,pending)",
+            "select": select,
+            "order": "created_at.desc",
+            "limit": "1",
+        })
+        return rows[0] if rows else None
+    # Fall back to user's most recent active claim
+    rows = await supabase_get("food_claims", {
+        "claimer_id": f"eq.{user_id}",
+        "status": "in.(approved,pending)",
+        "select": select,
+        "order": "created_at.desc",
+        "limit": "1",
+    })
+    return rows[0] if rows else None
+
+
+# ---------------------------------------------------------------------------
+# cancel_claim — release a claim and restore the listing
+# ---------------------------------------------------------------------------
+
+
+async def _cancel_claim(
+    user_id: str,
+    claim_id: Optional[str] = None,
+    listing_id: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    from backend.ai_engine import supabase_get, supabase_patch, supabase_delete
+
+    logger.info("cancel_claim: user=%s claim=%s listing=%s", user_id, claim_id, listing_id)
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    try:
+        claim = await _find_user_claim(user_id, claim_id, listing_id)
+    except Exception as exc:
+        logger.error("cancel_claim: lookup failed: %s", exc)
+        return {"success": False, "error": f"Could not look up your claim: {exc}"}
+
+    if not claim:
+        return {"success": False, "error": "No active claim found to cancel."}
+
+    status = str(claim.get("status") or "").lower()
+    if status in {"completed", "expired", "declined"}:
+        return {"success": False, "error": f"Claim is already {status}, nothing to cancel."}
+
+    cid = claim["id"]
+    food_id = claim.get("food_id")
+    claim_qty = int(claim.get("quantity") or 1)
+
+    # Release the claim by removing it (claim_status enum has no 'cancelled' value)
+    try:
+        await supabase_delete(
+            "food_claims",
+            {"id": f"eq.{cid}", "claimer_id": f"eq.{user_id}"},
+        )
+    except Exception as exc:
+        logger.error("cancel_claim: delete failed: %s", exc)
+        return {"success": False, "error": f"Could not cancel claim: {exc}"}
+
+    # Restore the listing (only if it exists and was marked claimed/active)
+    title = "the listing"
+    if food_id:
+        try:
+            listings = await supabase_get("food_listings", {
+                "id": f"eq.{food_id}",
+                "select": "id,title,quantity,status",
+                "limit": "1",
+            })
+            if listings:
+                listing = listings[0]
+                title = str(listing.get("title") or title)
+                try:
+                    current_qty = float(listing.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    current_qty = 0
+                restored_qty = current_qty + claim_qty
+                listing_status = str(listing.get("status") or "").lower()
+                patch = {"quantity": restored_qty}
+                if listing_status in {"claimed", "completed"}:
+                    patch["status"] = "active"
+                await supabase_patch("food_listings", {"id": f"eq.{food_id}"}, patch)
+        except Exception as exc:
+            logger.warning("cancel_claim: listing restore failed (non-fatal): %s", exc)
+
+    return {
+        "success": True,
+        "claim_id": str(cid),
+        "listing_id": str(food_id) if food_id else None,
+        "title": title,
+        "summary": f"Released your claim on '{title}'. It's back up for the community.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# confirm_claim — mark a claim as completed (pickup confirmed)
+# ---------------------------------------------------------------------------
+
+
+async def _confirm_claim(
+    user_id: str,
+    claim_id: Optional[str] = None,
+    listing_id: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    from backend.ai_engine import supabase_get, supabase_patch
+
+    logger.info("confirm_claim: user=%s claim=%s listing=%s", user_id, claim_id, listing_id)
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    try:
+        claim = await _find_user_claim(user_id, claim_id, listing_id)
+    except Exception as exc:
+        logger.error("confirm_claim: lookup failed: %s", exc)
+        return {"success": False, "error": f"Could not look up your claim: {exc}"}
+
+    if not claim:
+        return {"success": False, "error": "No active claim found to confirm."}
+
+    status = str(claim.get("status") or "").lower()
+    if status == "completed":
+        return {"success": False, "error": "Claim is already confirmed as picked up."}
+    if status in {"cancelled", "expired"}:
+        return {"success": False, "error": f"Cannot confirm a {status} claim."}
+
+    cid = claim["id"]
+    food_id = claim.get("food_id")
+
+    try:
+        await supabase_patch(
+            "food_claims",
+            {"id": f"eq.{cid}", "claimer_id": f"eq.{user_id}"},
+            {"status": "completed"},
+        )
+    except Exception as exc:
+        logger.error("confirm_claim: patch failed: %s", exc)
+        return {"success": False, "error": f"Could not confirm claim: {exc}"}
+
+    # Look up title for the summary
+    title = "your claim"
+    if food_id:
+        try:
+            listings = await supabase_get("food_listings", {
+                "id": f"eq.{food_id}",
+                "select": "title",
+                "limit": "1",
+            })
+            if listings:
+                title = str(listings[0].get("title") or title)
+        except Exception:
+            pass
+
+    return {
+        "success": True,
+        "claim_id": str(cid),
+        "listing_id": str(food_id) if food_id else None,
+        "title": title,
+        "summary": f"Pickup confirmed for '{title}'. You're all set — thanks for keeping food out of the landfill!",
+    }
+
+
+# ---------------------------------------------------------------------------
+# bulk_import_listings — create many listings in one call
+# ---------------------------------------------------------------------------
+
+
+_CSV_CATEGORY_ALIASES = {
+    "fruit": "produce", "fruits": "produce", "vegetable": "produce",
+    "vegetables": "produce", "veggies": "produce", "veg": "produce",
+    "bread": "bakery", "pastry": "bakery", "baked": "bakery",
+    "milk": "dairy", "cheese": "dairy", "yogurt": "dairy",
+    "canned": "pantry", "dry": "pantry", "grain": "pantry", "grains": "pantry",
+    "rice": "pantry", "pasta": "pantry",
+    "fish": "meat", "poultry": "meat", "chicken": "meat", "beef": "meat",
+    "cooked": "prepared", "meal": "prepared", "meals": "prepared",
+}
+
+
+def _csv_parse(text: str) -> list[dict]:
+    """Tiny RFC-4180-ish CSV parser. Header row required."""
+    import csv as _csv
+    import io as _io
+
+    if not isinstance(text, str) or not text.strip():
+        return []
+    reader = _csv.DictReader(_io.StringIO(text))
+    rows = []
+    for raw in reader:
+        rows.append({(k or "").strip().lower(): (v.strip() if isinstance(v, str) else v) for k, v in raw.items() if k})
+    return rows
+
+
+def _normalize_bulk_row(raw: dict, user_id: str) -> Optional[dict]:
+    title = str(raw.get("title") or raw.get("name") or raw.get("item") or "").strip()
+    if not title:
+        return None
+    try:
+        qty = float(raw.get("quantity") or raw.get("qty") or raw.get("amount") or 0)
+    except (TypeError, ValueError):
+        qty = 0
+    if qty <= 0:
+        return None
+    unit = str(raw.get("unit") or raw.get("units") or "items").strip() or "items"
+    cat_raw = str(raw.get("category") or raw.get("type") or "other").strip().lower()
+    category = cat_raw if cat_raw in _LISTING_CATEGORIES else _CSV_CATEGORY_ALIASES.get(cat_raw, "other")
+    row: dict = {
+        "user_id": str(user_id),
+        "title": title[:200],
+        "quantity": qty,
+        "unit": unit[:40],
+        "category": category,
+        "listing_type": "donation",
+        "status": "active",
+    }
+    if raw.get("description"):
+        row["description"] = str(raw["description"])[:1000]
+    if raw.get("expiry_date"):
+        row["expiry_date"] = str(raw["expiry_date"])[:40]
+    if raw.get("location"):
+        row["location"] = str(raw["location"])[:400]
+    return row
+
+
+async def _bulk_import_listings(
+    user_id: str,
+    csv_text: Optional[str] = None,
+    listings: Optional[list] = None,
+    **_ignored,
+) -> dict:
+    from backend.ai_engine import supabase_post
+
+    logger.info("bulk_import_listings: user=%s csv_len=%s listings=%s",
+                user_id,
+                len(csv_text) if csv_text else 0,
+                len(listings) if listings else 0)
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    rows_in: list[dict] = []
+    if csv_text:
+        rows_in.extend(_csv_parse(csv_text))
+    if isinstance(listings, list):
+        for item in listings:
+            if isinstance(item, dict):
+                rows_in.append({(k or "").lower(): v for k, v in item.items()})
+
+    if not rows_in:
+        return {"success": False, "error": "No rows to import. Provide csv_text or listings."}
+    if len(rows_in) > 100:
+        return {"success": False, "error": "Too many rows (max 100 per call)."}
+
+    created_ids: list[str] = []
+    errors: list[dict] = []
+    for idx, raw in enumerate(rows_in):
+        norm = _normalize_bulk_row(raw, user_id)
+        if not norm:
+            errors.append({"index": idx, "error": "Missing title or quantity"})
+            continue
+        try:
+            result = await supabase_post("food_listings", norm)
+            if isinstance(result, list) and result:
+                created_ids.append(str(result[0].get("id")))
+            else:
+                errors.append({"index": idx, "error": "Insert returned no row"})
+        except Exception as exc:
+            errors.append({"index": idx, "error": str(exc)})
+
+    return {
+        "success": len(created_ids) > 0,
+        "created": len(created_ids),
+        "failed": len(errors),
+        "ids": created_ids,
+        "errors": errors,
+        "summary": f"Imported {len(created_ids)} of {len(rows_in)} listings."
+                   + (f" {len(errors)} failed." if errors else ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# get_donor_expiring_listings — donor's listings nearing expiry
+# ---------------------------------------------------------------------------
+
+
+async def _get_donor_expiring_listings(
+    user_id: str,
+    days: Optional[int] = 2,
+    **_ignored,
+) -> dict:
+    from backend.ai_engine import supabase_get
+    from datetime import datetime, timedelta, timezone
+
+    logger.info("get_donor_expiring_listings: user=%s days=%s", user_id, days)
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    try:
+        window = int(days) if days is not None else 2
+    except (TypeError, ValueError):
+        window = 2
+    window = max(1, min(window, 14))
+
+    cutoff = (datetime.now(timezone.utc) + timedelta(days=window)).date().isoformat()
+
+    try:
+        rows = await supabase_get("food_listings", {
+            "user_id": f"eq.{user_id}",
+            "status": "eq.active",
+            # Donor view: their donations expiring soon, never their requests.
+            "listing_type": "eq.donation",
+            "expiry_date": f"lte.{cutoff}",
+            "select": "id,title,quantity,unit,category,expiry_date,pickup_by,full_address",
+            "order": "expiry_date.asc",
+            "limit": "20",
+        })
+    except Exception as exc:
+        logger.error("get_donor_expiring_listings: fetch failed: %s", exc)
+        return {"success": False, "error": f"Could not look up your listings: {exc}"}
+
+    if not rows:
+        return {
+            "success": True,
+            "count": 0,
+            "listings": [],
+            "summary": f"No listings expiring in the next {window} day(s). You're good!",
+        }
+
+    summary_lines = [
+        f"- '{r.get('title')}' ({r.get('quantity')} {r.get('unit')}) expires {r.get('expiry_date')}"
+        for r in rows
+    ]
+    return {
+        "success": True,
+        "count": len(rows),
+        "window_days": window,
+        "listings": rows,
+        "summary": f"{len(rows)} listing(s) expiring within {window} day(s):\n" + "\n".join(summary_lines),
+    }
+
+
+# ---------------------------------------------------------------------------
+# attach_photos_to_listing — set image_url on the donor's listing
+# ---------------------------------------------------------------------------
+
+
+async def _attach_photos_to_listing(
+    user_id: str,
+    listing_id: str,
+    image_url: str,
+    **_ignored,
+) -> dict:
+    from backend.ai_engine import supabase_get, supabase_patch
+
+    logger.info("attach_photos_to_listing: user=%s listing=%s", user_id, listing_id)
+    if not (user_id and listing_id and image_url):
+        return {"success": False, "error": "user_id, listing_id, and image_url are all required"}
+    if not (image_url.startswith("http://") or image_url.startswith("https://")):
+        return {"success": False, "error": "image_url must start with http:// or https://"}
+
+    try:
+        listings = await supabase_get("food_listings", {
+            "id": f"eq.{listing_id}",
+            "user_id": f"eq.{user_id}",
+            "select": "id,title",
+            "limit": "1",
+        })
+    except Exception as exc:
+        return {"success": False, "error": f"Could not look up listing: {exc}"}
+    if not listings:
+        return {"success": False, "error": "Listing not found or not owned by you."}
+
+    try:
+        await supabase_patch(
+            "food_listings",
+            {"id": f"eq.{listing_id}", "user_id": f"eq.{user_id}"},
+            {"image_url": image_url},
+        )
+    except Exception as exc:
+        logger.error("attach_photos_to_listing: patch failed: %s", exc)
+        return {"success": False, "error": f"Could not attach photo: {exc}"}
+
+    title = str(listings[0].get("title") or "your listing")
+    return {
+        "success": True,
+        "listing_id": str(listing_id),
+        "image_url": image_url,
+        "title": title,
+        "summary": f"Photo attached to '{title}'.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# navigate_ui — friendly alias of ui_action that maps common alt arg names
+# ---------------------------------------------------------------------------
+
+
+_NAVIGATE_ACTION_ALIASES = {
+    "open": "navigate",
+    "go": "navigate",
+    "goto": "navigate",
+    "go_to": "navigate",
+    "show": "navigate",
+}
+
+# Recipient-facing AI modal surfaces. The frontend opens these as overlays —
+# they are NOT React Router paths, so they must NOT go through the
+# `_UI_ALLOWED_PATHS` validator. The model is instructed (in the system
+# prompts) to call navigate_ui(action='open', target=<one of these>).
+_UI_MODAL_TARGETS = {
+    "meal-suggestions",
+    "spoilage-alerts",
+    "storage-coach",
+    "smart-notifications",
+    "pickup-reminders",
+    "sms-consent",
+    # also accept the snake_case form the model sometimes produces
+    "meal_suggestions",
+    "spoilage_alerts",
+    "storage_coach",
+    "smart_notifications",
+    "pickup_reminders",
+    "sms_consent",
+}
+
+_MODAL_ACTION_ALIASES = {
+    "open": "open_modal",
+    "close": "close_modal",
+    "toggle": "toggle_modal",
+    "show": "open_modal",
+    "hide": "close_modal",
+}
+
+
+async def _navigate_ui(
+    action: str,
+    path: Optional[str] = None,
+    target: Optional[str] = None,
+    target_id: Optional[str] = None,
+    listing_id: Optional[str] = None,
+    lang: Optional[str] = None,
+    reason: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    action_lc = (action or "").lower()
+    target_lc = (target or "").lower().strip().lstrip("/")
+
+    # 1. Modal surfaces (recipient AI helpers) — handled directly.
+    if target_lc in _UI_MODAL_TARGETS:
+        modal_action = _MODAL_ACTION_ALIASES.get(action_lc, action_lc or "open_modal")
+        canonical_target = target_lc.replace("_", "-")
+        payload = {
+            "ok": True,
+            "action": modal_action,
+            "target": canonical_target,
+        }
+        if reason:
+            payload["reason"] = reason
+        logger.info("navigate_ui (modal): %s -> %s", modal_action, canonical_target)
+        return payload
+
+    # 2. Otherwise treat as a route navigation.
+    mapped_action = _NAVIGATE_ACTION_ALIASES.get(action_lc, action)
+    if mapped_action == "navigate" and not path and target:
+        path = target if target.startswith("/") else f"/{target.lstrip('/')}"
+    return await _ui_action(
+        action=mapped_action,
+        path=path,
+        listing_id=listing_id,
+        target_id=target_id,
+        lang=lang,
+        reason=reason,
+    )
+
+
+# ---------------------------------------------------------------------------
+# post_food_request — recipient asks the community for food
+# ---------------------------------------------------------------------------
+
+
+async def _post_food_request(
+    user_id: str,
+    title: str,
+    quantity: float,
+    unit: str,
+    category: str,
+    description: Optional[str] = None,
+    needed_by: Optional[str] = None,
+    location: Optional[str] = None,
+    people: Optional[int] = None,
+    **_ignored,
+) -> dict:
+    from backend.ai_engine import supabase_post
+
+    logger.info("post_food_request: user=%s title=%s qty=%s", user_id, title, quantity)
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+    title = (title or "").strip()
+    if not title:
+        return {"success": False, "error": "title is required"}
+    try:
+        qty = float(quantity)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "quantity must be a number"}
+    if qty <= 0:
+        return {"success": False, "error": "quantity must be > 0"}
+
+    cat = (category or "other").lower()
+    if cat not in _LISTING_CATEGORIES:
+        cat = "other"
+
+    row: dict = {
+        "user_id": str(user_id),
+        "title": title[:200],
+        "quantity": qty,
+        "unit": (unit or "items")[:40],
+        "category": cat,
+        "listing_type": "request",
+        "status": "active",
+    }
+    if description:
+        row["description"] = str(description)[:1000]
+    if needed_by:
+        # food_listings.expiry_date doubles as 'needed_by' for requests
+        row["expiry_date"] = str(needed_by).strip()[:40]
+    if location:
+        row["location"] = str(location)[:400]
+    if people is not None:
+        try:
+            # food_listings has no `people` column; fold into description.
+            note = f"For {max(1, int(people))} people."
+            row["description"] = (row.get("description", "") + " " + note).strip()[:1000]
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        result = await supabase_post("food_listings", row)
+    except Exception as exc:
+        logger.error("post_food_request: insert failed: %s", exc)
+        return {"success": False, "error": f"Could not post request: {exc}"}
+
+    if not (isinstance(result, list) and result):
+        return {"success": False, "error": "Insert returned no row."}
+    request_id = result[0].get("id")
+    return {
+        "success": True,
+        "request_id": str(request_id),
+        "listing_id": str(request_id),
+        "title": title,
+        "quantity": qty,
+        "unit": row["unit"],
+        "category": cat,
+        "summary": f"Request posted: {qty} {row['unit']} of '{title}'. It's live for nearby donors.",
+    }
+
+

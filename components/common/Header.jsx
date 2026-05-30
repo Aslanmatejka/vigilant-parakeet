@@ -2,7 +2,7 @@ import React from "react";
 import Avatar from "./Avatar";
 import Button from "./Button";
 import { useAuthContext } from "../../utils/AuthContext";
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useTutorial } from '../../utils/TutorialContext';
 import PropTypes from 'prop-types';
 
@@ -25,6 +25,8 @@ function Header({
 }) {
     const { user: authUser, isAuthenticated, signOut } = useAuthContext();
     const navigate = useNavigate();
+    const location = useLocation();
+    const isAdminRoute = location.pathname.startsWith('/admin');
     const { startTutorial } = useTutorial();
     
     const [isMenuOpen, setIsMenuOpen] = React.useState(false);
@@ -103,7 +105,7 @@ function Header({
                         </a>
                     </div>
 
-                    <nav data-name="desktop-nav" className="hidden md:flex space-x-6">
+                    <nav data-name="desktop-nav" className="hidden lg:flex items-center gap-x-5 xl:gap-x-6 whitespace-nowrap text-sm xl:text-base">
                         {menuItems.map((item, index) => (
                             item.dropdown ? (
                                 <div 
@@ -161,9 +163,17 @@ function Header({
                                 </a>
                             )
                         ))}
+                        {isAuthenticated && (
+                            <a
+                                href="/dashboard"
+                                className="nav-link hover:text-[#2CABE3] transition-colors duration-200"
+                            >
+                                Receipts & Activity
+                            </a>
+                        )}
                     </nav>
 
-                    <div data-name="user-actions" className="hidden md:flex items-center space-x-4">
+                    <div data-name="user-actions" className="hidden lg:flex items-center space-x-3 xl:space-x-4">
                         {/* Help / Tutorial button */}
                         <button
                             onClick={() => startTutorial()}
@@ -206,15 +216,18 @@ function Header({
                                                 className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
                                                 role="menuitem"
                                             >
-                                                Dashboard
+                                                Receipts & Activity
                                             </a>
-                                            <a
-                                                href="/profile"
-                                                className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                                                role="menuitem"
-                                            >
-                                                Your Profile
-                                            </a>
+                                            {!isAdminRoute && (
+                                                <a
+                                                    href="/profile"
+                                                    className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                                                    role="menuitem"
+                                                >
+                                                    Your Profile
+                                                </a>
+                                            )}
+                                            {/* TEMPORARILY DISABLED
                                             <a
                                                 href="/listings"
                                                 className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
@@ -222,13 +235,7 @@ function Header({
                                             >
                                                 My Listings
                                             </a>
-                                            <a
-                                                href="/receipts"
-                                                className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                                                role="menuitem"
-                                            >
-                                                My Receipts
-                                            </a>
+                                            */}
                                             {authUser?.role === 'admin' && (
                                                 <a
                                                     href="/admin"
@@ -352,18 +359,20 @@ function Header({
                                                     className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
                                                     onClick={() => setIsMenuOpen(false)}
                                                 >
-                                                    Dashboard
+                                                    Receipts & Activity
                                                 </a>
                                             </li>
-                                            <li>
-                                                <a
-                                                    href="/profile"
-                                                    className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
-                                                    onClick={() => setIsMenuOpen(false)}
-                                                >
-                                                    Your Profile
-                                                </a>
-                                            </li>
+                                            {!isAdminRoute && (
+                                                <li>
+                                                    <a
+                                                        href="/profile"
+                                                        className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
+                                                        onClick={() => setIsMenuOpen(false)}
+                                                    >
+                                                        Your Profile
+                                                    </a>
+                                                </li>
+                                            )}
                                             {/* TEMPORARILY DISABLED
                                             <li>
                                                 <a
@@ -375,15 +384,6 @@ function Header({
                                                 </a>
                                             </li>
                                             */}
-                                            <li>
-                                                <a
-                                                    href="/receipts"
-                                                    className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
-                                                    onClick={() => setIsMenuOpen(false)}
-                                                >
-                                                    My Receipts
-                                                </a>
-                                            </li>
                                             {authUser?.role === 'admin' && (
                                                 <li>
                                                     <a

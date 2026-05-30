@@ -237,8 +237,8 @@ function FoodForm({
             const MAPBOX_TOKEN = API_CONFIG.MAPBOX.ACCESS_TOKEN;
             const encodedAddress = encodeURIComponent(address);
             const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodedAddress}.json?access_token=${MAPBOX_TOKEN}&limit=1`;
-            console.log('Geocoding URL:', url);
-            
+            // Intentionally do NOT log the full URL — it contains the Mapbox token.
+
             const response = await fetch(url);
             console.log('Geocoding response status:', response.status);
             
@@ -294,7 +294,7 @@ function FoodForm({
     const validateForm = () => {
         const newErrors = {};
         if (!formData.title) newErrors.title = 'Title is required';
-        if (!formData.quantity) newErrors.quantity = 'Quantity is required';
+        if (!formData.quantity || Number(formData.quantity) < 1) newErrors.quantity = 'Quantity must be at least 1';
         if (!formData.category) newErrors.category = 'Category is required';
         // Expiry date required only if not produce
         if (formData.category !== 'produce' && !formData.expiry_date) newErrors.expiry_date = 'Expiry date is required';

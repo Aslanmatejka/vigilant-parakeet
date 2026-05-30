@@ -548,3 +548,390 @@
     flex-shrink: 0;
     margin-top: 0.25rem;
 }
+
+/* === Global AI activity glow (utils/aiActivity.js + components/common/AIActivityOverlay.jsx) ===
+   Futuristic multi-layer effect: aurora blobs, scanlines, neon grid, corner
+   accents, and a vignette ring. All layers are pointer-events-none. */
+
+.ai-glow-overlay {
+    overflow: hidden;
+    isolation: isolate;
+    background:
+        radial-gradient(120% 90% at 50% 50%, rgba(8, 47, 73, 0) 55%, rgba(2, 132, 199, 0.28) 80%, rgba(2, 6, 23, 0.55) 100%);
+    box-shadow:
+        inset 0 0 0 2px rgba(34, 211, 238, 0.55),
+        inset 0 0 80px 20px rgba(14, 165, 233, 0.45),
+        inset 0 0 200px 40px rgba(8, 145, 178, 0.30);
+    animation: ai-glow-frame 1.6s ease-in-out infinite;
+}
+
+.ai-glow-overlay > * {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+/* ---- Aurora pools ---- */
+.ai-glow-aurora {
+    background:
+        radial-gradient(45% 40% at 18% 22%, rgba(34, 211, 238, 0.85) 0%, rgba(34, 211, 238, 0.35) 35%, rgba(34, 211, 238, 0) 70%),
+        radial-gradient(50% 45% at 82% 78%, rgba(14, 165, 233, 0.85) 0%, rgba(14, 165, 233, 0.35) 35%, rgba(14, 165, 233, 0) 70%),
+        radial-gradient(40% 38% at 65% 25%, rgba(168, 85, 247, 0.65) 0%, rgba(168, 85, 247, 0.25) 40%, rgba(168, 85, 247, 0) 70%);
+    mix-blend-mode: screen;
+    filter: blur(8px);
+    animation: ai-glow-pulse 1.8s ease-in-out infinite,
+               ai-glow-sweep 7s ease-in-out infinite;
+    will-change: opacity, transform, filter;
+}
+
+.ai-glow-aurora--alt {
+    background:
+        radial-gradient(38% 35% at 30% 80%, rgba(236, 72, 153, 0.55) 0%, rgba(236, 72, 153, 0.20) 40%, rgba(236, 72, 153, 0) 70%),
+        radial-gradient(45% 42% at 75% 35%, rgba(34, 211, 238, 0.70) 0%, rgba(34, 211, 238, 0.25) 40%, rgba(34, 211, 238, 0) 70%);
+    mix-blend-mode: screen;
+    filter: blur(14px);
+    animation: ai-glow-pulse 2.4s ease-in-out infinite reverse,
+               ai-glow-sweep 9s ease-in-out infinite reverse;
+}
+
+/* ---- Neon grid ---- */
+.ai-glow-grid {
+    background-image:
+        linear-gradient(rgba(34, 211, 238, 0.20) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(34, 211, 238, 0.20) 1px, transparent 1px);
+    background-size: 56px 56px, 56px 56px;
+    mix-blend-mode: screen;
+    opacity: 0.55;
+    mask-image: radial-gradient(80% 60% at 50% 50%, black 30%, transparent 80%);
+    -webkit-mask-image: radial-gradient(80% 60% at 50% 50%, black 30%, transparent 80%);
+    animation: ai-grid-drift 8s linear infinite;
+}
+
+/* ---- Scanline sweep ---- */
+.ai-glow-scan {
+    background: linear-gradient(
+        180deg,
+        rgba(34, 211, 238, 0) 0%,
+        rgba(34, 211, 238, 0) 45%,
+        rgba(165, 243, 252, 0.85) 50%,
+        rgba(34, 211, 238, 0) 55%,
+        rgba(34, 211, 238, 0) 100%
+    );
+    mix-blend-mode: screen;
+    opacity: 0.75;
+    animation: ai-scan-move 2.4s linear infinite;
+}
+
+/* ---- Corner accents ---- */
+.ai-glow-corner {
+    width: 120px;
+    height: 120px;
+    border-color: rgba(34, 211, 238, 0.95);
+    border-style: solid;
+    border-width: 0;
+    box-shadow:
+        0 0 24px 2px rgba(34, 211, 238, 0.75),
+        0 0 48px 6px rgba(14, 165, 233, 0.55);
+    animation: ai-corner-pulse 1.6s ease-in-out infinite;
+    inset: auto;
+}
+
+.ai-glow-corner--tl { top: 14px; left: 14px;    border-top-width: 3px;    border-left-width: 3px;    border-top-left-radius: 14px; }
+.ai-glow-corner--tr { top: 14px; right: 14px;   border-top-width: 3px;    border-right-width: 3px;   border-top-right-radius: 14px; }
+.ai-glow-corner--bl { bottom: 14px; left: 14px; border-bottom-width: 3px; border-left-width: 3px;    border-bottom-left-radius: 14px; }
+.ai-glow-corner--br { bottom: 14px; right: 14px; border-bottom-width: 3px; border-right-width: 3px;  border-bottom-right-radius: 14px; }
+
+/* ---- Animations ---- */
+@keyframes ai-glow-frame {
+    0%, 100% {
+        box-shadow:
+            inset 0 0 0 2px rgba(34, 211, 238, 0.55),
+            inset 0 0 80px 20px rgba(14, 165, 233, 0.45),
+            inset 0 0 200px 40px rgba(8, 145, 178, 0.30);
+    }
+    50% {
+        box-shadow:
+            inset 0 0 0 4px rgba(165, 243, 252, 0.90),
+            inset 0 0 120px 30px rgba(14, 165, 233, 0.70),
+            inset 0 0 260px 60px rgba(8, 145, 178, 0.45);
+    }
+}
+
+@keyframes ai-glow-pulse {
+    0%, 100% { opacity: 0.85; }
+    50%      { opacity: 1; }
+}
+
+@keyframes ai-glow-sweep {
+    0%   { transform: translate(-10%, -10%) scale(1);    }
+    50%  { transform: translate(10%, 8%)   scale(1.18); }
+    100% { transform: translate(-10%, -10%) scale(1);    }
+}
+
+@keyframes ai-grid-drift {
+    0%   { background-position: 0 0, 0 0; }
+    100% { background-position: 56px 56px, 56px 56px; }
+}
+
+@keyframes ai-scan-move {
+    0%   { transform: translateY(-100%); }
+    100% { transform: translateY(100%);  }
+}
+
+@keyframes ai-corner-pulse {
+    0%, 100% { opacity: 0.85; filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.8)); }
+    50%      { opacity: 1;    filter: drop-shadow(0 0 16px rgba(165, 243, 252, 1)); }
+}
+
+@keyframes ai-chip-float {
+    0%, 100% { transform: translate(-50%, 0); }
+    50%      { transform: translate(-50%, -3px); }
+}
+
+.ai-glow-chip {
+    animation: ai-chip-float 2.4s ease-in-out infinite,
+               ai-chip-glow  1.6s ease-in-out infinite;
+}
+
+@keyframes ai-chip-glow {
+    0%, 100% {
+        box-shadow:
+            0 0 0 1px rgba(34, 211, 238, 0.55),
+            0 0 24px 4px rgba(34, 211, 238, 0.60),
+            0 0 48px 12px rgba(14, 165, 233, 0.35);
+    }
+    50% {
+        box-shadow:
+            0 0 0 2px rgba(165, 243, 252, 0.85),
+            0 0 36px 8px rgba(34, 211, 238, 0.85),
+            0 0 72px 20px rgba(168, 85, 247, 0.45);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ai-glow-overlay,
+    .ai-glow-overlay > *,
+    .ai-glow-chip {
+        animation: none;
+    }
+}
+
+/* === Futuristic AI "thinking" indicator (components/assistant/AIChatPanel.jsx TypingIndicator) === */
+@keyframes ai-orbit-spin {
+    0%   { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+@keyframes ai-core-pulse {
+    0%, 100% {
+        transform: scale(1);
+        box-shadow:
+            0 0 0 0 rgba(34, 211, 238, 0.55),
+            0 0 18px 4px rgba(34, 211, 238, 0.55),
+            inset 0 0 8px rgba(165, 243, 252, 0.7);
+    }
+    50% {
+        transform: scale(1.08);
+        box-shadow:
+            0 0 0 6px rgba(34, 211, 238, 0),
+            0 0 28px 8px rgba(168, 85, 247, 0.65),
+            inset 0 0 14px rgba(165, 243, 252, 0.95);
+    }
+}
+
+@keyframes ai-shimmer {
+    0%   { transform: translateX(-120%); }
+    100% { transform: translateX(220%);  }
+}
+
+@keyframes ai-status-fade {
+    0%, 100% { opacity: 0.55; }
+    50%      { opacity: 1; }
+}
+
+@keyframes ai-dot-bounce {
+    0%, 80%, 100% { transform: translateY(0); opacity: 0.5; }
+    40%           { transform: translateY(-4px); opacity: 1; }
+}
+
+@keyframes ai-particle-rise {
+    0%   { transform: translateY(0) scale(1); opacity: 0; }
+    25%  { opacity: 1; }
+    100% { transform: translateY(-14px) scale(0.4); opacity: 0; }
+}
+
+.ai-typing-orbit-fast { animation: ai-orbit-spin 2.4s linear infinite; }
+.ai-typing-orbit-slow { animation: ai-orbit-spin 5s   linear infinite reverse; }
+.ai-typing-core       { animation: ai-core-pulse 1.6s ease-in-out infinite; }
+.ai-typing-status     { animation: ai-status-fade 1.8s ease-in-out infinite; }
+
+.ai-typing-shimmer {
+    position: relative;
+    overflow: hidden;
+}
+.ai-typing-shimmer::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(165, 243, 252, 0.0) 30%,
+        rgba(165, 243, 252, 0.55) 50%,
+        rgba(165, 243, 252, 0.0) 70%,
+        transparent 100%
+    );
+    animation: ai-shimmer 1.8s linear infinite;
+    pointer-events: none;
+}
+
+.ai-typing-dot {
+    animation: ai-dot-bounce 1.2s ease-in-out infinite;
+}
+
+.ai-typing-particle {
+    animation: ai-particle-rise 1.6s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ai-typing-orbit-fast,
+    .ai-typing-orbit-slow,
+    .ai-typing-core,
+    .ai-typing-status,
+    .ai-typing-shimmer::before,
+    .ai-typing-dot,
+    .ai-typing-particle {
+        animation: none;
+    }
+}
+
+/* === AI Chat input glow (components/assistant/AIChatPanel.jsx textarea wrapper) === */
+.ai-input-glow-wrap {
+    position: relative;
+    border-radius: 14px;
+    isolation: isolate;
+}
+
+/* Animated conic-gradient border that "flows" around the input */
+.ai-input-glow-wrap::before {
+    content: '';
+    position: absolute;
+    inset: -2px;
+    border-radius: 14px;
+    padding: 2px;
+    background: conic-gradient(
+        from 0deg,
+        rgba(34, 211, 238, 0)   0%,
+        rgba(34, 211, 238, 0.85) 22%,
+        rgba(168, 85, 247, 0.85) 50%,
+        rgba(34, 211, 238, 0)   78%,
+        rgba(34, 211, 238, 0)   100%
+    );
+    -webkit-mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+            mask-composite: exclude;
+    animation: ai-input-spin 4.5s linear infinite;
+    opacity: 0.55;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+    z-index: 0;
+}
+
+/* Soft ambient halo behind the input */
+.ai-input-glow-wrap::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 12px;
+    box-shadow:
+        0 0 14px 0  rgba(34, 211, 238, 0.18),
+        0 0 28px 4px rgba(168, 85, 247, 0.10);
+    animation: ai-input-halo 3.2s ease-in-out infinite;
+    pointer-events: none;
+    z-index: -1;
+}
+
+/* Intensify when the user is focused on the input */
+.ai-input-glow-wrap:focus-within::before {
+    opacity: 1;
+    animation-duration: 2.6s;
+}
+.ai-input-glow-wrap:focus-within::after {
+    box-shadow:
+        0 0 22px 2px rgba(34, 211, 238, 0.35),
+        0 0 44px 8px rgba(168, 85, 247, 0.20);
+}
+
+/* Even more intense while AI is generating */
+.ai-input-glow-wrap[data-thinking="true"]::before {
+    opacity: 1;
+    animation-duration: 1.8s;
+    background: conic-gradient(
+        from 0deg,
+        rgba(34, 211, 238, 0)    0%,
+        rgba(34, 211, 238, 1)    15%,
+        rgba(168, 85, 247, 1)    40%,
+        rgba(236, 72, 153, 0.9)  60%,
+        rgba(34, 211, 238, 0)    85%,
+        rgba(34, 211, 238, 0)    100%
+    );
+}
+.ai-input-glow-wrap[data-thinking="true"]::after {
+    box-shadow:
+        0 0 28px 4px rgba(34, 211, 238, 0.55),
+        0 0 56px 12px rgba(168, 85, 247, 0.35);
+}
+
+@keyframes ai-input-spin {
+    to { transform: rotate(360deg); }
+}
+@keyframes ai-input-halo {
+    0%, 100% {
+        box-shadow:
+            0 0 14px 0 rgba(34, 211, 238, 0.18),
+            0 0 28px 4px rgba(168, 85, 247, 0.08);
+    }
+    50% {
+        box-shadow:
+            0 0 22px 2px rgba(34, 211, 238, 0.32),
+            0 0 48px 8px rgba(168, 85, 247, 0.18);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ai-input-glow-wrap::before,
+    .ai-input-glow-wrap::after {
+        animation: none;
+    }
+}
+
+/* === AI chat input: animated cyan→purple border glow while model is thinking === */
+@keyframes ai-input-border-pulse {
+    0%, 100% {
+        border-color: rgba(34, 211, 238, 0.85);
+        box-shadow:
+            0 0 0 1px rgba(34, 211, 238, 0.55),
+            0 0 18px 2px rgba(34, 211, 238, 0.45),
+            inset 0 0 12px rgba(34, 211, 238, 0.18);
+    }
+    50% {
+        border-color: rgba(168, 85, 247, 0.95);
+        box-shadow:
+            0 0 0 1px rgba(168, 85, 247, 0.75),
+            0 0 28px 4px rgba(168, 85, 247, 0.55),
+            inset 0 0 18px rgba(168, 85, 247, 0.25);
+    }
+}
+
+.ai-input-glow {
+    animation: ai-input-border-pulse 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ai-input-glow {
+        animation: none;
+        box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.75), 0 0 12px rgba(34, 211, 238, 0.45);
+    }
+}

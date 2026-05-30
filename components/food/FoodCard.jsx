@@ -8,6 +8,7 @@ import { useAI } from "../../utils/hooks/useSupabase";
 import { UrgencyIndicator } from "./UrgencyBadge";
 import VerificationStatus from "./VerificationStatus";
 import FoodDietaryTags from "./FoodDietaryTags";
+import { AIThinkingInline } from "../common/AIThinking.jsx";
 
 const formatDistance = (dist) => {
     if (!dist) return '';
@@ -82,14 +83,15 @@ function FoodCard({
             return;
         }
 
+        // Open the panel immediately so the user sees the AI working state.
+        setAISuggestions(null);
+        setShowAITips(true);
         try {
             const ingredients = [title];
             const recipes = await getRecipeSuggestions(ingredients);
             setAISuggestions(recipes);
-            setShowAITips(true);
         } catch (error) {
             setAISuggestions({ error: error.message || 'Failed to get recipe suggestions.' });
-            setShowAITips(true);
         }
     };
 
@@ -147,7 +149,18 @@ function FoodCard({
                 </div>
             }
             footer={
-                <div className="flex items-center justify-end">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={handleAIRecipes}
+                        loading={aiLoading}
+                        aria-label={showAITips ? `Hide AI recipe tips for ${title}` : `Get AI recipe ideas for ${title}`}
+                        aria-pressed={showAITips}
+                    >
+                        <i className={`fas ${showAITips ? 'fa-chevron-up' : 'fa-utensils'} mr-1.5`} aria-hidden="true" />
+                        {showAITips ? 'Hide tips' : 'AI recipes'}
+                    </Button>
                     <div className="flex space-x-2">
                         {type === 'donation' ? (
                             <Button
@@ -195,15 +208,15 @@ function FoodCard({
                 </div>
                 
                 {/* AI Recipe Suggestions */}
-                {showAITips && aiSuggestions && (
+                {showAITips && (
                     <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                         <h4 className="font-semibold text-blue-800 mb-2 flex items-center">
                             <i className="fas fa-robot mr-2"></i>
                             AI Recipe Suggestions
                         </h4>
-                        {aiSuggestions.error ? (
+                        {aiSuggestions?.error ? (
                             <p className="text-sm text-red-600">{aiSuggestions.error}</p>
-                        ) : aiSuggestions.recipes && aiSuggestions.recipes.length > 0 ? (
+                        ) : aiSuggestions?.recipes && aiSuggestions.recipes.length > 0 ? (
                             <div className="space-y-2">
                                 {aiSuggestions.recipes.slice(0, 2).map((recipe, index) => (
                                     <div key={index} className="text-sm">
@@ -212,10 +225,18 @@ function FoodCard({
                                     </div>
                                 ))}
                             </div>
+                        ) : aiLoading || !aiSuggestions ? (
+                            <AIThinkingInline
+                                dark={false}
+                                size={36}
+                                stages={[
+                                    { icon: 'utensils', label: 'Reading ingredients' },
+                                    { icon: 'book', label: 'Searching recipes' },
+                                    { icon: 'wand-magic-sparkles', label: 'Crafting suggestions' },
+                                ]}
+                            />
                         ) : (
-                            <p className="text-sm text-blue-600">
-                                {typeof aiSuggestions === 'string' ? aiSuggestions : 'No recipes found.'}
-                            </p>
+                            <p className="text-sm text-blue-600">No recipes found.</p>
                         )}
                     </div>
                 )}

@@ -1,7 +1,9 @@
 /**
  * Voice Services — Whisper STT + TTS via FastAPI backend
- * All requests go through the backend at /api/ai/* which manages API keys server-side.
+ * All requests go through /api/ai/* with self-healing + auth headers.
  */
+import { resilientFetch } from './services/aiSelfHealing.js'
+import { throwAiHttpError } from './services/aiRequest.js'
 
 /**
  * Transcribe audio using backend Whisper endpoint
@@ -13,18 +15,17 @@ export async function transcribeAudio(audioBlob, language = 'en') {
   const formData = new FormData()
   formData.append('audio', audioBlob, 'audio.webm')
 
-  const response = await fetch('/api/ai/transcribe', {
-    method: 'POST',
-    body: formData,
-  })
+  const response = await resilientFetch(
+    '/api/ai/transcribe',
+    { method: 'POST', body: formData },
+    { retries: 2, timeout: 45000, backoff: [800, 2000], label: 'ai/transcribe' }
+  )
 
   if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(`Whisper API error: ${response.status} ${errorText}`)
+    await throwAiHttpError(response, 'Whisper transcription failed')
   }
 
   const data = await response.json()
-  // If backend filtered this as noise, return empty string
   if (data.filtered) return ''
   return data.transcript || ''
 }
@@ -32,22 +33,25 @@ export async function transcribeAudio(audioBlob, language = 'en') {
 /**
  * Generate speech audio from text using backend TTS endpoint
  * @param {string} text - Text to convert to speech
- * @param {Object} options - { voice, speed } (voice selection handled by backend based on language)
+ * @param {Object} options - { lang }
  * @returns {Promise<Blob>} - Audio blob (mp3)
  */
 export async function textToSpeech(text, options = {}) {
-  const response = await fetch('/api/ai/tts', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      text: text.slice(0, 4096),
-      lang: options.lang || 'en',
-    }),
-  })
+  const response = await resilientFetch(
+    '/api/ai/tts',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: text.slice(0, 4096),
+        lang: options.lang || 'en',
+      }),
+    },
+    { retries: 2, timeout: 30000, backoff: [500, 1500], label: 'ai/tts' }
+  )
 
   if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(`TTS API error: ${response.status} ${errorText}`)
+    await throwAiHttpError(response, 'Text-to-speech failed')
   }
 
   return await response.blob()

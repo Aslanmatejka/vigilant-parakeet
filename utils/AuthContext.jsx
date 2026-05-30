@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import authService from './authService.js';
+import { geocodeAddress } from './geocoding';
 
 const AuthContext = createContext({});
 
@@ -60,6 +61,34 @@ export const AuthProvider = ({ children }) => {
       unsubscribe();
     };
   }, []);
+
+  // Self-heal: if the user has an address but no geocoded coords (e.g. saved
+  // before geocoding was added), backfill them silently exactly once per
+  // session so the map / AI distance features have a fallback location.
+  const backfilledRef = useRef(new Set());
+  useEffect(() => {
+    if (!user?.id || !user?.address) return;
+    if (user.latitude != null && user.longitude != null) return;
+    if (backfilledRef.current.has(user.id)) return;
+    backfilledRef.current.add(user.id);
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const coords = await geocodeAddress(user.address);
+        if (cancelled || !coords) return;
+        await authService.updateProfile({
+          latitude: coords.latitude,
+          longitude: coords.longitude,
+          address_geocoded_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.debug('Address auto-geocode skipped:', err?.message);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [user?.id, user?.address, user?.latitude, user?.longitude]);
 
     const value = {
     user,

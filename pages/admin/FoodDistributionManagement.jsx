@@ -29,6 +29,19 @@ function FoodDistributionManagement() {
         fetchCommunities();
         fetchListings();
 
+        // Trailing debounce so bursts of realtime events (e.g. several
+        // rows expiring at once, or rapid admin edits) only trigger a
+        // single refetch. Prevents the previous loading-loop where every
+        // postgres_changes event re-ran fetchListings synchronously.
+        let refetchTimer = null;
+        const scheduleRefetch = () => {
+            if (refetchTimer) clearTimeout(refetchTimer);
+            refetchTimer = setTimeout(() => {
+                refetchTimer = null;
+                fetchListings();
+            }, 800);
+        };
+
         const subscription = supabase
             .channel('food-distribution')
             .on(
@@ -38,14 +51,12 @@ function FoodDistributionManagement() {
                     schema: 'public',
                     table: 'food_listings'
                 },
-                () => {
-                    console.log('Food listings changed, refreshing...');
-                    fetchListings();
-                }
+                scheduleRefetch
             )
             .subscribe();
 
         return () => {
+            if (refetchTimer) clearTimeout(refetchTimer);
             supabase.removeChannel(subscription);
         };
     }, []);
@@ -73,7 +84,9 @@ function FoodDistributionManagement() {
             setListings(data);
 
             const total = data.length;
-            const available = data.filter(item => item.status === 'available').length;
+            // DB enum uses 'active' / 'approved' for currently-available listings
+            // (there is no 'available' value), so match those instead.
+            const available = data.filter(item => item.status === 'active' || item.status === 'approved').length;
             const claimed = data.filter(item => item.status === 'claimed').length;
             const pending = data.filter(item => item.status === 'pending').length;
 

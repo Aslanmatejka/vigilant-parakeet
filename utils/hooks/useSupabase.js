@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import authService from '../authService.js'
 import dataService from '../dataService.js'
 
@@ -115,10 +115,13 @@ export const useFoodListings = (filters = {}, limit = null) => {
   const [listings, setListings] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  // Track whether we've completed at least one successful fetch so background
+  // refreshes don't flip `loading` back on and make the UI flicker.
+  const hasLoadedRef = useRef(false)
 
   const fetchListings = useCallback(async () => {
     try {
-      setLoading(true)
+      if (!hasLoadedRef.current) setLoading(true)
       setError(null)
       const fetchFilters = { ...filters };
       if (limit) {
@@ -127,6 +130,7 @@ export const useFoodListings = (filters = {}, limit = null) => {
       }
       const data = await dataService.getFoodListings(fetchFilters)
       setListings(data)
+      hasLoadedRef.current = true
     } catch (error) {
       setError(error.message)
     } finally {
@@ -769,10 +773,11 @@ export const useAI = () => {
     try {
       setIsLoading(true)
       setError(null)
-      
+
+      const userId = authService.getCurrentUser()?.id
       const { getRecipeSuggestions: getRecipesFn } = await import('../aiAgent.js')
-      const result = await getRecipesFn(ingredients)
-      
+      const result = await getRecipesFn(ingredients, { userId })
+
       return result
     } catch (error) {
       setError(error.message)

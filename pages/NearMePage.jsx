@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import FoodList from '../components/food/FoodList';
 import { FilterPanel } from '../components/food/FilterPanel';
-import { useGeoLocation } from '../utils/hooks/useLocation';
+import { useEffectiveLocation } from '../utils/hooks/useLocation';
 import MainLayout from '../components/layout/MainLayout';
 import Button from '../components/common/Button';
 import dataService from '../utils/dataService';
@@ -19,7 +19,7 @@ function NearMePage() {
         loading: locationLoading, 
         error: locationError,
         enableLocation 
-    } = useGeoLocation();
+    } = useEffectiveLocation();
 
     const [nearbyListings, setNearbyListings] = useState([]);
     const [loading, setLoading] = useState(true);

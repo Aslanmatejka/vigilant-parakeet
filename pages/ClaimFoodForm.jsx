@@ -226,7 +226,7 @@ export default function ClaimFoodForm() {
                 console.error('SMS notification error:', smsError);
             }
 
-            toast.success('Added to your receipt — view it on your dashboard!', { autoClose: 5000, position: 'top-center' });
+            toast.success('Added to your receipt — view it in Receipts & Activity!', { autoClose: 5000, position: 'top-center' });
             navigate('/find');
         } catch (error) {
             console.error('Error claiming food:', error);

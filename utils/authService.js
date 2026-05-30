@@ -1,30 +1,6 @@
 // Inject is_admin claim into Supabase session for local admin testing
 import supabase, { SUPABASE_AUTH_KEY } from './supabaseClient.js';
 
-export async function injectAdminClaim(userId) {
-  const { data: profile, error } = await supabase
-    .from('users')
-    .select('is_admin')
-    .eq('id', userId)
-    .single();
-  if (error) {
-    console.error('Error fetching admin status:', error);
-    return;
-  }
-  if (profile?.is_admin) {
-    // This is a workaround for local testing only
-    // Supabase does not support direct mutation of JWT claims client-side in production
-    // For production, use Edge Functions or a custom JWT provider
-    supabase.auth.setSession({
-      ...supabase.auth.session(),
-      user: {
-        ...supabase.auth.user(),
-        is_admin: true
-      }
-    });
-    console.log('Admin claim injected into session');
-  }
-}
 import { reportError } from './helpers.js'
 
 class AuthService {
@@ -119,20 +95,75 @@ class AuthService {
 
   async setUser(user) {
     try {
-      // Get user profile from database
-      const { data: profile, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', user.id)
-        .single()
+      // Get user profile from database, but don't let a hung JS client block login.
+      // If the query doesn't complete within 4s, fall back to auth-only data and
+      // refresh the profile in the background.
+      const PROFILE_TIMEOUT_MS = 4000
+      let profile = null
+      let error = null
+      let timedOut = false
+      try {
+        const profilePromise = supabase
+          .from('users')
+          .select('*')
+          .eq('id', user.id)
+          .single()
+        const result = await Promise.race([
+          profilePromise,
+          new Promise((resolve) => setTimeout(() => resolve({ __timeout: true }), PROFILE_TIMEOUT_MS))
+        ])
+        if (result && result.__timeout) {
+          timedOut = true
+          console.warn('Profile fetch timed out; using auth-only data and retrying in background')
+          // Background retry — update state when it eventually resolves
+          profilePromise.then(({ data, error: bgError }) => {
+            if (bgError) return
+            if (!data) return
+            this.currentUser = { ...user, ...data }
+            this.isAdmin = this.currentUser.role === 'admin' || this.currentUser.is_admin === true
+            localStorage.setItem('currentUser', JSON.stringify(this.currentUser))
+            if (this.isAdmin) {
+              localStorage.setItem('adminAuthenticated', 'true')
+              localStorage.setItem('adminUser', JSON.stringify(this.currentUser))
+            }
+            this.notifyListeners()
+          }).catch(() => {})
+        } else {
+          profile = result.data
+          error = result.error
+        }
+      } catch (e) {
+        error = e
+      }
 
-      if (error && error.code !== 'PGRST116') {
+      if (timedOut || (error && error.code !== 'PGRST116')) {
         // PGRST116 is "no rows returned" - this is expected for new users
-        console.error('Error fetching user profile:', error)
-        // Fall back to auth-only data so the user can still log in
+        if (error) console.error('Error fetching user profile:', error)
+
+        // If we already have a cached profile for THIS user (e.g. from a
+        // previous successful fetch / localStorage on app load), keep it.
+        // Wiping it here on a transient TOKEN_REFRESHED timeout would
+        // momentarily drop admin/role flags and bounce admins off /admin
+        // pages back to the home page.
+        const cached = this.currentUser
+        if (cached && cached.id === user.id) {
+          this.currentUser = { ...cached, ...user, id: cached.id }
+          this.isAuthenticated = true
+          this.isAdmin = cached.role === 'admin' || cached.is_admin === true
+          localStorage.setItem('userAuthenticated', 'true')
+          localStorage.setItem('currentUser', JSON.stringify(this.currentUser))
+          this.notifyListeners()
+          return
+        }
+
+        // No cached profile — fall back to auth-only data so the user can
+        // still log in (this is the first-ever sign-in path).
         this.currentUser = {
           ...user,
           name: user.user_metadata?.name || user.email,
+          address: user.user_metadata?.address || null,
+          phone: user.user_metadata?.phone || null,
+          community_role: user.user_metadata?.community_role || null,
           account_type: user.user_metadata?.account_type || 'individual',
           role: 'user',
           status: 'active'
@@ -156,6 +187,7 @@ class AuthService {
               id: user.id,
               email: user.email,
               name: user.user_metadata?.name || user.email,
+              address: user.user_metadata?.address || null,
               approval_number: user.user_metadata?.approval_number || null,
               community_id: user.user_metadata?.community_id || null,
               phone: user.user_metadata?.phone || null,
@@ -176,6 +208,9 @@ class AuthService {
             this.currentUser = {
               ...user,
               name: user.user_metadata?.name || user.email,
+              address: user.user_metadata?.address || null,
+              phone: user.user_metadata?.phone || null,
+              community_role: user.user_metadata?.community_role || null,
               account_type: user.user_metadata?.account_type || 'individual',
               role: 'user',
               status: 'active'
@@ -208,6 +243,9 @@ class AuthService {
           this.currentUser = {
             ...user,
             name: user.user_metadata?.name || user.email,
+            address: user.user_metadata?.address || null,
+            phone: user.user_metadata?.phone || null,
+            community_role: user.user_metadata?.community_role || null,
             account_type: user.user_metadata?.account_type || 'individual',
             role: 'user',
             status: 'active'
@@ -330,22 +368,34 @@ class AuthService {
     try {
       this._userExplicitlySignedOut = true
 
-      // Sign out from Supabase FIRST (while token is still available)
-      try {
-        const { error } = await supabase.auth.signOut()
-        if (error) {
-          console.error('Supabase signOut error:', error)
-        }
-      } catch (e) {
-        console.error('Supabase signOut exception:', e)
-      }
-
-      // Clear user state
+      // Clear local state IMMEDIATELY so the UI updates even if the network call hangs.
+      // This is the key fix: previously we awaited supabase.auth.signOut() BEFORE clearing
+      // local state. If that network call hung (e.g. after other activity held the token
+      // refresh lock or the network was slow), the UI would appear frozen until the next click.
       this.clearUser()
-
-      // Remove Supabase's own auth token as a safety net
-      // so getSession() won't find a stale session on next page load
       try { localStorage.removeItem(SUPABASE_AUTH_KEY) } catch (_) {}
+      try { localStorage.removeItem('userAuthenticated') } catch (_) {}
+      try { localStorage.removeItem('currentUser') } catch (_) {}
+      try { localStorage.removeItem('adminAuthenticated') } catch (_) {}
+      try { localStorage.removeItem('adminUser') } catch (_) {}
+
+      // Fire-and-forget Supabase signOut with a short timeout and scope:'local'.
+      // scope:'local' avoids a server round-trip that can hang; the token is revoked
+      // locally and refresh tokens are invalidated on next server use.
+      const signOutPromise = (async () => {
+        try {
+          const { error } = await supabase.auth.signOut({ scope: 'local' })
+          if (error) console.warn('Supabase signOut warning:', error.message || error)
+        } catch (e) {
+          console.warn('Supabase signOut exception (ignored):', e?.message || e)
+        }
+      })()
+
+      // Race with a 2-second timeout so we never block the user.
+      await Promise.race([
+        signOutPromise,
+        new Promise(resolve => setTimeout(resolve, 2000)),
+      ])
 
       return { success: true }
     } catch (error) {
@@ -389,13 +439,24 @@ class AuthService {
         throw new Error('No user logged in')
       }
 
-      // Debug log authentication state
+      // Ensure a valid session before uploading
       const { data: { session } } = await supabase.auth.getSession()
-      console.log('Current session:', session)
-      
+      if (!session) {
+        throw new Error('No active session')
+      }
+
       // 2. Validate file
       if (!file || !(file instanceof File)) {
         throw new Error('Invalid file provided')
+      }
+      // Reject anything that isn't an image, and cap size to keep the avatars
+      // bucket healthy (5 MB is plenty for a profile picture).
+      if (!file.type || !file.type.startsWith('image/')) {
+        throw new Error('Avatar must be an image file (jpg, png, gif, webp).')
+      }
+      const MAX_AVATAR_BYTES = 5 * 1024 * 1024
+      if (file.size > MAX_AVATAR_BYTES) {
+        throw new Error('Avatar file is too large. Please choose an image under 5 MB.')
       }
       console.log('Uploading file:', { name: file.name, type: file.type, size: file.size })
 
@@ -521,8 +582,7 @@ class AuthService {
   // Password reset functionality
   async resetPassword(email) {
     try {
-      console.log('Requesting password reset for:', email);
-      const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
         redirectTo: `${window.location.origin}/reset-password`
       })
 
@@ -530,8 +590,7 @@ class AuthService {
         console.error('Supabase resetPasswordForEmail error:', error);
         throw error;
       }
-      
-      console.log('Password reset email sent successfully:', data);
+
       return { success: true }
     } catch (error) {
       console.error('Password reset error:', error)

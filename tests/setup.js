@@ -1,6 +1,16 @@
 import '@testing-library/jest-dom';
 import 'whatwg-fetch';
 
+// Avoid import.meta / missing env when AI modules pull in supabaseClient.
+jest.mock('../utils/supabaseClient.js', () => ({
+  __esModule: true,
+  default: {
+    auth: {
+      getSession: jest.fn().mockResolvedValue({ data: { session: null } }),
+    },
+  },
+}));
+
 // Mock fetch to prevent actual HTTP requests in tests
 global.fetch = jest.fn(() =>
   Promise.resolve({

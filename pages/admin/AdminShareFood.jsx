@@ -129,7 +129,6 @@ function AdminShareFood() {
     const [communities, setCommunities] = React.useState([]);
     const [dateFilter, setDateFilter] = React.useState('current-week');
     const scrollContainerRef = React.useRef(null);
-    const topScrollRef = React.useRef(null);
 
     // Refs for new row inputs (uncontrolled) — same pattern as ImpactDataEntry
     const newRowRefs = React.useRef({
@@ -150,16 +149,42 @@ function AdminShareFood() {
     }, []);
 
     const fetchCommunities = async () => {
+        // Plain anon-key fetch — communities SELECT policy is public for is_active=true.
+        // Bypasses the Supabase JS client (known to hang on this page) AND the
+        // session-aware supabaseRest helper (which fails when no session token exists).
         try {
-            const { data, error } = await supabase
-                .from('communities')
-                .select('id, name, location')
-                .eq('is_active', true)
-                .order('name', { ascending: true });
-            if (error) throw error;
-            setCommunities(data || []);
+            const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+            const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+            if (!supabaseUrl || !supabaseKey) {
+                console.error('[fetchCommunities] Missing Supabase env vars');
+                setCommunities([]);
+                return;
+            }
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 10000);
+            const resp = await fetch(
+                `${supabaseUrl}/rest/v1/communities?select=id,name,location&is_active=eq.true&order=name.asc`,
+                {
+                    headers: {
+                        'apikey': supabaseKey,
+                        'Authorization': `Bearer ${supabaseKey}`,
+                        'Accept': 'application/json',
+                    },
+                    signal: controller.signal,
+                }
+            );
+            clearTimeout(timer);
+            if (!resp.ok) {
+                const text = await resp.text();
+                console.error('[fetchCommunities] HTTP', resp.status, text);
+                setCommunities([]);
+                return;
+            }
+            const rows = await resp.json();
+            console.log('[fetchCommunities] loaded', Array.isArray(rows) ? rows.length : 0, 'communities');
+            setCommunities(Array.isArray(rows) ? rows : []);
         } catch (err) {
-            console.error('Error fetching communities:', err);
+            console.error('[fetchCommunities] error:', err);
             setCommunities([]);
         }
     };
@@ -172,27 +197,14 @@ function AdminShareFood() {
                 setLoading(true);
             }
 
-            // Add a timeout to prevent infinite loading
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 15000);
-
-            const { data: listings, error } = await supabase
-                .from('food_listings')
-                .select('*')
-                .eq('donor_type', 'organization')
-                .order('created_at', { ascending: false })
-                .abortSignal(controller.signal);
-
-            clearTimeout(timeoutId);
-
-            if (error) throw error;
-            setData(listings || []);
+            // Use REST helper to avoid Supabase JS client hang
+            const rows = await supabaseRest(
+                'food_listings?select=*&donor_type=eq.organization&order=created_at.desc',
+                'GET'
+            );
+            setData(Array.isArray(rows) ? rows : []);
         } catch (error) {
-            if (error.name === 'AbortError') {
-                console.error('Fetch timed out after 15 seconds');
-            } else {
-                console.error('Error fetching food listings:', error);
-            }
+            console.error('Error fetching food listings:', error);
             if (!isRefresh) setData([]);
         } finally {
             setLoading(false);
@@ -326,6 +338,14 @@ function AdminShareFood() {
 
     // Update a single field inline
     const handleUpdateRow = async (id, field, value) => {
+        // Capture previous value for rollback
+        let previousValue;
+        setData(prev => {
+            const target = prev.find(r => r.id === id);
+            previousValue = target ? target[field] : undefined;
+            return prev.map(row => row.id === id ? { ...row, [field]: value } : row);
+        });
+
         try {
             await supabaseRest(
                 `food_listings?id=eq.${id}`,
@@ -333,12 +353,12 @@ function AdminShareFood() {
                 { [field]: value, updated_at: new Date().toISOString() },
                 { 'Prefer': 'return=minimal' }
             );
-            // Update local data after successful save
-            setData(prev => prev.map(row =>
-                row.id === id ? { ...row, [field]: value } : row
-            ));
         } catch (error) {
             console.error('Error updating row:', error);
+            // Rollback optimistic change
+            setData(prev => prev.map(row =>
+                row.id === id ? { ...row, [field]: previousValue } : row
+            ));
             alert('Failed to update: ' + error.message);
         }
     };
@@ -468,29 +488,10 @@ function AdminShareFood() {
                         <p className="mt-4 text-gray-600">Loading data...</p>
                     </div>
                 ) : (
-                    <>
-                    {/* Top scrollbar — mirrors the table's horizontal scroll */}
-                    <div
-                        ref={topScrollRef}
-                        className="overflow-x-auto bg-gray-100 rounded-t-lg"
-                        style={{ overflowY: 'hidden', height: '14px' }}
-                        onScroll={(e) => {
-                            if (scrollContainerRef.current) {
-                                scrollContainerRef.current.scrollLeft = e.target.scrollLeft;
-                            }
-                        }}
-                    >
-                        <div style={{ width: '1500px', height: '1px' }} />
-                    </div>
                     <div
                         ref={scrollContainerRef}
-                        className="bg-white rounded-b-lg shadow overflow-x-auto overflow-y-auto text-xs"
-                        style={{maxHeight: 'calc(100vh - 294px)'}}
-                        onScroll={(e) => {
-                            if (topScrollRef.current) {
-                                topScrollRef.current.scrollLeft = e.target.scrollLeft;
-                            }
-                        }}
+                        className="bg-white rounded-lg shadow overflow-x-auto overflow-y-auto text-xs"
+                        style={{ maxHeight: 'calc(100vh - 260px)' }}
                     >
                         <table className="min-w-full divide-y divide-gray-200 [&_td]:px-1 [&_td]:py-1">
                             <thead className="bg-gray-50 sticky top-0 z-10">
@@ -534,8 +535,8 @@ function AdminShareFood() {
                                 </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                                {/* New row (highlighted) — same as ImpactDataEntry */}
-                                <tr className="bg-[#2CABE3]/10">
+                                {/* New row — sticky pinned below the thead so it never scrolls away */}
+                                <tr className="[&>td]:sticky [&>td]:top-[34px] [&>td]:z-[5] [&>td]:bg-[#dff3fb] [&>td]:border-b-2 [&>td]:border-[#2CABE3]">
                                     <td className="px-3 py-2">
                                         <UncontrolledCell
                                             type="date"
@@ -779,7 +780,6 @@ function AdminShareFood() {
                             </tbody>
                         </table>
                     </div>
-                    </>
                 )}
 
                 {/* Help section */}

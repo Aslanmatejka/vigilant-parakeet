@@ -13,4 +13,4 @@ COPY backend/ ./backend/
 ENV PORT=8000
 EXPOSE ${PORT}
 
-CMD uvicorn backend.app:app --host 0.0.0.0 --port ${PORT}
+CMD python -m backend.run_forever

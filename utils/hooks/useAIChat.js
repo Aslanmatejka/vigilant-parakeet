@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuthContext } from '../AuthContext.jsx'
 import aiChatService from '../services/aiChatService.js'
+import normalizeToolResults from '../services/normalizeToolResults.js'
 
 const INITIAL_MESSAGE = {
   id: 'welcome',
@@ -16,6 +17,15 @@ const INITIAL_MESSAGE_ES = {
   timestamp: new Date().toISOString(),
 }
 
+function normalizeAssistantAction(action) {
+  if (!action || typeof action !== 'object') return action || null
+  if (action.action === 'navigate') return action
+  if (action.href) {
+    return { action: 'navigate', target: action.href, label: action.label || 'Go' }
+  }
+  return action
+}
+
 export function useAIChat() {
   const { user, isAuthenticated } = useAuthContext()
   const [messages, setMessages] = useState([INITIAL_MESSAGE])
@@ -23,6 +33,21 @@ export function useAIChat() {
   const [error, setError] = useState(null)
   const [language, setLanguage] = useState('en')
   const [historyLoaded, setHistoryLoaded] = useState(false)
+  // Monotonic counter so a slow earlier request can't append after a
+  // newer, faster one finished. Prevents out-of-order assistant bubbles
+  // when the user double-sends or retries quickly.
+  const reqSeqRef = useRef(0)
+
+  // When the active user changes (logout → login as a different account,
+  // or guest → authenticated), we MUST forget the previous chat so the
+  // new session starts clean and re-fetches the right history.
+  useEffect(() => {
+    setHistoryLoaded(false)
+    setMessages([language === 'es' ? INITIAL_MESSAGE_ES : INITIAL_MESSAGE])
+    setError(null)
+    // language intentionally excluded — switching language shouldn't wipe chat.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, isAuthenticated])
 
   // Load conversation history from backend when user logs in
   useEffect(() => {
@@ -34,13 +59,37 @@ export function useAIChat() {
         const history = await aiChatService.getHistory(user.id, 50)
         if (cancelled || !history?.length) return
 
-        const formatted = history.map(msg => ({
-          id: msg.id || `hist-${msg.created_at}`,
-          role: msg.role,
-          message: msg.message,
-          metadata: msg.metadata,
-          timestamp: msg.created_at,
-        }))
+        const formatted = history
+          .filter(msg => {
+            // Filter out internal "silent" prompts that were saved before
+            // the backend learned to skip persisting them. These start
+            // with [Action completed] or [Acción completada] and were
+            // never typed by the user.
+            if (msg.role !== 'user') return true
+            const text = String(msg.message || '').trimStart()
+            return !text.startsWith('[Action completed]')
+                && !text.startsWith('[Acción completada]')
+                && !text.startsWith('[Accion completada]')
+          })
+          .map(msg => ({
+            id: msg.id || `hist-${msg.created_at}`,
+            role: msg.role,
+            // Surface backend row id (UUID) so feedback writes target the
+            // correct ai_conversations row instead of a fake "hist-..." key.
+            conversationId: msg.id || null,
+            message: msg.message,
+            metadata: msg.metadata,
+            // Normalize so ToolResultCard / MapContext / UIControlContext
+            // all see the same { tool, ok, summary, result: {...} } shape
+            // regardless of whether the row is live or rehydrated.
+            toolResults: Array.isArray(msg.metadata?.actions)
+              ? normalizeToolResults(msg.metadata.actions)
+              : [],
+            // Mark history rows so effects that should only fire for live
+            // turns (e.g. claim toasts) can skip them.
+            fromHistory: true,
+            timestamp: msg.created_at,
+          }))
 
         setMessages([INITIAL_MESSAGE, ...formatted])
         setHistoryLoaded(true)
@@ -53,28 +102,111 @@ export function useAIChat() {
     return () => { cancelled = true }
   }, [isAuthenticated, user?.id, historyLoaded])
 
-  const sendMessage = useCallback(async (text) => {
-    if (!text?.trim() || isLoading) return
-
-    const userMsg = {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      message: text.trim(),
-      timestamp: new Date().toISOString(),
+  /**
+   * Translate a typed backend error code into a friendly bubble message.
+   * Falls back to a generic line for unknown codes so the user is never
+   * stuck staring at a raw `error_code` like "model_unavailable".
+   */
+  const friendlyErrorMessage = useCallback((code, lang = language) => {
+    const isEs = lang === 'es'
+    switch (code) {
+      case 'timeout':
+        return isEs
+          ? 'Mi respuesta tardó demasiado. Intenta de nuevo en un momento.'
+          : 'My response took too long. Please try again in a moment.'
+      case 'rate_limit':
+        return isEs
+          ? 'Estoy recibiendo muchas solicitudes ahora mismo. Intenta de nuevo en unos segundos.'
+          : "I'm getting a lot of requests right now. Please try again in a few seconds."
+      case 'model_unavailable':
+        return isEs
+          ? 'Mi modelo de IA no está disponible temporalmente. Vuelve a intentarlo.'
+          : 'My AI model is temporarily unavailable. Please try again.'
+      case 'circuit_open':
+        return isEs
+          ? 'Estoy recuperándome de un problema. Intenta de nuevo en unos segundos.'
+          : "I'm recovering from a hiccup. Please try again in a few seconds."
+      case 'auth':
+        return isEs
+          ? 'Hay un problema con mi autenticación. Contacta a soporte si esto continúa.'
+          : "There's an authentication issue. Please contact support if this keeps happening."
+      case 'invalid_input':
+        return isEs
+          ? 'No pude procesar esa solicitud. Intenta reformularla.'
+          : "I couldn't process that request. Please try rephrasing it."
+      default:
+        return isEs
+          ? 'Estoy teniendo un pequeño problema. ¿Puedes intentar de nuevo?'
+          : "I'm having a little trouble right now. Please try again."
     }
+  }, [language])
 
-    setMessages(prev => [...prev, userMsg])
+  /**
+   * Core send-and-render pipeline shared by `sendMessage`, `retryMessage`,
+   * and `regenerateLast`. Centralized so all three pathways apply the same
+   * ordering guard, typed-error handling, language switch, and bubble shape.
+   *
+   * `userMessage` is the bubble already in state (or about to be) representing
+   * the user turn. If passed, we don't re-add it.
+   */
+  const runChatTurn = useCallback(async (text, { userMessage = null, replaceErrorId = null } = {}) => {
+    if (!text?.trim()) return
+    const seq = ++reqSeqRef.current
     setIsLoading(true)
     setError(null)
+
+    // If we're re-running after a failure, remove the failed bubble so the
+    // chat doesn't accumulate stale errors when a retry succeeds.
+    if (replaceErrorId) {
+      setMessages(prev => prev.filter(m => m.id !== replaceErrorId))
+    }
+
+    // If caller didn't provide a userMessage (i.e. plain sendMessage), add one.
+    if (!userMessage) {
+      const userMsg = {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        message: text.trim(),
+        timestamp: new Date().toISOString(),
+      }
+      setMessages(prev => [...prev, userMsg])
+    }
 
     try {
       const result = await aiChatService.sendMessage(text.trim(), {
         userId: user?.id || '00000000-0000-0000-0000-000000000000',
       })
 
+      // Drop the response if a newer request was started while this one
+      // was in flight — prevents out-of-order assistant bubbles.
+      if (seq !== reqSeqRef.current) return
+
       // Update language from backend detection
       if (result.lang && result.lang !== language) {
         setLanguage(result.lang)
+      }
+
+      // Typed backend error — render an error bubble carrying the retry
+      // metadata so the panel can show a Retry button + diagnostic chip.
+      if (result.error) {
+        const err = result.error
+        const errorBubble = {
+          id: `error-${Date.now()}`,
+          role: 'assistant',
+          message: friendlyErrorMessage(err.code, result.lang || language),
+          isError: true,
+          errorCode: err.code,
+          errorRetryable: !!err.retryable,
+          errorRetryAfter: err.retryAfter ?? null,
+          requestId: err.requestId || result.requestId || null,
+          // Stash the originating user text so the Retry button can re-send
+          // even after the user has typed other things in the meantime.
+          retryText: text.trim(),
+          timestamp: new Date().toISOString(),
+        }
+        setMessages(prev => [...prev, errorBubble])
+        setError(err.message)
+        return
       }
 
       const assistantMsg = {
@@ -83,31 +215,78 @@ export function useAIChat() {
         message: result.response,
         audioUrl: result.audioUrl,
         conversationId: result.conversationId,
+        toolResults: result.toolResults || [],
+        suggestions: result.suggestions || [],
+        action: normalizeAssistantAction(result.action),
+        degraded: !!result.degraded,
+        source: result.source || null,
+        requestId: result.requestId || null,
         timestamp: new Date().toISOString(),
       }
 
       setMessages(prev => [...prev, assistantMsg])
     } catch (err) {
-      const errorMsg = {
+      if (seq !== reqSeqRef.current) return
+      // Unexpected exception (shouldn't happen now that the service catches
+      // structured errors, but defensive coding for the chat surface).
+      const errorBubble = {
         id: `error-${Date.now()}`,
         role: 'assistant',
-        message: language === 'es'
-          ? 'Estoy teniendo un pequeño problema. ¿Puedes intentar de nuevo en un momento?'
-          : "I'm having a little trouble right now. Please try again in a moment.",
+        message: friendlyErrorMessage('internal'),
         isError: true,
+        errorCode: 'internal',
+        errorRetryable: true,
+        retryText: text.trim(),
         timestamp: new Date().toISOString(),
       }
-
-      setMessages(prev => [...prev, errorMsg])
+      setMessages(prev => [...prev, errorBubble])
       setError(err.message)
     } finally {
-      setIsLoading(false)
+      if (seq === reqSeqRef.current) setIsLoading(false)
     }
-  }, [isLoading, language, user?.id])
+  }, [language, user?.id, friendlyErrorMessage])
+
+  const sendMessage = useCallback(async (text) => {
+    if (!text?.trim() || isLoading) return
+    await runChatTurn(text)
+  }, [isLoading, runChatTurn])
+
+  /**
+   * Retry a failed assistant turn. Resends the original user text (stashed
+   * on the error bubble as `retryText`) and removes the failed bubble so
+   * the chat ends up clean if the retry succeeds.
+   */
+  const retryMessage = useCallback(async (errorMessageId) => {
+    if (isLoading) return
+    const target = messages.find(m => m.id === errorMessageId)
+    if (!target || !target.isError || !target.retryText) return
+    await runChatTurn(target.retryText, { replaceErrorId: errorMessageId })
+  }, [isLoading, messages, runChatTurn])
+
+  /**
+   * Regenerate the most recent assistant response: re-runs the previous
+   * user message to get a fresh answer. Doesn't add a duplicate user
+   * bubble — we reuse the existing one.
+   */
+  const regenerateLast = useCallback(async () => {
+    if (isLoading) return
+    // Find the most recent user message that has an assistant response after it.
+    let lastUserIdx = -1
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') { lastUserIdx = i; break }
+    }
+    if (lastUserIdx === -1) return
+    const lastUser = messages[lastUserIdx]
+    // Drop everything after the user message so we don't end up with two
+    // assistant answers competing for screen space.
+    setMessages(prev => prev.slice(0, lastUserIdx + 1))
+    await runChatTurn(lastUser.message, { userMessage: lastUser })
+  }, [isLoading, messages, runChatTurn])
 
   const sendVoice = useCallback(async (audioBlob) => {
     if (isLoading || !audioBlob) return
 
+    const seq = ++reqSeqRef.current
     setIsLoading(true)
     setError(null)
 
@@ -117,16 +296,18 @@ export function useAIChat() {
         includeAudio: true,
       })
 
+      if (seq !== reqSeqRef.current) return
+
       if (result.lang && result.lang !== language) {
         setLanguage(result.lang)
       }
 
-      // Show the transcript as the user message
       if (result.transcript) {
         setMessages(prev => [...prev, {
           id: `user-${Date.now()}`,
           role: 'user',
           message: result.transcript,
+          source: 'voice',
           timestamp: new Date().toISOString(),
         }])
       }
@@ -135,27 +316,45 @@ export function useAIChat() {
         id: `assistant-${Date.now()}`,
         role: 'assistant',
         message: result.response,
-        audioUrl: result.audioUrl,        conversationId: result.conversationId,        timestamp: new Date().toISOString(),
+        audioUrl: result.audioUrl,
+        conversationId: result.conversationId,
+        toolResults: result.toolResults || [],
+        suggestions: result.suggestions || [],
+        action: normalizeAssistantAction(result.action),
+        source: 'voice',
+        degraded: !!result.degraded,
+        requestId: result.requestId || null,
+        timestamp: new Date().toISOString(),
       }
 
       setMessages(prev => [...prev, assistantMsg])
     } catch (err) {
+      if (seq !== reqSeqRef.current) return
+      const aiErr = err.aiError
       const errorMsg = {
         id: `error-${Date.now()}`,
         role: 'assistant',
-        message: language === 'es'
-          ? 'No pude procesar tu audio. Por favor usa el campo de texto.'
-          : "I couldn't process your voice message. Please try typing instead.",
+        message: aiErr
+          ? friendlyErrorMessage(aiErr.code, language)
+          : (language === 'es'
+            ? 'No pude procesar tu audio. Por favor usa el campo de texto.'
+            : "I couldn't process your voice message. Please try typing instead."),
         isError: true,
+        errorCode: aiErr?.code || 'internal',
+        errorRetryable: aiErr?.retryable ?? true,
+        errorRetryAfter: aiErr?.retryAfter ?? null,
+        requestId: err.requestId || aiErr?.requestId || null,
+        retryText: null,
+        source: 'voice',
         timestamp: new Date().toISOString(),
       }
 
       setMessages(prev => [...prev, errorMsg])
       setError(err.message)
     } finally {
-      setIsLoading(false)
+      if (seq === reqSeqRef.current) setIsLoading(false)
     }
-  }, [isLoading, language, user?.id])
+  }, [isLoading, language, user?.id, friendlyErrorMessage])
 
   const clearHistory = useCallback(async () => {
     try {
@@ -183,6 +382,58 @@ export function useAIChat() {
     }
   }, [isAuthenticated, user?.id, messages])
 
+  /**
+   * Append a synthetic message (user or assistant) directly into the
+   * local conversation without hitting the backend. Used for client-side
+   * flows like file uploads (photo / CSV → bulk-listings) where the chat
+   * UI narrates the action locally.
+   */
+  const appendLocalMessage = useCallback((msg) => {
+    if (!msg || !msg.role || !msg.message) return null
+    const id = msg.id || `${msg.role}-local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const enriched = {
+      id,
+      timestamp: new Date().toISOString(),
+      ...msg,
+    }
+    setMessages(prev => [...prev, enriched])
+    return id
+  }, [])
+
+  /**
+   * Send a context message to the AI backend without showing a user bubble.
+   * The AI's response IS shown as a normal assistant message.
+   * Used after events like bulk listing creation so Nouri can react naturally.
+   */
+  const sendSilentMessage = useCallback(async (text) => {
+    if (!text?.trim()) return
+    // Intentionally NOT setting isLoading — silent prompts run in the
+    // background and must not block the user from typing/sending real
+    // messages. The assistant reply still appears as a normal bubble.
+    try {
+      const result = await aiChatService.sendMessage(text.trim(), {
+        userId: user?.id || '00000000-0000-0000-0000-000000000000',
+        silent: true,
+      })
+      if (result.lang && result.lang !== language) setLanguage(result.lang)
+      const assistantMsg = {
+        id: `assistant-${Date.now()}`,
+        role: 'assistant',
+        message: result.response,
+        toolResults: result.toolResults || [],
+        suggestions: result.suggestions || [],
+        action: normalizeAssistantAction(result.action),
+        degraded: !!result.degraded,
+        timestamp: new Date().toISOString(),
+      }
+      setMessages(prev => [...prev, assistantMsg])
+    } catch (err) {
+      // Don't surface to the user, but log for debug visibility so
+      // failed bulk-upload reactions don't disappear silently in dev.
+      console.warn('sendSilentMessage failed:', err)
+    }
+  }, [language, user?.id])
+
   return {
     messages,
     sendMessage,
@@ -193,6 +444,11 @@ export function useAIChat() {
     setLanguage,
     clearHistory,
     submitFeedback,
+    appendLocalMessage,
+    sendSilentMessage,
     isAuthenticated,
+    // New: error recovery actions
+    retryMessage,
+    regenerateLast,
   }
 }

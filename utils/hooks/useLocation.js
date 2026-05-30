@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { locationService } from '../locationService';
+import { useAuthContext } from '../AuthContext';
 
 export function useGeoLocation() {
     const [location, setLocation] = useState(null);
@@ -24,11 +25,16 @@ export function useGeoLocation() {
         try {
             const permissionStatus = await locationService.requestLocationPermission();
             if (permissionStatus === 'granted') {
-                // If we already have permission, get the location
+                // If we already have permission, get the location silently.
+                // 'prompt' is intentionally NOT auto-triggered here — wait for the user to
+                // click "Enable GPS" so the browser prompt is tied to a user gesture.
                 getCurrentPosition();
             }
         } catch (err) {
-            setError('Location permission check failed');
+            // Permissions API is unavailable in some browsers (older Safari/Firefox).
+            // Don't surface this as an error — the user can still click "Enable GPS".
+            // eslint-disable-next-line no-console
+            console.debug('Geolocation permission check unavailable:', err?.message);
         }
     };
 
@@ -41,7 +47,15 @@ export function useGeoLocation() {
             setLocation(position);
             startWatching(); // Start watching for location updates
         } catch (err) {
-            setError('Unable to get your location. Please ensure location services are enabled.');
+            // Distinguish "denied" from "unavailable" / "timeout" for clearer UX.
+            const code = err?.code;
+            if (code === 1) {
+                setError('Location permission denied. Please enable location access in your browser settings.');
+            } else if (code === 3) {
+                setError('Location request timed out. Please try again.');
+            } else {
+                setError('Unable to get your location. Please ensure location services are enabled.');
+            }
         } finally {
             setLoading(false);
         }
@@ -58,16 +72,11 @@ export function useGeoLocation() {
     };
 
     const enableLocation = async () => {
-        try {
-            const permissionStatus = await locationService.requestLocationPermission();
-            if (permissionStatus === 'granted') {
-                getCurrentPosition();
-            } else {
-                setError('Location permission denied. Please enable location services in your browser settings.');
-            }
-        } catch (err) {
-            setError('Failed to enable location services');
-        }
+        // Always try to acquire the position directly. If permission is 'prompt',
+        // this triggers the browser prompt (which only works inside a user gesture).
+        // If it's 'denied', getCurrentPosition will reject with code 1 and we'll
+        // surface a clear error message.
+        await getCurrentPosition();
     };
 
     return {
@@ -76,5 +85,47 @@ export function useGeoLocation() {
         error,
         enableLocation,
         refreshLocation: getCurrentPosition
+    };
+}
+
+/**
+ * Returns the best-effort user location with a documented source.
+ * - `gps`     : live geolocation reading (preferred)
+ * - `profile` : geocoded coordinates of the user's saved profile address
+ * - `null`    : no location available
+ *
+ * Consumers can use the returned coordinates as the origin for distance
+ * calculations, route rendering, and AI tools whether or not the browser
+ * has granted geolocation permission.
+ */
+export function useEffectiveLocation() {
+    const gps = useGeoLocation();
+    let profileCoords = null;
+    try {
+        const { user } = useAuthContext() || {};
+        const lat = user?.latitude;
+        const lng = user?.longitude;
+        if (typeof lat === 'number' && typeof lng === 'number') {
+            profileCoords = { latitude: lat, longitude: lng };
+        } else if (lat != null && lng != null) {
+            const nLat = Number(lat);
+            const nLng = Number(lng);
+            if (Number.isFinite(nLat) && Number.isFinite(nLng)) {
+                profileCoords = { latitude: nLat, longitude: nLng };
+            }
+        }
+    } catch (_) {
+        // Hook used outside AuthProvider — fall back to GPS only.
+    }
+
+    const effective = gps.location || profileCoords;
+    const source = gps.location ? 'gps' : (profileCoords ? 'profile' : null);
+
+    return {
+        ...gps,
+        location: effective,
+        gpsLocation: gps.location,
+        profileLocation: profileCoords,
+        source,
     };
 }

@@ -95,15 +95,36 @@ function SignupPageContent() {
 
         setSubmitting(true);
         try {
-            // Validate the approval code against the database
+            // Validate the approval code against the database.
+            // Plain REST fetch (with 6s timeout) so a hung Supabase JS client doesn't freeze signup.
             const codeValue = formData.approvalNumber.trim().toUpperCase();
-            const { data: codeRecord, error: codeError } = await supabase
-                .from('approval_codes')
-                .select('*')
-                .eq('code', codeValue)
-                .single();
+            const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+            const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+            let codeRecord = null;
+            try {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 6000);
+                const resp = await fetch(
+                    `${supabaseUrl}/rest/v1/approval_codes?select=*&code=eq.${encodeURIComponent(codeValue)}&limit=1`,
+                    {
+                        headers: {
+                            'apikey': supabaseKey,
+                            'Authorization': `Bearer ${supabaseKey}`,
+                            'Accept': 'application/json',
+                        },
+                        signal: controller.signal,
+                    }
+                );
+                clearTimeout(timer);
+                if (resp.ok) {
+                    const rows = await resp.json();
+                    codeRecord = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+                }
+            } catch (e) {
+                console.warn('Approval code lookup failed:', e);
+            }
 
-            if (codeError || !codeRecord) {
+            if (!codeRecord) {
                 setErrors({ approvalNumber: 'Approval number is invalid. Please double check that it was entered correctly. If that doesn\'t work, contact your school community closet representative to get a new approval number.' });
                 return;
             }
@@ -138,15 +159,19 @@ function SignupPageContent() {
             }
 
             if (user) {
-                // Mark the approval code as claimed
-                await supabase
+                // Mark the approval code as claimed — fire-and-forget so it never blocks navigation.
+                // Admin can reconcile if this fails. Cannot block on this: the JS client is known to hang.
+                supabase
                     .from('approval_codes')
                     .update({
                         is_claimed: true,
                         claimed_by: user.id,
                         claimed_at: new Date().toISOString()
                     })
-                    .eq('code', codeValue);
+                    .eq('code', codeValue)
+                    .then(({ error: claimErr }) => {
+                        if (claimErr) console.warn('Failed to mark approval code as claimed:', claimErr);
+                    });
 
                 if (session) {
                     // User was auto-confirmed (no email confirmation required)

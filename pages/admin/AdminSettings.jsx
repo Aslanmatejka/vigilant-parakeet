@@ -5,6 +5,18 @@ import Card from '../../components/common/Card';
 import { reportError } from '../../utils/helpers';
 import { toast } from 'react-toastify';
 import { useAuth } from '../../utils/hooks/useSupabase';
+import supabase from '../../utils/supabaseClient';
+
+const AUTOMATION_EVENTS = ['new_listing', 'draft_listing_reminder', 'admin_broadcast'];
+
+const formatStatusDate = (value) => {
+    if (!value) return 'No activity yet';
+    try {
+        return new Date(value).toLocaleString();
+    } catch {
+        return String(value);
+    }
+};
 
 function AdminSettings() {
     const { user: authUser, isAdmin } = useAuth();
@@ -13,6 +25,25 @@ function AdminSettings() {
         const [success, setSuccess] = React.useState(null);
         const [error, setError] = React.useState(null);
         const [maintenanceMode, setMaintenanceMode] = React.useState(false);
+        const [automationStatus, setAutomationStatus] = React.useState({
+            loading: true,
+            refreshing: false,
+            error: null,
+            lastLoadedAt: null,
+            pendingBroadcasts: 0,
+            sentBroadcasts24h: 0,
+            deliveredBroadcasts24h: 0,
+            notifications24h: 0,
+            smsSent24h: 0,
+            smsFailed24h: 0,
+            eventCounts24h: {
+                new_listing: 0,
+                draft_listing_reminder: 0,
+                admin_broadcast: 0
+            },
+            latestEventAt: null,
+            failedBroadcasts: []
+        });
         const [settings, setSettings] = React.useState({
             general: {
                 siteName: 'ShareFoods',
@@ -50,7 +81,116 @@ function AdminSettings() {
         // Load initial settings
         React.useEffect(() => {
             loadSettings();
+            loadAutomationStatus(true);
         }, []);
+
+        const loadAutomationStatus = async (isInitial = false) => {
+            const now = new Date();
+            const sinceIso = new Date(now.getTime() - (24 * 60 * 60 * 1000)).toISOString();
+
+            setAutomationStatus(prev => ({
+                ...prev,
+                loading: isInitial,
+                refreshing: !isInitial,
+                error: null
+            }));
+
+            try {
+                const [pendingBroadcastsRes, sentBroadcastsRes, notificationsRes, smsRes] = await Promise.all([
+                    supabase
+                        .from('admin_broadcasts')
+                        .select('id', { count: 'exact', head: true })
+                        .eq('sent', false),
+                    supabase
+                        .from('admin_broadcasts')
+                        .select('id, title, channel, target_role, community_id, sent_at, delivered_count')
+                        .eq('sent', true)
+                        .gte('sent_at', sinceIso)
+                        .order('sent_at', { ascending: false })
+                        .limit(250),
+                    supabase
+                        .from('notifications')
+                        .select('created_at, data')
+                        .gte('created_at', sinceIso)
+                        .order('created_at', { ascending: false })
+                        .limit(500),
+                    supabase
+                        .from('sms_logs')
+                        .select('created_at, status')
+                        .gte('created_at', sinceIso)
+                        .order('created_at', { ascending: false })
+                        .limit(500)
+                ]);
+
+                if (pendingBroadcastsRes.error) throw pendingBroadcastsRes.error;
+                if (sentBroadcastsRes.error) throw sentBroadcastsRes.error;
+                if (notificationsRes.error) throw notificationsRes.error;
+                if (smsRes.error) throw smsRes.error;
+
+                const sentBroadcasts = sentBroadcastsRes.data || [];
+                const notifications = notificationsRes.data || [];
+                const smsLogs = smsRes.data || [];
+
+                const eventCounts24h = {
+                    new_listing: 0,
+                    draft_listing_reminder: 0,
+                    admin_broadcast: 0
+                };
+
+                notifications.forEach((item) => {
+                    const evt = item?.data?.event;
+                    if (AUTOMATION_EVENTS.includes(evt)) {
+                        eventCounts24h[evt] += 1;
+                    }
+                });
+
+                const smsFailed24h = smsLogs.filter((item) => {
+                    const status = String(item?.status || '').toLowerCase();
+                    return status === 'failed' || status === 'error';
+                }).length;
+
+                const deliveredBroadcasts24h = sentBroadcasts.reduce((sum, item) => {
+                    return sum + (Number(item.delivered_count) || 0);
+                }, 0);
+
+                const failedBroadcasts = sentBroadcasts
+                    .filter((item) => (Number(item.delivered_count) || 0) === 0)
+                    .slice(0, 10);
+
+                const latestEventAt = [
+                    notifications[0]?.created_at,
+                    smsLogs[0]?.created_at,
+                    sentBroadcasts[0]?.sent_at
+                ]
+                    .filter(Boolean)
+                    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] || null;
+
+                setAutomationStatus({
+                    loading: false,
+                    refreshing: false,
+                    error: null,
+                    lastLoadedAt: new Date().toISOString(),
+                    pendingBroadcasts: pendingBroadcastsRes.count || 0,
+                    sentBroadcasts24h: sentBroadcasts.length,
+                    deliveredBroadcasts24h,
+                    notifications24h: notifications.length,
+                    smsSent24h: smsLogs.length,
+                    smsFailed24h,
+                    eventCounts24h,
+                    latestEventAt,
+                    failedBroadcasts
+                });
+            } catch (statusError) {
+                console.error('Automation status load error:', statusError);
+                reportError(statusError);
+                setAutomationStatus(prev => ({
+                    ...prev,
+                    loading: false,
+                    refreshing: false,
+                    error: statusError?.message || 'Failed to load automation status.'
+                }));
+            }
+        };
 
         const loadSettings = async () => {
             try {
@@ -372,6 +512,148 @@ function AdminSettings() {
                                         {loading ? 'Saving...' : 'Save Settings'}
                                     </Button>
                                 </div>
+                            </div>
+                        </Card>
+
+                        {/* Automation Status */}
+                        <Card>
+                            <div className="p-6">
+                                <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                    <div>
+                                        <h2 className="text-lg font-semibold text-gray-900">Automation Status</h2>
+                                        <p className="mt-1 text-sm text-gray-500">
+                                            Live snapshot of run_forever workers over the last 24 hours.
+                                        </p>
+                                    </div>
+                                    <Button
+                                        variant="secondary"
+                                        size="sm"
+                                        onClick={() => loadAutomationStatus(false)}
+                                        disabled={automationStatus.loading || automationStatus.refreshing}
+                                    >
+                                        {automationStatus.refreshing ? 'Refreshing...' : 'Refresh Status'}
+                                    </Button>
+                                </div>
+
+                                {automationStatus.error && (
+                                    <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                                        <i className="fas fa-circle-exclamation mr-2"></i>
+                                        {automationStatus.error}
+                                    </div>
+                                )}
+
+                                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                                        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Pending Broadcasts</p>
+                                        <p className="mt-2 text-2xl font-bold text-yellow-700">
+                                            {automationStatus.loading ? '-' : automationStatus.pendingBroadcasts}
+                                        </p>
+                                    </div>
+                                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                                        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Broadcasts Sent (24h)</p>
+                                        <p className="mt-2 text-2xl font-bold text-[#2CABE3]">
+                                            {automationStatus.loading ? '-' : automationStatus.sentBroadcasts24h}
+                                        </p>
+                                    </div>
+                                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                                        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Delivery Actions (24h)</p>
+                                        <p className="mt-2 text-2xl font-bold text-gray-900">
+                                            {automationStatus.loading ? '-' : automationStatus.deliveredBroadcasts24h}
+                                        </p>
+                                    </div>
+                                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                                        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Latest Automation Event</p>
+                                        <p className="mt-2 text-sm font-semibold text-gray-900">
+                                            {automationStatus.loading ? 'Loading...' : formatStatusDate(automationStatus.latestEventAt)}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                                    <div className="rounded-lg border border-gray-200 p-4">
+                                        <h3 className="text-sm font-semibold text-gray-800">Automation Notification Events (24h)</h3>
+                                        <ul className="mt-3 space-y-2 text-sm text-gray-700">
+                                            <li className="flex items-center justify-between">
+                                                <span>New listing matches</span>
+                                                <strong>{automationStatus.loading ? '-' : automationStatus.eventCounts24h.new_listing}</strong>
+                                            </li>
+                                            <li className="flex items-center justify-between">
+                                                <span>Draft reminders</span>
+                                                <strong>{automationStatus.loading ? '-' : automationStatus.eventCounts24h.draft_listing_reminder}</strong>
+                                            </li>
+                                            <li className="flex items-center justify-between">
+                                                <span>Admin broadcast notifications</span>
+                                                <strong>{automationStatus.loading ? '-' : automationStatus.eventCounts24h.admin_broadcast}</strong>
+                                            </li>
+                                        </ul>
+                                    </div>
+
+                                    <div className="rounded-lg border border-gray-200 p-4">
+                                        <h3 className="text-sm font-semibold text-gray-800">SMS Worker Health (24h)</h3>
+                                        <ul className="mt-3 space-y-2 text-sm text-gray-700">
+                                            <li className="flex items-center justify-between">
+                                                <span>SMS logs recorded</span>
+                                                <strong>{automationStatus.loading ? '-' : automationStatus.smsSent24h}</strong>
+                                            </li>
+                                            <li className="flex items-center justify-between">
+                                                <span>SMS failures</span>
+                                                <strong className={automationStatus.smsFailed24h > 0 ? 'text-red-600' : ''}>
+                                                    {automationStatus.loading ? '-' : automationStatus.smsFailed24h}
+                                                </strong>
+                                            </li>
+                                            <li className="flex items-center justify-between">
+                                                <span>All notifications recorded</span>
+                                                <strong>{automationStatus.loading ? '-' : automationStatus.notifications24h}</strong>
+                                            </li>
+                                        </ul>
+                                    </div>
+                                </div>
+
+                                <div className="mt-5 rounded-lg border border-gray-200 p-4">
+                                    <div className="flex items-center justify-between">
+                                        <h3 className="text-sm font-semibold text-gray-800">Recent Broadcast Failures (24h)</h3>
+                                        <span className="text-xs text-gray-500">
+                                            Sent broadcasts with zero delivered notifications
+                                        </span>
+                                    </div>
+                                    {automationStatus.loading ? (
+                                        <p className="mt-3 text-sm text-gray-500">Loading...</p>
+                                    ) : automationStatus.failedBroadcasts.length === 0 ? (
+                                        <p className="mt-3 text-sm text-gray-500">No failed broadcasts in the last 24 hours.</p>
+                                    ) : (
+                                        <div className="mt-3 overflow-x-auto">
+                                            <table className="min-w-full divide-y divide-gray-200 text-sm">
+                                                <thead className="bg-gray-50">
+                                                    <tr>
+                                                        <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-600">Title</th>
+                                                        <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-600">Channel</th>
+                                                        <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-600">Target</th>
+                                                        <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-600">Sent At</th>
+                                                        <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-600">Delivered</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-gray-100 bg-white">
+                                                    {automationStatus.failedBroadcasts.map((item) => (
+                                                        <tr key={item.id}>
+                                                            <td className="px-3 py-2 text-gray-900">{item.title || '-'}</td>
+                                                            <td className="px-3 py-2 text-gray-700">{item.channel || '-'}</td>
+                                                            <td className="px-3 py-2 text-gray-700">
+                                                                {item.target_role || 'all'}
+                                                                {item.community_id ? ` / community ${item.community_id}` : ''}
+                                                            </td>
+                                                            <td className="px-3 py-2 text-gray-700">{formatStatusDate(item.sent_at)}</td>
+                                                            <td className="px-3 py-2 font-semibold text-red-600">0</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <p className="mt-5 text-xs text-gray-500">
+                                    Last refreshed: {formatStatusDate(automationStatus.lastLoadedAt)}
+                                </p>
                             </div>
                         </Card>
 

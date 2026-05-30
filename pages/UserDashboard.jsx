@@ -4,6 +4,9 @@ import Button from "../components/common/Button";
 import Avatar from "../components/common/Avatar";
 import Card from "../components/common/Card";
 import Receipt from "../components/common/Receipt";
+import RoleInsightsPanel from "../components/assistant/RoleInsightsPanel";
+import AIQueryPanel from "../components/assistant/AIQueryPanel";
+import PickupRouteOptimizer from "../components/donations/PickupRouteOptimizer";
 import { useAuth, useFoodListings, useNotifications } from "../utils/hooks/useSupabase";
 import supabase from "../utils/supabaseClient";
 
@@ -33,12 +36,14 @@ function UserDashboard() {
     const user = authUser;
 
     React.useEffect(() => {
+        let isMounted = true;
         if (authUser?.id) {
-            fetchReceipts();
+            fetchReceipts(() => isMounted);
         }
+        return () => { isMounted = false; };
     }, [authUser?.id]);
 
-    const fetchReceipts = async () => {
+    const fetchReceipts = async (isStillMounted = () => true) => {
         try {
             setReceiptsLoading(true);
 
@@ -50,6 +55,7 @@ function UserDashboard() {
                 .order('claimed_at', { ascending: false });
 
             if (receiptsError) throw receiptsError;
+            if (!isStillMounted()) return;
 
             // For each receipt, fetch the associated food claims and items
             const receiptsWithItems = await Promise.all(
@@ -77,18 +83,18 @@ function UserDashboard() {
                     const items = (claims || []).map(claim => ({
                         food_id: claim.food_id,
                         food_name: claim.food_listings?.title || 'Unknown Item',
-                        quantity: `${claim.food_listings?.quantity || ''} ${claim.food_listings?.unit || ''}`.trim() || 'N/A'
+                        quantity: `${claim.quantity ?? 1} ${claim.food_listings?.unit || ''}`.trim() || 'N/A'
                     }));
 
                     return { ...receipt, items };
                 })
             );
 
-            setReceipts(receiptsWithItems);
+            if (isStillMounted()) setReceipts(receiptsWithItems);
         } catch (err) {
             console.error('Error fetching receipts:', err);
         } finally {
-            setReceiptsLoading(false);
+            if (isStillMounted()) setReceiptsLoading(false);
         }
     };
     const recentActivity = React.useMemo(() => {
@@ -217,6 +223,15 @@ function UserDashboard() {
                     </div>
                 </div>
             </div>
+
+            {/* AI Role-Specific Insights */}
+            <RoleInsightsPanel className="mb-8" />
+
+            {/* Smart Pickup Route Optimizer */}
+            <PickupRouteOptimizer className="mb-8" />
+
+            {/* Natural-language Query Panel */}
+            <AIQueryPanel className="mb-8" />
 
             {/* Food Receipts Section */}
             <div className="mb-8" role="region" aria-label="Food Claim Receipts">

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { reportError } from '../utils/helpers';
 import { useAuthContext } from '../utils/AuthContext';
+import AIRecipePanel from '../components/food/AIRecipePanel';
 
 function RecipesPage() {
     const { isAdmin } = useAuthContext();
@@ -137,6 +138,7 @@ function RecipesPage() {
             {/* Recipes Grid */}
             <section className="py-16">
                 <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+                    <AIRecipePanel className="mb-10" />
                     {recipes.length === 0 ? (
                         <div className="text-center py-20">
                             <p className="text-gray-500 text-lg">No recipes yet. Check back soon!</p>

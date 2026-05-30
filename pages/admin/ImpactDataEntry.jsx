@@ -274,7 +274,6 @@ function ImpactDataEntry() {
             if (sessionError || !session) {
                 throw new Error('Not authenticated. Please log in again.');
             }
-            console.log('✓ User authenticated:', session.user.email);
 
             const { data, error } = await supabase
                 .from('impact_data')
@@ -335,7 +334,6 @@ function ImpactDataEntry() {
             if (sessionError || !session) {
                 throw new Error('Not authenticated. Please log in again.');
             }
-            console.log('✓ User authenticated:', session.user.email);
 
             const { data, error } = await supabase
                 .from('impact_data')

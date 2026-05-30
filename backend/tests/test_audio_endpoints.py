@@ -182,7 +182,9 @@ class TestVoiceEndpoint:
             data={"user_id": TEST_USER_ID},
         )
         assert resp.status_code == 504
-        assert "timed out" in resp.json()["detail"].lower()
+        body = resp.json()
+        assert body.get("error_code") == "timeout"
+        assert body.get("retryable") is True
 
     @patch("backend.app.conversation_engine")
     def test_voice_runtime_error_returns_503(self, mock_engine, client):
@@ -197,6 +199,7 @@ class TestVoiceEndpoint:
             data={"user_id": TEST_USER_ID},
         )
         assert resp.status_code == 503
+        assert resp.json().get("error_code") == "model_unavailable"
 
     @patch("backend.app.conversation_engine")
     def test_voice_codec_params_stripped(self, mock_engine, client):
@@ -305,6 +308,7 @@ class TestTranscribeEndpoint:
             files=[_fake_audio_file()],
         )
         assert resp.status_code == 503
+        assert resp.json().get("error_code") == "model_unavailable"
 
     @patch("backend.app.conversation_engine")
     def test_transcribe_strips_whitespace(self, mock_engine, client):
@@ -400,10 +404,11 @@ class TestTTSEndpoint:
             json={"text": "Hello"},
         )
         assert resp.status_code == 503
+        assert resp.json().get("error_code") == "model_unavailable"
 
     @patch("backend.app.conversation_engine")
-    def test_tts_upstream_error_returns_502(self, mock_engine, client):
-        """HTTP error from OpenAI should return 502."""
+    def test_tts_upstream_error_returns_503(self, mock_engine, client):
+        """HTTP 5xx from OpenAI should return retryable model_unavailable."""
         mock_resp = httpx.Response(500, request=httpx.Request("POST", "http://test"))
         mock_engine.generate_speech = AsyncMock(
             side_effect=httpx.HTTPStatusError("500", request=mock_resp.request, response=mock_resp)
@@ -413,11 +418,12 @@ class TestTTSEndpoint:
             "/api/ai/tts",
             json={"text": "Hello"},
         )
-        assert resp.status_code == 502
+        assert resp.status_code == 503
+        assert resp.json().get("error_code") == "model_unavailable"
 
     @patch("backend.app.conversation_engine")
     def test_tts_generic_error_returns_500(self, mock_engine, client):
-        """Unexpected errors should return 500."""
+        """Unexpected errors should return structured internal error."""
         mock_engine.generate_speech = AsyncMock(
             side_effect=ValueError("unexpected")
         )
@@ -427,4 +433,4 @@ class TestTTSEndpoint:
             json={"text": "Hello"},
         )
         assert resp.status_code == 500
-        assert "text-to-speech failed" in resp.json()["detail"].lower()
+        assert resp.json().get("error_code") == "internal"

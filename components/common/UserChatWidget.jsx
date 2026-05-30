@@ -149,22 +149,23 @@ function UserChatWidget() {
 
     return (
         <>
-            {/* Chat Button */}
+            {/* Chat Button (icon-only) */}
             <button
                 onClick={() => setIsOpen(!isOpen)}
-                className="fixed bottom-6 right-24 z-40 w-14 h-14 bg-blue-600 text-white rounded-full shadow-lg hover:bg-blue-700 transition-all duration-300 flex items-center justify-center group"
+                className="fixed bottom-6 right-24 z-40 w-10 h-10 text-gray-600 hover:text-blue-600 bg-white/80 hover:bg-white rounded-full shadow-md hover:shadow-lg transition-all duration-200 flex items-center justify-center"
                 aria-label="Open chat with admin"
+                title="Chat with admin"
             >
                 {isOpen ? (
-                    <i className="fas fa-times text-xl"></i>
+                    <i className="fas fa-times text-base"></i>
                 ) : (
-                    <>
-                        <i className="fas fa-comments text-xl"></i>
+                    <span className="relative inline-flex">
+                        <i className="fas fa-comments text-base"></i>
                         {/* Notification badge if there are unread admin messages */}
                         {messages.some(m => m.is_from_admin && !m.read_at) && (
-                            <span className="absolute top-0 right-0 w-3 h-3 bg-red-500 rounded-full border-2 border-white"></span>
+                            <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full border border-white"></span>
                         )}
-                    </>
+                    </span>
                 )}
             </button>
 

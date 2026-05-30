@@ -88,15 +88,23 @@ export default function UserReceipts() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [user?.id]);
 
+    // Hide empty expired receipts. After a Reclaim the old expired receipt's
+    // claims are moved to the new receipt; if the DB DELETE was blocked by
+    // RLS (missing receipts_delete_own policy on older deploys), the orphan
+    // would otherwise appear as an empty expired card.
+    const visibleReceipts = receipts.filter(
+        (r) => !(r.receipt.status === 'expired' && (!r.items || r.items.length === 0))
+    );
+
     const filtered = activeTab === 'all'
-        ? receipts
-        : receipts.filter((r) => r.receipt.status === activeTab);
+        ? visibleReceipts
+        : visibleReceipts.filter((r) => r.receipt.status === activeTab);
 
     const counts = {
-        all: receipts.length,
-        pending: receipts.filter((r) => r.receipt.status === 'pending').length,
-        completed: receipts.filter((r) => r.receipt.status === 'completed').length,
-        expired: receipts.filter((r) => r.receipt.status === 'expired').length,
+        all: visibleReceipts.length,
+        pending: visibleReceipts.filter((r) => r.receipt.status === 'pending').length,
+        completed: visibleReceipts.filter((r) => r.receipt.status === 'completed').length,
+        expired: visibleReceipts.filter((r) => r.receipt.status === 'expired').length,
     };
 
     return (

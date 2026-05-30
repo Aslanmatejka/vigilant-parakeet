@@ -13,7 +13,9 @@ class ReceiptService {
         try {
             console.log('[ReceiptService] Checking for expired receipts...');
 
-            // Call the Supabase function to expire receipts
+            // Call the Supabase function to expire receipts.
+            // The function RETURNS TABLE(expired_count INT), so `data` is an
+            // array of rows like [{ expired_count: N }].
             const { data, error } = await supabase.rpc('expire_unclaimed_receipts');
 
             if (error) {
@@ -21,7 +23,12 @@ class ReceiptService {
                 throw error;
             }
 
-            const expiredCount = data || 0;
+            let expiredCount = 0;
+            if (Array.isArray(data) && data.length > 0) {
+                expiredCount = Number(data[0]?.expired_count ?? 0);
+            } else if (typeof data === 'number') {
+                expiredCount = data;
+            }
             console.log(`[ReceiptService] Expired ${expiredCount} receipts and returned items to inventory`);
 
             return {

@@ -1,15 +1,17 @@
 """
-DoGoods AI Conversation Engine
-================================
-Connects OpenAI GPT-4o (reasoning), Whisper (speech-to-text), and TTS (text-to-speech).
-Manages conversations: user message + ID -> profile lookup -> GPT-4o query -> text/audio response.
-Includes food matching engine and environmental impact calculator.
+DoGoods AI Conversation Engine — Supabase edition.
 
-This module is the *service layer*. FastAPI routes live in backend/app.py.
+Talks to:
+  - OpenAI GPT-4.1 (reasoning + tool calls)
+  - OpenAI Whisper (speech-to-text)
+  - OpenAI TTS (text-to-speech)
 
-Run the API:
-    uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
+Conversation history, user profile, and reminders are persisted via the
+Supabase REST API (PostgREST). Relevant tables (RLS-protected):
+ai_conversations, ai_reminders, ai_feedback, users.
 """
+from __future__ import annotations
+
 
 import asyncio
 import json
@@ -19,14 +21,13 @@ import re
 import time
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 from dotenv import load_dotenv
 
-# Resolve .env files relative to the project root (parent of backend/)
+# Load .env from project root (this file lives in <root>/backend/ai_engine.py)
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(_PROJECT_ROOT, ".env.local"))
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
 logging.basicConfig(level=logging.INFO)
@@ -37,38 +38,193 @@ logger = logging.getLogger("ai_engine")
 # ---------------------------------------------------------------------------
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-
-# All AI calls use OpenAI (GPT-4o, Whisper, TTS)
 OPENAI_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
-
-# Conversation engine models (OpenAI)
-CHAT_MODEL = os.getenv("AI_CHAT_MODEL", "gpt-4o-mini")
-WHISPER_MODEL = "whisper-1"
-TTS_MODEL = "tts-1"
+# Chat / tool-calling: gpt-4.1 has stronger reasoning and more reliable
+# tool-calling than gpt-4o, with the same JSON-schema function-calling
+# API. Override via AI_CHAT_MODEL if you want a different model.
+CHAT_MODEL = os.getenv("AI_CHAT_MODEL", "gpt-4.1")
+# Follow-up summary after tool execution doesn't need full-size model;
+# gpt-4.1-mini is a good cost/quality balance.
+FOLLOWUP_MODEL = os.getenv("AI_FOLLOWUP_MODEL", "gpt-4.1-mini")
+WHISPER_MODEL = os.getenv("AI_WHISPER_MODEL", "whisper-1")
+TTS_MODEL = os.getenv("AI_TTS_MODEL", "tts-1")
 TTS_VOICE_EN = os.getenv("AI_TTS_VOICE", "nova")
-TTS_VOICE_ES = os.getenv("AI_TTS_VOICE_ES", "nova")  # Sesame-compatible Spanish voice
+TTS_VOICE_ES = os.getenv("AI_TTS_VOICE_ES", "nova")
 
-MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "2"))
-TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT", "30"))
-SUPABASE_TIMEOUT = 8  # seconds for DB lookups
+MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "3"))
+TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT", "60"))
 
-# Faster model for formatting tool results (follow-up calls after tool execution)
-FOLLOWUP_MODEL = os.getenv("AI_FOLLOWUP_MODEL", "gpt-4o-mini")
+RATE_LIMIT_DEFAULT = int(os.getenv("AI_RATE_LIMIT", "50"))
+RATE_LIMIT_WINDOW = 60
 
-# Shared HTTP client — reuses TCP/SSL connections across requests
-_http_client: httpx.AsyncClient | None = None
+# ---------------------------------------------------------------------------
+# Supabase configuration (PostgREST)
+# ---------------------------------------------------------------------------
+# Falls back to the VITE_-prefixed names so the same .env that powers the
+# frontend works for the backend too (DoGoods ships a single .env file).
+
+SUPABASE_URL = (
+    os.getenv("SUPABASE_URL")
+    or os.getenv("VITE_SUPABASE_URL", "")
+).rstrip("/")
+SUPABASE_SERVICE_KEY = (
+    os.getenv("SUPABASE_SERVICE_KEY")
+    or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+)
+SUPABASE_ANON_KEY = (
+    os.getenv("SUPABASE_ANON_KEY")
+    or os.getenv("VITE_SUPABASE_ANON_KEY", "")
+)
+SUPABASE_TIMEOUT = float(os.getenv("SUPABASE_TIMEOUT", "10"))
+
+# Backwards-compatible alias imported by backend/tools.py.
+DEFAULT_MODEL = CHAT_MODEL
+
+TRAINING_DATA_PATH = os.path.join(os.path.dirname(__file__), "ai_training_data.json")
+
+# Shared HTTP client
+_http_client: Optional[httpx.AsyncClient] = None
 
 
 def _get_http_client(timeout: float = TIMEOUT_SECONDS) -> httpx.AsyncClient:
-    """Return a shared httpx.AsyncClient (connection pooling)."""
+    """Return the shared HTTP client, creating it with a generous default timeout.
+
+    NOTE: callers MUST pass an explicit per-request timeout to client.request()
+    because the client's default is locked at construction time. This function
+    no longer recreates the client when a different timeout is requested.
+    """
     global _http_client
     if _http_client is None or _http_client.is_closed:
-        _http_client = httpx.AsyncClient(timeout=timeout)
+        # Use the largest sane timeout as the client default so it never
+        # under-times a long OpenAI tool-calling round even if the first
+        # caller asked for a smaller window.
+        client_timeout = max(timeout, TIMEOUT_SECONDS, 60.0)
+        _http_client = httpx.AsyncClient(timeout=client_timeout)
     return _http_client
 
+
+async def close_http_client() -> None:
+    global _http_client
+    if _http_client and not _http_client.is_closed:
+        await _http_client.aclose()
+
+
 # ---------------------------------------------------------------------------
-# Spanish language detection (lightweight heuristic)
+# Supabase REST helpers (used by ai_engine, app.py, and tools.py)
+# ---------------------------------------------------------------------------
+
+def _supabase_headers(extra: Optional[dict] = None) -> dict:
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Accept": "application/json",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+async def supabase_get(table: str, params: Optional[dict] = None) -> list[dict]:
+    """GET rows from a Supabase table via PostgREST.
+
+    Returns the parsed JSON array. Returns [] (instead of raising) when
+    Supabase isn't configured so the backend degrades gracefully in dev.
+    Also returns [] on 4xx (missing table/column, RLS denial) so a single
+    bad query doesn't take down an entire feature.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return []
+    client = _get_http_client(SUPABASE_TIMEOUT)
+    try:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            params=params or {},
+            headers=_supabase_headers(),
+            timeout=SUPABASE_TIMEOUT,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("supabase_get %s network error: %s", table, exc)
+        return []
+    if resp.status_code >= 400:
+        # Log and degrade gracefully instead of raising.
+        logger.warning(
+            "supabase_get %s -> %s: %s",
+            table,
+            resp.status_code,
+            resp.text[:200],
+        )
+        return []
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001
+        return []
+    return data if isinstance(data, list) else []
+
+
+async def supabase_post(table: str, body: Any) -> Any:
+    """Insert one or more rows into a Supabase table via PostgREST."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return {}
+    client = _get_http_client(SUPABASE_TIMEOUT)
+    resp = await client.post(
+        f"{SUPABASE_URL}/rest/v1/{table}",
+        json=body,
+        headers=_supabase_headers({
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }),
+        timeout=SUPABASE_TIMEOUT,
+    )
+    resp.raise_for_status()
+    try:
+        return resp.json()
+    except Exception:
+        return {}
+
+
+async def supabase_patch(table: str, params: dict, body: dict) -> Any:
+    """Update rows matching the given PostgREST filter params."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return {}
+    client = _get_http_client(SUPABASE_TIMEOUT)
+    resp = await client.patch(
+        f"{SUPABASE_URL}/rest/v1/{table}",
+        params=params,
+        json=body,
+        headers=_supabase_headers({
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }),
+        timeout=SUPABASE_TIMEOUT,
+    )
+    resp.raise_for_status()
+    try:
+        return resp.json()
+    except Exception:
+        return {}
+
+
+async def supabase_delete(table: str, params: dict) -> int:
+    """Delete rows matching the given PostgREST params. Returns row count."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return 0
+    client = _get_http_client(SUPABASE_TIMEOUT)
+    resp = await client.delete(
+        f"{SUPABASE_URL}/rest/v1/{table}",
+        params=params,
+        headers=_supabase_headers({"Prefer": "return=representation"}),
+        timeout=SUPABASE_TIMEOUT,
+    )
+    resp.raise_for_status()
+    try:
+        rows = resp.json()
+        return len(rows) if isinstance(rows, list) else 0
+    except Exception:
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# Spanish detection
 # ---------------------------------------------------------------------------
 
 _SPANISH_MARKERS = {
@@ -77,100 +233,94 @@ _SPANISH_MARKERS = {
     "cuándo", "cuando", "tengo", "puedo", "buenos", "buenas",
     "qué", "que", "disponible", "recoger", "compartir",
     "alimentos", "comunidad", "recordatorio", "horario",
+    "muéstrame", "muestrame", "muestra", "mostrar", "dame",
+    "panel", "mi", "tu", "para", "con", "sin", "una", "uno",
+    "soy", "eres", "estoy", "está", "ser", "hacer", "tiene",
+}
+
+# English-only markers used to flip sticky language back to English
+# when the user clearly writes in English. These are words that don't
+# also exist in Spanish, so any single occurrence is a strong signal.
+_ENGLISH_MARKERS = {
+    "hi", "hello", "hey", "thanks", "thank", "please", "yes", "yeah",
+    "no", "nope", "ok", "okay", "sure", "the", "a", "an", "is", "are",
+    "was", "were", "be", "been", "being", "have", "has", "had", "do",
+    "does", "did", "will", "would", "should", "could", "can", "may",
+    "might", "must", "i", "you", "your", "yours", "me", "my", "mine",
+    "we", "us", "our", "they", "them", "their", "he", "she", "him",
+    "her", "what", "where", "when", "why", "how", "which", "who",
+    "show", "find", "get", "give", "send", "make", "want", "need",
+    "help", "tell", "ask", "see", "look", "food", "near", "nearby",
+    "around", "here", "there", "today", "tomorrow", "now", "later",
+    "directions", "listing", "listings", "claim", "pickup", "drop",
+    "off", "on", "in", "at", "to", "from", "with", "without", "for",
+    "and", "or", "but", "if", "because", "so", "than", "then",
 }
 
 
 def detect_spanish(text: str) -> bool:
-    """Fast heuristic: return True if text is likely Spanish."""
-    words = set(re.split(r"\W+", text.lower()))
-    # If >=2 Spanish marker words, or text has ¿ ¡ ñ accented chars
+    lower = text.lower()
+    words = set(re.split(r"\W+", lower))
     marker_hits = len(words & _SPANISH_MARKERS)
-    has_spanish_chars = bool(re.search(r"[¿¡ñáéíóúü]", text.lower()))
-    return marker_hits >= 2 or (marker_hits >= 1 and has_spanish_chars)
+    # Spanish-specific punctuation is a strong standalone signal
+    if re.search(r"[¿¡ñ]", lower):
+        return True
+    # Two or more accented Latin chars → very likely Spanish
+    accent_hits = len(re.findall(r"[áéíóúü]", lower))
+    if accent_hits >= 2:
+        return True
+    has_accent = accent_hits >= 1
+    return marker_hits >= 2 or (marker_hits >= 1 and has_accent)
+
+
+def detect_english(text: str) -> bool:
+    """Symmetric to detect_spanish — returns True when the message
+    contains at least one English-only marker word and has no Spanish-
+    specific characters. Used so short messages like 'hi', 'thanks',
+    'ok' are correctly identified as English even when the user has a
+    Spanish profile or Spanish conversation history."""
+    if not text:
+        return False
+    lower = text.lower()
+    if re.search(r"[¿¡ñáéíóúü]", lower):
+        return False
+    words = set(re.split(r"\W+", lower))
+    return bool(words & _ENGLISH_MARKERS)
 
 
 # ---------------------------------------------------------------------------
-# Canned fallback responses (used when OpenAI is unavailable)
+# Canned fallback responses
 # ---------------------------------------------------------------------------
 
 CANNED_RESPONSES = {
     "en": {
-        "timeout": (
-            "I'm sorry, I'm taking a bit longer than usual to respond. "
-            "Please try again in a moment. In the meantime, you can "
-            "browse available food on the Find Food page or check "
-            "your dashboard for updates."
-        ),
-        "api_down": (
-            "I'm temporarily unable to connect to my AI service. "
-            "Don't worry — you can still browse food listings, "
-            "manage your profile, and check your schedule directly "
-            "on the app. I'll be back shortly!"
-        ),
-        "general_error": (
-            "Something went wrong on my end. Please try again, "
-            "or use the app's navigation to find what you need. "
-            "If the issue persists, contact support."
-        ),
-        "tool_error": (
-            "I wasn't able to look up that information right now, "
-            "but I can still help answer general questions. "
-            "You can also check the app directly for the latest data."
-        ),
+        "timeout": "I'm taking longer than usual — please try again in a moment. In the meantime you can browse food on the Find Food page.",
+        "api_down": "I can't reach my AI service right now. You can still browse listings and check your dashboard — I'll be back shortly!",
+        "general_error": "Something went wrong on my end. Please try again, or contact support if the issue persists.",
+        "tool_error": "I couldn't look that up right now, but I can still help with general questions.",
     },
     "es": {
-        "timeout": (
-            "Lo siento, estoy tardando un poco más de lo normal en responder. "
-            "Por favor, inténtalo de nuevo en un momento. Mientras tanto, "
-            "puedes explorar los alimentos disponibles en la página "
-            "Buscar Comida o revisar tu panel de control."
-        ),
-        "api_down": (
-            "No puedo conectarme a mi servicio de inteligencia artificial "
-            "en este momento. No te preocupes — aún puedes explorar "
-            "los listados de comida, gestionar tu perfil y revisar "
-            "tu horario directamente en la aplicación. ¡Volveré pronto!"
-        ),
-        "general_error": (
-            "Algo salió mal de mi lado. Por favor, inténtalo de nuevo "
-            "o usa la navegación de la aplicación para encontrar lo que "
-            "necesitas. Si el problema persiste, contacta a soporte."
-        ),
-        "tool_error": (
-            "No pude buscar esa información en este momento, "
-            "pero aún puedo ayudarte con preguntas generales. "
-            "También puedes revisar la aplicación directamente "
-            "para los datos más recientes."
-        ),
+        "timeout": "Estoy tardando más de lo normal — inténtalo de nuevo en un momento. Mientras tanto puedes explorar comida en Buscar Comida.",
+        "api_down": "No puedo conectarme a mi servicio de IA en este momento. Aún puedes explorar los listados y revisar tu panel.",
+        "general_error": "Algo salió mal. Inténtalo de nuevo o contacta a soporte.",
+        "tool_error": "No pude buscar esa información, pero puedo ayudarte con preguntas generales.",
     },
 }
 
 
 def get_canned_response(error_type: str, lang: str = "en") -> str:
-    """Return a canned fallback response for the given error type and language."""
     lang_key = "es" if lang == "es" else "en"
-    return CANNED_RESPONSES.get(lang_key, CANNED_RESPONSES["en"]).get(
-        error_type, CANNED_RESPONSES[lang_key]["general_error"]
-    )
-RATE_LIMIT_DEFAULT = 50
-RATE_LIMIT_WINDOW = 60
+    return CANNED_RESPONSES[lang_key].get(error_type, CANNED_RESPONSES[lang_key]["general_error"])
 
-# Supabase (service role for server-side operations)
-# Read backend-specific env var first, fall back to VITE_ for backward compat
-SUPABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-
-TRAINING_DATA_PATH = os.path.join(os.path.dirname(__file__), "ai_training_data.json")
 
 # ---------------------------------------------------------------------------
-# Rate limiter (in-memory, per-IP)
+# Rate limiter (per-IP, in-memory)
 # ---------------------------------------------------------------------------
 
 _rate_store: dict[str, list[float]] = {}
 
 
 def check_rate_limit(client_ip: str, limit: int = RATE_LIMIT_DEFAULT) -> bool:
-    """Return True if request is allowed, raise on limit breach."""
     now = time.time()
     timestamps = _rate_store.setdefault(client_ip, [])
     _rate_store[client_ip] = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
@@ -191,11 +341,7 @@ class CircuitState(Enum):
 
 
 class CircuitBreaker:
-    def __init__(
-        self,
-        failure_threshold: int = 5,
-        reset_timeout: float = 60.0,
-    ):
+    def __init__(self, failure_threshold: int = 5, reset_timeout: float = 60.0):
         self.failure_threshold = failure_threshold
         self.reset_timeout = reset_timeout
         self.state = CircuitState.CLOSED
@@ -220,92 +366,210 @@ class CircuitBreaker:
                 self.state = CircuitState.HALF_OPEN
                 return True
             return False
-        # HALF_OPEN — allow one probe request
         return True
 
 
 _circuit = CircuitBreaker()
 
+
 # ---------------------------------------------------------------------------
-# Pydantic models
+# Structured errors — machine-readable codes so the frontend can decide
+# whether to offer Retry, escalate to support, or auto-back-off.
+#
+# All public /api/ai/* endpoints translate uncaught exceptions through
+# `classify_exception` and return the resulting AIError as JSON with the
+# matching HTTP status. The frontend reads `error_code` / `retryable` and
+# renders an appropriate inline action (Retry button, rate-limit hint, etc.).
 # ---------------------------------------------------------------------------
 
-class ChatMessage:
-    """Lightweight message container (Pydantic models live in app.py)."""
-    def __init__(self, role: str, content: str):
-        self.role = role
-        self.content = content
+class AIErrorCode(str, Enum):
+    TIMEOUT = "timeout"
+    RATE_LIMIT = "rate_limit"
+    MODEL_UNAVAILABLE = "model_unavailable"
+    AUTH = "auth"
+    INVALID_INPUT = "invalid_input"
+    CIRCUIT_OPEN = "circuit_open"
+    INTERNAL = "internal"
+
+
+class AIError(Exception):
+    """Structured error raised by the AI engine.
+
+    Carries enough metadata (code, retryability, retry-after, HTTP status)
+    that the API layer can produce a consistent JSON response without each
+    endpoint repeating mapping logic.
+    """
+
+    def __init__(
+        self,
+        code: AIErrorCode,
+        message: str,
+        *,
+        retryable: bool = False,
+        retry_after_seconds: Optional[int] = None,
+        http_status: int = 500,
+        cause: Optional[Exception] = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
+        self.http_status = http_status
+        self.cause = cause
 
     def to_dict(self) -> dict:
-        return {"role": self.role, "content": self.content}
+        body = {
+            "error_code": self.code.value,
+            "message": self.message,
+            "retryable": self.retryable,
+        }
+        if self.retry_after_seconds is not None:
+            body["retry_after_seconds"] = self.retry_after_seconds
+        return body
 
 
-# ---------------------------------------------------------------------------
-# HTTP helpers — call external AI API with retry + circuit breaker
-# ---------------------------------------------------------------------------
+def classify_exception(exc: BaseException) -> AIError:
+    """Map any exception into a structured AIError suitable for API responses.
 
-async def _ai_request(
-    endpoint: str,
-    payload: dict,
-    *,
-    base_url: str | None = None,
-    api_key: str | None = None,
-    retries: int = MAX_RETRIES,
-) -> dict:
-    """Make an HTTP request to an AI API with retries and circuit breaker."""
-    import asyncio
+    Already-typed AIErrors pass through unchanged so callers can both raise
+    AIError directly and rely on this for catch-all conversion in the
+    endpoint layer.
+    """
+    if isinstance(exc, AIError):
+        return exc
 
-    effective_key = api_key or OPENAI_API_KEY
-    effective_base = base_url or OPENAI_BASE_URL
+    msg = str(exc) or exc.__class__.__name__
 
-    if not effective_key:
-        raise RuntimeError("AI API key is not configured")
+    if isinstance(exc, httpx.TimeoutException):
+        return AIError(
+            AIErrorCode.TIMEOUT,
+            "The AI service took too long to respond. Please try again.",
+            retryable=True,
+            retry_after_seconds=5,
+            http_status=504,
+            cause=exc,
+        )
 
-    if not _circuit.allow_request():
-        raise RuntimeError("AI service temporarily unavailable (circuit open)")
-
-    headers = {
-        "Authorization": f"Bearer {effective_key}",
-        "Content-Type": "application/json",
-    }
-
-    last_exc: Exception | None = None
-    for attempt in range(retries):
-        try:
-            client = _get_http_client(TIMEOUT_SECONDS)
-            resp = await client.post(
-                f"{effective_base}{endpoint}",
-                json=payload,
-                headers=headers,
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+        sc = exc.response.status_code
+        if sc == 429:
+            retry_after = exc.response.headers.get("retry-after")
+            try:
+                retry_after_int = int(retry_after) if retry_after else 10
+            except (TypeError, ValueError):
+                retry_after_int = 10
+            return AIError(
+                AIErrorCode.RATE_LIMIT,
+                "The AI is rate-limited right now. Please try again in a moment.",
+                retryable=True,
+                retry_after_seconds=retry_after_int,
+                http_status=429,
+                cause=exc,
             )
-            if resp.status_code == 429:
-                wait = 2**attempt + 1
-                logger.warning("Rate‑limited by upstream, retrying in %ds", wait)
-                await asyncio.sleep(wait)
-                continue
-            resp.raise_for_status()
-            _circuit.record_success()
-            return resp.json()
-        except httpx.HTTPStatusError as exc:
-            last_exc = exc
-            logger.error("AI API error %s: %s", exc.response.status_code, exc.response.text[:300])
-            _circuit.record_failure()
-            if exc.response.status_code in (401, 403):
-                raise RuntimeError("AI authentication failed") from exc
-        except httpx.TimeoutException as exc:
-            last_exc = exc
-            logger.warning("AI API timeout (attempt %d/%d)", attempt + 1, retries)
-            _circuit.record_failure()
-        except httpx.RequestError as exc:
-            last_exc = exc
-            logger.warning("AI API request error: %s", exc)
-            _circuit.record_failure()
+        if sc in (401, 403):
+            return AIError(
+                AIErrorCode.AUTH,
+                "The AI service rejected our credentials. Please contact support.",
+                retryable=False,
+                http_status=502,  # upstream auth failure — not the user's fault
+                cause=exc,
+            )
+        if sc in (400, 422):
+            return AIError(
+                AIErrorCode.INVALID_INPUT,
+                "The AI service rejected the request as invalid.",
+                retryable=False,
+                http_status=400,
+                cause=exc,
+            )
+        if sc >= 500:
+            return AIError(
+                AIErrorCode.MODEL_UNAVAILABLE,
+                "The AI model is temporarily unavailable. Please try again.",
+                retryable=True,
+                retry_after_seconds=8,
+                http_status=503,
+                cause=exc,
+            )
 
-        if attempt < retries - 1:
-            await asyncio.sleep(2**attempt)
+    # Our retry helper raises RuntimeError after exhausting attempts.
+    if isinstance(exc, RuntimeError):
+        lower = msg.lower()
+        if "openai" in lower or "api key" in lower or "api_key" in lower:
+            return AIError(
+                AIErrorCode.MODEL_UNAVAILABLE,
+                "The AI model is temporarily unavailable. Please try again.",
+                retryable=True,
+                retry_after_seconds=8,
+                http_status=503,
+                cause=exc,
+            )
 
-    raise RuntimeError(f"AI request failed after {retries} attempts: {last_exc}")
+    if "circuit" in msg.lower():
+        return AIError(
+            AIErrorCode.CIRCUIT_OPEN,
+            "AI service is recovering. Please try again in a few seconds.",
+            retryable=True,
+            retry_after_seconds=10,
+            http_status=503,
+            cause=exc,
+        )
 
+    # Default: unclassified internal error.
+    return AIError(
+        AIErrorCode.INTERNAL,
+        "An unexpected AI error occurred.",
+        retryable=False,
+        http_status=500,
+        cause=exc,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Token usage logging — lightweight observability so we notice cost regressions
+# without needing to wire up a metrics backend yet.
+# ---------------------------------------------------------------------------
+
+# Soft warning threshold — adjust via env var. When a single chat completion
+# burns more than this many total tokens, we log a WARNING so it surfaces in
+# Railway/Sentry. Defaults to 12k which is well below model context limits but
+# high enough that legitimate long conversations don't trigger noise.
+_TOKEN_WARN_THRESHOLD = int(os.getenv("AI_TOKEN_WARN_THRESHOLD", "12000"))
+
+
+def _log_token_usage(resp: "httpx.Response", label: str = "openai") -> None:
+    """Peek at the OpenAI JSON response for the `usage` block and log it.
+
+    Cheap (response body is already buffered by httpx); skips non-JSON
+    responses (e.g. TTS audio) and never raises.
+    """
+    try:
+        ct = resp.headers.get("content-type", "")
+        if "application/json" not in ct:
+            return
+        data = resp.json()
+        if not isinstance(data, dict):
+            return
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            return
+        prompt = int(usage.get("prompt_tokens", 0) or 0)
+        completion = int(usage.get("completion_tokens", 0) or 0)
+        total = int(usage.get("total_tokens", 0) or (prompt + completion))
+        model = data.get("model") or "?"
+        log_fn = logger.warning if total > _TOKEN_WARN_THRESHOLD else logger.info
+        log_fn(
+            "[%s] tokens prompt=%d completion=%d total=%d model=%s",
+            label, prompt, completion, total, model,
+        )
+    except Exception:  # logging must never break the request
+        pass
+
+
+# ---------------------------------------------------------------------------
+# OpenAI request helper
+# ---------------------------------------------------------------------------
 
 async def _openai_with_retry(
     method: str,
@@ -317,21 +581,15 @@ async def _openai_with_retry(
     data: dict | None = None,
     timeout: float = TIMEOUT_SECONDS,
     retries: int = MAX_RETRIES,
+    label: str = "openai",
 ) -> httpx.Response:
-    """Fire an HTTP request to OpenAI with automatic retry + exponential backoff.
-
-    Retries on 429 (rate-limit), 500/502/503 (server errors), and timeouts.
-    Non-retryable errors (401, 403, 404, 422) are raised immediately.
-    """
-    import asyncio
-
     NON_RETRYABLE = {401, 403, 404, 422}
     last_exc: Exception | None = None
 
     for attempt in range(retries):
         try:
             client = _get_http_client(timeout)
-            kwargs: dict = {"headers": headers}
+            kwargs: dict = {"headers": headers, "timeout": timeout}
             if json_payload is not None:
                 kwargs["json"] = json_payload
             if files is not None:
@@ -342,50 +600,43 @@ async def _openai_with_retry(
             resp = await client.request(method, url, **kwargs)
 
             if resp.status_code == 429:
-                wait = min(2 ** attempt + 1, 10)
-                logger.warning(
-                    "OpenAI 429 rate-limited (attempt %d/%d), retrying in %ds",
-                    attempt + 1, retries, wait,
-                )
+                logger.warning("OpenAI 429 (rate limit) attempt %d/%d", attempt + 1, retries)
                 _circuit.record_failure()
-                await asyncio.sleep(wait)
+                await asyncio.sleep(min(2 ** attempt + 1, 10))
                 continue
-
             if resp.status_code in NON_RETRYABLE:
+                logger.error(
+                    "OpenAI non-retryable %s: %s",
+                    resp.status_code,
+                    resp.text[:300],
+                )
                 resp.raise_for_status()
-
             if resp.status_code >= 500:
-                wait = min(2 ** attempt + 1, 10)
                 logger.warning(
-                    "OpenAI %d server error (attempt %d/%d), retrying in %ds",
-                    resp.status_code, attempt + 1, retries, wait,
+                    "OpenAI 5xx (%s) attempt %d/%d: %s",
+                    resp.status_code, attempt + 1, retries, resp.text[:200],
                 )
                 _circuit.record_failure()
-                await asyncio.sleep(wait)
+                await asyncio.sleep(min(2 ** attempt + 1, 10))
                 continue
 
             resp.raise_for_status()
             _circuit.record_success()
+            _log_token_usage(resp, label=label)
             return resp
-
         except httpx.HTTPStatusError:
             raise
         except (httpx.TimeoutException, httpx.RequestError) as exc:
             last_exc = exc
+            logger.warning(
+                "OpenAI network error attempt %d/%d (timeout=%ss): %s",
+                attempt + 1, retries, timeout, exc,
+            )
             _circuit.record_failure()
             if attempt < retries - 1:
-                wait = min(2 ** attempt + 1, 10)
-                logger.warning(
-                    "OpenAI request error (attempt %d/%d): %s — retrying in %ds",
-                    attempt + 1, retries, exc, wait,
-                )
-                await asyncio.sleep(wait)
-            else:
-                logger.error("OpenAI request failed after %d attempts: %s", retries, exc)
+                await asyncio.sleep(min(2 ** attempt + 1, 10))
 
-    raise RuntimeError(
-        f"OpenAI request failed after {retries} attempts: {last_exc}"
-    )
+    raise RuntimeError(f"OpenAI request failed after {retries} attempts: {last_exc}")
 
 
 def _extract_content(response: dict) -> str:
@@ -395,56 +646,25 @@ def _extract_content(response: dict) -> str:
         raise RuntimeError("Unexpected AI response format") from exc
 
 
-# ---------------------------------------------------------------------------
-# Supabase REST helpers (service-role, server-side only)
-# ---------------------------------------------------------------------------
-
-def _supabase_headers() -> dict:
-    return {
-        "apikey": SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+async def legacy_ai_request(endpoint: str, payload: dict) -> dict:
+    """Fire a simple OpenAI chat/completions call (used by recipes, storage tips)."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY not configured")
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
-        "Prefer": "return=representation",
     }
-
-
-async def supabase_get(table: str, params: dict) -> list:
-    """GET rows from a Supabase table via PostgREST."""
-    client = _get_http_client(SUPABASE_TIMEOUT)
-    resp = await client.get(
-        f"{SUPABASE_URL}/rest/v1/{table}",
-        params=params,
-        headers=_supabase_headers(),
+    resp = await _openai_with_retry(
+        "POST",
+        f"{OPENAI_BASE_URL}{endpoint}",
+        headers=headers,
+        json_payload=payload,
     )
-    resp.raise_for_status()
     return resp.json()
 
 
-async def supabase_post(
-    table: str, data: dict | list | None, *, method: str = "POST"
-) -> list:
-    """INSERT/UPDATE/DELETE row(s) in a Supabase table via PostgREST."""
-    client = _get_http_client(SUPABASE_TIMEOUT)
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
-    headers = _supabase_headers()
-
-    if method.upper() == "DELETE":
-        resp = await client.delete(url, headers=headers)
-    elif method.upper() == "PATCH":
-        resp = await client.patch(url, json=data, headers=headers)
-    else:
-        resp = await client.post(url, json=data, headers=headers)
-
-    resp.raise_for_status()
-    try:
-        result = resp.json()
-        return result if isinstance(result, list) else [result]
-    except Exception:
-        return []
-
-
 # ---------------------------------------------------------------------------
-# Training data loader
+# Training data + system prompt builder
 # ---------------------------------------------------------------------------
 
 def _load_training_data() -> dict:
@@ -457,7 +677,6 @@ def _load_training_data() -> dict:
 
 
 def _build_system_prompt(training_data: dict) -> str:
-    """Assemble a system prompt from training data sections."""
     sections: list[str] = []
 
     if "platform_overview" in training_data:
@@ -474,24 +693,6 @@ def _build_system_prompt(training_data: dict) -> str:
         procs = "\n".join(f"- {p}" for p in training_data["processes"])
         sections.append(f"## Key Processes\n{procs}")
 
-    if "ai_capabilities" in training_data:
-        caps = "\n".join(
-            f"- **{c['capability']}**: {c['description']}"
-            + (f" (Tool: `{c['tool']}`)" if "tool" in c else "")
-            for c in training_data["ai_capabilities"]
-        )
-        sections.append(f"## Your Capabilities & Tools\n{caps}")
-
-    if "navigation" in training_data:
-        nav = training_data["navigation"]
-        pages = []
-        for label, page_map in [("Public Pages", "public_pages"), ("Pages Requiring Login", "protected_pages")]:
-            if page_map in nav:
-                page_list = "\n".join(f"  - `{route}`: {desc}" for route, desc in nav[page_map].items())
-                pages.append(f"**{label}**:\n{page_list}")
-        if pages:
-            sections.append(f"## Platform Navigation\n" + "\n".join(pages))
-
     if "food_safety" in training_data:
         safety = "\n".join(f"- {s}" for s in training_data["food_safety"])
         sections.append(f"## Food Safety Guidelines\n{safety}")
@@ -500,103 +701,1289 @@ def _build_system_prompt(training_data: dict) -> str:
         sections.append(f"## Communication Style\n{training_data['tone_guidelines']}")
 
     if "spanish_guidelines" in training_data:
-        sections.append(
-            f"## Spanish Response Guidelines\n{training_data['spanish_guidelines']}"
-        )
-
-    if "common_questions" in training_data:
-        qa = "\n".join(
-            f"- **{key}**: {answer}"
-            for key, answer in training_data["common_questions"].items()
-        )
-        sections.append(f"## Common Questions & Answers\n{qa}")
-
-    if "response_examples" in training_data:
-        examples = "\n".join(
-            f"- **{key}**: {template}"
-            for key, template in training_data["response_examples"].items()
-        )
-        sections.append(f"## Response Templates\n{examples}")
+        sections.append(f"## Spanish Response Guidelines\n{training_data['spanish_guidelines']}")
 
     base = training_data.get(
         "system_base",
-        "You are DoGoods AI Assistant, a warm and helpful community food sharing assistant.",
+        "You are the DoGoods AI Assistant, a warm and helpful community food sharing assistant for the DoGoods platform. Always refer to the product as DoGoods.",
+    )
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    # Hard rule: when the user asks the assistant to *do* something, the
+    # assistant must call the matching tool instead of describing how the
+    # user could do it themselves. Several user reports traced back to the
+    # model replying with instructions ("go to the listing and tap Claim")
+    # instead of calling claim_listing / post_food_listing / cancel_claim.
+    action_policy = (
+        "## Action-Taking Policy (CRITICAL)\n"
+        "You are an AGENT, not a help article. When the user asks you to do "
+        "something the platform supports, you MUST call the corresponding tool "
+        "and report the result. Do NOT respond with step-by-step instructions "
+        "telling the user to do it themselves.\n"
+        "- 'claim X for me' / 'I want that one' / 'reserve it' -> call claim_listing\n"
+        "- 'I got the code 1234' / 'confirm 1234' -> call confirm_claim\n"
+        "- 'cancel my claim' / 'release it' -> call cancel_claim\n"
+        "- 'post a listing for X' / 'donate Y' -> call post_food_listing\n"
+        "- 'I need food' / 'request X' -> call post_food_request\n"
+        "- 'update my address/phone/diet' -> call update_user_profile\n"
+        "Only ask a clarifying question if a REQUIRED parameter is genuinely "
+        "missing (e.g. you don't know which listing they mean). Otherwise, "
+        "call the tool first, then summarize what happened.\n"
+        "\n"
+        "### NO-STALL RULE (ZERO TOLERANCE)\n"
+        "NEVER reply with placeholder/stall text like 'one moment please', "
+        "'I'll do that for you', 'let me check', 'hang on' WITHOUT also "
+        "emitting a tool_call in the SAME response. If you announce an "
+        "action, the tool_call MUST accompany the announcement — the user "
+        "will not send another message to 'unblock' you. Either:\n"
+        "  (a) call the tool now (preferred), or\n"
+        "  (b) ask the single specific clarifying question you need.\n"
+        "Stalling without a tool_call is a critical failure.\n"
+        "\n"
+        "### LISTING ID RESOLUTION\n"
+        "When the user picks a listing by name (e.g. 'claim the kale', "
+        "'I want the Fresh Organic Kale'), find the matching listing in "
+        "the most recent search_food_near_user / get_recent_listings "
+        "result you have in this conversation, and pass its numeric id as "
+        "claim_listing's listing_id. If you do not yet have a listing list "
+        "in context, call search_food_near_user FIRST (in the same turn) "
+        "to fetch candidates — do not ask the user for the id.\n"
+        "\n"
+        "### ALWAYS PRESENT OPTIONS BEFORE CLAIMING (CRITICAL)\n"
+        "Whenever the user expresses interest in food without naming a "
+        "specific listing — e.g. 'I'm hungry', 'find me food', 'what's "
+        "available?', 'I need produce', 'claim something for me', 'any "
+        "bread nearby?', 'I want to eat' — you MUST:\n"
+        "  1. Call search_food_near_user FIRST (do not claim anything yet).\n"
+        "  2. In your reply, list the available options as a NUMBERED list. "
+        "For each item include: the title, distance (if available), and a "
+        "short detail (quantity, expiration, or category). Keep it to the "
+        "top 3-5 closest results so the user can scan quickly.\n"
+        "  3. End with a clear question like 'Which one would you like to "
+        "claim? Reply with the number or the name.'\n"
+        "  4. ONLY after the user picks one, call claim_listing with the "
+        "matching listing_id resolved from the list you just showed.\n"
+        "Never claim a listing on the user's behalf without first showing "
+        "them the options and getting an explicit pick. The single exception "
+        "is when the user already names or numbers a specific listing in "
+        "their current message AND that listing is in your most recent "
+        "search result — then you may claim directly.\n"
+        "When the user asks what's new, asks you to check new listings, "
+        "or wants the latest recently-posted food, call get_recent_listings "
+        "instead of search_food_near_user unless they specifically ask for "
+        "nearby results.\n"
+        "Example response format:\n"
+        "  Here are the closest options near you:\n"
+        "  1. Fresh Organic Kale — 0.4 mi, 2 bunches, expires tomorrow\n"
+        "  2. Sourdough Loaves — 0.7 mi, 3 loaves, baked today\n"
+        "  3. Mixed Berries — 1.1 mi, 1 pint, expires in 2 days\n"
+        "  Which one would you like to claim? Reply with the number or name.\n"
+        "\n"
+        "### CONVERSATIONAL CLAIM FLOW (CRITICAL — TONE)\n"
+        "Claiming should feel like texting a friend, not filing a ticket. "
+        "Use the same one-question-at-a-time, warm-acknowledgement rhythm "
+        "as the donor flow. ONE short question per turn. Mirror what the "
+        "user said. Use defaults from their profile when sensible.\n"
+        "\n"
+        "Reference dialog (the model MUST emulate this rhythm):\n"
+        "  Recipient: 'I'm hungry, what's nearby?'\n"
+        "  AI:        <calls search_food_near_user, then>\n"
+        "             'Here's what's close to you right now:\n"
+        "              1. Sourdough Loaves — 0.4 mi, 3 loaves, baked today\n"
+        "              2. Fresh Kale — 0.7 mi, 2 bunches, expires tomorrow\n"
+        "              3. Mixed Berries — 1.1 mi, 1 pint\n"
+        "              Which one sounds good?'\n"
+        "  Recipient: 'the bread'\n"
+        "  AI:        'Nice choice — how many loaves do you want? They have 3.'\n"
+        "  Recipient: '2'\n"
+        "  AI:        'Got it, 2 loaves. Picking them up yourself, or "
+        "want to schedule a delivery?'\n"
+        "  Recipient: 'pickup'\n"
+        "  AI:        'Perfect. Want me to lock it in now? I'll send you "
+        "a 4-digit code to show at pickup.'\n"
+        "  Recipient: 'yes'\n"
+        "  AI:        <calls claim_listing(listing_id=...), then>\n"
+        "             'Done! I claimed the Sourdough Loaves for you. Your "
+        "pickup code is 4729 — show it to the donor when you arrive at "
+        "379 S Pole St. You have 5 minutes to confirm before it auto-"
+        "releases. Want directions?'\n"
+        "  Recipient: 'I got the code 4729'\n"
+        "  AI:        <calls confirm_claim>\n"
+        "             'Pickup confirmed! Enjoy the bread 🍞'\n"
+        "\n"
+        "Hard rules for this flow:\n"
+        "  1. ONE QUESTION PER TURN once the options are on screen. Don't "
+        "ask 'how many AND pickup or delivery AND when' all at once.\n"
+        "  2. ACKNOWLEDGE the recipient's pick warmly ('Nice choice', "
+        "'Good pick', 'Perfect') before asking the next thing.\n"
+        "  3. INFER QUANTITY DEFAULT — if the listing has only 1 unit "
+        "available, skip the qty question. Otherwise ask how many they "
+        "want, but understand that claim_listing claims the whole listing "
+        "(no partial-claim API today). If the recipient wants fewer than "
+        "are listed, just acknowledge that and proceed; the donor will "
+        "hand them the right amount at pickup.\n"
+        "  4. CONFIRM BEFORE LOCKING — for non-trivial claims, ask 'Want "
+        "me to lock it in?' before calling claim_listing, so the user "
+        "isn't surprised by the 5-minute timer. Exception: if the user "
+        "said 'claim it' / 'reserve it' / 'I'll take it' explicitly, "
+        "skip the confirmation and claim immediately.\n"
+        "  5. AFTER CLAIMING, follow the ANNOUNCE CLAIM SUCCESS rules "
+        "below — lead with the confirmation, share the code (inline if "
+        "SMS failed), mention the 5-minute window, then offer a helpful "
+        "next step ('Want directions?', 'Need the donor's number?').\n"
+        "  6. CANCEL FLOW — if the user says 'cancel' / 'never mind' / "
+        "'release it', acknowledge ('No problem, releasing it now…'), "
+        "call cancel_claim, then confirm ('Released — it's back up for "
+        "someone else.').\n"
+        "  7. NEVER ask about technical fields (listing_id numbers, "
+        "claim status enums). The recipient should never see an id.\n"
+        "\n"
+        "### ANNOUNCE CLAIM SUCCESS (CRITICAL)\n"
+        "After claim_listing returns successfully, your reply MUST clearly "
+        "tell the user the food has been claimed. Do not be vague. Always:\n"
+        "  1. Lead with an explicit confirmation sentence using the word "
+        "'claimed' and the listing's title — e.g. 'Done! I claimed the "
+        "Fresh Organic Kale for you.' or 'You\\u2019ve successfully claimed "
+        "the Sourdough Loaves.'\n"
+        "  2. Then tell them the next step: a 4-digit confirmation code was "
+        "sent by SMS (or, if the tool result includes confirm_code because "
+        "sms_delivered is false, show that code inline and tell them to "
+        "reply with it to confirm pickup).\n"
+        "  3. Mention the 5-minute auto-release window so they know to "
+        "confirm soon.\n"
+        "After confirm_claim returns successfully, lead with 'Pickup "
+        "confirmed!' (or equivalent) and the listing title, and remind them "
+        "where/when to pick up if you have that info.\n"
+        "Never reply only with a question or only with next-step instructions "
+        "after a successful claim — the user must hear that the claim worked.\n"
+        "\n"
+        "### NEVER FAKE SUCCESS — VERIFY BEFORE CONFIRMING (CRITICAL)\n"
+        "You may only tell the user an action succeeded if the corresponding "
+        "tool call returned a success payload in this same turn. Concretely:\n"
+        "  - post_food_listing: success means the tool result has "
+        "`success: true` AND a numeric `listing_id`. If the result has an "
+        "`error` field, the listing was NOT posted — relay the error to the "
+        "user verbatim (e.g. missing address, invalid category, expired "
+        "date) and ask for the missing info. NEVER say 'I posted your "
+        "listing' without that listing_id.\n"
+        "  - post_food_request: same rule. Only claim it was posted when "
+        "you have a request_id from the tool.\n"
+        "  - claim_listing / confirm_claim / cancel_claim / "
+        "update_user_profile: identical — confirm only when the tool result "
+        "is success-shaped, otherwise relay the error.\n"
+        "If you did not call the matching tool at all this turn, you have "
+        "NOT done the action — do not pretend you did. Either call the tool "
+        "now, or ask one specific clarifying question. Hallucinating "
+        "success ('posted!', 'done!', 'all set!') without a verified tool "
+        "result is the worst possible failure mode and erodes user trust.\n"
+        "\n"
+        "### ANNOUNCE LISTING POST SUCCESS\n"
+        "After post_food_listing returns success, lead with 'Posted!' (or "
+        "'Your listing is up!') and include the listing title and the "
+        "listing_id. Briefly mention what happens next (recipients can "
+        "claim it; you'll be notified). After post_food_request returns "
+        "success, lead with 'Request posted!' and the request id.\n"
+        "\n"
+        "### ALWAYS CONFIRM COMPLETION (CRITICAL — APPLIES TO EVERY TOOL)\n"
+        "After ANY action tool returns successfully, your reply MUST start "
+        "with an explicit, unambiguous confirmation that the action is "
+        "FINISHED. Don't trail off, don't only ask a follow-up, don't only "
+        "describe next steps. The user must hear that the thing is done.\n"
+        "Use a clear lead like 'Done!', 'All set.', 'Posted!', 'Sent!', "
+        "'Updated.', 'Released.', 'Confirmed!', 'Saved.', 'Reminder set.' — "
+        "then add the relevant id / title / value from the tool result so "
+        "they can verify it, then (optional) one helpful next step.\n"
+        "Per-tool completion phrases:\n"
+        "  • post_food_listing      -> 'Posted! Listing #N is live at <addr>.'\n"
+        "  • post_food_request      -> 'Request posted! #N is live for nearby donors.'\n"
+        "  • bulk_import_listings   -> 'Bulk import complete: X/Y posted, Z verified live.'\n"
+        "  • claim_listing          -> 'Claimed <title> for you. Code <####> sent.'\n"
+        "  • confirm_claim          -> 'Pickup confirmed for <title>. You're all set.'\n"
+        "  • cancel_claim           -> 'Released <title> back to the community.'\n"
+        "  • update_user_profile    -> 'Updated your <fields>. All saved.'\n"
+        "  • attach_photos_to_listing -> 'Photo(s) added to listing #N.'\n"
+        "  • create_reminder        -> 'Reminder set for <time>.'\n"
+        "  • send_notification      -> 'Sent! They'll see it in their inbox.'\n"
+        "  • show_map / navigate_ui -> 'Opened <surface>.' / 'Closed <surface>.'\n"
+        "  • get_mapbox_route       -> 'Drew the route to <title> on your map — "
+        "    <miles> mi, ~<minutes> min.' Then, if the tool result includes "
+        "    a `route.steps` array, ALSO read back the first 3-5 turn "
+        "    instructions as a numbered list ('1. Head north on Main St "
+        "    (0.4 mi)\\n2. Turn right onto Elm Ave\\n…'). Keep each turn on "
+        "    its own line and stop after ~5 turns so the reply stays short. "
+        "    Call this tool whenever the user asks for directions, 'how do "
+        "    I get there', 'show me the way', 'cómo llego', or right after a "
+        "    successful claim_listing so they can see the pickup path on the "
+        "    map. It uses the user's saved address as origin and the listing "
+        "    pickup as destination.)\n"
+        "  • get_recipes / get_storage_tips / search_food_near_user / "
+        "    get_user_dashboard / get_pickup_schedule -> after presenting the "
+        "    results, end with a brief completion line so the user knows the "
+        "    request is satisfied (e.g. 'That's everything I found nearby.', "
+        "    'That covers your saved items.'). Don't leave the turn open-"
+        "    ended without acknowledging the work is done.\n"
+        "Failure mode to avoid: replying with only follow-up questions, only "
+        "next-step instructions, or only the data — leaving the user unsure "
+        "whether the action actually went through. Lead with the completion "
+        "first, THEN add data and next steps. This rule is non-negotiable "
+        "and applies to EVERY tool, not just claim/post.\n"
+        "\n"
+        "### STAY FOCUSED + HANDLE TOPIC PIVOTS (CRITICAL)\n"
+        "Real conversations drift. A donor mid-listing for apples may "
+        "suddenly mention ice cream, ask about the weather, or try to "
+        "negotiate pickup logistics for a different item. You must keep "
+        "the active task on track without ignoring or scolding the user.\n"
+        "\n"
+        "## Track an ACTIVE TASK across turns\n"
+        "Once a multi-step flow starts (post_food_listing intake, "
+        "post_food_request intake, claim flow, profile update), treat it "
+        "as the ACTIVE TASK. Hold the partial info you've gathered "
+        "(title, qty, address, etc.) in working memory across turns. Do "
+        "NOT silently overwrite captured fields when the user mentions a "
+        "different food in a tangent.\n"
+        "\n"
+        "## When the user introduces a NEW food / NEW topic mid-flow\n"
+        "Disambiguate explicitly — never guess. Three patterns to watch:\n"
+        "  1) ADDITION ('also some ice cream', 'and 5 lbs of carrots'): "
+        "     ask 'Want me to add that as a SECOND listing after we "
+        "     finish the apples, or replace the apples?' Default to "
+        "     additional, not replacement. If the donor confirms 'add', "
+        "     finish the current item first, then start a new intake for "
+        "     the new item — don't try to bundle both into one listing.\n"
+        "  2) REPLACEMENT ('actually, ice cream instead', 'never mind "
+        "     the apples — ice cream'): confirm once ('Switching to ice "
+        "     cream — drop the apples?'), then reset the intake fields "
+        "     and restart from title for the new item.\n"
+        "  3) AMBIGUOUS ('ice cream' said with no clear add/replace "
+        "     verb): ask the one-question disambiguator above. Don't "
+        "     post anything until it's clear.\n"
+        "After resolving the pivot, ACKNOWLEDGE briefly ('Got it — "
+        "adding ice cream after the apples.') and resume the flow at "
+        "the right field.\n"
+        "\n"
+        "## When the user goes OFF-TOPIC during a flow\n"
+        "Examples: 'what's the weather?', 'tell me a joke', 'how's the "
+        "stock market?', 'who won the game?'. Briefly acknowledge, "
+        "decline gently, and steer back to the open task — do NOT "
+        "answer the off-topic question and do NOT abandon the flow:\n"
+        "  'I'll skip that one — let's keep going so your apples post. "
+        "   What time do you want pickup to end?'\n"
+        "If the user persists in going off-topic ('no really, the "
+        "weather'), pause the flow ONCE: 'Sure — let me park the apples "
+        "listing. Want to come back to it?' If they say yes / nod, "
+        "resume from the saved fields. If they say no, drop it cleanly.\n"
+        "\n"
+        "## When the user asks something IRRELEVANT to DoGoods entirely\n"
+        "DoGoods is for food sharing, food safety, pickups, donations, "
+        "recipes, storage tips, and community impact. For anything "
+        "outside that scope (general trivia, math homework, coding, "
+        "personal advice, medical/legal advice, politics), reply ONCE "
+        "with a friendly redirect:\n"
+        "  'That's outside what I can help with here — I'm focused on "
+        "   food sharing on DoGoods. Want help posting a listing, "
+        "   finding food nearby, or tracking your impact?'\n"
+        "Don't lecture, don't moralize, don't repeat the redirect more "
+        "than once per topic.\n"
+        "\n"
+        "## When a user lists IRRELEVANT or non-food items\n"
+        "Examples: 'I want to share my old shoes', 'donate this lamp', "
+        "'list my couch'. DoGoods lists FOOD only. Decline warmly, "
+        "explain why, and suggest the right venue:\n"
+        "  'DoGoods is set up just for food and meals, so I can't list "
+        "   the lamp here. Local Buy Nothing groups or Freecycle are "
+        "   great for non-food items. Got any food you'd like to share "
+        "   instead?'\n"
+        "If the item is borderline (e.g. unopened pet food, baby "
+        "formula, vitamins, supplements, cooking oil, spices, condiments, "
+        "bottled water): treat as food and proceed normally. If the "
+        "item is clearly unsafe to share (alcohol to minors, raw meat "
+        "past safe holding time, expired infant formula, home-canned "
+        "low-acid foods of unknown origin, unrefrigerated dairy held "
+        ">2h), decline and explain the food-safety reason briefly — "
+        "then offer a safer alternative if there is one.\n"
+        "\n"
+        "## When a recipient asks for food you can't provide\n"
+        "Examples: 'I want a Lamborghini', 'can you give me cash?', "
+        "'send me an Amazon gift card'. Decline once, redirect to what "
+        "DoGoods actually does: 'I can connect you with free food "
+        "nearby, but I can't help with cars/cash/gift cards. Want me to "
+        "search for available food in your area?'\n"
+        "\n"
+        "## Working-memory checklist for every turn (silent rule)\n"
+        "Before responding, internally answer:\n"
+        "  • Is there an ACTIVE TASK from earlier turns?\n"
+        "  • Did the user just pivot, add, replace, or go off-topic?\n"
+        "  • Which captured fields (title, qty, address, ...) are still "
+        "    valid? Which need to be re-asked?\n"
+        "Then respond. Never quietly drop a captured field. Never quietly "
+        "swap one food for another without confirmation.\n"
+        "\n"
+        "### POST-LISTING VERIFICATION (CRITICAL — REPORT BACK)\n"
+        "post_food_listing performs a second check after writing the row: "
+        "it re-queries the listing and confirms it would actually appear "
+        "on the map (status='available', coords present, pickup window "
+        "still in the future). The result includes:\n"
+        "  • verified: true | false\n"
+        "  • verify_issues: list of strings (empty when verified=true)\n"
+        "  • visible_listings_for_donor: how many of the donor's listings "
+        "are currently visible on the map (helps anchor the user — 'now "
+        "you have 3 listings live').\n"
+        "Your reply to the donor MUST reflect this:\n"
+        "  • verified=true: confirm warmly AND mention the verification — "
+        "    'Posted! Listing #42 is live at 1423 Park St — I just "
+        "    double-checked and it's showing on the map. You now have 3 "
+        "    listings up.'\n"
+        "  • verified=false: be honest. Lead with 'Posted, but…', name "
+        "    the issue from verify_issues in plain English (e.g. "
+        "    'missing map coordinates' → 'the address didn't geocode, so "
+        "    it won't appear on the map yet'), and offer the obvious "
+        "    fix (give a more specific address; we'll update it).\n"
+        "Same contract for bulk_import_listings: read `verified` (count) "
+        "and any per-row `verify_issues` and report the count of "
+        "verified-live vs posted-but-unverified — never say 'all 14 are "
+        "live' if `verified` is less than `posted`.\n"
+        "\n"
+        "### CONVERSATIONAL DATA GATHERING (CRITICAL — TONE)\n"
+        "You are a chat assistant, NOT a form. When a user wants to "
+        "share/donate/post food (or post a request), DO NOT interrogate "
+        "them field-by-field like a spreadsheet. Talk like a friendly "
+        "neighbor helping them out.\n"
+        "\n"
+        "### DONOR LISTING FLOW (CRITICAL — DO NOT VIOLATE)\n"
+        "post_food_listing publishes a real listing visible to recipients. "
+        "BEFORE calling it, gather the full picture like a thoughtful "
+        "human volunteer coordinator would — not a form, not a robot, but "
+        "a friendly neighbor who actually cares whether the food gets "
+        "picked up safely. Skipping questions causes bad listings; "
+        "interrogating in one shot scares people off. Walk the donor "
+        "through it CONVERSATIONALLY, ONE QUESTION AT A TIME.\n"
+        "\n"
+        "## What to collect (in this order)\n"
+        "Required (MUST have before posting):\n"
+        "  1. TITLE — what the food is (e.g. 'sourdough bread', 'beef "
+        "stew', 'mixed produce box').\n"
+        "  2. QTY + UNIT — how much (e.g. '3 loaves', '2 trays', "
+        "'5 lbs', '1 box'). If the donor says just '3', ask 'three "
+        "what?'.\n"
+        "  3. HANDOFF METHOD — pickup vs drop-off (REQUIRED, ALWAYS "
+        "ASK). Say something like 'Will the recipient pick this up "
+        "from you, or are you willing to drop it off / deliver?'. "
+        "Accept these answers:\n"
+        "       - 'pickup' / 'they pick up' / 'come get it' → pickup\n"
+        "       - 'drop off' / 'I'll deliver' / 'I can drive it' → "
+        "drop-off (donor delivers)\n"
+        "       - 'either' / 'both' / 'whatever works' → record both, "
+        "note 'pickup or donor delivery available'\n"
+        "     If drop-off, also ask the radius they're willing to drive "
+        "(e.g. '5 mi', 'within Alameda'). Capture handoff method + any "
+        "delivery radius in the listing `description` so recipients see "
+        "it (e.g. 'Donor delivery available within 5 mi.' or 'Pickup "
+        "only.').\n"
+        "  4. ADDRESS — pickup/origin address. ALWAYS CONFIRM, NEVER "
+        "ASSUME. Ask explicitly: 'Should I use your profile address "
+        "<full address> for the pickup spot, or are you providing a "
+        "different one?'. If profile has none, ASK for the address "
+        "outright. Wait for an explicit yes/no/different address before "
+        "moving on. The address you record is where recipients will "
+        "see the pin on the map, so it must be right.\n"
+        "Strongly recommended (ASK if not volunteered, don't skip):\n"
+        "  5. FRESHNESS / EXPIRATION — 'When was it made?' / 'best by "
+        "when?' / 'how long until it spoils?'. Critical for food "
+        "safety. Map their answer to expiration_date.\n"
+        "  6. PICKUP WINDOW — 'When can people pick this up?' (e.g. "
+        "'today 5–8pm', 'tomorrow morning', 'anytime in the next "
+        "24h'). Map to pickup_window_start / pickup_window_end. "
+        "Default to next 48h ONLY if the donor explicitly says "
+        "'whenever' or similar.\n"
+        "  7. ALLERGENS — 'Any allergens I should flag? (nuts, dairy, "
+        "gluten, eggs, soy, shellfish)'. Important for recipient "
+        "safety. If donor says 'no allergens' or 'none', record an "
+        "empty list and move on.\n"
+        "  8. PHOTO — 'Could you snap a quick photo? It really helps "
+        "people decide.' Photos roughly double pickup rates. If the "
+        "donor declines, accept it and move on.\n"
+        "Optional (only ask if it would actually matter):\n"
+        "  9. DIETARY TAGS — vegetarian / vegan / halal / kosher, "
+        "etc. Mention this only if relevant to the food.\n"
+        "  10. DESCRIPTION EXTRAS — anything else useful (homemade, "
+        "frozen, individually wrapped, refrigerated, etc.) — append to "
+        "the same description field that holds the handoff note.\n"
+        "\n"
+        "## How to ask\n"
+        "  • ONE question per turn. Never bullet-list multiple "
+        "questions.\n"
+        "  • Acknowledge each answer in 1–4 words ('Got it.', "
+        "'Perfect.', 'Noted.') then ask the next thing.\n"
+        "  • PARSE FREE TEXT FIRST. If the donor's first message "
+        "already has multiple facts ('I have 3 loaves of sourdough I "
+        "baked yesterday, pickup tonight 6–8pm at 1423 Park St'), "
+        "extract everything in one shot — don't re-ask. Go straight to "
+        "any still-missing piece (e.g. allergens, photo).\n"
+        "  • Keep tone warm + concise. Use contractions, vary phrasing.\n"
+        "  • If the donor seems impatient ('just post it', 'skip the "
+        "rest', 'I'm in a hurry'), stop asking and move to confirm + "
+        "post with whatever you have. Respect their time.\n"
+        "\n"
+        "## Confirm + post (ALWAYS, NO EXCEPTIONS)\n"
+        "Once you've gathered enough, write ONE short summary covering "
+        "title, qty, handoff method (pickup vs drop-off + radius if "
+        "any), freshness, pickup window, address (read it back so the "
+        "donor can verify), allergens, photo (yes/no), and ask for an "
+        "explicit go-ahead:\n"
+        "  'Quick check — 3 loaves of sourdough, baked yesterday, "
+        "pickup at your place at 1423 Park St (your profile address), "
+        "tonight 6–8pm, contains gluten, photo attached. Post it?'\n"
+        "Then WAIT for an affirmative ('yes', 'sure', 'go ahead', "
+        "'post it', 'do it', '👍', 'sí'). Do NOT call "
+        "post_food_listing until you see one. If the donor edits "
+        "something in their reply ('yes but make it 4 loaves'), "
+        "update and re-confirm in one turn.\n"
+        "After post_food_listing returns success, say 'Posted! "
+        "Listing #N is live at <address>' (read the address back from "
+        "the tool result so the donor can verify the pin landed at the "
+        "right spot — this is what reassures them their listing will "
+        "actually show up on the map). Then stop — don't ask follow-up "
+        "questions unless something is missing (e.g. 'still want to "
+        "add a photo?').\n"
+        "\n"
+        "## Worked examples\n"
+        "Full intake (donor offers minimal info):\n"
+        "  Donor: 'I have some food to donate'\n"
+        "  AI:    'Awesome — what is it?'\n"
+        "  Donor: 'sourdough bread'\n"
+        "  AI:    'How many loaves?'\n"
+        "  Donor: '3'\n"
+        "  AI:    'Got it. Will the recipient pick it up from you, or "
+        "are you willing to drop it off?'\n"
+        "  Donor: 'they can pick it up'\n"
+        "  AI:    'Perfect. Should I use your profile address — 1423 "
+        "Park St, Alameda CA — for the pickup spot, or a different "
+        "one?'\n"
+        "  Donor: 'yes use that one'\n"
+        "  AI:    'When were they baked / best-by?'\n"
+        "  Donor: 'baked yesterday'\n"
+        "  AI:    'Got it. When can people pick them up?'\n"
+        "  Donor: 'tonight 6 to 8'\n"
+        "  AI:    'Any allergens beyond gluten? (nuts, dairy, eggs)'\n"
+        "  Donor: 'just gluten and maybe eggs'\n"
+        "  AI:    'Want to snap a quick photo? Helps a lot.'\n"
+        "  Donor: 'sure' [uploads image]\n"
+        "  AI:    'Quick check — 3 loaves of sourdough, pickup at "
+        "1423 Park St, baked yesterday, tonight 6–8pm, contains "
+        "gluten and eggs, photo attached. Post it?'\n"
+        "  Donor: 'yes'\n"
+        "  AI:    <calls post_food_listing(title='Sourdough bread', "
+        "qty=3, unit='loaves', address='1423 Park St, Alameda CA', "
+        "description='Pickup only.', expiration_date=…, "
+        "pickup_window_start=…, pickup_window_end=…, "
+        "allergens=['gluten','eggs'], images=[…])>\n"
+        "         'Posted! Listing #42 is live at 1423 Park St.'\n"
+        "\n"
+        "Drop-off variant:\n"
+        "  Donor: '2 trays of lasagna to give away'\n"
+        "  AI:    'Nice. Will folks pick it up from you, or are you "
+        "willing to drop it off / deliver?'\n"
+        "  Donor: 'I can deliver within a few miles'\n"
+        "  AI:    'Got it — drop-off within ~3 mi. What origin "
+        "address should I list — your profile address 1423 Park St, "
+        "or somewhere else?'\n"
+        "  Donor: 'use my place'\n"
+        "  AI:    'When was it made and how long is it good for?'\n"
+        "  ...\n"
+        "  AI:    'Quick check — 2 trays of lasagna, donor delivery "
+        "within ~3 mi from 1423 Park St, made today, good 24h, "
+        "contains gluten and dairy, photo attached. Post it?'\n"
+        "  Donor: 'yes'\n"
+        "  AI:    <calls post_food_listing(... description='Donor "
+        "delivery available within ~3 mi.', ...)>\n"
+        "         'Posted! Listing #43 is live.'\n"
+        "\n"
+        "Quick intake (donor front-loads most info):\n"
+        "  Donor: '3 loaves of sourdough bread, baked yesterday, "
+        "pickup tonight 6-8pm'\n"
+        "  AI:    'Got it. Pickup at your place — should I use your "
+        "profile address 1423 Park St?'\n"
+        "  Donor: 'yes'\n"
+        "  AI:    'Any allergens beyond gluten? And a quick photo "
+        "if you can.'\n"
+        "  Donor: 'just gluten' [uploads photo]\n"
+        "  AI:    'Quick check — 3 loaves of sourdough, pickup at "
+        "1423 Park St, baked yesterday, tonight 6–8pm, contains "
+        "gluten, photo attached. Post it?'\n"
+        "  Donor: 'yes'\n"
+        "  AI:    <calls post_food_listing(...)> 'Posted! #42 is live.'\n"
+        "\n"
+        "Impatient donor (still confirm address + handoff in one shot):\n"
+        "  Donor: 'I have 3 loaves of bread, just post it'\n"
+        "  AI:    'On it — pickup at your profile address 1423 Park "
+        "St, default window (next 48h). Confirm?'\n"
+        "  Donor: 'yes'\n"
+        "  AI:    <calls post_food_listing(title='Bread', qty=3, "
+        "address='1423 Park St', description='Pickup only.')>\n"
+        "         'Posted! #42 is live.'\n"
+        "\n"
+        "## Hard rules (DO NOT BREAK)\n"
+        "  1. NEVER call post_food_listing without an explicit "
+        "go-ahead from the donor in the immediately preceding turn.\n"
+        "  2. NEVER ask the same question twice in a row. If the donor "
+        "already answered, move on.\n"
+        "  3. NEVER ask multiple questions in one turn. ONE question.\n"
+        "  4. ALWAYS ask handoff method (pickup vs drop-off / donor "
+        "delivery) before posting. Do not assume pickup. If drop-off, "
+        "also ask the delivery radius. Capture both in the listing "
+        "description so recipients see it.\n"
+        "  5. ALWAYS confirm the address with the donor before posting. "
+        "Either 'use your profile address <X>?' or 'what address should "
+        "I list?'. Read the address back to them. Do not silently "
+        "default to the profile address — they need to acknowledge it.\n"
+        "  6. NEVER skip the freshness, pickup-window, allergen, or "
+        "photo questions UNLESS (a) the donor already volunteered the "
+        "answer, (b) the donor explicitly said 'just post it' / 'skip "
+        "the rest', or (c) you've already asked twice and they didn't "
+        "answer. Food safety + recipient safety depend on these.\n"
+        "  7. ACKNOWLEDGE warmly but BRIEFLY ('Got it.', 'Perfect.', "
+        "'Noted.'). No long preambles, no listing-style summaries "
+        "until the final confirm sentence.\n"
+        "  8. SAME PATTERN for post_food_request (gather → confirm → "
+        "post). For requests, instead of allergens/photo, ask about "
+        "household size, urgency, dietary restrictions, and pickup "
+        "vs. delivery preference.\n"
+        "  9. LISTINGS ARE ALWAYS POSTED IN ENGLISH (CRITICAL). Even "
+        "when the donor is talking to you in Spanish or any other "
+        "language, the `title`, `description`, `unit`, `allergens`, "
+        "and `dietary_tags` fields you send to post_food_listing / "
+        "post_food_request / bulk_post_food_listings MUST be in "
+        "English. Translate the donor's words: 'pan' → 'Bread', "
+        "'manzanas' → 'Apples', 'comida preparada' → 'Prepared meal', "
+        "'lácteos' → 'dairy', 'sin gluten' → 'gluten-free', "
+        "'recogida solamente' → 'Pickup only.'. Numbers, addresses, "
+        "and phone numbers stay as the donor wrote them. Continue the "
+        "CONVERSATION in Spanish — only the data sent to the listing "
+        "tools is English. The recipient-side UI is English; mixed-"
+        "language listings break search and filters.\n"
+        "\n"
+        "### PHOTO HANDLING (IMPORTANT)\n"
+        "When the donor uploads a photo, the chat will contain a user "
+        "message that starts with 'image: ' followed by a URL like "
+        "'/uploads/ai/<uuid>.jpg' (or the display caption '📎 Uploaded "
+        "photo …'). Treat that URL as the photo. Two cases:\n"
+        "  CASE A — photo arrives BEFORE the listing is posted: include "
+        "the URL in the `images` array of the post_food_listing call. "
+        "Don't post a separate listing for the photo.\n"
+        "  CASE B — photo arrives AFTER a listing is already posted "
+        "(you have its listing_id from a previous tool result this "
+        "conversation): call attach_photos_to_listing with that "
+        "listing_id and the new URL(s). Confirm briefly: 'Photo added "
+        "to listing #42 ✓'. Don't ask the donor for the listing_id if "
+        "you can read it from the recent conversation.\n"
+        "If multiple recent listings could match, ask once which one "
+        "(by title or id), then call the tool. Never tell the donor "
+        "'photo added' unless attach_photos_to_listing returned "
+        "success.\n"
+        "\n"
+        "### BULK UPLOAD (CSV / PDF / pasted spreadsheet) — IDIOT-PROOF\n"
+        "Bulk sharing is the SAME job as single-listing sharing, just "
+        "repeated. You are still a friendly neighbor coordinator, NOT a "
+        "form processor. Your job is to make sure every row has the "
+        "minimum requirements BEFORE anything goes live, and to be warm "
+        "and conversational while you do it.\n"
+        "\n"
+        "## When does bulk intent fire?\n"
+        "  • The donor pastes a CSV / table / spreadsheet in the chat.\n"
+        "  • The frontend wraps an upload as ```csv ... ``` or sends a "
+        "user message starting with 'csv:'.\n"
+        "  • The donor uploads a PDF and the frontend has converted it "
+        "to text describing many items.\n"
+        "  • The donor types something like 'I have a bunch of items, "
+        "let me list them' / 'here's my inventory' / 'I need to post a "
+        "lot at once'.\n"
+        "Do NOT walk through each row one at a time — that's what bulk "
+        "is for. But do NOT fire-and-forget either.\n"
+        "\n"
+        "## Required for EVERY bulk row (idiot-proof checklist)\n"
+        "  1. TITLE — what the food is. Per-row, no defaulting.\n"
+        "  2. QTY — how much. If a row has no qty, the server defaults "
+        "to 1 — that's almost always wrong, so ask the donor to fill it "
+        "in if many rows are missing qty.\n"
+        "  3. ADDRESS — pickup address. Resolution order:\n"
+        "       (a) the row's own address column,\n"
+        "       (b) the default_address arg you pass to the tool,\n"
+        "       (c) the donor's profile address.\n"
+        "     If NONE of those exist for a row, the server refuses the "
+        "whole batch (pre-flight).\n"
+        "Strongly recommended (ask once, apply to all rows if they "
+        "agree):\n"
+        "  4. PICKUP WINDOW — 'When can people pick these up? (default "
+        "is the next 48h.)' Apply the same window to every row unless "
+        "the CSV has its own column.\n"
+        "  5. FRESHNESS — 'Anything in this batch close to spoiling? "
+        "(I'll mark those high-perishability and shorten the "
+        "expiration.)'\n"
+        "  6. ALLERGENS — if everything in the batch shares an allergen "
+        "(e.g. all bakery → gluten), call it out so the donor can "
+        "confirm/edit.\n"
+        "\n"
+        "## Conversational bulk flow (DO NOT VIOLATE)\n"
+        "Step 1 — ACKNOWLEDGE. 'Got the spreadsheet, let me take a "
+        "look.' (One short line. Don't dump the rows back at them.)\n"
+        "Step 2 — TRY THE IMPORT. Call bulk_import_listings with the "
+        "csv_text and (if the donor has a profile address) "
+        "default_address=<that address>. Don't ask first; just try it. "
+        "The server's pre-flight is fast.\n"
+        "Step 3 — READ THE RESULT.\n"
+        "  • If success=true: report '<posted>/<total> listings posted' "
+        "in one line. If `results` shows per-row errors, mention the "
+        "first one and offer to fix ('Row 7 had an invalid date — want "
+        "me to set it to next week?').\n"
+        "  • If success=false AND `needs` is set: this is the COMMON "
+        "case. Read `needs`, `missing_title_rows`, "
+        "`missing_address_rows`. Ask ONE focused question to fill the "
+        "gap, e.g.:\n"
+        "      - needs=['address'] AND fallback_address is null: "
+        "        'I can post these, but 8 rows don't have a pickup "
+        "address and I don't have one in your profile either. What "
+        "address should I use for those?' — then call "
+        "bulk_import_listings AGAIN with default_address set.\n"
+        "      - needs=['title']: 'Rows 4, 9, and 12 don't have a "
+        "title — what's in those? You can also just delete those rows "
+        "and re-paste.'\n"
+        "      - needs=['address','title']: ask about title first "
+        "(harder to fix), then address.\n"
+        "  • If error= is set (CSV unparseable, no header row, etc.): "
+        "explain the problem in plain English and offer the expected "
+        "header format ('I need a header row like "
+        "title,qty,unit,address,best_before').\n"
+        "Step 4 — POST + RECAP. After a successful import, give a warm "
+        "1-line recap ('Posted 14 of 14! They're live on the map now.') "
+        "and offer the obvious next step ('Want to add photos to any of "
+        "them?').\n"
+        "\n"
+        "## Worked example — missing addresses\n"
+        "  Donor: <pastes 10-row CSV with title+qty but no address>\n"
+        "  AI:    'Got the list, importing now.'\n"
+        "         <calls bulk_import_listings(csv_text=..., "
+        "default_address=None)>\n"
+        "         <result: success=false, needs=['address'], "
+        "missing_address_rows=[2..11], fallback_address=null>\n"
+        "  AI:    'All 10 rows look good except none of them have a "
+        "pickup address. What address should I use for the whole batch?'\n"
+        "  Donor: '1423 Park St, Oakland'\n"
+        "  AI:    <calls bulk_import_listings(csv_text=..., "
+        "default_address='1423 Park St, Oakland')>\n"
+        "         <result: success=true, posted=10/10>\n"
+        "         'Posted all 10! They're live at 1423 Park St. Want to "
+        "add photos to any of them?'\n"
+        "\n"
+        "## Hard rules for bulk (DO NOT BREAK)\n"
+        "  1. NEVER tell the donor 'I posted N listings' unless the "
+        "tool result has success=true AND posted > 0. If pre-flight "
+        "blocked the import, the listings did NOT go live.\n"
+        "  2. NEVER ask the donor to fix things row-by-row when the "
+        "missing field is the SAME for every row (e.g. address). Ask "
+        "ONCE, apply to all.\n"
+        "  3. NEVER fire-and-forget. If the result has any failed rows, "
+        "mention them (count + first example) so the donor can decide "
+        "whether to retry.\n"
+        "  4. DO use server defaults for unit/category/perishability — "
+        "those are safe. DON'T silently default address or title — "
+        "those are not.\n"
+        "  5. CSV CONTENT MUST BE ENGLISH. Even if the donor pastes a "
+        "Spanish CSV or describes items in Spanish, the title, "
+        "description, unit, and category fields you submit to "
+        "bulk_import_listings MUST be in English. Translate before "
+        "posting (pan → Bread, manzanas → Apples, lbs stays lbs). "
+        "Addresses, phone numbers, and quantities pass through "
+        "unchanged. Keep talking to the donor in their language; only "
+        "the listing data is English.\n"
+        "\n"
+        "### REQUIREMENTS CHECKLIST (idiot-proof, applies to ALL action tools)\n"
+        "Before calling any action tool, verify you have everything it "
+        "needs. If something is missing, ASK — never guess for fields "
+        "that affect food safety, location, or who gets the food.\n"
+        "\n"
+        "  • post_food_listing  → title, qty, address (call OR profile). "
+        "    Recommended: pickup window, expiration/freshness, "
+        "    allergens, photo. The server will default unit, category, "
+        "    perishability, and the pickup window if you omit them.\n"
+        "  • bulk_import_listings → csv_text (with header row). For "
+        "    EVERY row: title + qty + address (row OR default_address "
+        "    arg OR donor profile). The server pre-flights and refuses "
+        "    the whole batch if any row is missing title or address.\n"
+        "  • post_food_request → title, qty, recipient address (or "
+        "    delivery vs pickup), urgency. Recommended: dietary "
+        "    restrictions, household size.\n"
+        "  • claim_listing → listing_id (you must have searched and "
+        "    presented options first), recipient phone on profile (the "
+        "    server enforces this — if missing, prompt to add one via "
+        "    update_user_profile before retrying).\n"
+        "  • confirm_claim → 4-digit code from the user, the matching "
+        "    claim_id from earlier in this conversation.\n"
+        "  • attach_photos_to_listing → listing_id (read from a recent "
+        "    tool result, never ask the user for a numeric id), one or "
+        "    more image URLs (/uploads/ai/<uuid>.jpg or http(s)).\n"
+        "  • update_user_profile → exactly the field(s) being changed. "
+        "    Confirm the new value back to the user.\n"
+        "  • navigate_ui → action ∈ {open, close, toggle} and a valid "
+        "    target. Open ONE per turn.\n"
+        "If a required field is missing, the right move is ALWAYS one "
+        "warm question, never a fake success message.\n"
+        "\n"
+        "Other rules of thumb still apply:\n"
+        "  • PARSE FREE TEXT FIRST. If the donor writes a full sentence "
+        "with multiple facts ('I have 3 sourdough loaves at 379 S Pole "
+        "St, pickup after 5pm'), extract everything in one shot — don't "
+        "re-ask things they already told you. Then ask only the next "
+        "still-missing piece (freshness, allergens, photo, etc.).\n"
+        "  • SERVER DEFAULTS exist as a SAFETY NET, not a shortcut. The "
+        "server will fill pickup_window (next 48h), expiration_date "
+        "(from perishability), unit ('units'), perishability "
+        "('medium'), and category (guessed from title) if you omit "
+        "them. But you should still ASK the donor about freshness, "
+        "pickup window, and allergens unless they've already told you "
+        "or asked you to skip — defaults can mismatch real-world food "
+        "safety.\n"
+        "  • TRULY-REQUIRED fields are: title, qty, and an address (the "
+        "donor's profile address counts). If you only have those, you "
+        "CAN post — but a thorough human-style intake covers freshness, "
+        "pickup window, allergens, and a photo too.\n"
+        "  • TONE: warm, brief, neighborly. Use contractions. Vary "
+        "phrasing across turns. Avoid corporate language ('please "
+        "provide', 'kindly specify', 'in order to proceed').\n"
+        "\n"
+        "### RECIPIENT AI FEATURES (open via navigate_ui)\n"
+        "Recipients have a suite of AI helpers mounted as modals. Open "
+        "them with navigate_ui(action='open', target=...). Pick the "
+        "RIGHT one based on what the user asked, and only open ONE per "
+        "turn. After opening, keep the reply to one short sentence — "
+        "the modal speaks for itself.\n"
+        "  • target='meal-suggestions' — for 'what can I cook with what "
+        "I claimed', 'meal ideas', 'recipes from my food', 'I have "
+        "leftovers, what should I make'. Combines the user's "
+        "expiring claimed items into recipes.\n"
+        "  • target='spoilage-alerts' — for 'what's about to expire', "
+        "'spoilage', 'going bad', 'food waste'. Surfaces a countdown "
+        "of the user's most at-risk claims.\n"
+        "  • target='storage-coach' — for 'how do I store X', 'fridge "
+        "vs counter', 'how long does X last', 'keep food fresh'. "
+        "Per-food storage guidance.\n"
+        "  • target='smart-notifications' — for 'too many notifications', "
+        "'tune my alerts', 'smart notifications', 'notification "
+        "preferences'. Lets the user adjust learning preferences.\n"
+        "  • target='pickup-reminders' — for 'remind me about pickups', "
+        "'pickup reminder', 'don't let me forget my pickup', "
+        "'reminders settings'.\n"
+        "  • target='sms-consent' — for 'enable SMS', 'text me', 'turn "
+        "on text notifications', 'SMS opt in'. Opens the SMS "
+        "consent / opt-in flow.\n"
+        "When the user describes the NEED (e.g. 'I have spinach "
+        "expiring tonight, ideas?') call meal-suggestions and add a "
+        "one-line lead-in ('Pulling up some recipes that use your "
+        "expiring items.'). Don't lecture; let the modal do the work.\n"
+        "If the user is ambiguous ('help me with my food'), ASK what "
+        "they want before opening anything."
+    )
+    return (
+        f"{base}\n\nCurrent date and time: {now_str}\n\n"
+        + action_policy
+        + "\n\n"
+        + "\n\n".join(sections)
     )
 
-    # Inject current date/time so the model can reason about "tomorrow", "next week", etc.
-    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    return f"{base}\n\nCurrent date and time: {now_str}\n\n" + "\n\n".join(sections)
+
+# ---------------------------------------------------------------------------
+# Role-specific behaviour
+# ---------------------------------------------------------------------------
+
+_ROLE_BEHAVIOR_EN: dict[str, str] = {
+    "recipient": (
+        "The user is a RECIPIENT. Proactively suggest food items they can claim — "
+        "use search_food_near_user and get_user_dashboard. Respect their allergies "
+        "and dietary_restrictions. Nudge them to set reminders for pickup windows.\n"
+        "\n"
+        "POSTING / DONATING IS NOT ALLOWED FOR RECIPIENT ACCOUNTS. If the recipient "
+        "asks to donate, share, give away, or post food, DO NOT call "
+        "post_food_listing. Politely explain in one short sentence that this account "
+        "is a recipient account and can only claim food, then tell them to sign in "
+        "as a donor (or switch their account role) to share food. Example: 'Heads "
+        "up — this is a recipient account, so it can't donate. Sign in as a donor "
+        "and I'll post it for you.'"
+    ),
+    "donor": (
+        "The user is a DONOR. Focus on their posted listings. If any are close to "
+        "expiring, warn them (call get_donor_expiring_listings) and suggest lowering "
+        "price, highlighting, or re-sharing. Celebrate completed donations.\n"
+        "\n"
+        "CLAIMING IS NOT ALLOWED FOR DONOR ACCOUNTS. If the donor asks to claim, "
+        "reserve, take, or pick up a listing, DO NOT call claim_listing / "
+        "confirm_claim / cancel_claim. Politely explain in one short sentence that "
+        "this account is a donor account and can only post listings, then tell them "
+        "to sign in as a recipient (or switch their account role) to claim food. "
+        "Example: 'Heads up — this is a donor account, so it can't claim food. "
+        "Sign in as a recipient and I'll grab it for you.'"
+    ),
+    "volunteer": (
+        "The user is a VOLUNTEER. Help with pickup logistics — call "
+        "get_driver_route_plan for an optimised stop order and get_mapbox_route for "
+        "directions. Encourage safe driving and on-time arrivals."
+    ),
+    "driver": (
+        "The user is a DRIVER. Prioritise route optimisation (get_driver_route_plan) "
+        "and next-stop ETA. Surface pickup deadlines. Keep directions concise."
+    ),
+    "dispatcher": (
+        "The user is a DISPATCHER. Help them triage by calling get_dispatch_queue; "
+        "match open requests to unclaimed listings, flag urgency, and recommend "
+        "volunteer assignments. Be operational and concise."
+    ),
+    "admin": (
+        "The user is an ADMIN. Use get_platform_stats when they ask about health, "
+        "activity, or outcomes. Offer encouraging, positive framing ('great growth "
+        "this week!') and flag real anomalies. Never expose raw user PII unasked."
+    ),
+}
+
+_ROLE_BEHAVIOR_ES: dict[str, str] = {
+    "recipient": (
+        "El usuario es RECIPIENTE. Sugiere alimentos que pueda reclamar (usa "
+        "search_food_near_user y get_user_dashboard). Respeta alergias y "
+        "restricciones dietéticas. Recuérdale configurar alertas de recogida.\n"
+        "\n"
+        "LAS CUENTAS DE RECIPIENTE NO PUEDEN DONAR NI PUBLICAR. Si pide donar, "
+        "compartir o publicar comida, NO llames a post_food_listing. Explícale en "
+        "una oración que esta cuenta es de recipiente y solo puede reclamar; debe "
+        "iniciar sesión como donante para compartir comida. Ejemplo: 'Aviso — esta "
+        "cuenta es de recipiente, no puede donar. Inicia sesión como donante y lo "
+        "publico por ti.'"
+    ),
+    "donor": (
+        "El usuario es DONANTE. Enfócate en sus publicaciones activas. Si alguna está "
+        "por vencer, avísale (get_donor_expiring_listings) y sugiere acciones. "
+        "Felicítalo por donaciones completadas.\n"
+        "\n"
+        "LAS CUENTAS DE DONANTE NO PUEDEN RECLAMAR. Si el donante pide reclamar, "
+        "reservar o recoger un listado, NO llames a claim_listing / confirm_claim / "
+        "cancel_claim. Explícale en una oración que esta cuenta es de donante y "
+        "solo puede publicar; debe iniciar sesión como recipiente para reclamar. "
+        "Ejemplo: 'Aviso — esta cuenta es de donante, no puede reclamar. Inicia "
+        "sesión como recipiente y lo reservo por ti.'"
+    ),
+    "volunteer": (
+        "El usuario es VOLUNTARIO. Ayúdalo con la logística de recogidas: "
+        "get_driver_route_plan y get_mapbox_route. Recomienda manejar con seguridad."
+    ),
+    "driver": (
+        "El usuario es CONDUCTOR. Prioriza rutas optimizadas (get_driver_route_plan) "
+        "y tiempos estimados a la siguiente parada."
+    ),
+    "dispatcher": (
+        "El usuario es DESPACHADOR. Apóyalo con get_dispatch_queue, empareja "
+        "solicitudes con listados disponibles y señala urgencias."
+    ),
+    "admin": (
+        "El usuario es ADMIN. Usa get_platform_stats al preguntar por la salud de la "
+        "plataforma. Usa tono alentador y positivo. No expongas datos personales sin pedirlo."
+    ),
+}
+
+
+def _role_behavior_prompt(role: Optional[str], lang: str = "en") -> Optional[str]:
+    if not role:
+        return None
+    key = str(role).lower().strip()
+    mapping = _ROLE_BEHAVIOR_ES if lang == "es" else _ROLE_BEHAVIOR_EN
+    return mapping.get(key)
+
+
+async def _profile_gap_prompt(user_id: str, lang: str = "en") -> Optional[str]:
+    """Inject a nudge telling the model about missing profile fields."""
+    try:
+        from backend.tools import _get_profile_gaps  # type: ignore
+    except Exception:
+        return None
+    try:
+        result = await _get_profile_gaps(str(user_id))
+    except Exception:
+        return None
+    if not isinstance(result, dict) or result.get("error"):
+        return None
+    prompts = result.get("prompts_es" if lang == "es" else "prompts_en") or []
+    if not prompts:
+        return None
+    header_en = (
+        "Profile gaps detected for this user. When it feels natural in the "
+        "conversation, politely invite them (max 1 short sentence) to share ONE of "
+        "the following so you can help better. Do NOT list all gaps at once."
+    )
+    header_es = (
+        "Perfil incompleto. Cuando sea natural en la conversación, invítale "
+        "amablemente (máx. 1 oración) a compartir UNA de las siguientes cosas. "
+        "No enumeres todas a la vez."
+    )
+    header = header_es if lang == "es" else header_en
+    bullets = "\n".join(f"- {p}" for p in prompts)
+    return f"{header}\n{bullets}"
+
+
+# ---------------------------------------------------------------------------
+# Privacy guard for run_safe_query
+# ---------------------------------------------------------------------------
+
+# Each entity that the run_safe_query whitelist exposes is mapped to the
+# column that identifies the owning/participating user, plus an optional
+# role-based "is this the caller?" test. The AI is forced to filter on
+# the authenticated user for any of these entities so one user can never
+# enumerate another user's listings, requests, or profile data.
+_SAFE_QUERY_USER_SCOPE = {
+    # donor_id OR recipient_id must equal auth user
+    "listings": ("donor_id", "recipient_id"),
+    # recipient_id must equal auth user
+    "requests": ("recipient_id",),
+    # id must equal auth user (no enumerating the users table)
+    "users": ("id",),
+}
+
+
+def _scope_safe_query(fn_args: dict, auth_user_id: str) -> dict:
+    """Ensure run_safe_query is always scoped to the authenticated user.
+
+    If the caller (an LLM) does not already include a filter binding the
+    query to its own user_id via one of the accepted columns, we inject
+    an ``eq`` filter so the result cannot span other accounts. Centers are
+    public directory data and are left unchanged.
+
+    User IDs are compared as strings so UUIDs (DoGoods/Supabase) and
+    integer ids (legacy) both work.
+    """
+    if not isinstance(fn_args, dict):
+        return {"entity": "centers"}
+    entity = str(fn_args.get("entity") or "").lower()
+    accepted_cols = _SAFE_QUERY_USER_SCOPE.get(entity)
+    if not accepted_cols:
+        # Centers (or unknown entity — handler will reject) — no scoping.
+        return fn_args
+
+    filters = fn_args.get("filters") or []
+    if not isinstance(filters, list):
+        filters = []
+
+    auth_str = str(auth_user_id)
+
+    def _binds_to_auth(f: dict) -> bool:
+        if not isinstance(f, dict):
+            return False
+        field = str(f.get("field", ""))
+        op = str(f.get("op", "eq")).lower()
+        val = f.get("value")
+        if field not in accepted_cols or op != "eq":
+            return False
+        return str(val) == auth_str
+
+    # Drop any filter on one of the scope columns that targets a *different*
+    # user, then append our own eq-filter if none already binds us.
+    cleaned = [
+        f for f in filters
+        if not (isinstance(f, dict)
+                and str(f.get("field", "")) in accepted_cols
+                and not _binds_to_auth(f))
+    ]
+    if not any(_binds_to_auth(f) for f in cleaned):
+        cleaned.append({
+            "field": accepted_cols[0],
+            "op": "eq",
+            "value": auth_str,
+        })
+
+    new_args = dict(fn_args)
+    new_args["filters"] = cleaned
+    return new_args
 
 
 # ---------------------------------------------------------------------------
 # Conversation Engine
 # ---------------------------------------------------------------------------
 
+
+def _build_memory_snapshot(history: list[dict]) -> Optional[str]:
+    """Distill recent tool calls into a compact context block.
+
+    Walks the assistant messages newest-first, collects the latest
+    listings, claims, posts, and reminders the model produced, and
+    returns a short markdown-ish summary the next chat turn can use to
+    answer "claim it", "what was the address", "show me #3", etc.
+
+    Returns None if there's nothing worth replaying.
+    """
+    if not isinstance(history, list) or not history:
+        return None
+
+    latest_listings: list[dict] = []
+    recent_claims: list[dict] = []
+    recent_posts: list[dict] = []
+    recent_cancels: list[dict] = []
+    # claim_id → cancelled flag, so we can hide claims the user already
+    # cancelled from the "Recent successful claims" section instead of
+    # showing them and letting the model double-cancel.
+    cancelled_claim_ids: set[str] = set()
+    last_search_summary: Optional[str] = None
+
+    # Tool names match the live handler names in backend/tools.py.
+    # Do NOT include legacy aliases here — if a row in history has an
+    # unknown tool name it just won't contribute, which is the safe behavior.
+    SEARCH_TOOLS = {
+        "search_food_near_user",
+        "get_recent_listings",
+        "query_distribution_centers",
+    }
+    CLAIM_TOOLS = {"claim_listing", "claim_food", "confirm_claim"}
+    CANCEL_TOOLS = {"cancel_claim"}
+    POST_TOOLS = {"post_food_listing", "create_food_listing", "post_food_request"}
+
+    for msg in reversed(history):
+        if msg.get("role") != "assistant":
+            continue
+        meta = msg.get("metadata") or {}
+        # Skip silent congratulation turns triggered by non-AI events
+        # (bulk upload, photo enrichment). Their actions aren't real user
+        # context — they were synthesized to make the assistant react.
+        if meta.get("silent_trigger"):
+            continue
+        actions = meta.get("actions") or []
+        if not isinstance(actions, list):
+            continue
+        for a in actions:
+            if not isinstance(a, dict):
+                continue
+            tool = a.get("tool")
+            if tool in SEARCH_TOOLS and a.get("listings") and not latest_listings:
+                latest_listings = a.get("listings") or []
+                last_search_summary = a.get("summary")
+            elif tool in CLAIM_TOOLS and a.get("ok"):
+                cid = a.get("claim_id")
+                # Drop earlier successful claims that the user later cancelled.
+                if not cid or cid not in cancelled_claim_ids:
+                    recent_claims.append(a)
+            elif tool in CANCEL_TOOLS and a.get("ok"):
+                cid = a.get("claim_id")
+                if cid:
+                    cancelled_claim_ids.add(cid)
+                recent_cancels.append(a)
+            elif tool in POST_TOOLS and a.get("ok"):
+                recent_posts.append(a)
+        if (
+            latest_listings
+            and len(recent_claims) >= 3
+            and len(recent_posts) >= 3
+            and len(recent_cancels) >= 2
+        ):
+            break
+
+    if not (latest_listings or recent_claims or recent_posts or recent_cancels):
+        return None
+
+    lines: list[str] = ["RECENT CONTEXT (use this to resolve references like 'claim it', '#3', 'that one', 'the bread'):"]
+    if latest_listings:
+        lines.append(
+            "Last search results (most recent first) — use these listing_ids directly, do NOT search again unless the user asks for fresh results:"
+        )
+        for i, item in enumerate(latest_listings, 1):
+            parts = [f"#{i}"]
+            if item.get("title"):
+                parts.append(str(item["title"]))
+            if item.get("quantity") and item.get("unit"):
+                parts.append(f"{item['quantity']} {item['unit']}")
+            elif item.get("quantity"):
+                parts.append(str(item["quantity"]))
+            if item.get("category"):
+                parts.append(item["category"])
+            if item.get("distance_km") is not None:
+                parts.append(f"{item['distance_km']} km")
+            if item.get("address"):
+                parts.append(f"at {item['address']}")
+            if item.get("id"):
+                parts.append(f"id={item['id']}")
+            if item.get("donor_name"):
+                parts.append(f"donor={item['donor_name']}")
+            lines.append("  - " + " · ".join(parts))
+        if last_search_summary:
+            lines.append(f"  (search said: {last_search_summary})")
+
+    if recent_claims:
+        lines.append("Recent successful claims by this user (use claim_id for cancel/confirm flows):")
+        for a in recent_claims[:3]:
+            title = a.get("title") or "(item)"
+            cid = a.get("claim_id") or "?"
+            lid = a.get("listing_id") or "?"
+            lines.append(f"  - claim_id={cid} listing_id={lid} title={title}")
+
+    if recent_posts:
+        lines.append("Recent successful posts by this user (use listing_id for follow-ups like attaching a photo):")
+        for a in recent_posts[:3]:
+            title = a.get("title") or "(item)"
+            lid = a.get("listing_id") or "?"
+            lines.append(f"  - listing_id={lid} title={title}")
+
+    if recent_cancels:
+        lines.append(
+            "Recently cancelled claims (DO NOT try to cancel these again or "
+            "treat them as active):"
+        )
+        for a in recent_cancels[:3]:
+            title = a.get("title") or "(item)"
+            cid = a.get("claim_id") or "?"
+            lid = a.get("listing_id") or "?"
+            lines.append(f"  - claim_id={cid} listing_id={lid} title={title}")
+
+    return "\n".join(lines)
+
+
 class ConversationEngine:
-    """
-    Manages AI conversations:
-      user message + user_id -> profile lookup -> GPT-4o query -> text/audio response
-    """
+    """Supabase-backed conversation engine."""
 
     def __init__(self) -> None:
         self.training_data = _load_training_data()
-
-        # Import tool definitions (lazy to avoid circular imports)
         from backend.tools import TOOL_DEFINITIONS, execute_tool
-
         self.tool_definitions = TOOL_DEFINITIONS
         self._execute_tool = execute_tool
 
     @property
     def system_prompt(self) -> str:
-        """Rebuild system prompt each time so the datetime stays current."""
         return _build_system_prompt(self.training_data)
 
-    # ---- Language detection -----------------------------------------------
-
     def _detect_lang(self, text: str) -> str:
-        """Return 'es' for Spanish, 'en' for English."""
         return "es" if detect_spanish(text) else "en"
 
-    # ---- Profile lookup ---------------------------------------------------
+    def _detect_lang_sticky(
+        self,
+        message: str,
+        history: Optional[list] = None,
+        profile: Optional[dict] = None,
+    ) -> str:
+        """Sticky language detection.
+
+        Short replies like 'sí', 'ok', 'gracias', 'vale' don't carry
+        enough Spanish markers for the per-message detector, which makes
+        the assistant flip back to English mid-conversation. Resolve
+        language using (in priority order):
+          1) the current message itself, if confidently Spanish;
+          2) the user's profile.language preference, if set;
+          3) any recent user/assistant turn that was Spanish;
+          4) default English.
+        """
+        if message and detect_spanish(message):
+            return "es"
+        # If the current message contains ANY English-only marker word
+        # (and no Spanish chars), treat it as English. This catches
+        # short greetings like 'hi', 'hello', 'thanks', 'ok' that don't
+        # have 3+ words but are obviously English. The user reported the
+        # AI replying in Spanish to plain English messages — this is the
+        # fix: English markers beat Spanish profile / Spanish history.
+        if message and detect_english(message):
+            return "en"
+        # Multi-word ASCII-only messages without Spanish chars also win.
+        if message:
+            lower = message.lower()
+            has_spanish_chars = bool(re.search(r"[¿¡ñáéíóúü]", lower))
+            ascii_words = re.findall(r"[a-z]{2,}", lower)
+            if not has_spanish_chars and len(ascii_words) >= 3:
+                return "en"
+        try:
+            pref = (profile or {}).get("language")
+            if isinstance(pref, str) and pref.lower().startswith("es"):
+                return "es"
+        except Exception:
+            pass
+        if history:
+            for h in reversed(history[-8:]):
+                # History items use either "message" (DB rows) or
+                # "content" (chat-style dicts). Accept both.
+                content = (h or {}).get("message") or (h or {}).get("content") or ""
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                if detect_spanish(content):
+                    return "es"
+        return "en"
+
+    # ---- Profile lookup via Supabase --------------------------------------
 
     async def get_user_profile(self, user_id: str) -> Optional[dict]:
-        """Fetch user profile from Supabase users table."""
-        if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-            logger.warning("Supabase not configured — skipping profile lookup")
-            return None
         try:
             rows = await supabase_get("users", {
                 "id": f"eq.{user_id}",
-                "select": "id,name,email,is_admin,avatar_url,organization,created_at",
+                "select": "*",
+                "limit": "1",
             })
-            return rows[0] if rows else None
         except Exception as exc:
-            logger.error("Profile lookup failed for %s: %s", user_id, exc)
+            logger.error("get_user_profile failed for %s: %s", user_id, exc)
             return None
+        if not rows:
+            return None
+        user = rows[0]
+        # Normalised snapshot the rest of the engine relies on. Missing
+        # columns simply come through as None so the AI never crashes on
+        # an older schema — it just gets fewer facts.
+        role = user.get("role")
+        is_admin = bool(user.get("is_admin")) or (str(role).lower() == "admin")
+        return {
+            "id": user.get("id"),
+            "name": user.get("name") or user.get("full_name"),
+            "email": user.get("email"),
+            "role": role,
+            "community_role": user.get("community_role"),
+            "organization": user.get("organization"),
+            "is_admin": is_admin,
+            "created_at": user.get("created_at"),
+            # Prefer the geocoded `latitude`/`longitude` columns populated by
+            # the address-geocoding pipeline; fall back to legacy keys so
+            # older rows still work.
+            "lat": (
+                user.get("latitude")
+                or user.get("coords_lat")
+                or user.get("lat")
+            ),
+            "lng": (
+                user.get("longitude")
+                or user.get("coords_lng")
+                or user.get("lng")
+            ),
+            "address_geocoded_at": user.get("address_geocoded_at"),
+            "phone": user.get("phone"),
+            "address": user.get("address"),
+            "dietary_restrictions": user.get("dietary_restrictions"),
+            "allergens": user.get("allergens"),
+            "household_size": user.get("household_size"),
+            "sms_consent": (
+                user.get("sms_consent")
+                or user.get("sms_opt_in")
+                or user.get("sms_notifications_enabled")
+            ),
+            "language": user.get("language"),
+        }
 
-    # ---- Conversation history ---------------------------------------------
+    # ---- History via Supabase ---------------------------------------------
 
-    async def get_conversation_history(
-        self, user_id: str, limit: int = 50
-    ) -> list[dict]:
-        """Retrieve recent conversation messages from ai_conversations table."""
-        if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-            return []
+    async def get_conversation_history(self, user_id: str, limit: int = 50) -> list[dict]:
         try:
             rows = await supabase_get("ai_conversations", {
                 "user_id": f"eq.{user_id}",
-                "select": "role,message,created_at",
+                "select": "id,role,message,metadata,created_at",
                 "order": "created_at.desc",
                 "limit": str(limit),
             })
-            rows.reverse()  # chronological order
-            return rows
         except Exception as exc:
-            logger.error("History fetch failed for %s: %s", user_id, exc)
+            logger.error("get_conversation_history failed for %s: %s", user_id, exc)
             return []
-
-    # ---- Store messages ---------------------------------------------------
+        # Caller expects chronological order (oldest → newest).
+        rows.reverse()
+        return [
+            {
+                "id": r.get("id"),
+                "role": r.get("role", "user"),
+                "message": r.get("message", ""),
+                "metadata": r.get("metadata") or {},
+                "created_at": r.get("created_at", ""),
+            }
+            for r in rows
+        ]
 
     async def store_message(
         self,
@@ -604,213 +1991,624 @@ class ConversationEngine:
         role: str,
         message: str,
         metadata: dict | None = None,
-    ) -> str | None:
-        """Persist a conversation message to ai_conversations table.
-        Returns the inserted row's UUID, or None on failure."""
-        if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-            return None
+    ) -> Optional[str]:
         try:
-            headers = _supabase_headers()
-            headers["Prefer"] = "return=representation"
-            async with httpx.AsyncClient(timeout=SUPABASE_TIMEOUT) as client:
-                resp = await client.post(
-                    f"{SUPABASE_URL}/rest/v1/ai_conversations",
-                    json={
-                        "user_id": user_id,
-                        "role": role,
-                        "message": message,
-                        "metadata": metadata or {},
-                    },
-                    headers=headers,
-                )
-                if resp.status_code == 409:
-                    # FK violation (user not in users table) — non-critical
-                    logger.debug("Skipped storing message (user %s not in users table)", user_id)
-                    return None
-                resp.raise_for_status()
-                rows = resp.json()
-                if rows and isinstance(rows, list):
-                    return rows[0].get("id")
-                return None
+            result = await supabase_post("ai_conversations", {
+                "user_id": user_id,
+                "role": role,
+                "message": message,
+                "metadata": metadata or {},
+            })
         except Exception as exc:
-            logger.error("Failed to store message: %s", exc)
+            logger.error("store_message failed for %s: %s", user_id, exc)
             return None
+        if isinstance(result, list) and result:
+            return result[0].get("id")
+        if isinstance(result, dict):
+            return result.get("id")
+        return None
 
-    # ---- Main chat flow ---------------------------------------------------
+    async def clear_history(self, user_id: str) -> int:
+        try:
+            return await supabase_delete("ai_conversations", {
+                "user_id": f"eq.{user_id}",
+            })
+        except Exception as exc:
+            logger.error("clear_history failed for %s: %s", user_id, exc)
+            return 0
+
+    # ---- Main chat --------------------------------------------------------
 
     async def chat(
         self,
         user_id: str,
         message: str,
         include_audio: bool = False,
+        silent: bool = False,
     ) -> dict:
-        """
-        Full conversation flow:
-          1. Detect language (Spanish / English)
-          2. Look up user profile
-          3. Fetch conversation history
-          4. Build messages with system prompt + context + history + new message
-          5. Call GPT-4o with tool definitions (with fallback)
-          6. Store user + assistant messages
-          7. Optionally generate TTS audio (language-aware voice)
-          8. Return text + audio URL + detected language
-        """
-        # 1. Language detection
-        lang = self._detect_lang(message)
-
-        # 2 & 3. Profile + History in parallel (graceful — failures don't block)
         profile_task = asyncio.create_task(self.get_user_profile(user_id))
-        history_task = asyncio.create_task(self.get_conversation_history(user_id, limit=4))
+        # Pull 30 messages (~15 turns) so multi-step flows — like "find food,
+        # show me #3, what's the address, claim it" spread across breaks —
+        # don't lose context. Each message is also kept much longer below
+        # (4000 char cap instead of 800) so listing IDs / titles survive.
+        history_task = asyncio.create_task(self.get_conversation_history(user_id, limit=30))
         profile, history = await asyncio.gather(profile_task, history_task)
 
-        # 4. Build messages
+        # Sticky language: use the message, then profile preference, then
+        # recent history. Prevents short replies like 'sí' / 'ok' from
+        # flipping a Spanish conversation back to English.
+        lang = self._detect_lang_sticky(message, history=history, profile=profile)
+
         messages: list[dict] = [{"role": "system", "content": self.system_prompt}]
 
-        # Inject language directive
         if lang == "es":
             messages.append({
                 "role": "system",
                 "content": (
-                    "The user is writing in Spanish. You MUST respond entirely "
-                    "in Spanish. Maintain your warm, helpful personality. "
-                    "Use 'tú' for casual and 'usted' for formal contexts."
+                    "The user is communicating in Spanish. You MUST respond "
+                    "ENTIRELY in Spanish for this turn and every following "
+                    "turn unless the user explicitly switches to another "
+                    "language. This includes: your reply text, any natural-"
+                    "language summaries of tool results, error explanations, "
+                    "confirmation prompts, and follow-up questions. Do NOT "
+                    "slip into English even for short phrases (e.g. say "
+                    "'¡Listo!' not 'Done!', 'Reclamado' not 'Claimed', "
+                    "'Publicado' not 'Posted'). Maintain a warm, helpful "
+                    "personality."
+                ),
+            })
+        else:
+            # Symmetric English lock. Without this, if any prior assistant
+            # turn in history was Spanish, the model copies that style and
+            # keeps replying in Spanish even though the user just wrote in
+            # English. This system message overrides that drift.
+            messages.append({
+                "role": "system",
+                "content": (
+                    "The user is communicating in English. You MUST respond "
+                    "ENTIRELY in English for this turn, even if earlier turns "
+                    "in the conversation history were in Spanish or another "
+                    "language. The user has switched (or always was) writing "
+                    "in English — match them. This applies to your reply "
+                    "text, tool-result summaries, confirmation prompts, "
+                    "follow-up questions, and error explanations. Do not "
+                    "include Spanish phrases or translations. Only switch "
+                    "back to Spanish if the user explicitly writes in Spanish "
+                    "again."
                 ),
             })
 
         if profile:
-            context = (
-                f"Current user: {profile.get('name', 'Community Member')} "
-                f"(ID: {user_id}). "
-                f"Organization: {profile.get('organization', 'N/A')}. "
-                f"Role: {'Admin' if profile.get('is_admin') else 'Member'}. "
-                f"When calling tools that require user_id, always use \"{user_id}\"."
+            # Build a rich, conversational context block so the model has
+            # the same situational awareness a human assistant would. Skip
+            # null/blank fields so we don't pollute the prompt.
+            facts = [f"Current user: {profile.get('name') or 'Community Member'} (ID: {user_id})"]
+            role = profile.get("role") or "member"
+            facts.append(f"role: {role}")
+            community_role = profile.get("community_role")
+            if community_role:
+                facts.append(
+                    f"community role: {community_role} — tailor suggestions accordingly "
+                    f"(donor=help them share food, recipient=help them find/claim food, "
+                    f"volunteer/driver/organizer=help with logistics, sponsor=focus on community impact)"
+                )
+            if profile.get("address"):
+                facts.append(f"profile address on file: {profile['address']}")
+            else:
+                facts.append("NO profile address on file (will need one to post listings/requests)")
+            # Surface the geocoded coordinates so the model can pass them to
+            # distance / route / nearby-search tools without having to ask
+            # the user for their location every turn.
+            try:
+                p_lat = float(profile.get("lat")) if profile.get("lat") is not None else None
+                p_lng = float(profile.get("lng")) if profile.get("lng") is not None else None
+            except (TypeError, ValueError):
+                p_lat, p_lng = None, None
+            if p_lat is not None and p_lng is not None:
+                facts.append(
+                    f"profile coordinates (geocoded from address): lat={p_lat:.6f}, "
+                    f"lng={p_lng:.6f} — USE THESE as the origin for "
+                    "search_food_near_user, get_mapbox_route, and any "
+                    "distance calculation. Do NOT ask the user where they are."
+                )
+            elif profile.get("address"):
+                facts.append(
+                    "address is saved but not yet geocoded — search_food_near_user "
+                    "may not return distance-sorted results. Suggest re-saving the "
+                    "address in Settings if nearby search fails."
+                )
+            if profile.get("phone"):
+                facts.append(f"phone on file: {profile['phone']} (required to claim listings; SMS codes go here)")
+            else:
+                facts.append("NO phone on file (claim_listing will fail until they add one)")
+            if profile.get("dietary_restrictions"):
+                facts.append(f"dietary restrictions: {profile['dietary_restrictions']}")
+            if profile.get("allergens"):
+                facts.append(f"allergens: {profile['allergens']} — NEVER suggest food matching these")
+            if profile.get("household_size"):
+                facts.append(f"household size: {profile['household_size']}")
+            if profile.get("language"):
+                # Annotate the saved preference with the *currently
+                # detected* language so the model doesn't get a mixed
+                # signal (e.g. saved 'es' but they're typing English
+                # right now → reply in English).
+                saved = str(profile.get("language"))
+                if lang == "es":
+                    facts.append(
+                        f"preferred language: {saved} — they ARE writing in "
+                        f"Spanish this turn, respond in Spanish."
+                    )
+                else:
+                    facts.append(
+                        f"preferred language: {saved} (saved), but they are "
+                        f"writing in English this turn — RESPOND IN ENGLISH. "
+                        f"Saved preference does not override the live message."
+                    )
+            facts.append(
+                f"When calling tools that require user_id, always use \"{user_id}\" "
+                "— NEVER ask the user for their id or any other field listed above. "
+                "You already know it."
             )
-            messages.append({"role": "system", "content": context})
+            context = "\n".join(facts)
         else:
-            # No profile found, still provide user_id for tool calls
             context = (
                 f"Current user ID: {user_id}. "
                 f"When calling tools that require user_id, always use \"{user_id}\"."
             )
-            messages.append({"role": "system", "content": context})
+        messages.append({"role": "system", "content": context})
 
+        # Conversation-awareness reminder. Without this the model treats
+        # every turn as fresh and re-asks for things the user already
+        # answered earlier in the same chat.
+        messages.append({
+            "role": "system",
+            "content": (
+                "CONVERSATION AWARENESS (CRITICAL — read this every turn):\n"
+                "• Before responding, SCAN the full conversation above for "
+                "facts the user already provided. Reuse them silently.\n"
+                "• Multi-turn form filling: when you are gathering fields "
+                "for a tool (post_food_listing, post_food_request, "
+                "create_reminder, etc.), TRACK every field across turns. "
+                "If turn 1 the user said 'I want to share apples', turn 2 "
+                "you asked 'how many?', and turn 3 they said '10', you "
+                "ALREADY know title=apples qty=10 — proceed to the next "
+                "missing field. Never re-ask what is already answered.\n"
+                "• Pronouns + references: 'it', 'that', 'that one', '#3', "
+                "'the bread', 'the one near me' refer to items from "
+                "earlier turns OR the RECENT CONTEXT block below. Resolve "
+                "them locally; do NOT search again unless the user asks.\n"
+                "• Numbered selections after a search ('the 2nd', '#3', "
+                "'the kale'): match against the last list you showed; "
+                "claim_listing directly with that listing_id.\n"
+                "• If a tool returned an error, acknowledge what went "
+                "wrong and ask only for the MISSING piece, not the full "
+                "form again.\n"
+                "• NEVER ask for fields already shown in the user-profile "
+                "context above (address, phone, dietary_restrictions, "
+                "allergens). Use them silently.\n"
+                "• If asked 'what did I just claim/post?' or 'what was "
+                "the address?', answer from the RECENT CONTEXT block or "
+                "the prior assistant turn — do NOT call a tool to "
+                "re-fetch unless the user explicitly asks for fresh data."
+            ),
+        })
+
+        # Action policy: let the AI actually DO things on the user's behalf.
+        # Always inject for authenticated users — gating on keyword match
+        # caused the model to silently fall back to text-only replies
+        # whenever the user phrased a donation in an unfamiliar way (e.g.
+        # 'I have a few cans of soup spare'), making listings 'sometimes
+        # work, sometimes not'.
+        if True:
+            action_policy_en = (
+                "You can take actions for the user through tool calls. Use the ACTION "
+                "tools (claim_listing, cancel_claim, update_user_profile, post_food_request, "
+                "post_food_listing, send_notification) whenever the user asks — you do not "
+                "need to ask them to click buttons. "
+                "Rules: "
+                "(1) The server enforces the authenticated user_id; still pass the id shown above. "
+                "(2) For destructive / irreversible actions (cancel_claim, post_food_listing, "
+                "post_food_request), confirm briefly once before calling. "
+                "(3) For small updates (e.g. adding an allergy, opting into SMS), act immediately and report what changed. "
+                "(4) When the user says things like 'I'll take it', 'reserve that', 'grab #42', "
+                "call claim_listing. Then tell them to watch for the SMS code. "
+                "(5) If a tool returns an error, explain it plainly and suggest the next step. "
+                "(6) ALWAYS CONFIRM COMPLETION: after a tool returns success, lead your reply "
+                "with an explicit completion phrase ('Done!', 'Posted!', 'Sent!', 'Updated.', "
+                "'Released.', 'Confirmed!', 'Saved.', 'Reminder set.') so the user clearly hears "
+                "the action FINISHED. Never leave the turn open-ended after a write tool — the "
+                "user must know the work is complete before any follow-up question or next step. "
+                "(7) STAY FOCUSED: if a multi-step flow is in progress (e.g. listing apples) and "
+                "the user mentions a different food (e.g. 'ice cream'), DO NOT silently swap "
+                "items. Ask one disambiguator: 'Add ice cream as a second listing after the "
+                "apples, or switch to ice cream instead?' Default assumption is ADD, not "
+                "replace. Carry captured fields (title, qty, address, etc.) across turns; never "
+                "quietly drop them. "
+                "(8) IGNORE-AND-STEER: if the user asks something off-topic mid-flow (weather, "
+                "trivia, jokes, unrelated chat), briefly decline and steer back to the open "
+                "task. If they persist, ask once whether to pause the flow. "
+                "(9) FOOD ONLY: DoGoods lists FOOD. If a user tries to list non-food items "
+                "(furniture, electronics, clothes), decline warmly and suggest Buy Nothing / "
+                "Freecycle. If a recipient asks for cash/cars/gift cards, decline and offer to "
+                "search for available food instead. Stay scoped to food sharing, food safety, "
+                "pickups, recipes, storage, and community impact."
+            )
+            action_policy_es = (
+                "Puedes realizar acciones por el usuario mediante tool calls. Usa las herramientas "
+                "de ACCIÓN (claim_listing, cancel_claim, update_user_profile, post_food_request, "
+                "post_food_listing, send_notification) cuando el usuario lo pida — no le digas que "
+                "haga clic en botones. Reglas: (1) El servidor impone el user_id autenticado. "
+                "(2) Confirma brevemente antes de acciones destructivas. (3) Para cambios pequeños, "
+                "actúa de inmediato y reporta el resultado. (4) Frases como 'lo tomo', 'resérvalo' "
+                "deben disparar claim_listing. (5) Si una herramienta falla, explícalo y sugiere el "
+                "siguiente paso. (6) CONFIRMA SIEMPRE QUE TERMINASTE: después de un éxito, comienza "
+                "tu respuesta con una frase clara de finalización ('¡Listo!', '¡Publicado!', "
+                "'¡Enviado!', 'Actualizado.', 'Liberado.', '¡Confirmado!', 'Guardado.', "
+                "'Recordatorio creado.') para que el usuario sepa que la acción YA TERMINÓ antes "
+                "de cualquier siguiente paso. "
+                "(7) MANTÉN EL FOCO: si hay un flujo en curso (p.ej. publicando manzanas) y el "
+                "usuario menciona otra comida (p.ej. 'helado'), NO cambies en silencio. Pregunta "
+                "una sola vez: '¿Agrego el helado como un SEGUNDO anuncio después de las "
+                "manzanas, o cambias a helado?' Por defecto: AGREGAR, no reemplazar. Conserva "
+                "los campos ya capturados (título, cantidad, dirección) entre turnos. "
+                "(8) IGNORAR Y REDIRIGIR: si en medio del flujo el usuario pregunta algo fuera "
+                "de tema (clima, chistes, trivia), declina brevemente y vuelve a la tarea. Si "
+                "insiste, pregunta una vez si pausamos el flujo. "
+                "(9) SOLO COMIDA: DoGoods es para comida. Si intenta publicar objetos no "
+                "alimenticios (muebles, ropa, electrónicos), declina con amabilidad y sugiere "
+                "Buy Nothing o Freecycle. Si pide dinero/coches/tarjetas de regalo, declina y "
+                "ofrece buscar comida disponible. Mantente en el ámbito de comida, seguridad "
+                "alimentaria, recogidas, recetas, almacenamiento e impacto comunitario."
+            )
+            messages.append({
+                "role": "system",
+                "content": action_policy_es if lang == "es" else action_policy_en,
+            })
+
+        # Role-specific behaviour + profile-gap nudges (best-effort; non-fatal)
+        try:
+            role_prompt = _role_behavior_prompt(
+                (profile or {}).get("role"), lang=lang
+            )
+            if role_prompt:
+                messages.append({"role": "system", "content": role_prompt})
+        except Exception as exc:  # pragma: no cover
+            logger.debug("role prompt build failed: %s", exc)
+
+        try:
+            gap_prompt = await _profile_gap_prompt(user_id, lang=lang)
+            if gap_prompt:
+                messages.append({"role": "system", "content": gap_prompt})
+        except Exception as exc:  # pragma: no cover
+            logger.debug("profile gap prompt failed: %s", exc)
+
+        # Skip legacy silent-prompt user rows (created before the silent
+        # flag existed) and silent-trigger assistant rows so the model
+        # never sees orphaned "[Action completed]…" turns or a
+        # congratulatory assistant turn with no preceding user message.
+        _SILENT_USER_PREFIXES = (
+            "[action completed]",
+            "[acción completada]",
+            "[accion completada]",
+        )
         for msg in history:
-            # Truncate long history messages to avoid bloating the context
-            content = msg["message"]
-            if len(content) > 400:
-                content = content[:400] + "... [truncated]"
-            messages.append({"role": msg["role"], "content": content})
+            role = msg.get("role", "user")
+            content = msg.get("message", "")
+            if role == "user" and isinstance(content, str) and content.strip().lower().startswith(_SILENT_USER_PREFIXES):
+                continue
+            if role == "assistant" and (msg.get("metadata") or {}).get("silent_trigger"):
+                continue
+            # Per-message cap raised from 800 → 4000 so previous assistant
+            # turns that enumerated listings (with ids/titles/distances)
+            # survive intact. Without this, "claim #3" can't be resolved
+            # because the original list was sliced mid-item.
+            if len(content) > 4000:
+                content = content[:4000] + "... [truncated]"
+            messages.append({"role": role, "content": content})
+
+        # Replay recent tool-result summaries so the model retains the
+        # structured facts that were never persisted as message text.
+        # Without this, after a page refresh the user can say "claim it"
+        # and the model has no listing_id, no donor name, no address.
+        memory_snapshot = _build_memory_snapshot(history)
+        if memory_snapshot:
+            messages.append({
+                "role": "system",
+                "content": memory_snapshot,
+            })
+
+        lower_message = (message or "").lower()
+        wants_new_listings = any(
+            phrase in lower_message
+            for phrase in (
+                "new listings",
+                "new listing",
+                "latest listings",
+                "latest listing",
+                "recent listings",
+                "recent listing",
+                "check new listings",
+                "check latest listings",
+                "what's new",
+                "whats new",
+            )
+        )
+        if wants_new_listings:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "This request is specifically about newly posted listings. "
+                    "You MUST call get_recent_listings for this turn unless the "
+                    "user explicitly asked for nearby distance-based results."
+                ),
+            })
 
         messages.append({"role": "user", "content": message})
 
-        # 5. Call GPT-4o with full fallback chain
-        response_text = await self._call_with_fallbacks(messages, lang)
+        response_text, actions = await self._call_with_fallbacks(messages, lang, auth_user_id=user_id)
 
-        # 6. Persist conversation (await to get row ID for feedback)
         conversation_id = await self._persist_conversation(
-            user_id, message, response_text, lang
+            user_id, message, response_text, lang, actions=actions, silent=silent,
         )
 
-        # 7. Optional audio (language-aware voice selection)
-        audio_url = None
+        audio_b64 = None
         if include_audio:
-            audio_url = await self._generate_audio_url(response_text, lang=lang)
+            audio_b64 = await self._generate_audio_b64(response_text, lang=lang)
+
+        # Quick-reply chips must reflect the LANGUAGE OF THE AI'S REPLY,
+        # not the user's last message. Sticky-lang already handles short
+        # replies, but the response text itself is the strongest signal:
+        # if the model wrote in Spanish, the chips must be Spanish too.
+        chip_lang = lang
+        try:
+            if response_text and detect_spanish(response_text):
+                chip_lang = "es"
+        except Exception:
+            pass
 
         return {
             "text": response_text,
-            "audio_url": audio_url,
-            "user_id": user_id,
+            "audio_url": audio_b64,  # data URL, or None
+            "user_id": str(user_id),
             "lang": lang,
-            "conversation_id": conversation_id,
+            "conversation_id": str(conversation_id) if conversation_id else None,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tool_results": actions,
+            "actions": actions,
+            "suggestions": generate_quick_replies(response_text, chip_lang),
         }
 
     async def _persist_conversation(
-        self, user_id: str, user_msg: str, assistant_msg: str, lang: str
-    ) -> str | None:
-        """Store both user and assistant messages in parallel. Returns assistant row UUID."""
+        self,
+        user_id: str,
+        user_msg: str,
+        assistant_msg: str,
+        lang: str,
+        actions: Optional[list[dict]] = None,
+        silent: bool = False,
+    ) -> Optional[str]:
+        # Anonymous sessions all share the nil UUID — the ai_conversations.user_id
+        # FK references auth.users(id), so the insert would fail anyway AND
+        # different users would end up reading each other's rows under the
+        # same fake id. Skip persistence cleanly instead of relying on the
+        # swallowed error path.
+        if not user_id or user_id == "00000000-0000-0000-0000-000000000000":
+            return None
         try:
-            _, row_id = await asyncio.gather(
-                self.store_message(user_id, "user", user_msg),
-                self.store_message(
-                    user_id, "assistant", assistant_msg,
-                    metadata={"lang": lang},
-                ),
-            )
+            assistant_metadata: dict = {"lang": lang}
+            if silent:
+                assistant_metadata["silent_trigger"] = True
+            # Strip large payloads but keep the lightweight facts the next
+            # turn needs to resolve "claim it" / "show me the 3rd one" /
+            # "what was the address again". We persist titles, ids, and
+            # short summaries — not full geometries / arrays — so the row
+            # stays small but the model regains context after a refresh.
+            if actions:
+                compact: list[dict] = []
+                for a in actions[-8:]:  # last 8 tool calls per turn is plenty
+                    if not isinstance(a, dict):
+                        continue
+                    res = a.get("result") or {}
+                    listings = res.get("listings") or res.get("results") or []
+                    compact_listings = []
+                    for item in (listings[:5] if isinstance(listings, list) else []):
+                        if not isinstance(item, dict):
+                            continue
+                        compact_listings.append({
+                            "id": item.get("id"),
+                            "title": item.get("title") or item.get("name"),
+                            "category": item.get("category"),
+                            "quantity": item.get("quantity"),
+                            "unit": item.get("unit"),
+                            "latitude": item.get("latitude") or item.get("lat"),
+                            "longitude": item.get("longitude") or item.get("lng"),
+                            "distance_km": item.get("distance_km"),
+                            "address": item.get("full_address") or item.get("address"),
+                            "donor_name": item.get("donor_name"),
+                        })
+                    entry_compact: dict = {
+                        "tool": a.get("tool"),
+                        "ok": a.get("ok"),
+                        "summary": (a.get("summary") or "")[:240],
+                        # Mirror `ok` as a success flag so ToolResultCard
+                        # checks like `result?.success` work on re-hydrated rows.
+                        "success": bool(a.get("ok")),
+                        "listing_id": res.get("listing_id") or a.get("listing_id"),
+                        "claim_id": res.get("claim_id") or a.get("claim_id"),
+                        "receipt_id": res.get("receipt_id") or a.get("receipt_id"),
+                        "title": res.get("title"),
+                        "quantity": res.get("quantity"),
+                        "unit": res.get("unit"),
+                        "pickup_location": res.get("pickup_location"),
+                        "listings": compact_listings,
+                    }
+                    # Preserve UI-control + route fields so map markers and
+                    # navigation actions can re-fire after a page refresh.
+                    for k in ("action", "path", "target", "view", "focus", "target_id", "lang"):
+                        if a.get(k) is not None:
+                            entry_compact[k] = a[k]
+                    if isinstance(a.get("route"), dict):
+                        entry_compact["route"] = {
+                            "geometry": a["route"].get("geometry"),
+                            "origin": a["route"].get("origin"),
+                            "destination": a["route"].get("destination"),
+                            "distance_km": a["route"].get("distance_km"),
+                            "duration_text": a["route"].get("duration_text"),
+                            "profile": a["route"].get("profile"),
+                        }
+                    compact.append(entry_compact)
+                if compact:
+                    assistant_metadata["actions"] = compact
+            # Silent prompts (e.g. "[Action completed] I just published…")
+            # are internal context, not something the user typed. Skip the
+            # user-side store so the prompt never appears in chat history.
+            if silent:
+                row_id = await self.store_message(
+                    user_id, "assistant", assistant_msg, metadata=assistant_metadata,
+                )
+            else:
+                _, row_id = await asyncio.gather(
+                    self.store_message(user_id, "user", user_msg),
+                    self.store_message(
+                        user_id, "assistant", assistant_msg, metadata=assistant_metadata,
+                    ),
+                )
             return row_id
         except Exception as exc:
-            logger.error("Conversation persistence failed: %s", exc)
+            logger.error("Persistence failed: %s", exc)
             return None
 
-    # ---- Fallback-aware orchestrator --------------------------------------
+    # ---- GPT call with fallback ------------------------------------------
 
-    async def _call_with_fallbacks(
-        self, messages: list[dict], lang: str = "en"
-    ) -> str:
-        """Try GPT-4o; on failure fall back to text-only canned responses."""
-        # Attempt 1: Full GPT-4o with tool calling
+    async def _call_with_fallbacks(self, messages: list[dict], lang: str = "en", auth_user_id: Optional[str] = None) -> tuple[str, list[dict]]:
+        actions: list[dict] = []
         try:
-            return await self._call_openai_chat(messages, lang=lang)
-        except httpx.TimeoutException:
-            logger.warning("GPT-4o timed out — returning canned timeout response")
-            return get_canned_response("timeout", lang)
+            text = await self._call_openai_chat(messages, lang=lang, auth_user_id=auth_user_id, actions_out=actions)
+            return text, actions
+        except httpx.TimeoutException as exc:
+            logger.warning("GPT timeout after %ss: %s", TIMEOUT_SECONDS, exc)
+            return get_canned_response("timeout", lang), actions
         except httpx.HTTPStatusError as exc:
-            logger.error("GPT-4o HTTP error %s", exc.response.status_code)
-            return get_canned_response("api_down", lang)
+            status = exc.response.status_code if exc.response is not None else "?"
+            body_preview = ""
+            if exc.response is not None:
+                try:
+                    body_preview = exc.response.text[:300]
+                except Exception:
+                    body_preview = ""
+            logger.error("GPT HTTP %s error: %s | body=%s", status, exc, body_preview)
+            return get_canned_response("api_down", lang), actions
         except RuntimeError as exc:
-            # e.g. "OPENAI_API_KEY not configured"
-            logger.error("GPT-4o runtime error: %s", exc)
+            logger.error("GPT runtime error: %s", exc)
+            return get_canned_response("api_down", lang), actions
+        except Exception as exc:
+            logger.exception("GPT unexpected error: %s", exc)
+            return get_canned_response("general_error", lang), actions
+
+    async def public_chat_reply(self, messages: list[dict], lang: str = "en") -> str:
+        """Stateless OpenAI call with NO tools and NO persistence.
+
+        Used by the anonymous landing-page chat. Safe to expose without auth.
+        """
+        if not OPENAI_API_KEY:
+            return get_canned_response("api_down", lang)
+        payload = {
+            "model": CHAT_MODEL,
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 600,
+        }
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = await _openai_with_retry(
+                "POST",
+                f"{OPENAI_BASE_URL}/chat/completions",
+                headers=headers,
+                json_payload=payload,
+            )
+            data = resp.json()
+            return data["choices"][0]["message"].get("content", "").strip() or get_canned_response("general_error", lang)
+        except httpx.TimeoutException:
+            return get_canned_response("timeout", lang)
+        except httpx.HTTPStatusError:
             return get_canned_response("api_down", lang)
         except Exception as exc:
-            logger.error("GPT-4o unexpected error: %s", exc)
+            logger.error("public_chat_reply error: %s", exc)
             return get_canned_response("general_error", lang)
-
-    # ---- Lightweight tool-need classifier ---------------------------------
 
     @staticmethod
     def _needs_tools(message: str) -> bool:
-        """Quick heuristic: does the user message likely need a tool call?
-
-        Tool-requiring messages reference personal data (dashboard, profile,
-        pickups, claims, notifications, reminders, nearby food, directions,
-        communities, distribution centers).
-        Generic chat (greetings, recipes, storage tips, food safety, how-to)
-        can be answered from the system prompt alone — skip tools for speed.
-        """
         lower = message.lower()
-        # Keywords that signal a database/tool lookup is needed
         tool_keywords = {
             "dashboard", "profile", "my account", "my info",
             "pickup", "schedule", "claim", "claimed",
-            "notification", "notifications", "unread",
             "remind", "reminder", "set a reminder",
             "near me", "nearby", "find food", "available food",
             "search food", "food near", "listings near",
-            "direction", "directions", "route", "how do i get",
-            "distribution", "community", "communities",
-            "my listings", "my food", "my impact",
-            "mark", "read",
+            "direction", "directions", "route", "routes",
+            "distribution", "community", "communities", "center",
+            "my listings", "my food",
+            # role-specific
+            "expiring", "expire", "expiry", "about to expire",
+            "queue", "dispatch", "assignment", "assign", "unassigned",
+            "stats", "metrics", "platform", "how are we doing",
+            "complete my profile", "fill my profile", "profile gap",
+            "dietary", "allergies", "preferences",
+            # voice / GPS / routing / query
+            "current location", "here", "my location", "gps",
+            "urgent", "urgency", "most urgent",
+            "optimize", "optimise", "best route", "plan route",
+            "recipe", "recipes", "cook", "meal",
+            "how many", "how much", "query", "list all", "show me",
+            # actions (write)
+            "reserve", "take it", "grab it", "i'll take",
+            "cancel", "release", "unclaim", "drop",
+            "update my", "change my", "set my", "save my",
+            "add allergy", "add allergies", "add dietary",
+            "opt in", "opt out", "sms", "text me",
+            "post a request", "request food", "ask for",
+            "post a listing", "list my", "donate", "share food", "give away",
+            "loaves", "loaf", "bread", "fruit", "produce", "vegetables",
+            "send message", "tell admin", "tell donor", "message them",
         }
         return any(kw in lower for kw in tool_keywords)
 
-    # ---- OpenAI chat completions with tool calling -----------------------
+    # Tools that write on behalf of the user — user_id MUST come from the
+    # authenticated session, never from the model's arguments.
+    _ACTION_TOOLS = {
+        "claim_listing",
+        "cancel_claim",
+        "update_user_profile",
+        "post_food_request",
+        "post_food_listing",
+        "attach_photos_to_listing",
+        "send_notification",
+        "create_reminder",
+    }
 
-    async def _call_openai_chat(
-        self, messages: list[dict], lang: str = "en"
-    ) -> str:
-        """Call GPT-4o, handle tool calls, return final assistant text."""
-        import time as _time
+    async def _call_openai_chat(self, messages: list[dict], lang: str = "en", auth_user_id: Optional[str] = None, actions_out: Optional[list] = None) -> str:
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY not configured")
 
-        # Only include tool definitions when the message likely needs them
-        # This avoids the ~16s overhead of sending 14 tool schemas for simple chat
         user_text = ""
         for m in reversed(messages):
             if m["role"] == "user":
                 user_text = m.get("content", "")
                 break
-        use_tools = self._needs_tools(user_text)
+        # Look at recent assistant turns too: if we just asked the user a
+        # data-gathering question (e.g. 'how many?'), their reply will be
+        # short ('3', 'yes') and won't match the keyword check on its own.
+        # Tools must stay attached or the model can only emit text and will
+        # hallucinate 'Posted!' without actually calling post_food_listing.
+        recent_assistant = ""
+        for m in reversed(messages[-6:]):
+            if m["role"] == "assistant" and m.get("content"):
+                recent_assistant = m["content"]
+                break
+        use_tools = True
 
         payload = {
             "model": CHAT_MODEL,
@@ -826,23 +2624,27 @@ class ConversationEngine:
             "Content-Type": "application/json",
         }
 
-        t0 = _time.time()
         resp = await _openai_with_retry(
             "POST",
             f"{OPENAI_BASE_URL}/chat/completions",
             headers=headers,
             json_payload=payload,
         )
-        t1 = _time.time()
-        logger.info("GPT initial call: %.1fs", t1 - t0)
         data = resp.json()
-
         choice = data["choices"][0]
         msg = choice["message"]
 
-        # Handle tool calls (single round) with graceful per-tool errors
-        if msg.get("tool_calls"):
-            # Work on a copy to avoid mutating the caller's message list
+        # Multi-round tool calling. The previous single-round design meant
+        # that if the FIRST tool call returned an error (bad address, past
+        # date, unknown category, etc.) the followup model had no tools
+        # attached and could only apologize in text — the listing would
+        # silently fail. With up to 3 rounds the model can self-correct
+        # once or twice (e.g. retry post_food_listing with a fuller
+        # address) before giving up.
+        MAX_TOOL_ROUNDS = 3
+        round_idx = 0
+        while msg.get("tool_calls") and round_idx < MAX_TOOL_ROUNDS:
+            round_idx += 1
             tool_messages = list(messages)
             tool_messages.append(msg)
             for tool_call in msg["tool_calls"]:
@@ -850,80 +2652,168 @@ class ConversationEngine:
                 try:
                     fn_args = json.loads(tool_call["function"]["arguments"])
                 except (json.JSONDecodeError, TypeError) as parse_err:
-                    logger.error("Bad tool args for %s: %s", fn_name, parse_err)
                     tool_messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
                         "content": json.dumps({"error": f"Invalid arguments: {parse_err}"}),
                     })
                     continue
-
+                # Security: the AI must never operate on another user's
+                # behalf. Whenever a tool call carries a `user_id` argument,
+                # force it to the authenticated user so prompt-injection
+                # (or a hallucinated id) cannot pivot to another account.
+                # This covers BOTH read tools (profile, dashboard, history,
+                # pickups) and write tools (claim, cancel, update, post).
+                if not isinstance(fn_args, dict):
+                    fn_args = {}
+                if auth_user_id is not None and "user_id" in fn_args:
+                    fn_args["user_id"] = str(auth_user_id)
+                # run_safe_query: force a caller-scoped filter on any entity
+                # that has a user column, so the model can't enumerate other
+                # users' listings/requests or read the users table freely.
+                if fn_name == "run_safe_query" and auth_user_id is not None:
+                    fn_args = _scope_safe_query(fn_args, auth_user_id)
                 try:
-                    t_tool = _time.time()
                     result = await self._execute_tool(fn_name, fn_args)
-                    logger.info("Tool %s executed: %.1fs", fn_name, _time.time() - t_tool)
                 except Exception as tool_exc:
-                    logger.error("Tool %s failed: %s", fn_name, tool_exc)
-                    # Graceful tool error — feed error context back to GPT
+                    # Log full traceback server-side; surface a generic
+                    # message so internal exception text doesn't reach
+                    # the user via the AI's reply.
+                    logger.exception("Tool %s failed", fn_name)
                     result = {
-                        "error": True,
-                        "message": (
-                            f"The {fn_name} tool encountered an error. "
-                            "Please respond helpfully without this data."
-                        ),
+                        "success": False,
+                        "error": f"{fn_name} failed. Please try again.",
                     }
 
-                # Truncate large tool results to avoid blowing token limits
-                result_str = json.dumps(result)
-                if len(result_str) > 4000:
-                    result_str = result_str[:4000] + '... [truncated]"}}'
+                # Trace tool calls so we can debug why the model picked a tool.
+                try:
+                    logger.info(
+                        "AI tool call: %s args=%s ok=%s",
+                        fn_name,
+                        {k: v for k, v in fn_args.items() if k != "user_id"},
+                        not (isinstance(result, dict) and result.get("error")),
+                    )
+                except Exception:
+                    pass
 
+                # Record this tool call so the UI can surface progress /
+                # done indicators (claiming, listing posted, etc.).
+                if actions_out is not None and isinstance(result, dict):
+                    err_val = result.get("error")
+                    if err_val is True:
+                        ok = False
+                    elif err_val:
+                        ok = False
+                    elif result.get("success") is False or result.get("created") is False:
+                        ok = False
+                    else:
+                        ok = True
+                    # Suppress noisy "✗ Claim failed" chips when the model
+                    # hallucinates a listing the user never asked for. The
+                    # backend returned an error and the chat reply itself
+                    # already explains it; an additional red chip just
+                    # confuses the user.
+                    suppress_chip = (
+                        not ok
+                        and fn_name in {"claim_listing", "confirm_claim", "cancel_claim"}
+                        and isinstance(err_val, str)
+                        and (
+                            "not found" in err_val.lower()
+                            or "invalid" in err_val.lower()
+                            or "no listing_id" in err_val.lower()
+                        )
+                    )
+                    if not suppress_chip:
+                        summary_val = result.get("summary")
+                        if not summary_val and err_val:
+                            summary_val = err_val if isinstance(err_val, str) else None
+                        entry = {
+                            "tool": fn_name,
+                            "ok": bool(ok),
+                            "summary": summary_val,
+                            "result": result,
+                            "listing_id": result.get("listing_id"),
+                        }
+                        # Forward extra UI-control / map fields at the top level
+                        # so legacy consumers can read them without unwrapping.
+                        for extra_key in (
+                            "action", "target", "view", "focus", "path",
+                            "listing_id", "lang", "target_id",
+                            "geometry", "origin", "destination",
+                            "coords_lat", "coords_lng", "address",
+                            "verified", "verify_issues", "duplicate_of_recent",
+                            "claim_id", "receipt_id",
+                        ):
+                            if extra_key in result and result[extra_key] is not None:
+                                entry[extra_key] = result[extra_key]
+                        if isinstance(result.get("route"), dict):
+                            entry["route"] = result["route"]
+                        elif result.get("geometry"):
+                            entry["route"] = {
+                                "geometry": result.get("geometry"),
+                                "origin": result.get("origin"),
+                                "destination": result.get("destination"),
+                                "distance_km": result.get("distance_km"),
+                                "duration_text": result.get("duration_text"),
+                                "profile": result.get("profile"),
+                            }
+                        actions_out.append(entry)
+
+                result_str = json.dumps(result, default=str)
+                if len(result_str) > 4000:
+                    # For bulk operations, the per-row `results` array can be
+                    # huge. Drop it and keep the summary so the AI can still
+                    # report success/failure counts without blowing the
+                    # context window. For other tools, fall back to a hard
+                    # truncate.
+                    if isinstance(result, dict) and isinstance(result.get("results"), list):
+                        trimmed = {k: v for k, v in result.items() if k != "results"}
+                        trimmed["results_omitted"] = len(result["results"])
+                        result_str = json.dumps(trimmed, default=str)
+                    if len(result_str) > 4000:
+                        result_str = result_str[:4000] + "...[truncated]"
                 tool_messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call["id"],
                     "content": result_str,
                 })
 
-            # Follow-up call with tool results — use faster model since it's just formatting
             followup_payload = {
                 "model": FOLLOWUP_MODEL,
                 "messages": tool_messages,
                 "temperature": 0.7,
                 "max_tokens": 1024,
+                # Keep tools attached so the model can retry after a tool
+                # error (e.g. correct an address, switch category) instead
+                # of silently giving up in text.
+                "tools": self.tool_definitions,
             }
             try:
-                t2 = _time.time()
                 resp = await _openai_with_retry(
                     "POST",
                     f"{OPENAI_BASE_URL}/chat/completions",
                     headers=headers,
                     json_payload=followup_payload,
                 )
-                t3 = _time.time()
-                logger.info("GPT follow-up call: %.1fs (total: %.1fs)", t3 - t2, t3 - t0)
-                data = resp.json()
-                return data["choices"][0]["message"]["content"]
+                followup_data = resp.json()
+                msg = followup_data["choices"][0]["message"]
+                # The followup response becomes the seed for the next loop
+                # iteration. Persist conversation context too so subsequent
+                # tool rounds reference both the original messages AND the
+                # tool results from this round.
+                messages = tool_messages
             except Exception as followup_exc:
-                logger.error("GPT-4o follow-up failed: %s", followup_exc)
+                logger.error("Follow-up failed: %s", followup_exc)
                 return get_canned_response("tool_error", lang)
 
-        return msg["content"]
+        return msg.get("content") or ""
 
-    # ---- Whisper speech-to-text ------------------------------------------
+    # ---- Whisper + TTS ---------------------------------------------------
 
-    async def transcribe_audio(
-        self, audio_bytes: bytes, filename: str = "audio.webm"
-    ) -> str:
-        """Transcribe audio using OpenAI Whisper API.
-
-        Whisper auto-detects language (supports Spanish natively).
-        Raises RuntimeError on config issues, httpx errors on API failure.
-        """
+    async def transcribe_audio(self, audio_bytes: bytes, filename: str = "audio.webm") -> str:
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY not configured")
-
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-
         resp = await _openai_with_retry(
             "POST",
             f"{OPENAI_BASE_URL}/audio/transcriptions",
@@ -934,82 +2824,237 @@ class ConversationEngine:
         )
         return resp.json()["text"]
 
-    # ---- TTS text-to-speech ----------------------------------------------
-
     async def generate_speech(self, text: str, lang: str = "en") -> bytes:
-        """Generate speech audio bytes using OpenAI TTS API.
-
-        Selects voice based on language: Spanish uses TTS_VOICE_ES,
-        English uses TTS_VOICE_EN (both support Sesame voices).
-        """
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY not configured")
-
-        # TTS has a ~4096 char limit
         truncated = text[:4096]
         voice = TTS_VOICE_ES if lang == "es" else TTS_VOICE_EN
-
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "Content-Type": "application/json",
         }
-
         resp = await _openai_with_retry(
             "POST",
             f"{OPENAI_BASE_URL}/audio/speech",
             headers=headers,
-            json_payload={
-                "model": TTS_MODEL,
-                "input": truncated,
-                "voice": voice,
-            },
+            json_payload={"model": TTS_MODEL, "input": truncated, "voice": voice},
             timeout=30,
         )
         return resp.content
 
-    async def _generate_audio_url(
-        self, text: str, lang: str = "en"
-    ) -> Optional[str]:
-        """Generate speech and upload to Supabase storage, return public URL."""
+    async def _generate_audio_b64(self, text: str, lang: str = "en") -> Optional[str]:
+        """Return the TTS audio as a base64 data URL (no external storage needed)."""
         try:
             audio_bytes = await self.generate_speech(text, lang=lang)
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-            filename = f"ai-voice/{ts}-response.mp3"
-
-            headers = {
-                "apikey": SUPABASE_SERVICE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                "Content-Type": "audio/mpeg",
-            }
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{SUPABASE_URL}/storage/v1/object/ai-audio/{filename}",
-                    content=audio_bytes,
-                    headers=headers,
-                )
-                if resp.status_code in (200, 201):
-                    return (
-                        f"{SUPABASE_URL}/storage/v1/object/public/"
-                        f"ai-audio/{filename}"
-                    )
-            logger.warning("Audio upload failed: HTTP %s", resp.status_code)
-            return None
+            import base64
+            b64 = base64.b64encode(audio_bytes).decode("ascii")
+            return f"data:audio/mpeg;base64,{b64}"
         except Exception as exc:
             logger.warning("Audio generation failed: %s", exc)
             return None
 
 
-# ---------------------------------------------------------------------------
-# Singleton instances
-# ---------------------------------------------------------------------------
+def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
+    """Heuristic 'smart reply' / autofill chips for the chat UI.
+
+    Looks at the last AI message and returns up to 4 short tappable
+    suggestions the user is likely to want to reply with. Pure string
+    matching — no extra LLM call, so it's free and instant.
+
+    Rule of thumb: it is better to return [] (no chips) than to return
+    chips that don't match the question. Yes/No/Later under "what food
+    would you like to share?" is worse than no chips at all.
+    """
+    if not text:
+        return []
+    t = text.lower()
+    # Only suggest when the AI is actually asking the user something,
+    # otherwise chips would clutter every reply.
+    if "?" not in t and "¿" not in t:
+        return []
+
+    es = lang == "es"
+    out: list[str] = []
+
+    def add(*items: str) -> None:
+        for it in items:
+            if it and it not in out and len(out) < 4:
+                out.append(it)
+
+    # An "open-ended" question is one that asks WHAT / WHICH / WHEN /
+    # WHERE / HOW MANY / HOW MUCH — never answerable with yes/no.
+    # NOTE on Spanish: only match accented "qué " (the question word).
+    # Unaccented "que " is a connector/pronoun ("¿Quieres que…?") and
+    # would mis-fire as open-ended on yes/no questions.
+    open_ended = any(
+        k in t for k in (
+            "what ", "which ", "when ", "where ", "how many", "how much",
+            "what's", "what is",
+            "qué ", "cuál", "cuándo", "dónde", "cuántos", "cuántas",
+        )
+    )
+
+    # ---- Specific intent branches (run before any generic fallback) -----
+
+    # Final confirm: any phrasing where the AI is asking the donor/recipient
+    # to greenlight posting the listing/request. The AI's confirm summary
+    # always ends with one of these — match generously so chips are right.
+    confirm_post_keys = (
+        "post it", "post that", "post this", "post the listing",
+        "publish it", "publish that", "publish this", "publish the listing",
+        "should i post", "shall i post", "want me to post", "ok to post",
+        "ready to post", "ready to publish", "go ahead and post",
+        "good to post", "good to publish", "look good", "looks good",
+        "sound good", "sounds good", "all set", "all good",
+        "confirm?", "confirm and post", "shall i go ahead", "should i go ahead",
+        # Spanish
+        "publicarlo", "publicar la", "publicar el", "publico la", "publico el",
+        "¿confirmas", "¿lo publico", "¿lo publicamos", "¿publicamos",
+        "¿está bien", "¿esta bien", "¿se ve bien", "¿todo bien",
+        "listo para publicar",
+    )
+    if any(k in t for k in confirm_post_keys):
+        if es:
+            add("Sí, publícalo", "Espera, edítalo", "Cancelar")
+        else:
+            add("Yes, post it", "Wait, edit it", "Cancel")
+        return out
+
+    # Handoff method (pickup vs drop-off). Skip if the question is about
+    # WHEN — "¿cuándo pueden recogerlo?" is a pickup-window question, not
+    # a handoff question, even though it contains "recoger".
+    is_when_question = any(
+        k in t for k in ("when can", "what time", "cuándo", "cuando", "qué horario", "que horario")
+    )
+    if (not is_when_question) and any(
+        k in t for k in ("pick this up", "pick it up", "drop it off", "drop-off", "drop off",
+                         "deliver", "pickup or", "recoger", "entregar", "entrega")
+    ):
+        if es:
+            add("Recogida en mi casa", "Yo lo entrego", "Cualquiera")
+        else:
+            add("Pickup at my place", "I'll drop it off", "Either works")
+        if any(k in t for k in ("radius", "how far", "miles", "millas", "qué tan lejos")):
+            if es:
+                add("5 millas", "10 millas")
+            else:
+                add("Within 5 mi", "Within 10 mi")
+        return out
+
+    # Address confirmation
+    if any(k in t for k in (
+            "profile address", "use your address", "different one", "what address",
+            "dirección de tu perfil", "dirección del perfil", "tu dirección guardada",
+            "uso tu dirección", "uso la dirección", "qué dirección", "que direccion",
+            "otra dirección", "distinta", "diferente",
+    )):
+        if es:
+            add("Sí, usa esa", "Es otra dirección", "No tengo una guardada")
+        else:
+            add("Yes, use that one", "Use a different address", "I don't have one saved")
+        return out
+
+    # Allergens
+    if "allerg" in t or "alérgen" in t or "alergia" in t:
+        if es:
+            add("Sin alérgenos", "Solo gluten", "Lácteos", "Frutos secos")
+        else:
+            add("No allergens", "Just gluten", "Dairy", "Nuts")
+        return out
+
+    # Photo
+    if "photo" in t or "picture" in t or "foto" in t or "imagen" in t:
+        if es:
+            add("Adjuntar foto", "Sin foto", "Después")
+        else:
+            add("I'll add one", "Skip the photo", "Maybe later")
+        return out
+
+    # Pickup window / when
+    if any(k in t for k in ("when can", "pick them up", "pickup window", "what time",
+                            "cuándo pueden", "cuando pueden", "qué horario", "que horario")):
+        if es:
+            add("Hoy 5–8pm", "Mañana", "Próximas 24h", "Cuando sea")
+        else:
+            add("Today 5–8pm", "Tomorrow morning", "Next 24h", "Whenever")
+        return out
+
+    # Freshness / expiration
+    if any(k in t for k in ("best by", "expir", "fresh", "baked", "made it",
+                            "caduc", "vence", "fresco", "horneado", "preparado")):
+        if es:
+            add("Hecho hoy", "Hecho ayer", "Vence mañana")
+        else:
+            add("Made today", "Made yesterday", "Good for 24h")
+        return out
+
+    # Quantity prompt ("how many", "three what?")
+    if any(k in t for k in ("how many", "how much", "what unit", "three what",
+                            "cuántos", "cuántas", "qué unidad")):
+        if es:
+            add("1", "3", "5", "10")
+        else:
+            add("1", "3", "5", "10")
+        return out
+
+    # "What food / what would you like to share / what is it / what are you donating"
+    if any(k in t for k in (
+            "what food", "what would you like to share", "what would you like to donate",
+            "what are you sharing", "what are you donating", "what is it", "what's the food",
+            "what do you have", "what kind of food",
+            # Spanish
+            "qué comida", "que comida",
+            "qué quieres compartir", "que quieres compartir",
+            "qué te gustaría compartir", "que te gustaria compartir",
+            "qué tienes", "que tienes",
+            "qué vas a donar", "que vas a donar",
+            "qué quieres donar", "que quieres donar",
+            "qué te gustaría donar", "que te gustaria donar",
+            "qué tipo de comida", "que tipo de comida",
+            "qué vas a compartir", "que vas a compartir",
+    )):
+        if es:
+            add("Pan", "Frutas", "Verduras", "Comida preparada")
+        else:
+            add("Bread", "Fruit", "Vegetables", "Prepared meal")
+        return out
+
+    # "What are you looking for" (recipient side)
+    if any(k in t for k in (
+            "what are you looking for", "what do you need",
+            "qué buscas", "que buscas",
+            "qué necesitas", "que necesitas",
+            "qué te hace falta", "que te hace falta",
+            "qué estás buscando", "que estas buscando",
+    )):
+        if es:
+            add("Pan", "Frutas", "Verduras", "Comida preparada")
+        else:
+            add("Bread", "Fruit", "Vegetables", "Prepared meal")
+        return out
+
+    # ---- Fallbacks --------------------------------------------------
+
+    # Open-ended wh-question with no specific branch above: don't guess.
+    # Empty chips > wrong chips.
+    if open_ended:
+        return out
+
+    # Generic yes/no question — only safe when NOT open-ended.
+    if any(k in t for k in (
+            "would you like", "do you want", "ready to", "should i",
+            "shall i", "want me to", "can i",
+            "¿quieres", "quieres que", "¿te gustaría", "te gustaría que",
+            "¿listo", "¿debo", "¿puedo", "¿lo hago", "¿lo hacemos",
+    )):
+        if es:
+            add("Sí", "No", "Más tarde")
+        else:
+            add("Yes", "No", "Later")
+        return out
+
+    return out
+
 
 conversation_engine = ConversationEngine()
 
-
-# ---------------------------------------------------------------------------
-# Legacy helpers used by app.py routes (matching, recipes, etc.)
-# ---------------------------------------------------------------------------
-
-async def legacy_ai_request(endpoint: str, payload: dict) -> dict:
-    """Call OpenAI for legacy routes (recipes, storage tips, etc.)."""
-    return await _ai_request(endpoint, payload)
