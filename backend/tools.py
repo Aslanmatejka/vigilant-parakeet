@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -1072,6 +1073,136 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    # ---------- AGENTIC EXPANSIONS — memory + donor-messaging ----------
+    {
+        "type": "function",
+        "function": {
+            "name": "remember_user_fact",
+            "description": (
+                "Save a durable fact about the user so it persists across "
+                "future conversations. Use whenever the user says 'remember "
+                "that I…', 'from now on…', 'I always…', or shares a stable "
+                "preference / situation (household size, dietary restrictions, "
+                "allergies, work schedule, transport, chronic constraints). "
+                "Do NOT use for ephemeral things (today's mood, current "
+                "craving). The user can view/delete saved memories in Settings."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "The user this memory belongs to."},
+                    "key": {
+                        "type": "string",
+                        "description": (
+                            "Short snake_case identifier — overwrites any prior fact "
+                            "with the same key. Examples: household_size, "
+                            "dietary_restriction, allergy, transport, work_schedule, "
+                            "preferred_pickup_time, no_oven, has_wheelchair."
+                        ),
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "Human-readable fact (<200 chars). E.g. '4 people incl. 2 kids', 'vegan', 'no oven'.",
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "0.0-1.0 — how certain you are the fact is durable. Use 1.0 when the user stated it explicitly.",
+                        "default": 1.0,
+                    },
+                },
+                "required": ["user_id", "key", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forget_user_fact",
+            "description": (
+                "Delete a previously-remembered fact. Use when the user says "
+                "'forget that', 'I no longer…', 'we moved', or otherwise "
+                "invalidates a stored memory."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "key": {"type": "string", "description": "The snake_case key of the memory to remove."},
+                },
+                "required": ["user_id", "key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_user_facts",
+            "description": (
+                "Return everything the assistant currently remembers about "
+                "the user. Use when the user asks 'what do you remember "
+                "about me?' or wants to audit their saved facts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "message_donor",
+            "description": (
+                "Send a notification (in-app + optional SMS) to the donor of "
+                "a specific food listing on behalf of the current user. Use "
+                "when a recipient wants to ask the donor a question, "
+                "coordinate a pickup time, or thank them. Includes the "
+                "recipient's name so the donor knows who's reaching out. "
+                "Returns success + the notification id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from_user_id": {"type": "string", "description": "The user_id of the recipient sending the message (must match the authenticated user)."},
+                    "listing_id": {"type": "string", "description": "The food listing whose donor is being contacted."},
+                    "message": {"type": "string", "description": "The message body. Keep under 600 characters."},
+                    "topic": {
+                        "type": "string",
+                        "description": "Optional one-line subject (e.g. 'Question about pickup time', 'Running 10 minutes late').",
+                    },
+                },
+                "required": ["from_user_id", "listing_id", "message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "extend_listing_deadline",
+            "description": (
+                "Push out the pickup_by deadline of a food listing the user "
+                "owns. Use when a donor wants to give recipients more time "
+                "(e.g. 'extend the bread by 4 hours', 'keep my listing open "
+                "until tomorrow noon'). Only the listing owner may extend; "
+                "the new deadline must be in the future."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "Owner of the listing (must match the authenticated user)."},
+                    "listing_id": {"type": "string", "description": "The listing to extend."},
+                    "new_pickup_by": {
+                        "type": "string",
+                        "description": "New deadline as ISO timestamp (YYYY-MM-DDTHH:MM:SSZ) OR a relative spec like '+4h', '+1d', 'tomorrow 18:00'.",
+                    },
+                },
+                "required": ["user_id", "listing_id", "new_pickup_by"],
+            },
+        },
+    },
 ]
 
 
@@ -1111,6 +1242,12 @@ async def execute_tool(name: str, arguments: dict) -> dict:
         "meal_suggestions": _get_recipes,
         "post_food_request": _post_food_request,
         "bulk_post_food_listings": _bulk_import_listings,
+        # Agentic expansion — memory + donor messaging + listing controls
+        "remember_user_fact": _remember_user_fact,
+        "forget_user_fact": _forget_user_fact,
+        "list_user_facts": _list_user_facts,
+        "message_donor": _message_donor,
+        "extend_listing_deadline": _extend_listing_deadline,
     }
 
     handler = handlers.get(name)
@@ -3559,6 +3696,328 @@ async def _post_food_request(
         "unit": row["unit"],
         "category": cat,
         "summary": f"Request posted: {qty} {row['unit']} of '{title}'. It's live for nearby donors.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Long-term memory tools — remember_user_fact / forget_user_fact / list_user_facts
+# ---------------------------------------------------------------------------
+
+async def _remember_user_fact(
+    user_id: str,
+    key: str,
+    value: str,
+    confidence: float = 1.0,
+    **_ignored,
+) -> dict:
+    """Persist a durable fact about the user (explicit save)."""
+    from backend.ai_engine import upsert_user_memory, _normalize_memory_key
+
+    if not user_id:
+        return {"success": False, "error": "user_id is required"}
+
+    norm_key = _normalize_memory_key(key)
+    if not norm_key:
+        return {
+            "success": False,
+            "error": "Memory key must be a short snake_case identifier (a-z, 0-9, _).",
+        }
+    if not value or not str(value).strip():
+        return {"success": False, "error": "Memory value cannot be empty."}
+
+    saved = await upsert_user_memory(
+        user_id, norm_key, value, confidence=float(confidence or 1.0), source="explicit",
+    )
+    if not saved:
+        return {
+            "success": False,
+            "error": "Memory could not be saved (table missing or DB unreachable).",
+        }
+    return {
+        "success": True,
+        "key": norm_key,
+        "value": saved.get("value", value),
+        "summary": f"Saved: {norm_key.replace('_', ' ')} = {saved.get('value', value)}",
+    }
+
+
+async def _forget_user_fact(user_id: str, key: str, **_ignored) -> dict:
+    """Delete a previously-saved memory."""
+    from backend.ai_engine import delete_user_memory, _normalize_memory_key
+
+    if not user_id:
+        return {"success": False, "error": "user_id is required"}
+    norm_key = _normalize_memory_key(key)
+    if not norm_key:
+        return {"success": False, "error": "Invalid memory key."}
+
+    removed = await delete_user_memory(user_id, norm_key)
+    if removed <= 0:
+        return {
+            "success": True,
+            "removed": 0,
+            "key": norm_key,
+            "summary": f"No memory called '{norm_key.replace('_', ' ')}' was saved — nothing to forget.",
+        }
+    return {
+        "success": True,
+        "removed": int(removed),
+        "key": norm_key,
+        "summary": f"Forgotten: {norm_key.replace('_', ' ')}.",
+    }
+
+
+async def _list_user_facts(user_id: str, **_ignored) -> dict:
+    """Return everything currently remembered about the user."""
+    from backend.ai_engine import get_user_memories
+
+    if not user_id:
+        return {"success": False, "error": "user_id is required"}
+    rows = await get_user_memories(user_id, limit=50)
+    facts = [
+        {
+            "key": r.get("key"),
+            "value": r.get("value"),
+            "confidence": r.get("confidence"),
+            "source": r.get("source"),
+            "last_seen": r.get("last_seen"),
+        }
+        for r in rows
+        if isinstance(r, dict) and r.get("key") and r.get("value")
+    ]
+    if not facts:
+        return {
+            "success": True,
+            "facts": [],
+            "summary": "I don't have any saved facts about you yet. Tell me something like 'remember that I'm vegan' and I'll keep it in mind for next time.",
+        }
+    bullets = "\n".join(f"- {f['key'].replace('_', ' ')}: {f['value']}" for f in facts[:15])
+    summary = (
+        f"Here's what I currently remember about you ({len(facts)} item"
+        f"{'s' if len(facts) != 1 else ''}):\n{bullets}"
+    )
+    return {"success": True, "facts": facts, "summary": summary}
+
+
+# ---------------------------------------------------------------------------
+# message_donor — recipient → donor messaging (in-app notification)
+# ---------------------------------------------------------------------------
+
+async def _message_donor(
+    from_user_id: str,
+    listing_id: str,
+    message: str,
+    topic: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    """Send an in-app notification (and SMS if the donor has opted in) on
+    behalf of the recipient to the donor of a specific food listing.
+    """
+    from backend.ai_engine import supabase_get
+
+    if not from_user_id or not listing_id or not message:
+        return {"success": False, "error": "from_user_id, listing_id and message are required"}
+
+    msg_clean = str(message).strip()
+    if not msg_clean:
+        return {"success": False, "error": "Message cannot be empty"}
+    if len(msg_clean) > 600:
+        msg_clean = msg_clean[:597] + "..."
+
+    # 1. Resolve listing → donor user_id
+    try:
+        listings = await supabase_get("food_listings", {
+            "id": f"eq.{listing_id}",
+            "select": "id,title,user_id",
+            "limit": "1",
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.error("message_donor listing lookup failed: %s", exc)
+        return {"success": False, "error": f"Could not look up listing: {exc}"}
+    if not listings:
+        return {"success": False, "error": "Listing not found or no longer available."}
+    listing = listings[0]
+    donor_id = listing.get("user_id")
+    if not donor_id:
+        return {"success": False, "error": "Listing has no donor on record."}
+    if str(donor_id) == str(from_user_id):
+        return {
+            "success": False,
+            "error": "You can't message yourself about your own listing.",
+        }
+
+    # 2. Resolve sender → display name for the donor's notification
+    sender_name = "A community member"
+    try:
+        senders = await supabase_get("users", {
+            "id": f"eq.{from_user_id}",
+            "select": "name,full_name",
+            "limit": "1",
+        })
+        if senders:
+            row = senders[0]
+            sender_name = row.get("name") or row.get("full_name") or sender_name
+    except Exception:  # noqa: BLE001
+        pass  # name lookup is best-effort
+
+    listing_title = listing.get("title") or "your listing"
+    topic_clean = (topic or "").strip()
+    title = (topic_clean or f"Message from {sender_name} about {listing_title}")[:120]
+    body = f"{sender_name} (about \"{listing_title}\"): {msg_clean}"
+
+    # 3. Deliver via the existing notification handler so SMS + realtime + RLS
+    #    all behave consistently.
+    notif_result = await _send_notification(
+        user_id=str(donor_id),
+        title=title,
+        message=body[:600],
+        notification_type="system",
+        data={
+            "kind": "donor_message",
+            "from_user_id": str(from_user_id),
+            "from_name": sender_name,
+            "listing_id": str(listing.get("id")),
+            "listing_title": listing_title,
+            "topic": topic_clean or None,
+            "message": msg_clean,
+        },
+    )
+
+    if isinstance(notif_result, dict) and notif_result.get("error"):
+        return {
+            "success": False,
+            "error": notif_result["error"],
+            "listing_id": str(listing.get("id")),
+        }
+    return {
+        "success": True,
+        "listing_id": str(listing.get("id")),
+        "donor_id": str(donor_id),
+        "notification_id": (notif_result or {}).get("notification_id"),
+        "summary": (
+            f"Message delivered to the donor of '{listing_title}'. "
+            "They'll get a notification (and an SMS if they have texts on)."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# extend_listing_deadline — donor pushes the pickup_by window further
+# ---------------------------------------------------------------------------
+
+_RELATIVE_DELTA_RE = re.compile(r"^\+\s*(\d+)\s*([hd])$", re.IGNORECASE)
+
+
+def _resolve_new_pickup_by(spec: str) -> Optional[datetime]:
+    """Convert a relative or ISO-ish string into a UTC datetime in the future."""
+    if not spec:
+        return None
+    s = str(spec).strip()
+
+    # Relative form: '+4h', '+1d', '+ 12 h'
+    m = _RELATIVE_DELTA_RE.match(s)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2).lower()
+        delta = timedelta(hours=n) if unit == "h" else timedelta(days=n)
+        return datetime.now(timezone.utc) + delta
+
+    # ISO timestamp (with or without Z)
+    parsed = _parse_dt(s)
+    if parsed:
+        return parsed
+
+    # Loose "tomorrow HH:MM" / "tomorrow"
+    low = s.lower()
+    if low.startswith("tomorrow"):
+        base = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
+            hour=18, minute=0, second=0, microsecond=0,
+        )
+        time_match = re.search(r"(\d{1,2})(?::(\d{2}))?", low)
+        if time_match:
+            hh = max(0, min(23, int(time_match.group(1))))
+            mm = max(0, min(59, int(time_match.group(2) or 0)))
+            base = base.replace(hour=hh, minute=mm)
+        return base
+    if low == "tonight":
+        return datetime.now(timezone.utc).replace(
+            hour=22, minute=0, second=0, microsecond=0,
+        )
+
+    return None
+
+
+async def _extend_listing_deadline(
+    user_id: str,
+    listing_id: str,
+    new_pickup_by: str,
+    **_ignored,
+) -> dict:
+    """Push out (or set) the pickup_by deadline of a listing the user owns."""
+    from backend.ai_engine import supabase_get, supabase_patch
+
+    if not user_id or not listing_id:
+        return {"success": False, "error": "user_id and listing_id are required"}
+
+    # 1. Verify ownership
+    try:
+        listings = await supabase_get("food_listings", {
+            "id": f"eq.{listing_id}",
+            "select": "id,title,user_id,pickup_by,status",
+            "limit": "1",
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.error("extend_listing_deadline lookup failed: %s", exc)
+        return {"success": False, "error": f"Could not look up listing: {exc}"}
+    if not listings:
+        return {"success": False, "error": "Listing not found."}
+    listing = listings[0]
+    if str(listing.get("user_id")) != str(user_id):
+        return {
+            "success": False,
+            "error": "Only the listing owner can extend its deadline.",
+        }
+
+    # 2. Resolve the new deadline
+    new_dt = _resolve_new_pickup_by(new_pickup_by)
+    if not new_dt:
+        return {
+            "success": False,
+            "error": (
+                "Couldn't parse the new pickup deadline. Use an ISO timestamp "
+                "(e.g. 2026-05-31T18:00:00Z) or a relative spec like '+4h' or '+1d'."
+            ),
+        }
+    now = datetime.now(timezone.utc)
+    if new_dt <= now:
+        return {"success": False, "error": "New deadline must be in the future."}
+
+    # 3. Patch the row
+    iso_value = new_dt.astimezone(timezone.utc).isoformat()
+    try:
+        await supabase_patch(
+            "food_listings",
+            params={
+                "id": f"eq.{listing_id}",
+                "user_id": f"eq.{user_id}",
+            },
+            body={"pickup_by": iso_value},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("extend_listing_deadline update failed: %s", exc)
+        return {"success": False, "error": f"Could not extend listing: {exc}"}
+
+    prev = listing.get("pickup_by")
+    return {
+        "success": True,
+        "listing_id": str(listing.get("id")),
+        "title": listing.get("title"),
+        "previous_pickup_by": prev,
+        "new_pickup_by": iso_value,
+        "summary": (
+            f"Extended '{listing.get('title') or 'your listing'}' — "
+            f"new pickup deadline is {iso_value}."
+        ),
     }
 
 

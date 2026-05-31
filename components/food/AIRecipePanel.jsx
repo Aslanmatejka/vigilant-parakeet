@@ -25,16 +25,19 @@ export default function AIRecipePanel({ className = '' }) {
 
     const [loading, setLoading] = React.useState(false);
     const [error, setError] = React.useState(null);
+    const [errorMeta, setErrorMeta] = React.useState(null);
     const [result, setResult] = React.useState(null);
     const [expandedIdx, setExpandedIdx] = React.useState(null);
 
     const handleGenerate = async () => {
         if (!isAuthenticated || !user?.id) {
             setError('Please sign in to generate recipes.');
+            setErrorMeta(null);
             return;
         }
         setLoading(true);
         setError(null);
+        setErrorMeta(null);
         try {
             const explicit = ingredientsText
                 .split(/[,\n]/)
@@ -57,7 +60,13 @@ export default function AIRecipePanel({ className = '' }) {
             setResult(res);
             setExpandedIdx(res.recipes?.length ? 0 : null);
         } catch (err) {
-            setError(err?.message || 'Failed to generate recipes.');
+            const aiError = err?.aiError || null;
+            setError(aiError?.message || err?.message || 'Failed to generate recipes.');
+            setErrorMeta(aiError ? {
+                code: aiError.code || aiError.errorCode || null,
+                retryable: !!aiError.retryable,
+                requestId: aiError.requestId || err?.requestId || null,
+            } : null);
         } finally {
             setLoading(false);
         }
@@ -172,7 +181,32 @@ export default function AIRecipePanel({ className = '' }) {
                     )}
                 </div>
 
-                {error && <p className="text-xs text-red-600">{error}</p>}
+                {error && (
+                    <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-700">
+                        <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                                <p className="font-medium leading-snug">{error}</p>
+                                {(errorMeta?.code || errorMeta?.requestId) && (
+                                    <p className="mt-0.5 text-[10px] text-red-500/80 truncate">
+                                        {errorMeta?.code ? <span className="uppercase">{errorMeta.code}</span> : null}
+                                        {errorMeta?.code && errorMeta?.requestId ? ' · ' : null}
+                                        {errorMeta?.requestId ? <span>req {errorMeta.requestId}</span> : null}
+                                    </p>
+                                )}
+                            </div>
+                            {(errorMeta?.retryable ?? true) && (
+                                <button
+                                    type="button"
+                                    onClick={handleGenerate}
+                                    disabled={loading}
+                                    className="shrink-0 rounded-md bg-red-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-red-700 disabled:bg-red-300"
+                                >
+                                    Retry
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                )}
                 {!isAuthenticated && (
                     <p className="text-xs text-gray-500">Sign in to anchor recipes to your claimed pickups.</p>
                 )}

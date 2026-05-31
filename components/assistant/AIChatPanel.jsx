@@ -471,6 +471,46 @@ const TOOL_CARD_TOKENS = {
     accent: 'text-blue-200',
     sub: 'text-blue-300/75',
   },
+  memory_save: {
+    title: { en: 'Saved to memory', es: 'Guardado en memoria' },
+    icon: 'fa-brain',
+    ring: 'ring-violet-400/40',
+    bg: 'bg-gradient-to-br from-violet-900/40 to-violet-950/30 border-violet-500/25',
+    accent: 'text-violet-200',
+    sub: 'text-violet-300/75',
+  },
+  memory_forget: {
+    title: { en: 'Forgotten', es: 'Olvidado' },
+    icon: 'fa-eraser',
+    ring: 'ring-slate-400/40',
+    bg: 'bg-gradient-to-br from-slate-800/50 to-slate-900/40 border-slate-500/25',
+    accent: 'text-slate-200',
+    sub: 'text-slate-400/75',
+  },
+  memory_list: {
+    title: { en: "What I remember", es: 'Lo que recuerdo' },
+    icon: 'fa-list-check',
+    ring: 'ring-indigo-400/40',
+    bg: 'bg-gradient-to-br from-indigo-900/40 to-indigo-950/30 border-indigo-500/25',
+    accent: 'text-indigo-200',
+    sub: 'text-indigo-300/75',
+  },
+  donor_message: {
+    title: { en: 'Message sent', es: 'Mensaje enviado' },
+    icon: 'fa-paper-plane',
+    ring: 'ring-teal-400/40',
+    bg: 'bg-gradient-to-br from-teal-900/40 to-teal-950/30 border-teal-500/25',
+    accent: 'text-teal-200',
+    sub: 'text-teal-300/75',
+  },
+  listing_extended: {
+    title: { en: 'Deadline extended', es: 'Plazo extendido' },
+    icon: 'fa-clock-rotate-left',
+    ring: 'ring-orange-400/40',
+    bg: 'bg-gradient-to-br from-orange-900/40 to-orange-950/30 border-orange-500/25',
+    accent: 'text-orange-200',
+    sub: 'text-orange-400/75',
+  },
 }
 
 function ToolCardShell({ kind, language = 'en', titleOverride, children }) {
@@ -608,6 +648,106 @@ function ToolResultCard({ toolResult, language = 'en' }) {
           </div>
         )}
         {result.summary && <div className="text-sky-300/75 mt-1">{result.summary}</div>}
+      </ToolCardShell>
+    )
+  }
+
+  if (tool === 'remember_user_fact' && ok) {
+    const prettyKey = (result.key || '').replace(/_/g, ' ')
+    return (
+      <ToolCardShell kind="memory_save" language={language}>
+        <div className="text-violet-100">
+          <span className="opacity-75">{language === 'es' ? 'Recordaré: ' : "I'll remember: "}</span>
+          <span className="font-medium capitalize">{prettyKey}</span>
+          {result.value && <span className="text-violet-200"> · {result.value}</span>}
+        </div>
+        <div className="text-violet-300/75 mt-1 text-[11px]">
+          {language === 'es'
+            ? 'Puedes ver o borrar esto en Ajustes → Memoria.'
+            : 'You can view or remove this in Settings → AI Memory.'}
+        </div>
+      </ToolCardShell>
+    )
+  }
+
+  if (tool === 'forget_user_fact' && ok) {
+    const prettyKey = (result.key || '').replace(/_/g, ' ')
+    return (
+      <ToolCardShell kind="memory_forget" language={language}>
+        <span className="text-slate-100">
+          {result.removed > 0
+            ? (language === 'es' ? 'Olvidé: ' : 'Forgot: ')
+            : (language === 'es' ? 'No tenía guardado: ' : 'Nothing saved for: ')}
+          <span className="font-medium capitalize">{prettyKey}</span>
+        </span>
+      </ToolCardShell>
+    )
+  }
+
+  if (tool === 'list_user_facts' && ok) {
+    const facts = Array.isArray(result.facts) ? result.facts : []
+    return (
+      <ToolCardShell kind="memory_list" language={language}>
+        {facts.length === 0 ? (
+          <span className="text-indigo-200/80">
+            {language === 'es'
+              ? 'Aún no tengo nada guardado sobre ti.'
+              : "I don't have anything saved about you yet."}
+          </span>
+        ) : (
+          <ul className="space-y-0.5">
+            {facts.slice(0, 6).map((f) => (
+              <li key={f.key} className="text-indigo-100">
+                <span className="capitalize opacity-75">{(f.key || '').replace(/_/g, ' ')}: </span>
+                <span>{f.value}</span>
+              </li>
+            ))}
+            {facts.length > 6 && (
+              <li className="text-indigo-300/75 mt-1 text-[11px]">
+                {language === 'es' ? `+${facts.length - 6} más` : `+${facts.length - 6} more`}
+              </li>
+            )}
+          </ul>
+        )}
+      </ToolCardShell>
+    )
+  }
+
+  if (tool === 'message_donor' && ok) {
+    return (
+      <ToolCardShell kind="donor_message" language={language}>
+        <span className="text-teal-100">
+          {result.summary || (language === 'es' ? 'Mensaje entregado al donante.' : 'Message delivered to the donor.')}
+        </span>
+      </ToolCardShell>
+    )
+  }
+
+  if (tool === 'extend_listing_deadline' && ok) {
+    let when = ''
+    if (result.new_pickup_by) {
+      try {
+        const dt = new Date(result.new_pickup_by)
+        if (!Number.isNaN(dt.getTime())) {
+          when = dt.toLocaleString(language === 'es' ? 'es' : undefined, {
+            month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+          })
+        }
+      } catch { /* keep blank */ }
+    }
+    return (
+      <ToolCardShell kind="listing_extended" language={language}>
+        {result.title && (
+          <div className="text-orange-100">
+            <span className="font-semibold">{result.title}</span>
+          </div>
+        )}
+        {when && (
+          <div className="text-orange-300/80 mt-1">
+            {language === 'es' ? 'Nuevo plazo: ' : 'New deadline: '}
+            <span className="text-orange-100">{when}</span>
+          </div>
+        )}
       </ToolCardShell>
     )
   }

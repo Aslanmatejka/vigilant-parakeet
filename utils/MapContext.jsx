@@ -44,8 +44,26 @@ export function MapProvider({ children }) {
     }))
   }, [])
 
-  const centerOn = useCallback((lat, lng, zoom = 13) => {
-    if (typeof lat !== 'number' || typeof lng !== 'number') return
+  /**
+   * Center the map on a coordinate.
+   *
+   * Supports both call styles for backwards compatibility:
+   *   centerOn(lat, lng, zoom)
+   *   centerOn({ lat, lng, zoom })
+   */
+  const centerOn = useCallback((latOrOpts, maybeLng, maybeZoom = 13) => {
+    let lat, lng, zoom
+    if (typeof latOrOpts === 'object' && latOrOpts !== null) {
+      lat = Number(latOrOpts.lat)
+      lng = Number(latOrOpts.lng)
+      zoom = Number(latOrOpts.zoom ?? 13)
+    } else {
+      lat = Number(latOrOpts)
+      lng = Number(maybeLng)
+      zoom = Number(maybeZoom)
+    }
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return
+    if (!Number.isFinite(zoom)) zoom = 13
     setState(prev => ({
       ...prev,
       centerRequest: { lat, lng, zoom, ts: Date.now() },

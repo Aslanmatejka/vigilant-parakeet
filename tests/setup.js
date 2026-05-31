@@ -11,6 +11,16 @@ jest.mock('../utils/supabaseClient.js', () => ({
   },
 }));
 
+// dataService also reads import.meta.env, mock the surface used by the AI panel.
+jest.mock('../utils/dataService.js', () => ({
+  __esModule: true,
+  default: {
+    uploadFile: jest.fn().mockResolvedValue({ url: '' }),
+    getFoodListings: jest.fn().mockResolvedValue([]),
+    createFoodListing: jest.fn().mockResolvedValue({ id: 'mock' }),
+  },
+}));
+
 // Mock fetch to prevent actual HTTP requests in tests
 global.fetch = jest.fn(() =>
   Promise.resolve({

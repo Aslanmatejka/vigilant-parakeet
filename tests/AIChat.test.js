@@ -89,7 +89,7 @@ describe('AI Chat — Message Send/Receive', () => {
     expect(screen.getByText(/I'm Nouri/)).toBeInTheDocument()
 
     // Type a message and send
-    const input = screen.getByPlaceholderText(/Ask me anything/i)
+    const input = screen.getByPlaceholderText(/Message Nouri|Ask me anything|Pregunta/i)
     fireEvent.change(input, { target: { value: 'Find food near me' } })
     fireEvent.submit(input.closest('form'))
 
@@ -154,7 +154,7 @@ describe('AI Chat — Spanish Language Detection', () => {
 
     await renderAndOpen()
 
-    const input = screen.getByPlaceholderText(/Ask me anything/i)
+    const input = screen.getByPlaceholderText(/Message Nouri|Ask me anything|Pregunta/i)
     fireEvent.change(input, { target: { value: 'Hola, buscar comida cerca' } })
     fireEvent.submit(input.closest('form'))
 
@@ -172,7 +172,7 @@ describe('AI Chat — Error Handling', () => {
 
     await renderAndOpen()
 
-    const input = screen.getByPlaceholderText(/Ask me anything/i)
+    const input = screen.getByPlaceholderText(/Message Nouri|Ask me anything|Pregunta/i)
     fireEvent.change(input, { target: { value: 'test error' } })
     fireEvent.submit(input.closest('form'))
 
