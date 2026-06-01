@@ -30,10 +30,40 @@ function UserDashboard() {
 
     const [receipts, setReceipts] = React.useState([]);
     const [receiptsLoading, setReceiptsLoading] = React.useState(true);
+    // Always trust the DB for community_role — auth cache can lag after a save.
+    const [freshRole, setFreshRole] = React.useState(null);
 
     const loading = listingsLoading || notificationsLoading || receiptsLoading;
     const error = listingsError || notificationsError;
-    const user = authUser;
+    const user = React.useMemo(
+        () => ({ ...(authUser || {}), community_role: freshRole ?? authUser?.community_role ?? null }),
+        [authUser, freshRole]
+    );
+
+    React.useEffect(() => {
+        let cancelled = false;
+        if (!authUser?.id) { setFreshRole(null); return; }
+        (async () => {
+            try {
+                const { data } = await supabase
+                    .from('users')
+                    .select('community_role')
+                    .eq('id', authUser.id)
+                    .single();
+                if (!cancelled && data) setFreshRole(data.community_role || null);
+            } catch (_) { /* keep cached value */ }
+        })();
+        const onRoleChanged = (e) => {
+            if (!e?.detail || e.detail.userId === authUser.id) {
+                setFreshRole(e.detail?.role ?? null);
+            }
+        };
+        window.addEventListener('dogoods:community-role-changed', onRoleChanged);
+        return () => {
+            cancelled = true;
+            window.removeEventListener('dogoods:community-role-changed', onRoleChanged);
+        };
+    }, [authUser?.id]);
 
     React.useEffect(() => {
         let isMounted = true;

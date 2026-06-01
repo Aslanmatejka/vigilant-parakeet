@@ -157,16 +157,21 @@ class AuthService {
         }
 
         // No cached profile — fall back to auth-only data so the user can
-        // still log in (this is the first-ever sign-in path).
+        // still log in (this is the first-ever sign-in path). Preserve any
+        // values previously persisted to localStorage so a transient timeout
+        // can't wipe community_role/address/phone for the same user.
+        let prev = null
+        try { prev = JSON.parse(localStorage.getItem('currentUser') || 'null') } catch (_) { prev = null }
+        if (prev && prev.id !== user.id) prev = null
         this.currentUser = {
           ...user,
-          name: user.user_metadata?.name || user.email,
-          address: user.user_metadata?.address || null,
-          phone: user.user_metadata?.phone || null,
-          community_role: user.user_metadata?.community_role || null,
-          account_type: user.user_metadata?.account_type || 'individual',
-          role: 'user',
-          status: 'active'
+          name: prev?.name || user.user_metadata?.name || user.email,
+          address: prev?.address ?? user.user_metadata?.address ?? null,
+          phone: prev?.phone ?? user.user_metadata?.phone ?? null,
+          community_role: prev?.community_role ?? user.user_metadata?.community_role ?? null,
+          account_type: prev?.account_type || user.user_metadata?.account_type || 'individual',
+          role: prev?.role || 'user',
+          status: prev?.status || 'active'
         }
         this.isAuthenticated = true
         this.isAdmin = false
@@ -204,16 +209,20 @@ class AuthService {
 
           if (createError) {
             console.error('Error creating user profile:', createError)
-            // Use auth data only if profile creation fails
+            // Use auth data only if profile creation fails — but preserve any
+            // cached profile fields so role/address don't get wiped.
+            let prev = null
+            try { prev = JSON.parse(localStorage.getItem('currentUser') || 'null') } catch (_) { prev = null }
+            if (prev && prev.id !== user.id) prev = null
             this.currentUser = {
               ...user,
-              name: user.user_metadata?.name || user.email,
-              address: user.user_metadata?.address || null,
-              phone: user.user_metadata?.phone || null,
-              community_role: user.user_metadata?.community_role || null,
-              account_type: user.user_metadata?.account_type || 'individual',
-              role: 'user',
-              status: 'active'
+              name: prev?.name || user.user_metadata?.name || user.email,
+              address: prev?.address ?? user.user_metadata?.address ?? null,
+              phone: prev?.phone ?? user.user_metadata?.phone ?? null,
+              community_role: prev?.community_role ?? user.user_metadata?.community_role ?? null,
+              account_type: prev?.account_type || user.user_metadata?.account_type || 'individual',
+              role: prev?.role || 'user',
+              status: prev?.status || 'active'
             }
           } else {
             console.log('User profile created successfully')
@@ -239,16 +248,20 @@ class AuthService {
           }
         } catch (createError) {
           console.error('Error creating user profile:', createError)
-          // Use auth data only if profile creation fails
+          // Use auth data only if profile creation fails — but preserve any
+          // cached profile fields so role/address don't get wiped.
+          let prev = null
+          try { prev = JSON.parse(localStorage.getItem('currentUser') || 'null') } catch (_) { prev = null }
+          if (prev && prev.id !== user.id) prev = null
           this.currentUser = {
             ...user,
-            name: user.user_metadata?.name || user.email,
-            address: user.user_metadata?.address || null,
-            phone: user.user_metadata?.phone || null,
-            community_role: user.user_metadata?.community_role || null,
-            account_type: user.user_metadata?.account_type || 'individual',
-            role: 'user',
-            status: 'active'
+            name: prev?.name || user.user_metadata?.name || user.email,
+            address: prev?.address ?? user.user_metadata?.address ?? null,
+            phone: prev?.phone ?? user.user_metadata?.phone ?? null,
+            community_role: prev?.community_role ?? user.user_metadata?.community_role ?? null,
+            account_type: prev?.account_type || user.user_metadata?.account_type || 'individual',
+            role: prev?.role || 'user',
+            status: prev?.status || 'active'
           }
         }
       } else {
