@@ -21,6 +21,49 @@ logger = logging.getLogger("ai_tools")
 
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN") or os.getenv("VITE_MAPBOX_TOKEN", "")
 MAPBOX_DIRECTIONS_URL = "https://api.mapbox.com/directions/v5/mapbox"
+MAPBOX_GEOCODE_URL = "https://api.mapbox.com/geocoding/v5/mapbox.places"
+
+
+async def _geocode_address(address: str) -> Optional[dict]:
+    """Forward-geocode a free-text address via Mapbox.
+
+    Returns {"latitude", "longitude", "full_address"} on success, or None
+    on any failure (missing token, no result, network error). Callers should
+    treat None as "keep going without coords" — do not raise.
+    """
+    if not MAPBOX_TOKEN or not isinstance(address, str):
+        return None
+    query = address.strip()
+    if len(query) < 3:
+        return None
+    import urllib.parse
+    url = f"{MAPBOX_GEOCODE_URL}/{urllib.parse.quote(query, safe='')}.json"
+    params = {"access_token": MAPBOX_TOKEN, "limit": "1", "types": "address,place,postcode,locality,neighborhood"}
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.warning("geocode failed for %r: %s", query[:80], exc)
+        return None
+    features = data.get("features") if isinstance(data, dict) else None
+    if not features:
+        return None
+    f = features[0]
+    center = f.get("center") or []
+    if not isinstance(center, list) or len(center) < 2:
+        return None
+    try:
+        lng = float(center[0])
+        lat = float(center[1])
+    except (TypeError, ValueError):
+        return None
+    return {
+        "latitude": lat,
+        "longitude": lng,
+        "full_address": f.get("place_name") or query,
+    }
 
 _PERISHABLE_CATEGORY_MAX_AGE_HOURS = {
     "prepared": 24,
@@ -891,7 +934,10 @@ TOOL_DEFINITIONS = [
                     },
                     "description": {"type": "string"},
                     "expiry_date": {"type": "string", "description": "ISO date YYYY-MM-DD."},
-                    "location": {"type": "string"},
+                    "location": {"type": "string", "description": "Pickup address (free-text). Will be geocoded automatically."},
+                    "address": {"type": "string", "description": "Alias for location — pickup street address."},
+                    "latitude": {"type": "number", "description": "Optional pre-known latitude. Skips geocoding if both lat+lng provided."},
+                    "longitude": {"type": "number", "description": "Optional pre-known longitude."},
                     "dietary_tags": {"type": "array", "items": {"type": "string"}},
                     "allergens": {"type": "array", "items": {"type": "string"}},
                 },
@@ -2840,12 +2886,16 @@ async def _create_food_listing(
     description: Optional[str] = None,
     expiry_date: Optional[str] = None,
     location: Optional[str] = None,
+    address: Optional[str] = None,
+    full_address: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
     dietary_tags: Optional[list] = None,
     allergens: Optional[list] = None,
     **_ignored,
 ) -> dict:
     """Insert a single food donation listing for the authenticated user."""
-    from backend.ai_engine import supabase_post
+    from backend.ai_engine import supabase_post, supabase_get
 
     logger.info("create_food_listing: user=%s title=%s qty=%s", user_id, title, quantity)
     if not user_id:
@@ -2867,6 +2917,13 @@ async def _create_food_listing(
     if cat not in _LISTING_CATEGORIES:
         cat = "other"
 
+    # --- Address normalization: accept several aliases the model might use ---
+    addr_text = (
+        (full_address or "").strip()
+        or (address or "").strip()
+        or (location or "").strip()
+    )
+
     row: dict = {
         "user_id": str(user_id),
         "title": title_s[:200],
@@ -2880,12 +2937,57 @@ async def _create_food_listing(
         row["description"] = str(description).strip()[:2000]
     if expiry_date:
         row["expiry_date"] = str(expiry_date).strip()[:40]
-    if location:
-        row["location"] = str(location).strip()[:200]
     if isinstance(dietary_tags, list):
         row["dietary_tags"] = [str(t).strip()[:40] for t in dietary_tags if str(t).strip()][:20]
     if isinstance(allergens, list):
         row["allergens"] = [str(t).strip()[:40] for t in allergens if str(t).strip()][:20]
+
+    if addr_text:
+        row["location"] = addr_text[:200]
+        row["full_address"] = addr_text[:400]
+
+    # --- Resolve coordinates so the listing shows up on the map ---
+    lat_val: Optional[float] = None
+    lng_val: Optional[float] = None
+    try:
+        if latitude is not None and longitude is not None:
+            lat_val = float(latitude)
+            lng_val = float(longitude)
+    except (TypeError, ValueError):
+        lat_val = lng_val = None
+
+    if (lat_val is None or lng_val is None) and addr_text:
+        geo = await _geocode_address(addr_text)
+        if geo:
+            lat_val = geo["latitude"]
+            lng_val = geo["longitude"]
+            row["full_address"] = geo["full_address"][:400]
+
+    if lat_val is None or lng_val is None:
+        # Fall back to the donor's saved profile coordinates so the pin still
+        # lands somewhere reasonable instead of being absent from the map.
+        try:
+            users = await supabase_get("users", {
+                "id": f"eq.{user_id}",
+                "select": "latitude,longitude,address",
+                "limit": "1",
+            })
+            if users:
+                u = users[0]
+                u_lat = u.get("latitude")
+                u_lng = u.get("longitude")
+                if u_lat is not None and u_lng is not None:
+                    lat_val = float(u_lat)
+                    lng_val = float(u_lng)
+                    if not row.get("full_address") and u.get("address"):
+                        row["full_address"] = str(u["address"])[:400]
+                        row.setdefault("location", str(u["address"])[:200])
+        except Exception as exc:
+            logger.warning("create_food_listing: profile coord fallback failed: %s", exc)
+
+    if lat_val is not None and lng_val is not None:
+        row["latitude"] = lat_val
+        row["longitude"] = lng_val
 
     try:
         result = await supabase_post("food_listings", row)
@@ -2899,6 +3001,7 @@ async def _create_food_listing(
     if not listing_id:
         return {"success": False, "error": "No row returned from database"}
 
+    mapped = lat_val is not None and lng_val is not None
     return {
         "success": True,
         "listing_id": str(listing_id),
@@ -2906,7 +3009,14 @@ async def _create_food_listing(
         "quantity": row["quantity"],
         "unit": row["unit"],
         "category": row["category"],
-        "summary": f"Posted '{row['title']}' ({row['quantity']} {row['unit']}, {row['category']}).",
+        "address": row.get("full_address") or row.get("location"),
+        "latitude": lat_val,
+        "longitude": lng_val,
+        "mapped": mapped,
+        "summary": (
+            f"Posted '{row['title']}' ({row['quantity']} {row['unit']}, {row['category']})."
+            + ("" if mapped else " Warning: no coordinates resolved — it will not appear on the map until an address is added.")
+        ),
     }
 
 
@@ -3398,11 +3508,49 @@ async def _bulk_import_listings(
 
     created_ids: list[str] = []
     errors: list[dict] = []
+    # Fetch donor's profile coords once so rows without their own address
+    # still get a pin.
+    donor_lat: Optional[float] = None
+    donor_lng: Optional[float] = None
+    donor_addr: Optional[str] = None
+    try:
+        from backend.ai_engine import supabase_get
+        users = await supabase_get("users", {
+            "id": f"eq.{user_id}",
+            "select": "latitude,longitude,address",
+            "limit": "1",
+        })
+        if users:
+            u = users[0]
+            if u.get("latitude") is not None and u.get("longitude") is not None:
+                try:
+                    donor_lat = float(u["latitude"])
+                    donor_lng = float(u["longitude"])
+                except (TypeError, ValueError):
+                    pass
+            donor_addr = (u.get("address") or None)
+    except Exception as exc:
+        logger.warning("bulk_import_listings: profile fetch failed: %s", exc)
+
     for idx, raw in enumerate(rows_in):
         norm = _normalize_bulk_row(raw, user_id)
         if not norm:
             errors.append({"index": idx, "error": "Missing title or quantity"})
             continue
+        addr_text = norm.get("location") or donor_addr
+        if addr_text:
+            norm.setdefault("full_address", str(addr_text)[:400])
+            geo = await _geocode_address(str(addr_text))
+            if geo:
+                norm["latitude"] = geo["latitude"]
+                norm["longitude"] = geo["longitude"]
+                norm["full_address"] = geo["full_address"][:400]
+        if "latitude" not in norm and donor_lat is not None and donor_lng is not None:
+            norm["latitude"] = donor_lat
+            norm["longitude"] = donor_lng
+            if donor_addr and not norm.get("full_address"):
+                norm["full_address"] = str(donor_addr)[:400]
+                norm.setdefault("location", str(donor_addr)[:200])
         try:
             result = await supabase_post("food_listings", norm)
             if isinstance(result, list) and result:
