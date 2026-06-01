@@ -1714,6 +1714,18 @@ function AIChatPanel() {
           ? `Detecté: **${draft.title}** (${draft.quantity} ${draft.unit}, ${draft.category}). Revisa el borrador abajo y confirma para publicar.`
           : `I detected: **${draft.title}** (${draft.quantity} ${draft.unit}, ${draft.category}). Review the draft below and confirm to publish.`,
       })
+
+      // Surface the uploaded photo URL to the model as hidden context so that if
+      // the donor proceeds through the conversational tool flow (instead of
+      // confirming the bulk preview), any create_food_listing / post_food_listing
+      // call will carry the real photo URL as image_url.
+      if (uploadedUrl) {
+        sendSilentMessage(
+          `[Photo uploaded] The donor just uploaded a photo of "${draft.title}". `
+          + `Use this exact URL as image_url whenever you call create_food_listing or `
+          + `post_food_listing for this item: ${uploadedUrl}`
+        )
+      }
     } catch (err) {
       if (sessionId !== uploadSessionRef.current) return
       const msg = err?.message || (language === 'es' ? 'Falló el análisis de la imagen.' : 'Vision request failed.')
@@ -1726,7 +1738,7 @@ function AIChatPanel() {
     } finally {
       if (sessionId === uploadSessionRef.current) setUploadBusy(false)
     }
-  }, [appendLocalMessage, authUser?.id, language])
+  }, [appendLocalMessage, authUser?.id, language, sendSilentMessage])
 
   const handleCsvSelected = useCallback(async (e) => {
     const file = e.target.files?.[0]

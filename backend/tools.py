@@ -834,6 +834,15 @@ TOOL_DEFINITIONS = [
                             "the donor to pick one. Never guess."
                         ),
                     },
+                    "image_url": {
+                        "type": "string",
+                        "description": (
+                            "Public http(s) URL of a photo the donor uploaded for this listing. "
+                            "If the donor uploaded a food photo in this conversation, you MUST "
+                            "pass that exact URL here verbatim \u2014 do not omit it, do not replace "
+                            "it with a stock URL. Leave empty only when no photo was uploaded."
+                        ),
+                    },
                 },
                 "required": ["user_id", "title", "quantity", "unit", "category", "community_id"],
             },
@@ -949,6 +958,14 @@ TOOL_DEFINITIONS = [
                     "longitude": {"type": "number", "description": "Optional pre-known longitude."},
                     "dietary_tags": {"type": "array", "items": {"type": "string"}},
                     "allergens": {"type": "array", "items": {"type": "string"}},
+                    "image_url": {
+                        "type": "string",
+                        "description": (
+                            "Public http(s) URL of a photo the donor uploaded for this listing. "
+                            "If the donor uploaded a food photo in this conversation, pass that "
+                            "exact URL here verbatim. Leave empty only when no photo was uploaded."
+                        ),
+                    },
                 },
                 "required": ["user_id", "title", "quantity", "unit", "category"],
             },
@@ -2980,6 +2997,7 @@ async def _create_food_listing(
     dietary_tags: Optional[list] = None,
     allergens: Optional[list] = None,
     community_id: Optional[int] = None,
+    image_url: Optional[str] = None,
     **_ignored,
 ) -> dict:
     """Insert a single food donation listing for the authenticated user."""
@@ -3049,6 +3067,17 @@ async def _create_food_listing(
         or (location or "").strip()
     )
 
+    # Respect a caller-supplied image_url (e.g. a photo the donor just
+    # uploaded). Only fall back to a stock photo when none was provided or
+    # the value is not a usable http(s) URL.
+    chosen_image: Optional[str] = None
+    if isinstance(image_url, str):
+        candidate = image_url.strip()
+        if candidate.startswith("http://") or candidate.startswith("https://"):
+            chosen_image = candidate[:2000]
+    if not chosen_image:
+        chosen_image = _assign_food_image(title_s, cat)
+
     row: dict = {
         "user_id": str(user_id),
         "title": title_s[:200],
@@ -3058,7 +3087,7 @@ async def _create_food_listing(
         "listing_type": "donation",
         "status": "active",
         "community_id": community_id_int,
-        "image_url": _assign_food_image(title_s, cat),
+        "image_url": chosen_image,
     }
     if description:
         row["description"] = str(description).strip()[:2000]
