@@ -250,15 +250,35 @@ function UserSettings() {
                     }
                 } catch (_) { /* non-fatal */ }
                 try { clearCachedInsights(authUser.id); } catch (_) {}
+                // Notify every other mounted component (ProfilePage badge,
+                // RoleInsightsPanel, AI chat) that the role just changed so
+                // they can refetch instead of holding the old value.
+                try {
+                    window.dispatchEvent(new CustomEvent('dogoods:community-role-changed', {
+                        detail: { userId: authUser.id, role: formData.community_role || null }
+                    }));
+                } catch (_) {}
             } else if (updateProfile) {
                 await updateProfile(formData);
             }
             
-            const roleLabel = section === 'Account' && formData.community_role
-                ? ` Your community role is now "${formData.community_role}".`
+            const roleChanged = section === 'Account' && formData.community_role;
+            const roleLabel = roleChanged
+                ? ` Your community role is now "${formData.community_role}". Refreshing so it applies everywhere…`
                 : '';
             setSuccessMessage(`${section} settings saved successfully.${roleLabel}`);
             
+            if (roleChanged) {
+                // Hard reload is the only bulletproof way to flush stale role
+                // state in components we don't own (AI chat conversation, any
+                // open Profile tab, cached insights, etc.). Give the toast a
+                // beat so the user sees confirmation first.
+                setTimeout(() => {
+                    try { window.location.reload(); } catch (_) {}
+                }, 1200);
+                return;
+            }
+
             // Clear success message after 3 seconds
             setTimeout(() => {
                 setSuccessMessage('');
