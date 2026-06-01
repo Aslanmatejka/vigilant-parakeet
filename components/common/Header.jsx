@@ -4,26 +4,63 @@ import Button from "./Button";
 import { useAuthContext } from "../../utils/AuthContext";
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useTutorial } from '../../utils/TutorialContext';
+import { useCommunityRole } from '../../utils/hooks/useCommunityRole.js';
 import PropTypes from 'prop-types';
 
-function Header({
-    menuItems = [
-        // { label: 'Share Food', path: '/share' }, // TEMPORARILY DISABLED
-        { label: 'Find Food', path: '/find' },
-        { 
-            label: 'Support Us', 
-            dropdown: [
-                { label: 'Donate', path: '/donate' },
-                { label: 'Volunteer', path: 'https://allgoodlivingfoundation.org/volunteer-form', external: true }
-            ]
-        },
-        { label: 'Impact Story', path: '/impact-story' },
-        { label: 'Recipes', path: '/recipes' },
-        { label: 'Sponsors', path: '/sponsors' },
-        { label: 'Contact', path: '/contact' }
+const SUPPORT_DROPDOWN = {
+    label: 'Support Us',
+    dropdown: [
+        { label: 'Donate', path: '/donate' },
+        { label: 'Volunteer', path: 'https://allgoodlivingfoundation.org/volunteer-form', external: true }
     ]
-}) {
+};
+const COMMON_TAIL = [
+    SUPPORT_DROPDOWN,
+    { label: 'Impact Story', path: '/impact-story' },
+    { label: 'Recipes', path: '/recipes' },
+    { label: 'Sponsors', path: '/sponsors' },
+    { label: 'Contact', path: '/contact' }
+];
+
+function Header({ menuItems: menuItemsProp }) {
     const { user: authUser, isAuthenticated, signOut } = useAuthContext();
+    const communityRole = useCommunityRole();
+    const isDonor = communityRole === 'donor';
+    const isRecipient = communityRole === 'recipient';
+    const isVolunteer = ['volunteer', 'driver', 'dispatcher'].includes(communityRole);
+
+    const menuItems = React.useMemo(() => {
+        if (menuItemsProp) return menuItemsProp;
+        if (!isAuthenticated) {
+            return [{ label: 'Find Food', path: '/find' }, ...COMMON_TAIL];
+        }
+        if (isDonor) {
+            return [
+                { label: 'Share Food', path: '/share' },
+                { label: 'My Listings', path: '/listings' },
+                { label: 'Donation Schedules', path: '/donations' },
+                ...COMMON_TAIL,
+            ];
+        }
+        if (isRecipient) {
+            return [
+                { label: 'Find Food', path: '/find' },
+                { label: 'Near Me', path: '/near-me' },
+                { label: 'My Receipts', path: '/receipts' },
+                ...COMMON_TAIL,
+            ];
+        }
+        if (isVolunteer) {
+            return [
+                { label: 'Find Food', path: '/find' },
+                { label: 'Pickup Routes', path: '/donations' },
+                { label: 'Near Me', path: '/near-me' },
+                ...COMMON_TAIL,
+            ];
+        }
+        return [{ label: 'Find Food', path: '/find' }, ...COMMON_TAIL];
+    }, [menuItemsProp, isAuthenticated, isDonor, isRecipient, isVolunteer]);
+
     const navigate = useNavigate();
     const location = useLocation();
     const isAdminRoute = location.pathname.startsWith('/admin');
