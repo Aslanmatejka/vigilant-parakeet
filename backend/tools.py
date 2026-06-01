@@ -2886,6 +2886,84 @@ async def _mark_notifications_read(
 _LISTING_CATEGORIES = {"produce", "bakery", "dairy", "pantry", "meat", "prepared", "other"}
 
 
+# Mirror of utils/foodImages.js so AI-created listings get a sensible photo
+# even when the donor doesn't upload one. Keeps recipient-side UX consistent.
+_UNSPLASH_BASE = "https://images.unsplash.com/photo-"
+_UNSPLASH_PARAMS = "?w=400&q=80&auto=format&fit=crop"
+
+
+def _u(photo_id: str) -> str:
+    return f"{_UNSPLASH_BASE}{photo_id}{_UNSPLASH_PARAMS}"
+
+
+_KEYWORD_IMAGES: list[tuple[tuple[str, ...], str]] = [
+    (("apple",), _u("1619566636858-adf3ef46400b")),
+    (("banana",), _u("1571771894821-ce9b6c11b08e")),
+    (("orange", "citrus", "lemon", "lime", "grapefruit"), _u("1547514701-42782101795e")),
+    (("strawberr", "berr", "blueberr", "raspberr"), _u("1464965911861-746a04b4bca6")),
+    (("grape",), _u("1537640538966-79f369143f8f")),
+    (("peach", "plum", "apricot", "nectarine"), _u("1528825871115-3581a5387919")),
+    (("mango", "pineapple", "papaya"), _u("1550258987-190a2d41a8ba")),
+    (("watermelon", "melon", "cantaloupe"), _u("1563114773-84221bd62daa")),
+    (("avocado",), _u("1523049673857-eb18f1ddf950")),
+    (("tomato",), _u("1546470427-e26264be0b0d")),
+    (("carrot",), _u("1598170845058-32b9d6a5da37")),
+    (("broccoli",), _u("1459411621453-7b03977f4bfc")),
+    (("lettuce", "salad", "greens", "spinach", "kale"), _u("1540420773420-3366772f4999")),
+    (("potato", "yam"), _u("1518977676693-5ba7e0c27fb4")),
+    (("onion", "garlic"), _u("1518977676693-5ba7e0c27fb4")),
+    (("pepper",), _u("1525609004556-c46c7d6cf023")),
+    (("corn", "zucchini", "squash", "cucumber"), _u("1542838132-92c53300491e")),
+    (("vegetable", "veggie", "produce"), _u("1542838132-92c53300491e")),
+    (("bread", "loaf", "sourdough", "baguette"), _u("1608198093002-ad4e005484ec")),
+    (("muffin", "cupcake", "cake", "pastry", "croissant", "danish"), _u("1551024601-bec78aea704b")),
+    (("cookie", "brownie", "donut"), _u("1499636136210-6f4ee915583a")),
+    (("bagel", "roll", "bun"), _u("1509440159596-0249088772ff")),
+    (("tortilla", "wrap", "pita"), _u("1621996659397-5b5e3f4e7d34")),
+    (("egg",), _u("1582722872445-44dc5f7e3c8f")),
+    (("milk", "dairy", "yogurt", "yoghurt", "cream", "butter"), _u("1563636619-e9143da7973b")),
+    (("cheese",), _u("1486297678162-eb2a19b0a32d")),
+    (("chicken", "poultry", "turkey"), _u("1604908176997-125f25cc6f3d")),
+    (("beef", "steak", "burger", "hamburger"), _u("1558030006-da6fa8fb6f27")),
+    (("pork", "bacon", "sausage", "ham"), _u("1529042410759-befb1204b468")),
+    (("fish", "salmon", "tuna", "seafood", "shrimp"), _u("1580476262798-bddd9f4b7369")),
+    (("rice",), _u("1586201375761-83865001e31c")),
+    (("pasta", "spaghetti", "noodle"), _u("1551462147-37885acc36f1")),
+    (("bean", "lentil", "chickpea"), _u("1515543904431-90b4b23dc9bd")),
+    (("soup", "broth", "stew", "canned"), _u("1593759608892-b0033064e78c")),
+    (("oat", "cereal", "granola"), _u("1606312619070-d48b4c652a52")),
+    (("formula",), _u("1606312619070-d48b4c652a52")),
+    (("coffee", "tea", "juice", "beverage", "drink"), _u("1461023058943-362d6d1c2d0d")),
+    (("snack", "chip", "cracker"), _u("1606312619070-d48b4c652a52")),
+    (("meal", "cooked", "prepared", "leftover", "dinner", "lunch", "breakfast"), _u("1504674900247-0877df9cc836")),
+    (("sandwich",), _u("1528735602780-2552fd46c7f1")),
+]
+
+_CATEGORY_POOLS: dict[str, list[str]] = {
+    "produce": [_u("1542838132-92c53300491e"), _u("1619566636858-adf3ef46400b"), _u("1571771894821-ce9b6c11b08e"), _u("1547514701-42782101795e")],
+    "bakery":  [_u("1608198093002-ad4e005484ec"), _u("1551024601-bec78aea704b"), _u("1499636136210-6f4ee915583a"), _u("1509440159596-0249088772ff")],
+    "dairy":   [_u("1628088062854-d1870b4553da"), _u("1582722872445-44dc5f7e3c8f"), _u("1563636619-e9143da7973b"), _u("1486297678162-eb2a19b0a32d")],
+    "pantry":  [_u("1586201375761-83865001e31c"), _u("1593759608892-b0033064e78c"), _u("1551462147-37885acc36f1"), _u("1606312619070-d48b4c652a52")],
+    "meat":    [_u("1604908176997-125f25cc6f3d"), _u("1558030006-da6fa8fb6f27"), _u("1580476262798-bddd9f4b7369")],
+    "prepared":[_u("1504674900247-0877df9cc836"), _u("1476718406336-4b0cf2c7f74e"), _u("1540420773420-3366772f4999")],
+    "other":   [_u("1512621776951-a57141f2eefd"), _u("1610832958506-aa56368176cf"), _u("1498557850523-fd3d118b962e")],
+}
+
+
+def _assign_food_image(title: str, category: str) -> str:
+    """Return a stable, category-appropriate stock photo URL for a listing."""
+    lower = (title or "").lower()
+    for keywords, url in _KEYWORD_IMAGES:
+        if any(kw in lower for kw in keywords):
+            return url
+    pool = _CATEGORY_POOLS.get(str(category or "other").lower(), _CATEGORY_POOLS["other"])
+    # Stable hash → consistent image per title.
+    h = 0
+    for ch in lower:
+        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    return pool[h % len(pool)]
+
+
 async def _create_food_listing(
     user_id: str,
     title: str,
@@ -2980,6 +3058,7 @@ async def _create_food_listing(
         "listing_type": "donation",
         "status": "active",
         "community_id": community_id_int,
+        "image_url": _assign_food_image(title_s, cat),
     }
     if description:
         row["description"] = str(description).strip()[:2000]
