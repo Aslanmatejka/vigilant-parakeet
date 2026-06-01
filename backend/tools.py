@@ -2936,7 +2936,17 @@ async def _create_food_listing(
     if description:
         row["description"] = str(description).strip()[:2000]
     if expiry_date:
-        row["expiry_date"] = str(expiry_date).strip()[:40]
+        # food_listings.expiry_date is DATE \u2014 only YYYY-MM-DD will insert.
+        # Drop anything else silently so the whole insert doesn't 400.
+        import re as _re_exp
+        import datetime as _dt_exp
+        m = _re_exp.match(r"^(\d{4}-\d{2}-\d{2})", str(expiry_date).strip())
+        if m:
+            try:
+                _dt_exp.date.fromisoformat(m.group(1))
+                row["expiry_date"] = m.group(1)
+            except ValueError:
+                pass
     if isinstance(dietary_tags, list):
         row["dietary_tags"] = [str(t).strip()[:40] for t in dietary_tags if str(t).strip()][:20]
     if isinstance(allergens, list):
@@ -3117,8 +3127,11 @@ async def _claim_food_listing(
         or "Anonymous"
     )[:200]
 
-    # --- 3b. Calculate the next-Friday pickup deadline (UTC) for the receipt ---
+    # --- 3b. Compute pickup-by deadline. Prefer the listing's own pickup_by
+    # or expiry_date so receipts reflect the actual donor commitment; only
+    # fall back to the next-Friday default when neither is set. ---
     import datetime as _dt
+    import re as _re
 
     def _next_friday_5pm_utc() -> str:
         now_utc = _dt.datetime.utcnow()
@@ -3133,35 +3146,57 @@ async def _claim_food_listing(
         friday_utc = friday_pac + _dt.timedelta(hours=8)
         return friday_utc.strftime('%Y-%m-%dT%H:%M:%S+00:00')
 
-    pickup_deadline_utc = _next_friday_5pm_utc()
+    def _normalize_deadline(val) -> Optional[str]:
+        if not val:
+            return None
+        s = str(val).strip()
+        if not s:
+            return None
+        # Plain date \u2192 use end-of-day UTC so the receipt isn't expired the
+        # moment it's created. Timestamps pass through unchanged.
+        if "T" not in s and " " not in s and len(s) == 10:
+            return f"{s}T23:59:59+00:00"
+        return s
 
-    # --- 3c. Find or create a receipt for this user (so the claim appears in Receipts & Activity) ---
+    pickup_deadline_utc = (
+        _normalize_deadline(listing.get("pickup_by"))
+        or _normalize_deadline(listing.get("expiry_date"))
+        or _next_friday_5pm_utc()
+    )
+
+    # --- 3c. Always create a fresh receipt for this claim. Reusing the most
+    # recent pending receipt was bundling unrelated pickups together (wrong
+    # pickup_location, stale pickup_by) — one claim per receipt is cleaner. ---
     receipt_id = None
     pickup_loc = listing.get("full_address") or listing.get("location") or None
     try:
-        existing_receipts = await supabase_get("receipts", {
-            "user_id": f"eq.{user_id}",
-            "status": "eq.pending",
-            "select": "id",
-            "order": "created_at.desc",
-            "limit": "1",
-        })
-        if existing_receipts:
-            receipt_id = existing_receipts[0].get("id")
-        else:
-            receipt_row: dict = {
-                "user_id": str(user_id),
-                "status": "pending",
-                "pickup_by": pickup_deadline_utc,
-            }
-            if pickup_loc:
-                receipt_row["pickup_location"] = str(pickup_loc)[:255]
-                receipt_row["pickup_address"] = str(pickup_loc)[:500]
-            receipt_result = await supabase_post("receipts", receipt_row)
-            if isinstance(receipt_result, list) and receipt_result:
-                receipt_id = receipt_result[0].get("id")
+        receipt_row: dict = {
+            "user_id": str(user_id),
+            "status": "pending",
+            "pickup_by": pickup_deadline_utc,
+        }
+        if pickup_loc:
+            receipt_row["pickup_location"] = str(pickup_loc)[:255]
+            receipt_row["pickup_address"] = str(pickup_loc)[:500]
+        receipt_result = await supabase_post("receipts", receipt_row)
+        if isinstance(receipt_result, list) and receipt_result:
+            receipt_id = receipt_result[0].get("id")
     except Exception as exc:
-        logger.warning("claim_food_listing: receipt create/lookup failed (non-fatal): %s", exc)
+        logger.warning("claim_food_listing: receipt create failed (non-fatal): %s", exc)
+
+    # --- 3d. Validate pickup_date — food_claims.pickup_date is type DATE so
+    # only YYYY-MM-DD will insert. Anything else (datetime, "tomorrow", etc.)
+    # would 400 the entire claim, so drop invalid values silently. ---
+    pickup_date_clean = None
+    if pickup_date:
+        pd_raw = str(pickup_date).strip()[:40]
+        m = _re.match(r"^(\d{4}-\d{2}-\d{2})", pd_raw)
+        if m:
+            try:
+                _dt.date.fromisoformat(m.group(1))
+                pickup_date_clean = m.group(1)
+            except ValueError:
+                pickup_date_clean = None
 
     claim_row: dict = {
         "food_id": listing_id,
@@ -3169,16 +3204,15 @@ async def _claim_food_listing(
         "requester_name": requester_name,
         "status": "approved",
         "quantity": requested_qty,
-        "pickup_date": str(pickup_date).strip()[:40] if pickup_date else None,
     }
+    if pickup_date_clean:
+        claim_row["pickup_date"] = pickup_date_clean
     if receipt_id:
         claim_row["receipt_id"] = str(receipt_id)
     if user_row.get("email"):
         claim_row["requester_email"] = str(user_row["email"])[:200]
     if user_row.get("phone"):
         claim_row["requester_phone"] = str(user_row["phone"])[:40]
-    if not pickup_date:
-        claim_row.pop("pickup_date", None)
     # `people` is an optional impact-tracking column that may not exist on all
     # Supabase deployments. Skip it to avoid 400 errors on the insert.
     # (The AI response text already conveys how many people will be fed.)

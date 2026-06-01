@@ -142,6 +142,16 @@ export const useFoodListings = (filters = {}, limit = null) => {
     fetchListings()
   }, [fetchListings])
 
+  // Listen for AI-driven mutations (claim/create/cancel via the chat panel).
+  // The backend writes directly to Supabase, so the only way the UI hears
+  // about it is this custom event — realtime can be disabled or drop frames.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onChanged = () => { fetchListings() }
+    window.addEventListener('dogoods:listings-changed', onChanged)
+    return () => window.removeEventListener('dogoods:listings-changed', onChanged)
+  }, [fetchListings])
+
   // Real-time subscription
   useEffect(() => {
     const allowedStatuses = filters.status

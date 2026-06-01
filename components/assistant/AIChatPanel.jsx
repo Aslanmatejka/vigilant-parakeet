@@ -1379,6 +1379,11 @@ function AIChatPanel() {
             : `Claim confirmed! You reserved ${t}. Check Receipts & Activity.`,
           { autoClose: 6000, position: 'top-center' }
         )
+        try {
+          window.dispatchEvent(new CustomEvent('dogoods:listings-changed', {
+            detail: { reason: 'claim', listingId: result?.listing_id || tr.listing_id }
+          }))
+        } catch (_) {}
       }
       if (tr.tool === 'cancel_claim' && ok) {
         lastToastedClaimRef.current = key
@@ -1386,6 +1391,20 @@ function AIChatPanel() {
           language === 'es' ? 'Reclamo cancelado.' : 'Claim released — item returned to inventory.',
           { autoClose: 4000, position: 'top-center' }
         )
+        try {
+          window.dispatchEvent(new CustomEvent('dogoods:listings-changed', {
+            detail: { reason: 'cancel' }
+          }))
+        } catch (_) {}
+      }
+      if ((tr.tool === 'create_food_listing' || tr.tool === 'post_food_listing'
+           || tr.tool === 'bulk_post_food_listings') && ok) {
+        lastToastedClaimRef.current = key
+        try {
+          window.dispatchEvent(new CustomEvent('dogoods:listings-changed', {
+            detail: { reason: 'create', listingId: result?.listing_id }
+          }))
+        } catch (_) {}
       }
     }
   }, [messages, language])
