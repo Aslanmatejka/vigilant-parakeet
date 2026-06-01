@@ -178,11 +178,15 @@ function FindFoodPage({ initialCategory }) {
 
         if (filters.community) {
             const WAREHOUSE_COMMUNITY_ID = '1';
-            result = result.filter(food => 
-                String(food.community_id) === String(filters.community) || 
-                food.community === filters.community ||
-                String(food.community_id) === WAREHOUSE_COMMUNITY_ID
-            );
+            result = result.filter(food => {
+                // Public / unassigned listings are visible to every community.
+                if (food.community_id == null && !food.community) return true;
+                return (
+                    String(food.community_id) === String(filters.community) ||
+                    food.community === filters.community ||
+                    String(food.community_id) === WAREHOUSE_COMMUNITY_ID
+                );
+            });
         }
 
         if (filters.type !== 'all') {
