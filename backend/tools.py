@@ -825,8 +825,17 @@ TOOL_DEFINITIONS = [
                         "items": {"type": "string"},
                         "description": "Optional allergens present (e.g. 'nuts','dairy','gluten').",
                     },
+                    "community_id": {
+                        "type": "integer",
+                        "description": (
+                            "REQUIRED. Integer id of the community this listing is being shared with. "
+                            "BEFORE calling this tool you MUST ask the donor which community to share with \u2014 "
+                            "call get_active_communities first, present the numbered list, and wait for "
+                            "the donor to pick one. Never guess."
+                        ),
+                    },
                 },
-                "required": ["user_id", "title", "quantity", "unit", "category"],
+                "required": ["user_id", "title", "quantity", "unit", "category", "community_id"],
             },
         },
     },
@@ -2892,6 +2901,7 @@ async def _create_food_listing(
     longitude: Optional[float] = None,
     dietary_tags: Optional[list] = None,
     allergens: Optional[list] = None,
+    community_id: Optional[int] = None,
     **_ignored,
 ) -> dict:
     """Insert a single food donation listing for the authenticated user."""
@@ -2917,6 +2927,43 @@ async def _create_food_listing(
     if cat not in _LISTING_CATEGORIES:
         cat = "other"
 
+    # --- Community selection: REQUIRED so listings show up in the right feed.
+    # The AI is instructed to call get_active_communities and ask the donor to
+    # pick one before calling this tool. If it didn't, return a structured error
+    # so the AI can recover by asking the question on the next turn.
+    community_id_int: Optional[int] = None
+    if community_id is not None and community_id != "":
+        try:
+            community_id_int = int(community_id)
+        except (TypeError, ValueError):
+            return {
+                "success": False,
+                "error": "community_id must be an integer matching an entry from get_active_communities",
+                "needs": "community_id",
+            }
+    if community_id_int is None:
+        try:
+            from backend.ai_engine import supabase_get as _sg
+            comms = await _sg("communities", {
+                "select": "id,name",
+                "order": "name.asc",
+                "limit": "50",
+            })
+        except Exception:
+            comms = []
+        return {
+            "success": False,
+            "needs": "community_id",
+            "error": (
+                "Before I can post this, you need to tell me which community to share it with. "
+                "Ask the donor to pick one from the list and call me again with community_id set."
+            ),
+            "communities": [
+                {"id": c.get("id"), "name": c.get("name")}
+                for c in (comms or []) if c.get("id") is not None
+            ],
+        }
+
     # --- Address normalization: accept several aliases the model might use ---
     addr_text = (
         (full_address or "").strip()
@@ -2932,6 +2979,7 @@ async def _create_food_listing(
         "category": cat,
         "listing_type": "donation",
         "status": "active",
+        "community_id": community_id_int,
     }
     if description:
         row["description"] = str(description).strip()[:2000]
