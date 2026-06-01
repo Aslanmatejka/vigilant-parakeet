@@ -1,6 +1,7 @@
 import supabase, { SUPABASE_AUTH_KEY } from './supabaseClient.js'
 import { reportError } from './helpers.js'
 import communities from './communities.js'
+import { assignFoodImage } from './foodImages.js'
 
 class DataService {
   // Get food claims by status (for admin dashboard)
@@ -538,12 +539,17 @@ class DataService {
       const timeoutId = setTimeout(() => controller.abort(), 15000);
 
       // First attempt: include community_id
+      const withDonor = (listing) => ({
+        ...listing,
+        image_url: listing.image_url || assignFoodImage(listing),
+        donor: listing.users,
+      });
       try {
         const q1 = buildQuery(selectWithCommunity);
         const { data, error } = await q1.order('created_at', { ascending: false }).abortSignal(controller.signal);
         clearTimeout(timeoutId);
         if (error) throw error;
-        return data.map(listing => ({ ...listing, donor: listing.users }));
+        return data.map(withDonor);
       } catch (err) {
         clearTimeout(timeoutId);
         // If community_id column doesn't exist, retry without it
@@ -554,7 +560,7 @@ class DataService {
           const { data: data2, error: error2 } = await q2.order('created_at', { ascending: false }).abortSignal(controller2.signal);
           clearTimeout(timeoutId2);
           if (error2) throw error2;
-          return data2.map(listing => ({ ...listing, donor: listing.users }));
+          return data2.map(withDonor);
         }
         throw err;
       }
@@ -1598,6 +1604,7 @@ class DataService {
 
       return data.map(listing => ({
         ...listing,
+        image_url: listing.image_url || assignFoodImage(listing),
         donor: listing.users
       }))
     } catch (error) {

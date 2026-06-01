@@ -5,6 +5,7 @@ import supabase, { SUPABASE_AUTH_KEY } from "../utils/supabaseClient";
 import communitiesStatic from '../utils/communities';
 import twilioService from '../utils/twilioService';
 import { useAuthContext } from '../utils/AuthContext';
+import { assignFoodImage } from '../utils/foodImages.js';
 import { toast } from 'react-toastify';
 
 // Calculate next Friday from today (food returns to inventory at 11:59PM Friday)
@@ -274,17 +275,11 @@ export default function ClaimFoodForm() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {/* Food Image */}
                     <div>
-                        {food.image_url ? (
-                            <img 
-                                src={food.image_url} 
-                                alt={food.title || food.name}
-                                className="w-full h-64 object-cover rounded-lg shadow-md"
-                            />
-                        ) : (
-                            <div className="w-full h-64 bg-gray-200 rounded-lg flex items-center justify-center">
-                                <i className="fas fa-image text-gray-400 text-5xl"></i>
-                            </div>
-                        )}
+                        <img 
+                            src={food.image_url || assignFoodImage(food)} 
+                            alt={food.title || food.name}
+                            className="w-full h-64 object-cover rounded-lg shadow-md"
+                        />
                     </div>
 
                     {/* Food Information */}
