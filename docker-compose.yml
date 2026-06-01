@@ -9,12 +9,14 @@ services:
     environment:
       - NODE_ENV=production
     depends_on:
-      - supabase
       - ai-backend
     networks:
       - dogoods-network
 
   # AI Backend (FastAPI + OpenAI)
+  # Talks to the Supabase project configured via .env (SUPABASE_URL +
+  # SUPABASE_SERVICE_ROLE_KEY). For a local Supabase stack, run
+  # `npx supabase start` on the host (no docker service needed).
   ai-backend:
     build:
       context: .
@@ -22,30 +24,7 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - .env.local
-    environment:
-      - SUPABASE_URL=http://supabase:54321
-    depends_on:
-      - supabase
-    networks:
-      - dogoods-network
-
-  # Supabase local development
-  supabase:
-    image: supabase/supabase-dev
-    ports:
-      - "54321:54321"  # API
-      - "54322:54322"  # Database
-      - "54323:54323"  # Studio
-      - "54324:54324"  # Inbucket (email testing)
-    environment:
-      - POSTGRES_PASSWORD=your-super-secret-and-long-postgres-password
-      - JWT_SECRET=your-super-secret-jwt-token-with-at-least-32-characters-long
-      - ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
-      - SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
-    volumes:
-      - supabase_data:/var/lib/postgresql/data
-      - ./supabase:/supabase
+      - .env
     networks:
       - dogoods-network
 
@@ -60,7 +39,6 @@ services:
       - dogoods-network
 
 volumes:
-  supabase_data:
   redis_data:
 
 networks:

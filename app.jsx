@@ -166,6 +166,10 @@ function AppContent() {
                 <Route path="/admin/approval-codes" element={<AdminRoute><ApprovalCodeManagement /></AdminRoute>} />
                 <Route path="/admin/communities" element={<AdminRoute><CommunityManagement /></AdminRoute>} />
                 <Route path="/admin/share-food" element={<AdminRoute><AdminShareFood /></AdminRoute>} />
+                {/* Fallback redirects for nav targets whose detail pages don't exist yet */}
+                <Route path="/blog/:slug" element={<Navigate to="/blog" replace />} />
+                <Route path="/success/submit" element={<Navigate to="/contact" replace />} />
+                <Route path="/success/:id" element={<Navigate to="/success" replace />} />
                 <Route path="*" element={<div>Page Not Found</div>} />
             </Routes>
         </MainLayout>

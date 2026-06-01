@@ -10,6 +10,7 @@ export const FilterPanel = ({ onFilterChange }) => {
         dietaryPreferences: [],
         pickupTime: '',
     });
+    const [locationStatus, setLocationStatus] = useState(null);
 
     const dietaryOptions = [
         'Vegetarian',

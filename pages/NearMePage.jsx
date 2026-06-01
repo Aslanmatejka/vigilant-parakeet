@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import FoodList from '../components/food/FoodList';
 import { FilterPanel } from '../components/food/FilterPanel';
 import { useEffectiveLocation } from '../utils/hooks/useLocation';
-import MainLayout from '../components/layout/MainLayout';
 import Button from '../components/common/Button';
 import dataService from '../utils/dataService';
 
@@ -100,7 +99,7 @@ function NearMePage() {
     };
 
     return (
-        <MainLayout>
+        <>
             <div className="container mx-auto px-4 py-8">
                 <div className="mb-8">
                     <h1 className="text-3xl font-bold mb-4">Food Near Me</h1>
@@ -143,7 +142,7 @@ function NearMePage() {
                     />
                 </div>
             </div>
-        </MainLayout>
+        </>
     );
 }
 
