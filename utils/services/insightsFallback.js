@@ -48,6 +48,15 @@ export function cacheInsights(userId, payload) {
     }
 }
 
+export function clearCachedInsights(userId) {
+    if (!userId || typeof window === 'undefined') return
+    try {
+        window.localStorage.removeItem(keyFor(userId))
+    } catch (_) {
+        /* ignore */
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Local insight computation — queries Supabase directly
 // ---------------------------------------------------------------------------

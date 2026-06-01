@@ -9,6 +9,7 @@ import AIMemoryCard from "../components/assistant/AIMemoryCard";
 import { useTutorial } from "../utils/TutorialContext";
 import supabase from "../utils/supabaseClient";
 import { geocodeAddress } from "../utils/geocoding";
+import { clearCachedInsights } from "../utils/services/insightsFallback";
 
 function UserSettings() {
     const { resetTutorial } = useTutorial();
@@ -229,11 +230,34 @@ function UserSettings() {
                 if (updateProfile) {
                     try { await updateProfile(updates); } catch (_) {}
                 }
+                // Re-read the row we just wrote so the dropdown can't show a
+                // stale value, and drop any cached AI insights so the role
+                // badge on the Profile page refreshes immediately.
+                try {
+                    const { data: fresh } = await supabase
+                        .from('users')
+                        .select('community_role,name,address,phone,latitude,longitude')
+                        .eq('id', authUser.id)
+                        .single();
+                    if (fresh) {
+                        setFormData(prev => ({
+                            ...prev,
+                            community_role: fresh.community_role || '',
+                            name: fresh.name ?? prev.name,
+                            address: fresh.address ?? prev.address,
+                            phone: fresh.phone ?? prev.phone,
+                        }));
+                    }
+                } catch (_) { /* non-fatal */ }
+                try { clearCachedInsights(authUser.id); } catch (_) {}
             } else if (updateProfile) {
                 await updateProfile(formData);
             }
             
-            setSuccessMessage(`${section} settings saved successfully`);
+            const roleLabel = section === 'Account' && formData.community_role
+                ? ` Your community role is now "${formData.community_role}".`
+                : '';
+            setSuccessMessage(`${section} settings saved successfully.${roleLabel}`);
             
             // Clear success message after 3 seconds
             setTimeout(() => {
