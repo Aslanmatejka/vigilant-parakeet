@@ -112,32 +112,35 @@ function UserDashboard() {
         return activities;
     }, [userListings]);
 
-    // Quick actions
-    const quickActions = [
-        /* TEMPORARILY DISABLED
-        {
-            title: 'Share Food',
-            description: 'Share your surplus food',
-            icon: 'fa-plus',
-            path: '/share',
-            color: 'bg-[#2CABE3]'
-        },
-        */
-        {
-            title: 'Find Food',
-            description: 'Browse available items',
-            icon: 'fa-search',
-            path: '/find',
-            color: 'bg-blue-500'
-        },
-        {
-            title: 'Donation Schedules',
-            description: 'Set up recurring donations',
-            icon: 'fa-calendar',
-            path: '/donations',
-            color: 'bg-purple-500'
-        }
-    ];
+    // Quick actions tailored to community_role so the dashboard actually
+    // changes when the user switches between donor / recipient / volunteer.
+    const role = String(user?.community_role || '').toLowerCase();
+    const isDonor = role === 'donor';
+    const isRecipient = role === 'recipient';
+    const isVolunteer = role === 'volunteer' || role === 'driver' || role === 'dispatcher';
+
+    const quickActions = isDonor
+        ? [
+            { title: 'Share Food', description: 'Post surplus food for the community', icon: 'fa-plus', path: '/share', color: 'bg-[#2CABE3]' },
+            { title: 'My Listings', description: 'Manage what you’ve posted', icon: 'fa-list', path: '/listings', color: 'bg-emerald-500' },
+            { title: 'Donation Schedules', description: 'Set up recurring donations', icon: 'fa-calendar', path: '/donations', color: 'bg-purple-500' },
+        ]
+        : isRecipient
+        ? [
+            { title: 'Find Food', description: 'Browse available items near you', icon: 'fa-search', path: '/find', color: 'bg-blue-500' },
+            { title: 'Near Me', description: 'See pickups on the map', icon: 'fa-location-dot', path: '/near-me', color: 'bg-emerald-500' },
+            { title: 'My Receipts', description: 'View claims and pickups', icon: 'fa-receipt', path: '/receipts', color: 'bg-purple-500' },
+        ]
+        : isVolunteer
+        ? [
+            { title: 'Pickup Routes', description: 'Plan your delivery run', icon: 'fa-route', path: '/donations', color: 'bg-[#2CABE3]' },
+            { title: 'Find Food', description: 'See what needs delivering', icon: 'fa-search', path: '/find', color: 'bg-blue-500' },
+            { title: 'Near Me', description: 'Pickups on the map', icon: 'fa-location-dot', path: '/near-me', color: 'bg-emerald-500' },
+        ]
+        : [
+            { title: 'Find Food', description: 'Browse available items', icon: 'fa-search', path: '/find', color: 'bg-blue-500' },
+            { title: 'Donation Schedules', description: 'Set up recurring donations', icon: 'fa-calendar', path: '/donations', color: 'bg-purple-500' },
+        ];
 
     // Calculate notifications from Supabase data
     const dashboardNotifications = React.useMemo(() => {
@@ -227,13 +230,14 @@ function UserDashboard() {
             {/* AI Role-Specific Insights */}
             <RoleInsightsPanel className="mb-8" />
 
-            {/* Smart Pickup Route Optimizer */}
-            <PickupRouteOptimizer className="mb-8" />
+            {/* Smart Pickup Route Optimizer — donor/volunteer only */}
+            {(isDonor || isVolunteer) && <PickupRouteOptimizer className="mb-8" />}
 
             {/* Natural-language Query Panel */}
             <AIQueryPanel className="mb-8" />
 
-            {/* Food Receipts Section */}
+            {/* Food Receipts Section — recipient/volunteer/default; hidden for donors */}
+            {!isDonor && (
             <div className="mb-8" role="region" aria-label="Food Claim Receipts">
                 <h2 className="text-2xl font-bold text-gray-900 mb-6">Your Food Receipts</h2>
                 
@@ -272,6 +276,7 @@ function UserDashboard() {
                     </div>
                 )}
             </div>
+            )}
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                 {/* Quick Actions */}
@@ -299,7 +304,8 @@ function UserDashboard() {
                     </div>
                 </div>
 
-                {/* Recent Activities */}
+                {/* Recent Activities — these are listings YOU posted, only meaningful for donors */}
+                {isDonor ? (
                 <div className="space-y-6">
                     <h2 className="text-lg font-semibold text-gray-900">Recent Activities</h2>
                     <Card>
@@ -333,6 +339,7 @@ function UserDashboard() {
                         </div>
                     </Card>
                 </div>
+                ) : null}
             </div>
 
             {/* Notifications */}
