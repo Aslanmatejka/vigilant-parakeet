@@ -5,7 +5,6 @@ import Input from "../components/common/Input";
 import Button from "../components/common/Button";
 import { useAuth } from "../utils/hooks/useSupabase";
 import DietaryPreferences from "../components/profile/DietaryPreferences";
-import AIMemoryCard from "../components/assistant/AIMemoryCard";
 import { useTutorial } from "../utils/TutorialContext";
 import supabase from "../utils/supabaseClient";
 import { geocodeAddress } from "../utils/geocoding";
@@ -678,9 +677,6 @@ function UserSettings() {
                         </div>
                     </div>
                 </Card>
-
-                {/* AI Memory — durable facts the assistant remembers across sessions */}
-                {authUser?.id && <AIMemoryCard userId={authUser.id} />}
 
                 {/* Tutorial Section */}
                 <Card>
