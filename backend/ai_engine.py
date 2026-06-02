@@ -10,6 +10,11 @@ Conversation history, user profile, and reminders are persisted via the
 Supabase REST API (PostgREST). Relevant tables (RLS-protected):
 ai_conversations, ai_reminders, ai_feedback, users.
 """
+# This module deals with dynamically-shaped JSON from Supabase / OpenAI.
+# Fully typing every dict shape would require TypedDicts across hundreds
+# of lines for zero runtime benefit, so we relax the noisier "unknown
+# type" reports for this file only.
+# pyright: reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingTypeArgument=false, reportUnnecessaryIsInstance=false, reportUnusedVariable=false, reportUnusedFunction=false
 from __future__ import annotations
 
 
@@ -113,7 +118,7 @@ async def close_http_client() -> None:
 # Supabase REST helpers (used by ai_engine, app.py, and tools.py)
 # ---------------------------------------------------------------------------
 
-def _supabase_headers(extra: Optional[dict] = None) -> dict:
+def _supabase_headers(extra: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     headers = {
         "apikey": SUPABASE_SERVICE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
@@ -124,7 +129,7 @@ def _supabase_headers(extra: Optional[dict] = None) -> dict:
     return headers
 
 
-async def supabase_get(table: str, params: Optional[dict] = None) -> list[dict]:
+async def supabase_get(table: str, params: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
     """GET rows from a Supabase table via PostgREST.
 
     Returns the parsed JSON array. Returns [] (instead of raising) when
@@ -182,7 +187,7 @@ async def supabase_post(table: str, body: Any) -> Any:
         return {}
 
 
-async def supabase_patch(table: str, params: dict, body: dict) -> Any:
+async def supabase_patch(table: str, params: dict[str, Any], body: dict[str, Any]) -> Any:
     """Update rows matching the given PostgREST filter params."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return {}
@@ -204,7 +209,7 @@ async def supabase_patch(table: str, params: dict, body: dict) -> Any:
         return {}
 
 
-async def supabase_delete(table: str, params: dict) -> int:
+async def supabase_delete(table: str, params: dict[str, Any]) -> int:
     """Delete rows matching the given PostgREST params. Returns row count."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return 0
@@ -223,7 +228,7 @@ async def supabase_delete(table: str, params: dict) -> int:
         return 0
 
 
-async def fetch_donor_listing_defaults(user_id: str) -> dict:
+async def fetch_donor_listing_defaults(user_id: str) -> dict[str, Any]:
     """Load donor profile fields to stamp onto new food_listings rows."""
     if not user_id:
         return {}
@@ -238,7 +243,7 @@ async def fetch_donor_listing_defaults(user_id: str) -> dict:
     return rows[0] if rows else {}
 
 
-def apply_donor_defaults_to_listing(row: dict, donor: dict | None) -> dict:
+def apply_donor_defaults_to_listing(row: dict[str, Any], donor: dict[str, Any] | None) -> dict[str, Any]:
     """Copy donor profile + coordinates onto a listing row when missing."""
     if not donor:
         return row
@@ -466,7 +471,7 @@ class AIError(Exception):
         retryable: bool = False,
         retry_after_seconds: Optional[int] = None,
         http_status: int = 500,
-        cause: Optional[Exception] = None,
+        cause: Optional[BaseException] = None,
     ):
         super().__init__(message)
         self.code = code
@@ -476,7 +481,7 @@ class AIError(Exception):
         self.http_status = http_status
         self.cause = cause
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         body = {
             "error_code": self.code.value,
             "message": self.message,
@@ -509,7 +514,7 @@ def classify_exception(exc: BaseException) -> AIError:
             cause=exc,
         )
 
-    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+    if isinstance(exc, httpx.HTTPStatusError):
         sc = exc.response.status_code
         if sc == 429:
             retry_after = exc.response.headers.get("retry-after")
@@ -633,10 +638,10 @@ async def _openai_with_retry(
     method: str,
     url: str,
     *,
-    headers: dict,
-    json_payload: dict | None = None,
-    files: dict | None = None,
-    data: dict | None = None,
+    headers: dict[str, Any],
+    json_payload: dict[str, Any] | None = None,
+    files: dict[str, Any] | None = None,
+    data: dict[str, Any] | None = None,
     timeout: float = TIMEOUT_SECONDS,
     retries: int = MAX_RETRIES,
     label: str = "openai",
@@ -647,7 +652,7 @@ async def _openai_with_retry(
     for attempt in range(retries):
         try:
             client = _get_http_client(timeout)
-            kwargs: dict = {"headers": headers, "timeout": timeout}
+            kwargs: dict[str, Any] = {"headers": headers, "timeout": timeout}
             if json_payload is not None:
                 kwargs["json"] = json_payload
             if files is not None:
@@ -697,14 +702,14 @@ async def _openai_with_retry(
     raise RuntimeError(f"OpenAI request failed after {retries} attempts: {last_exc}")
 
 
-def _extract_content(response: dict) -> str:
+def _extract_content(response: dict[str, Any]) -> str:
     try:
         return response["choices"][0]["message"]["content"]
     except (KeyError, IndexError) as exc:
         raise RuntimeError("Unexpected AI response format") from exc
 
 
-async def legacy_ai_request(endpoint: str, payload: dict) -> dict:
+async def legacy_ai_request(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Fire a simple OpenAI chat/completions call (used by recipes, storage tips)."""
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not configured")
@@ -725,7 +730,7 @@ async def legacy_ai_request(endpoint: str, payload: dict) -> dict:
 # Training data + system prompt builder
 # ---------------------------------------------------------------------------
 
-def _load_training_data() -> dict:
+def _load_training_data() -> dict[str, Any]:
     try:
         with open(TRAINING_DATA_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -734,7 +739,7 @@ def _load_training_data() -> dict:
         return {}
 
 
-def _build_system_prompt(training_data: dict) -> str:
+def _build_system_prompt(training_data: dict[str, Any]) -> str:
     sections: list[str] = []
 
     if "platform_overview" in training_data:
@@ -1701,7 +1706,7 @@ _SAFE_QUERY_USER_SCOPE = {
 }
 
 
-def _scope_safe_query(fn_args: dict, auth_user_id: str) -> dict:
+def _scope_safe_query(fn_args: dict[str, Any], auth_user_id: str) -> dict[str, Any]:
     """Ensure run_safe_query is always scoped to the authenticated user.
 
     If the caller (an LLM) does not already include a filter binding the
@@ -1726,7 +1731,7 @@ def _scope_safe_query(fn_args: dict, auth_user_id: str) -> dict:
 
     auth_str = str(auth_user_id)
 
-    def _binds_to_auth(f: dict) -> bool:
+    def _binds_to_auth(f: dict[str, Any]) -> bool:
         if not isinstance(f, dict):
             return False
         field = str(f.get("field", ""))
@@ -1761,7 +1766,7 @@ def _scope_safe_query(fn_args: dict, auth_user_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _build_memory_snapshot(history: list[dict]) -> Optional[str]:
+def _build_memory_snapshot(history: list[dict[str, Any]]) -> Optional[str]:
     """Distill recent tool calls into a compact context block.
 
     Walks the assistant messages newest-first, collects the latest
@@ -1774,10 +1779,10 @@ def _build_memory_snapshot(history: list[dict]) -> Optional[str]:
     if not isinstance(history, list) or not history:
         return None
 
-    latest_listings: list[dict] = []
-    recent_claims: list[dict] = []
-    recent_posts: list[dict] = []
-    recent_cancels: list[dict] = []
+    latest_listings: list[dict[str, Any]] = []
+    recent_claims: list[dict[str, Any]] = []
+    recent_posts: list[dict[str, Any]] = []
+    recent_cancels: list[dict[str, Any]] = []
     # claim_id → cancelled flag, so we can hide claims the user already
     # cancelled from the "Recent successful claims" section instead of
     # showing them and letting the model double-cancel.
@@ -1914,7 +1919,7 @@ class ConversationEngine:
         self,
         message: str,
         history: Optional[list] = None,
-        profile: Optional[dict] = None,
+        profile: Optional[dict[str, Any]] = None,
     ) -> str:
         """Sticky language detection.
 
@@ -1963,7 +1968,7 @@ class ConversationEngine:
 
     # ---- Profile lookup via Supabase --------------------------------------
 
-    async def get_user_profile(self, user_id: str) -> Optional[dict]:
+    async def get_user_profile(self, user_id: str) -> Optional[dict[str, Any]]:
         try:
             rows = await supabase_get("users", {
                 "id": f"eq.{user_id}",
@@ -2019,7 +2024,7 @@ class ConversationEngine:
 
     # ---- History via Supabase ---------------------------------------------
 
-    async def get_conversation_history(self, user_id: str, limit: int = 50) -> list[dict]:
+    async def get_conversation_history(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
         try:
             rows = await supabase_get("ai_conversations", {
                 "user_id": f"eq.{user_id}",
@@ -2048,7 +2053,7 @@ class ConversationEngine:
         user_id: str,
         role: str,
         message: str,
-        metadata: dict | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Optional[str]:
         try:
             result = await supabase_post("ai_conversations", {
@@ -2083,7 +2088,7 @@ class ConversationEngine:
         message: str,
         include_audio: bool = False,
         silent: bool = False,
-    ) -> dict:
+    ) -> dict[str, Any]:
         profile_task = asyncio.create_task(self.get_user_profile(user_id))
         # Pull 30 messages (~15 turns) so multi-step flows — like "find food,
         # show me #3, what's the address, claim it" spread across breaks —
@@ -2097,7 +2102,7 @@ class ConversationEngine:
         # flipping a Spanish conversation back to English.
         lang = self._detect_lang_sticky(message, history=history, profile=profile)
 
-        messages: list[dict] = [{"role": "system", "content": self.system_prompt}]
+        messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
 
         if lang == "es":
             messages.append({
@@ -2158,8 +2163,10 @@ class ConversationEngine:
             # distance / route / nearby-search tools without having to ask
             # the user for their location every turn.
             try:
-                p_lat = float(profile.get("lat")) if profile.get("lat") is not None else None
-                p_lng = float(profile.get("lng")) if profile.get("lng") is not None else None
+                _raw_lat = profile.get("lat")
+                _raw_lng = profile.get("lng")
+                p_lat = float(_raw_lat) if _raw_lat is not None else None
+                p_lng = float(_raw_lng) if _raw_lng is not None else None
             except (TypeError, ValueError):
                 p_lat, p_lng = None, None
             if p_lat is not None and p_lng is not None:
@@ -2442,7 +2449,7 @@ class ConversationEngine:
         user_msg: str,
         assistant_msg: str,
         lang: str,
-        actions: Optional[list[dict]] = None,
+        actions: Optional[list[dict[str, Any]]] = None,
         silent: bool = False,
     ) -> Optional[str]:
         # Anonymous sessions all share the nil UUID — the ai_conversations.user_id
@@ -2453,7 +2460,7 @@ class ConversationEngine:
         if not user_id or user_id == "00000000-0000-0000-0000-000000000000":
             return None
         try:
-            assistant_metadata: dict = {"lang": lang}
+            assistant_metadata: dict[str, Any] = {"lang": lang}
             if silent:
                 assistant_metadata["silent_trigger"] = True
             # Strip large payloads but keep the lightweight facts the next
@@ -2462,7 +2469,7 @@ class ConversationEngine:
             # short summaries — not full geometries / arrays — so the row
             # stays small but the model regains context after a refresh.
             if actions:
-                compact: list[dict] = []
+                compact: list[dict[str, Any]] = []
                 for a in actions[-8:]:  # last 8 tool calls per turn is plenty
                     if not isinstance(a, dict):
                         continue
@@ -2484,7 +2491,7 @@ class ConversationEngine:
                             "address": item.get("full_address") or item.get("address"),
                             "donor_name": item.get("donor_name"),
                         })
-                    entry_compact: dict = {
+                    entry_compact: dict[str, Any] = {
                         "tool": a.get("tool"),
                         "ok": a.get("ok"),
                         "summary": (a.get("summary") or "")[:240],
@@ -2538,8 +2545,8 @@ class ConversationEngine:
 
     # ---- GPT call with fallback ------------------------------------------
 
-    async def _call_with_fallbacks(self, messages: list[dict], lang: str = "en", auth_user_id: Optional[str] = None) -> tuple[str, list[dict]]:
-        actions: list[dict] = []
+    async def _call_with_fallbacks(self, messages: list[dict[str, Any]], lang: str = "en", auth_user_id: Optional[str] = None) -> tuple[str, list[dict[str, Any]]]:
+        actions: list[dict[str, Any]] = []
         try:
             text = await self._call_openai_chat(messages, lang=lang, auth_user_id=auth_user_id, actions_out=actions)
             return text, actions
@@ -2547,13 +2554,12 @@ class ConversationEngine:
             logger.warning("GPT timeout after %ss: %s", TIMEOUT_SECONDS, exc)
             return get_canned_response("timeout", lang), actions
         except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else "?"
+            status = exc.response.status_code
             body_preview = ""
-            if exc.response is not None:
-                try:
-                    body_preview = exc.response.text[:300]
-                except Exception:
-                    body_preview = ""
+            try:
+                body_preview = exc.response.text[:300]
+            except Exception:
+                body_preview = ""
             logger.error("GPT HTTP %s error: %s | body=%s", status, exc, body_preview)
             return get_canned_response("api_down", lang), actions
         except RuntimeError as exc:
@@ -2563,7 +2569,7 @@ class ConversationEngine:
             logger.exception("GPT unexpected error: %s", exc)
             return get_canned_response("general_error", lang), actions
 
-    async def public_chat_reply(self, messages: list[dict], lang: str = "en") -> str:
+    async def public_chat_reply(self, messages: list[dict[str, Any]], lang: str = "en") -> str:
         """Stateless OpenAI call with NO tools and NO persistence.
 
         Used by the anonymous landing-page chat. Safe to expose without auth.
@@ -2647,7 +2653,7 @@ class ConversationEngine:
         "create_reminder",
     }
 
-    async def _call_openai_chat(self, messages: list[dict], lang: str = "en", auth_user_id: Optional[str] = None, actions_out: Optional[list] = None) -> str:
+    async def _call_openai_chat(self, messages: list[dict[str, Any]], lang: str = "en", auth_user_id: Optional[str] = None, actions_out: Optional[list] = None) -> str:
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY not configured")
 
