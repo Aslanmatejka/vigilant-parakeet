@@ -414,52 +414,26 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             const count = listingCountsByCommunity[community.id] || 0;
             const countStr = String(count);
 
-            // Place-of-interest style marker: a rounded square "POI tile" with
-            // a building/landmark glyph, anchored by a small tail pointing to
-            // the exact coordinate. A red badge in the top-right corner shows
-            // the number of active listings (hidden when zero).
-            const tileSize = 34;                                // px
-            const badgeR = countStr.length >= 3 ? 11 : 9;       // badge radius
-            const tailH = 8;
-            const pad = badgeR + 2;                             // extra room for badge overflow
-            const svgW = tileSize + pad * 2;
-            const svgH = tileSize + tailH + pad;
-            const tileX = pad;
-            const tileY = pad;
-            const cx = svgW / 2;
-            const tileBottom = tileY + tileSize;
+            // Simple circular pin in the community's color, with a small red
+            // badge in the top-right showing the active listing count.
+            const dotR = 13;
+            const badgeR = countStr.length >= 3 ? 11 : 9;
+            const pad = badgeR + 2;
+            const svgW = dotR * 2 + pad * 2;
+            const svgH = dotR * 2 + pad * 2;
+            const dotCx = svgW / 2;
+            const dotCy = svgH / 2;
 
-            const badgeCx = tileX + tileSize - 2;
-            const badgeCy = tileY + 2;
+            const badgeCx = dotCx + dotR - 2;
+            const badgeCy = dotCy - dotR + 2;
 
             const color = colorForCommunity(community.id);
 
             const svg = `
-                <svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" style="display:block;overflow:visible;filter:drop-shadow(0 3px 4px rgba(0,0,0,0.3));">
-                    <!-- tail -->
-                    <path d="M ${cx - 6} ${tileBottom - 0.5} L ${cx} ${tileBottom + tailH} L ${cx + 6} ${tileBottom - 0.5} Z"
-                          fill="${color}" fill-opacity="0.82" stroke="#ffffff" stroke-width="2" stroke-linejoin="round" />
-                    <!-- tile -->
-                    <rect x="${tileX}" y="${tileY}" width="${tileSize}" height="${tileSize}" rx="9" ry="9"
-                          fill="${color}" fill-opacity="0.82" stroke="#ffffff" stroke-width="2" />
-                    <!-- building / community glyph (centered inside tile) -->
-                    <g transform="translate(${tileX + tileSize / 2 - 9}, ${tileY + tileSize / 2 - 9})" fill="#ffffff">
-                        <!-- left building -->
-                        <rect x="0" y="6" width="7" height="12" rx="1" />
-                        <rect x="1.5" y="8.5" width="1.6" height="1.6" fill="${color}" />
-                        <rect x="3.9" y="8.5" width="1.6" height="1.6" fill="${color}" />
-                        <rect x="1.5" y="11.5" width="1.6" height="1.6" fill="${color}" />
-                        <rect x="3.9" y="11.5" width="1.6" height="1.6" fill="${color}" />
-                        <!-- right (taller) building -->
-                        <path d="M 8 4 L 14 0.5 L 18 4 L 18 18 L 8 18 Z" />
-                        <rect x="10" y="6.5" width="1.6" height="1.6" fill="${color}" />
-                        <rect x="13.4" y="6.5" width="1.6" height="1.6" fill="${color}" />
-                        <rect x="10" y="9.5" width="1.6" height="1.6" fill="${color}" />
-                        <rect x="13.4" y="9.5" width="1.6" height="1.6" fill="${color}" />
-                        <rect x="11.5" y="13" width="2.5" height="5" fill="${color}" />
-                    </g>
+                <svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" style="display:block;overflow:visible;filter:drop-shadow(0 2px 3px rgba(0,0,0,0.3));">
+                    <circle cx="${dotCx}" cy="${dotCy}" r="${dotR}"
+                            fill="${color}" stroke="#ffffff" stroke-width="3" />
                     ${count > 0 ? `
-                        <!-- count badge -->
                         <circle cx="${badgeCx}" cy="${badgeCy}" r="${badgeR}"
                                 fill="#ef4444" stroke="#ffffff" stroke-width="1.75" />
                         <text x="${badgeCx}" y="${badgeCy}" text-anchor="middle" dominant-baseline="central"
@@ -1003,7 +977,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                         <span className="font-medium text-gray-700">{foodListings.length} Listings</span>
                     </div>
                     <div className="flex items-center gap-2">
-                        <i className="fas fa-city text-base text-gray-700" aria-hidden="true"></i>
+                        <div className="w-3 h-3 rounded-full bg-[#2563eb] border-2 border-white shadow-[0_1px_2px_rgba(0,0,0,0.3)]"></div>
                         <span className="font-medium text-gray-700">{communities.length} Communities</span>
                     </div>
                     {userLocation?.latitude != null && userLocation?.longitude != null && (
