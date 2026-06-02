@@ -427,7 +427,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             const badgeCx = dotCx + dotR - 2;
             const badgeCy = dotCy - dotR + 2;
 
-            const color = colorForCommunity(community.id);
+            const color = '#2563eb';
 
             const svg = `
                 <svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" style="display:block;overflow:visible;filter:drop-shadow(0 2px 3px rgba(0,0,0,0.3));">
