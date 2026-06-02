@@ -23,10 +23,16 @@ function NearMePage() {
     const [nearbyListings, setNearbyListings] = useState([]);
     const [loading, setLoading] = useState(true);
 
-    // Fetch listings on mount AND when location/filters change
+    // Fetch listings on mount AND when location/filters change.
+    // Depend on primitive values to avoid an infinite loop — `location` and
+    // `filters` get new object references on every render even when the
+    // underlying coordinates/values are unchanged.
+    const lat = location?.latitude;
+    const lng = location?.longitude;
+    const dietaryKey = (filters.dietaryPreferences || []).join(',');
     useEffect(() => {
         fetchNearbyListings();
-    }, [location, filters]);
+    }, [lat, lng, filters.radius, filters.foodType, dietaryKey, filters.pickupTime]);
 
     const fetchNearbyListings = async () => {
         setLoading(true);
