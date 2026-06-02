@@ -2925,11 +2925,27 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
     """
     if not text:
         return []
-    t = text.lower()
+    full = text.lower()
     # Only suggest when the AI is actually asking the user something,
     # otherwise chips would clutter every reply.
-    if "?" not in t and "¿" not in t:
+    if "?" not in full and "¿" not in full:
         return []
+
+    # Scope keyword matching to the LAST question in the message. The AI
+    # often mentions things like "no allergens noted" or "added the photo"
+    # in earlier sentences, which would otherwise mis-trigger chip
+    # branches keyed on those words. The chips should answer the question
+    # the user is actually being asked.
+    import re as _re
+    # Split on sentence terminators while keeping '?' attached.
+    parts = _re.split(r"(?<=[.!?¿])\s+", full)
+    last_q = ""
+    for seg in reversed(parts):
+        if "?" in seg or "¿" in seg:
+            last_q = seg
+            break
+    # Fall back to the full text if we couldn't isolate a question.
+    t = last_q or full
 
     es = lang == "es"
     out: list[str] = []
@@ -2999,12 +3015,15 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
                 add("Within 5 mi", "Within 10 mi")
         return out
 
-    # Address confirmation
+    # Address confirmation — require an explicit address-related cue,
+    # not just the word "different"/"diferente" which appears in many
+    # unrelated questions.
     if any(k in t for k in (
-            "profile address", "use your address", "different one", "what address",
+            "profile address", "use your address", "what address",
+            "address on file", "saved address", "a different address",
             "dirección de tu perfil", "dirección del perfil", "tu dirección guardada",
             "uso tu dirección", "uso la dirección", "qué dirección", "que direccion",
-            "otra dirección", "distinta", "diferente",
+            "otra dirección",
     )):
         if es:
             add("Sí, usa esa", "Es otra dirección", "No tengo una guardada")
@@ -3046,8 +3065,10 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
             add("Made today", "Made yesterday", "Good for 24h")
         return out
 
-    # Quantity prompt ("how many", "three what?")
-    if any(k in t for k in ("how many", "how much", "what unit", "three what",
+    # Quantity prompt — require an explicit count cue. "how much"
+    # appears in many non-numeric questions like "how much does it
+    # weigh?" or "how much time do you have?".
+    if any(k in t for k in ("how many", "what unit", "three what",
                             "cuántos", "cuántas", "qué unidad")):
         if es:
             add("1", "3", "5", "10")
@@ -3098,12 +3119,14 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
     if open_ended:
         return out
 
-    # Generic yes/no question — only safe when NOT open-ended.
+    # Generic yes/no question — only safe when NOT open-ended. Don't
+    # include "can i" here: it appears in many user-direction questions
+    # like "Can I see the photo first?" where Yes/No/Later is wrong.
     if any(k in t for k in (
             "would you like", "do you want", "ready to", "should i",
-            "shall i", "want me to", "can i",
+            "shall i", "want me to",
             "¿quieres", "quieres que", "¿te gustaría", "te gustaría que",
-            "¿listo", "¿debo", "¿puedo", "¿lo hago", "¿lo hacemos",
+            "¿listo", "¿debo", "¿lo hago", "¿lo hacemos",
     )):
         if es:
             add("Sí", "No", "Más tarde")
