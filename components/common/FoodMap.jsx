@@ -999,11 +999,11 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             <div className="absolute bottom-4 left-4 bg-white rounded-lg shadow-lg px-4 py-2 z-10">
                 <div className="flex items-center gap-4 text-sm flex-wrap">
                     <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 bg-primary-600 rounded-full"></div>
+                        <div className="w-3 h-3 rounded-full bg-[#dc2626] border-2 border-white shadow-[0_1px_2px_rgba(0,0,0,0.3)]"></div>
                         <span className="font-medium text-gray-700">{foodListings.length} Listings</span>
                     </div>
                     <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 bg-orange-500 rounded-full"></div>
+                        <i className="fas fa-city text-base text-gray-700" aria-hidden="true"></i>
                         <span className="font-medium text-gray-700">{communities.length} Communities</span>
                     </div>
                     {userLocation?.latitude != null && userLocation?.longitude != null && (
