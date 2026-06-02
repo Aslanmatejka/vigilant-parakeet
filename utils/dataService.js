@@ -565,6 +565,11 @@ class DataService {
         throw err;
       }
     } catch (error) {
+      // Aborts (timeouts / effect-cleanup) are expected and shouldn't be noisy.
+      const msg = error?.message || '';
+      if (error?.name === 'AbortError' || error?.code === '20' || msg.includes('aborted')) {
+        throw error;
+      }
       console.error('Get food listings error:', error)
       reportError(error)
       throw error

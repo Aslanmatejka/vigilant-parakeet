@@ -93,6 +93,11 @@ function NearMePage() {
                 setNearbyListings(allListings);
             }
         } catch (error) {
+            const msg = error?.message || '';
+            if (error?.name === 'AbortError' || error?.code === '20' || msg.includes('aborted')) {
+                // Request was superseded or timed out — ignore silently.
+                return;
+            }
             console.error('Error fetching nearby listings:', error);
             setNearbyListings([]);
         } finally {
