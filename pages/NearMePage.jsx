@@ -113,16 +113,49 @@ function NearMePage() {
         <>
             <div className="container mx-auto px-4 py-8">
                 <div className="mb-8">
-                    <h1 className="text-3xl font-bold mb-4">Food Near Me</h1>
+                    <h1 className="text-3xl font-bold mb-2">Food Near Me</h1>
+                    <p className="text-gray-600 mb-4">
+                        Find free food shared by neighbors and local organizations within a distance you choose.
+                    </p>
+
+                    {/* Step-by-step guide */}
+                    <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+                        <h2 className="text-lg font-semibold text-green-800 mb-3 flex items-center">
+                            <span className="mr-2">ℹ️</span> How it works — 4 quick steps
+                        </h2>
+                        <ol className="space-y-2 text-sm text-gray-700">
+                            <li>
+                                <span className="font-semibold text-green-700">1. Enable location</span> —
+                                click <em>Enable Location</em> below so we can show food near you. We never store your exact location.
+                            </li>
+                            <li>
+                                <span className="font-semibold text-green-700">2. Set your distance</span> —
+                                use the radius (in miles) to control how far you’re willing to travel.
+                            </li>
+                            <li>
+                                <span className="font-semibold text-green-700">3. Filter (optional)</span> —
+                                narrow results by food type, dietary needs, or pickup time.
+                            </li>
+                            <li>
+                                <span className="font-semibold text-green-700">4. Claim & pick up</span> —
+                                tap a listing to see details, then claim it and coordinate pickup with the donor.
+                            </li>
+                        </ol>
+                    </div>
+
                     {!location && !locationLoading && (
                         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
-                            <h2 className="text-lg font-semibold mb-2">Enable Location Services</h2>
-                            <p className="text-gray-600 mb-4">
-                                Allow ShareFoods to access your location to see available food listings near you.
+                            <h2 className="text-lg font-semibold mb-2">Step 1: Enable Location Services</h2>
+                            <p className="text-gray-600 mb-2">
+                                Allow DoGoods to access your location so we can rank listings by distance from you.
+                            </p>
+                            <p className="text-xs text-gray-500 mb-4">
+                                Your browser will ask for permission. Your coordinates stay on your device — we only use them to sort results.
                             </p>
                             <Button
                                 onClick={enableLocation}
                                 className="bg-primary-500 hover:bg-primary-600 text-white"
+                                title="Click to share your current location with this page only"
                             >
                                 Enable Location
                             </Button>
@@ -146,6 +179,20 @@ function NearMePage() {
                     />
                 )}
                 <div className={location ? "mt-6" : ""}>
+                    {location && !loading && nearbyListings.length > 0 && (
+                        <p
+                            className="text-sm text-gray-600 mb-3"
+                            title="Listings are sorted by distance from you. Tap any listing to view details and claim it."
+                        >
+                            Showing <span className="font-semibold">{nearbyListings.length}</span> listing{nearbyListings.length === 1 ? '' : 's'} within {filters.radius} mile{filters.radius === 1 ? '' : 's'}.
+                            Tap a listing to view details and claim it.
+                        </p>
+                    )}
+                    {location && !loading && nearbyListings.length === 0 && (
+                        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4 text-sm text-gray-700">
+                            No listings found in this area. Try widening the radius or clearing filters.
+                        </div>
+                    )}
                     <FoodList
                         foods={nearbyListings}
                         loading={loading}
