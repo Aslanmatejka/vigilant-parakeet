@@ -87,16 +87,19 @@ function FindFoodPage({ initialCategory }) {
     }, [user?.community_id]);
 
     // Refresh listings every 60s so expired items disappear in near real-time.
-    // Also refresh when the tab regains focus.
+    // Also refresh when the tab regains focus or a donor publishes via AI/Share Food.
     useEffect(() => {
         const interval = setInterval(() => {
             fetchListings();
         }, 60000);
         const onFocus = () => fetchListings();
+        const onFoodShared = () => fetchListings();
         window.addEventListener('focus', onFocus);
+        window.addEventListener('foodShared', onFoodShared);
         return () => {
             clearInterval(interval);
             window.removeEventListener('focus', onFocus);
+            window.removeEventListener('foodShared', onFoodShared);
         };
     }, [fetchListings]);
 
@@ -142,8 +145,8 @@ function FindFoodPage({ initialCategory }) {
         // Update URL when category changes
         if (name === 'category') {
             const newUrl = value 
-                ? `${routerLocation.pathname}?category=${value}`
-                : routerLocation.pathname;
+                ? `${location.pathname}?category=${value}`
+                : location.pathname;
             navigate(newUrl, { replace: true });
         }
     };
@@ -178,8 +181,10 @@ function FindFoodPage({ initialCategory }) {
 
         if (filters.community) {
             const WAREHOUSE_COMMUNITY_ID = '1';
-            result = result.filter(food => 
-                String(food.community_id) === String(filters.community) || 
+            result = result.filter(food =>
+                // Listings without a community are visible to everyone (e.g. AI photo uploads)
+                food.community_id == null || food.community_id === '' ||
+                String(food.community_id) === String(filters.community) ||
                 food.community === filters.community ||
                 String(food.community_id) === WAREHOUSE_COMMUNITY_ID
             );

@@ -471,46 +471,6 @@ const TOOL_CARD_TOKENS = {
     accent: 'text-blue-200',
     sub: 'text-blue-300/75',
   },
-  memory_save: {
-    title: { en: 'Saved to memory', es: 'Guardado en memoria' },
-    icon: 'fa-brain',
-    ring: 'ring-violet-400/40',
-    bg: 'bg-gradient-to-br from-violet-900/40 to-violet-950/30 border-violet-500/25',
-    accent: 'text-violet-200',
-    sub: 'text-violet-300/75',
-  },
-  memory_forget: {
-    title: { en: 'Forgotten', es: 'Olvidado' },
-    icon: 'fa-eraser',
-    ring: 'ring-slate-400/40',
-    bg: 'bg-gradient-to-br from-slate-800/50 to-slate-900/40 border-slate-500/25',
-    accent: 'text-slate-200',
-    sub: 'text-slate-400/75',
-  },
-  memory_list: {
-    title: { en: "What I remember", es: 'Lo que recuerdo' },
-    icon: 'fa-list-check',
-    ring: 'ring-indigo-400/40',
-    bg: 'bg-gradient-to-br from-indigo-900/40 to-indigo-950/30 border-indigo-500/25',
-    accent: 'text-indigo-200',
-    sub: 'text-indigo-300/75',
-  },
-  donor_message: {
-    title: { en: 'Message sent', es: 'Mensaje enviado' },
-    icon: 'fa-paper-plane',
-    ring: 'ring-teal-400/40',
-    bg: 'bg-gradient-to-br from-teal-900/40 to-teal-950/30 border-teal-500/25',
-    accent: 'text-teal-200',
-    sub: 'text-teal-300/75',
-  },
-  listing_extended: {
-    title: { en: 'Deadline extended', es: 'Plazo extendido' },
-    icon: 'fa-clock-rotate-left',
-    ring: 'ring-orange-400/40',
-    bg: 'bg-gradient-to-br from-orange-900/40 to-orange-950/30 border-orange-500/25',
-    accent: 'text-orange-200',
-    sub: 'text-orange-400/75',
-  },
 }
 
 function ToolCardShell({ kind, language = 'en', titleOverride, children }) {
@@ -648,106 +608,6 @@ function ToolResultCard({ toolResult, language = 'en' }) {
           </div>
         )}
         {result.summary && <div className="text-sky-300/75 mt-1">{result.summary}</div>}
-      </ToolCardShell>
-    )
-  }
-
-  if (tool === 'remember_user_fact' && ok) {
-    const prettyKey = (result.key || '').replace(/_/g, ' ')
-    return (
-      <ToolCardShell kind="memory_save" language={language}>
-        <div className="text-violet-100">
-          <span className="opacity-75">{language === 'es' ? 'Recordaré: ' : "I'll remember: "}</span>
-          <span className="font-medium capitalize">{prettyKey}</span>
-          {result.value && <span className="text-violet-200"> · {result.value}</span>}
-        </div>
-        <div className="text-violet-300/75 mt-1 text-[11px]">
-          {language === 'es'
-            ? 'Puedes ver o borrar esto en Ajustes → Memoria.'
-            : 'You can view or remove this in Settings → AI Memory.'}
-        </div>
-      </ToolCardShell>
-    )
-  }
-
-  if (tool === 'forget_user_fact' && ok) {
-    const prettyKey = (result.key || '').replace(/_/g, ' ')
-    return (
-      <ToolCardShell kind="memory_forget" language={language}>
-        <span className="text-slate-100">
-          {result.removed > 0
-            ? (language === 'es' ? 'Olvidé: ' : 'Forgot: ')
-            : (language === 'es' ? 'No tenía guardado: ' : 'Nothing saved for: ')}
-          <span className="font-medium capitalize">{prettyKey}</span>
-        </span>
-      </ToolCardShell>
-    )
-  }
-
-  if (tool === 'list_user_facts' && ok) {
-    const facts = Array.isArray(result.facts) ? result.facts : []
-    return (
-      <ToolCardShell kind="memory_list" language={language}>
-        {facts.length === 0 ? (
-          <span className="text-indigo-200/80">
-            {language === 'es'
-              ? 'Aún no tengo nada guardado sobre ti.'
-              : "I don't have anything saved about you yet."}
-          </span>
-        ) : (
-          <ul className="space-y-0.5">
-            {facts.slice(0, 6).map((f) => (
-              <li key={f.key} className="text-indigo-100">
-                <span className="capitalize opacity-75">{(f.key || '').replace(/_/g, ' ')}: </span>
-                <span>{f.value}</span>
-              </li>
-            ))}
-            {facts.length > 6 && (
-              <li className="text-indigo-300/75 mt-1 text-[11px]">
-                {language === 'es' ? `+${facts.length - 6} más` : `+${facts.length - 6} more`}
-              </li>
-            )}
-          </ul>
-        )}
-      </ToolCardShell>
-    )
-  }
-
-  if (tool === 'message_donor' && ok) {
-    return (
-      <ToolCardShell kind="donor_message" language={language}>
-        <span className="text-teal-100">
-          {result.summary || (language === 'es' ? 'Mensaje entregado al donante.' : 'Message delivered to the donor.')}
-        </span>
-      </ToolCardShell>
-    )
-  }
-
-  if (tool === 'extend_listing_deadline' && ok) {
-    let when = ''
-    if (result.new_pickup_by) {
-      try {
-        const dt = new Date(result.new_pickup_by)
-        if (!Number.isNaN(dt.getTime())) {
-          when = dt.toLocaleString(language === 'es' ? 'es' : undefined, {
-            month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-          })
-        }
-      } catch { /* keep blank */ }
-    }
-    return (
-      <ToolCardShell kind="listing_extended" language={language}>
-        {result.title && (
-          <div className="text-orange-100">
-            <span className="font-semibold">{result.title}</span>
-          </div>
-        )}
-        {when && (
-          <div className="text-orange-300/80 mt-1">
-            {language === 'es' ? 'Nuevo plazo: ' : 'New deadline: '}
-            <span className="text-orange-100">{when}</span>
-          </div>
-        )}
       </ToolCardShell>
     )
   }
@@ -1379,11 +1239,6 @@ function AIChatPanel() {
             : `Claim confirmed! You reserved ${t}. Check Receipts & Activity.`,
           { autoClose: 6000, position: 'top-center' }
         )
-        try {
-          window.dispatchEvent(new CustomEvent('dogoods:listings-changed', {
-            detail: { reason: 'claim', listingId: result?.listing_id || tr.listing_id }
-          }))
-        } catch (_) {}
       }
       if (tr.tool === 'cancel_claim' && ok) {
         lastToastedClaimRef.current = key
@@ -1391,20 +1246,6 @@ function AIChatPanel() {
           language === 'es' ? 'Reclamo cancelado.' : 'Claim released — item returned to inventory.',
           { autoClose: 4000, position: 'top-center' }
         )
-        try {
-          window.dispatchEvent(new CustomEvent('dogoods:listings-changed', {
-            detail: { reason: 'cancel' }
-          }))
-        } catch (_) {}
-      }
-      if ((tr.tool === 'create_food_listing' || tr.tool === 'post_food_listing'
-           || tr.tool === 'bulk_post_food_listings') && ok) {
-        lastToastedClaimRef.current = key
-        try {
-          window.dispatchEvent(new CustomEvent('dogoods:listings-changed', {
-            detail: { reason: 'create', listingId: result?.listing_id }
-          }))
-        } catch (_) {}
       }
     }
   }, [messages, language])
@@ -1714,18 +1555,6 @@ function AIChatPanel() {
           ? `Detecté: **${draft.title}** (${draft.quantity} ${draft.unit}, ${draft.category}). Revisa el borrador abajo y confirma para publicar.`
           : `I detected: **${draft.title}** (${draft.quantity} ${draft.unit}, ${draft.category}). Review the draft below and confirm to publish.`,
       })
-
-      // Surface the uploaded photo URL to the model as hidden context so that if
-      // the donor proceeds through the conversational tool flow (instead of
-      // confirming the bulk preview), any create_food_listing / post_food_listing
-      // call will carry the real photo URL as image_url.
-      if (uploadedUrl) {
-        sendSilentMessage(
-          `[Photo uploaded] The donor just uploaded a photo of "${draft.title}". `
-          + `Use this exact URL as image_url whenever you call create_food_listing or `
-          + `post_food_listing for this item: ${uploadedUrl}`
-        )
-      }
     } catch (err) {
       if (sessionId !== uploadSessionRef.current) return
       const msg = err?.message || (language === 'es' ? 'Falló el análisis de la imagen.' : 'Vision request failed.')
@@ -1738,7 +1567,7 @@ function AIChatPanel() {
     } finally {
       if (sessionId === uploadSessionRef.current) setUploadBusy(false)
     }
-  }, [appendLocalMessage, authUser?.id, language, sendSilentMessage])
+  }, [appendLocalMessage, authUser?.id, language])
 
   const handleCsvSelected = useCallback(async (e) => {
     const file = e.target.files?.[0]
@@ -1794,7 +1623,7 @@ function AIChatPanel() {
       if (authUser?.id) {
         setPendingUpload(prev => prev ? { ...prev, enriching: true } : prev)
         try {
-          const enrichment = await aiChatService.enrichListings(rows.slice(0, 100), {
+          const enrichment = await aiChatService.enrichListings(rowsWithImages.slice(0, 100), {
             userId: authUser.id,
             language,
           })
@@ -1890,6 +1719,9 @@ function AIChatPanel() {
       )
       setPendingUpload(null)
 
+      // Notify Find Food / map views to refresh immediately.
+      window.dispatchEvent(new CustomEvent('foodShared'))
+
       // Build a rich context prompt so Nouri responds naturally to what just happened.
       const isEs = language === 'es'
       const itemNames = pendingUpload.rows
@@ -1907,8 +1739,8 @@ function AIChatPanel() {
         ? (isEs ? 'foto' : 'photo upload')
         : (isEs ? 'importación CSV' : 'bulk CSV upload')
       const prompt = isEs
-        ? `[Acción completada] Acabo de publicar ${created} donación${created === 1 ? '' : 'es'} de comida mediante ${kindLabel}${failNote}. Artículos: ${itemNames}${moreItems}. Por favor responde en español, felicítame brevemente y ofrece 2-3 sugerencias de próximos pasos útiles (por ejemplo revisar mis publicaciones, compartir más, ver el impacto).`
-        : `[Action completed] I just published ${created} food listing${created === 1 ? '' : 's'} via ${kindLabel}${failNote}. Items: ${itemNames}${moreItems}. Please congratulate me briefly and suggest 2-3 helpful next steps (e.g. reviewing listings, sharing more, checking impact).`
+        ? `[Acción ya completada por el sistema] El sistema acaba de guardar ${created} publicación${created === 1 ? '' : 'es'} de comida en la base de datos mediante ${kindLabel}${failNote}. Artículos: ${itemNames}${moreItems}. NO llames a post_food_listing, create_food_listing, bulk_post_food_listings ni bulk_import_listings — la publicación YA está guardada y volver a llamar crearía duplicados. Solo responde en español, felicítame brevemente y ofrece 2-3 sugerencias de próximos pasos (revisar mis publicaciones, compartir más, ver el impacto).`
+        : `[Action already completed by the system] The system just saved ${created} food listing${created === 1 ? '' : 's'} to the database via ${kindLabel}${failNote}. Items: ${itemNames}${moreItems}. DO NOT call post_food_listing, create_food_listing, bulk_post_food_listings, or bulk_import_listings — the listing is ALREADY saved and calling again would create duplicates. Just reply with a brief congratulation and 2-3 helpful next-step suggestions (reviewing listings, sharing more, checking impact).`
       sendSilentMessage(prompt)
     } catch (err) {
       const msg = err?.message || (language === 'es' ? 'Falló la creación.' : 'Bulk create failed.')

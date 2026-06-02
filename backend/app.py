@@ -38,16 +38,14 @@ from backend.ai_engine import (
     _circuit,
     supabase_get,
     supabase_post,
+    fetch_donor_listing_defaults,
+    apply_donor_defaults_to_listing,
     SUPABASE_URL,
     SUPABASE_SERVICE_KEY,
     OPENAI_API_KEY,
     AIError,
     AIErrorCode,
     classify_exception,
-    get_user_memories,
-    upsert_user_memory,
-    delete_user_memory,
-    clear_user_memories,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -772,108 +770,6 @@ async def ai_feedback(body: AIFeedbackRequest, request: Request) -> dict:
         raise classify_exception(exc) from exc
 
 
-# ===================================================================
-#  AI LONG-TERM MEMORY  — durable per-user facts (ai_user_memory table)
-# ===================================================================
-
-class AIMemoryUpsertRequest(BaseModel):
-    user_id: str = Field(min_length=1, max_length=128)
-    key: str = Field(min_length=1, max_length=80)
-    value: str = Field(min_length=1, max_length=500)
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
-    source: str = Field(default="explicit")
-
-
-@app.get("/api/ai/memory/{user_id}")
-async def ai_memory_list(user_id: str, request: Request, limit: int = 50) -> dict:
-    """Return every memory the assistant has stored about a user."""
-    _enforce_rate_limit(request)
-    _validate_uuid(user_id)
-
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != user_id:
-        raise HTTPException(403, "Cannot access another user's memories")
-
-    try:
-        items = await get_user_memories(user_id, limit=limit)
-        return {
-            "user_id": user_id,
-            "count": len(items),
-            "memories": items,
-        }
-    except Exception as exc:
-        rid = _request_id(request)
-        logger.error("[%s] memory list failed: %s", rid, exc, exc_info=True)
-        raise classify_exception(exc) from exc
-
-
-@app.post("/api/ai/memory")
-async def ai_memory_upsert(body: AIMemoryUpsertRequest, request: Request) -> dict:
-    """Insert or overwrite a single memory. Used by the Settings UI for manual edits."""
-    _enforce_rate_limit(request)
-    _validate_uuid(body.user_id)
-
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != body.user_id:
-        raise HTTPException(403, "user_id does not match authenticated user")
-
-    try:
-        saved = await upsert_user_memory(
-            body.user_id,
-            body.key,
-            body.value,
-            confidence=body.confidence,
-            source=body.source if body.source in {"explicit", "extracted", "profile", "system"} else "explicit",
-        )
-        if not saved:
-            raise HTTPException(400, "Memory could not be saved (check key/value format)")
-        return {"success": True, "memory": saved}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        rid = _request_id(request)
-        logger.error("[%s] memory upsert failed: %s", rid, exc, exc_info=True)
-        raise classify_exception(exc) from exc
-
-
-@app.delete("/api/ai/memory/{user_id}/{key}")
-async def ai_memory_delete(user_id: str, key: str, request: Request) -> dict:
-    """Delete a single memory by key."""
-    _enforce_rate_limit(request)
-    _validate_uuid(user_id)
-
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != user_id:
-        raise HTTPException(403, "Cannot delete another user's memories")
-
-    try:
-        removed = await delete_user_memory(user_id, key)
-        return {"success": True, "removed": int(removed), "key": key}
-    except Exception as exc:
-        rid = _request_id(request)
-        logger.error("[%s] memory delete failed: %s", rid, exc, exc_info=True)
-        raise classify_exception(exc) from exc
-
-
-@app.delete("/api/ai/memory/{user_id}")
-async def ai_memory_clear(user_id: str, request: Request) -> dict:
-    """Delete every memory the assistant has stored about the user."""
-    _enforce_rate_limit(request)
-    _validate_uuid(user_id)
-
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != user_id:
-        raise HTTPException(403, "Cannot clear another user's memories")
-
-    try:
-        removed = await clear_user_memories(user_id)
-        return {"success": True, "removed": int(removed)}
-    except Exception as exc:
-        rid = _request_id(request)
-        logger.error("[%s] memory clear failed: %s", rid, exc, exc_info=True)
-        raise classify_exception(exc) from exc
-
-
 @app.post("/api/ai/voice", response_model=AIChatResponse)
 async def ai_voice(
     request: Request,
@@ -1153,8 +1049,8 @@ async def _gather_recipient_data(user_id: str) -> dict:
         "limit": "10",
     })
     nearby_listings = await supabase_get("food_listings", {
-        "status": "eq.approved",
-        "select": "id,title,category,quantity,unit,expiry_date,pickup_by,location,created_at",
+        "status": "in.(approved,active)",
+        "select": "id,title,category,quantity,unit,expiry_date,pickup_by,location,image_url,created_at",
         "order": "created_at.desc",
         "limit": "12",
     })
@@ -2750,7 +2646,11 @@ class BulkListingsRequest(BaseModel):
     listings: List[BulkListingItem] = Field(min_length=1, max_length=_MAX_BULK_LISTINGS)
 
 
-def _normalize_listing_row(item: BulkListingItem, user_id: str) -> dict:
+def _normalize_listing_row(
+    item: BulkListingItem,
+    user_id: str,
+    donor: dict | None = None,
+) -> dict:
     """Map a validated BulkListingItem into a Supabase food_listings row."""
     category = (item.category or "").strip().lower()
     if category not in _VALID_FOOD_CATEGORIES:
@@ -2762,7 +2662,9 @@ def _normalize_listing_row(item: BulkListingItem, user_id: str) -> dict:
         "unit": item.unit.strip()[:40],
         "category": category,
         "listing_type": "donation",
-        "status": "active",
+        # Match the manual Share Food flow after admin approval so recipients
+        # see AI photo listings in Find Food and dashboard insights.
+        "status": "approved",
     }
     if item.description:
         row["description"] = item.description.strip()[:2000]
@@ -2777,7 +2679,7 @@ def _normalize_listing_row(item: BulkListingItem, user_id: str) -> dict:
         row["allergens"] = [str(t).strip()[:40] for t in item.allergens if str(t).strip()][:20]
     if item.image_url:
         row["image_url"] = item.image_url.strip()[:2000]
-    return row
+    return apply_donor_defaults_to_listing(row, donor)
 
 
 # ---- AI gap-fill for parsed CSV / vision drafts ------------------------------
@@ -2968,11 +2870,12 @@ async def ai_bulk_listings(body: BulkListingsRequest, request: Request) -> dict:
     auth_uid = await _authenticate_request(request)
     if auth_uid and auth_uid != body.user_id:
         raise HTTPException(403, "user_id does not match authenticated user")
+    donor = await fetch_donor_listing_defaults(body.user_id)
     created_ids: List[str] = []
     errors: List[dict] = []
     for idx, item in enumerate(body.listings):
         try:
-            row = _normalize_listing_row(item, body.user_id)
+            row = _normalize_listing_row(item, body.user_id, donor=donor)
             result = await supabase_post("food_listings", row)
             if isinstance(result, list) and result:
                 rid = result[0].get("id")

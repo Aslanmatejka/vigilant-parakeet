@@ -142,16 +142,6 @@ export const useFoodListings = (filters = {}, limit = null) => {
     fetchListings()
   }, [fetchListings])
 
-  // Listen for AI-driven mutations (claim/create/cancel via the chat panel).
-  // The backend writes directly to Supabase, so the only way the UI hears
-  // about it is this custom event — realtime can be disabled or drop frames.
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    const onChanged = () => { fetchListings() }
-    window.addEventListener('dogoods:listings-changed', onChanged)
-    return () => window.removeEventListener('dogoods:listings-changed', onChanged)
-  }, [fetchListings])
-
   // Real-time subscription
   useEffect(() => {
     const allowedStatuses = filters.status
@@ -190,9 +180,6 @@ export const useFoodListings = (filters = {}, limit = null) => {
     try {
       setLoading(true)
       const result = await dataService.createFoodListing(listingData)
-      // Realtime can be disabled / drop events; always refetch so the UI
-      // reflects what's actually in the database.
-      await fetchListings()
       return result
     } catch (error) {
       setError(error.message)
@@ -200,13 +187,12 @@ export const useFoodListings = (filters = {}, limit = null) => {
     } finally {
       setLoading(false)
     }
-  }, [fetchListings])
+  }, [])
 
   const updateListing = useCallback(async (id, updates) => {
     try {
       setLoading(true)
       const result = await dataService.updateFoodListing(id, updates)
-      await fetchListings()
       return result
     } catch (error) {
       setError(error.message)
@@ -214,13 +200,12 @@ export const useFoodListings = (filters = {}, limit = null) => {
     } finally {
       setLoading(false)
     }
-  }, [fetchListings])
+  }, [])
 
   const deleteListing = useCallback(async (id) => {
     try {
       setLoading(true)
       const result = await dataService.deleteFoodListing(id)
-      await fetchListings()
       return result
     } catch (error) {
       setError(error.message)
@@ -228,7 +213,7 @@ export const useFoodListings = (filters = {}, limit = null) => {
     } finally {
       setLoading(false)
     }
-  }, [fetchListings])
+  }, [])
 
   return {
     listings,

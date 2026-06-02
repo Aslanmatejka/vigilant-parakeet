@@ -268,6 +268,7 @@ export function visionDraftToRow(draft) {
     description: draft.description ? String(draft.description).slice(0, 2000) : undefined,
     dietary_tags: Array.isArray(draft.dietary_tags) ? draft.dietary_tags : undefined,
     allergens: Array.isArray(draft.allergens) ? draft.allergens : undefined,
+    image_url: draft.image_url ? String(draft.image_url).slice(0, 2000) : undefined,
   }
 }
 

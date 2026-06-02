@@ -11,7 +11,6 @@ import json
 import logging
 import math
 import os
-import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -21,49 +20,6 @@ logger = logging.getLogger("ai_tools")
 
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN") or os.getenv("VITE_MAPBOX_TOKEN", "")
 MAPBOX_DIRECTIONS_URL = "https://api.mapbox.com/directions/v5/mapbox"
-MAPBOX_GEOCODE_URL = "https://api.mapbox.com/geocoding/v5/mapbox.places"
-
-
-async def _geocode_address(address: str) -> Optional[dict]:
-    """Forward-geocode a free-text address via Mapbox.
-
-    Returns {"latitude", "longitude", "full_address"} on success, or None
-    on any failure (missing token, no result, network error). Callers should
-    treat None as "keep going without coords" — do not raise.
-    """
-    if not MAPBOX_TOKEN or not isinstance(address, str):
-        return None
-    query = address.strip()
-    if len(query) < 3:
-        return None
-    import urllib.parse
-    url = f"{MAPBOX_GEOCODE_URL}/{urllib.parse.quote(query, safe='')}.json"
-    params = {"access_token": MAPBOX_TOKEN, "limit": "1", "types": "address,place,postcode,locality,neighborhood"}
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as exc:
-        logger.warning("geocode failed for %r: %s", query[:80], exc)
-        return None
-    features = data.get("features") if isinstance(data, dict) else None
-    if not features:
-        return None
-    f = features[0]
-    center = f.get("center") or []
-    if not isinstance(center, list) or len(center) < 2:
-        return None
-    try:
-        lng = float(center[0])
-        lat = float(center[1])
-    except (TypeError, ValueError):
-        return None
-    return {
-        "latitude": lat,
-        "longitude": lng,
-        "full_address": f.get("place_name") or query,
-    }
 
 _PERISHABLE_CATEGORY_MAX_AGE_HOURS = {
     "prepared": 24,
@@ -825,26 +781,8 @@ TOOL_DEFINITIONS = [
                         "items": {"type": "string"},
                         "description": "Optional allergens present (e.g. 'nuts','dairy','gluten').",
                     },
-                    "community_id": {
-                        "type": "integer",
-                        "description": (
-                            "REQUIRED. Integer id of the community this listing is being shared with. "
-                            "BEFORE calling this tool you MUST ask the donor which community to share with \u2014 "
-                            "call get_active_communities first, present the numbered list, and wait for "
-                            "the donor to pick one. Never guess."
-                        ),
-                    },
-                    "image_url": {
-                        "type": "string",
-                        "description": (
-                            "Public http(s) URL of a photo the donor uploaded for this listing. "
-                            "If the donor uploaded a food photo in this conversation, you MUST "
-                            "pass that exact URL here verbatim \u2014 do not omit it, do not replace "
-                            "it with a stock URL. Leave empty only when no photo was uploaded."
-                        ),
-                    },
                 },
-                "required": ["user_id", "title", "quantity", "unit", "category", "community_id"],
+                "required": ["user_id", "title", "quantity", "unit", "category"],
             },
         },
     },
@@ -952,20 +890,9 @@ TOOL_DEFINITIONS = [
                     },
                     "description": {"type": "string"},
                     "expiry_date": {"type": "string", "description": "ISO date YYYY-MM-DD."},
-                    "location": {"type": "string", "description": "Pickup address (free-text). Will be geocoded automatically."},
-                    "address": {"type": "string", "description": "Alias for location — pickup street address."},
-                    "latitude": {"type": "number", "description": "Optional pre-known latitude. Skips geocoding if both lat+lng provided."},
-                    "longitude": {"type": "number", "description": "Optional pre-known longitude."},
+                    "location": {"type": "string"},
                     "dietary_tags": {"type": "array", "items": {"type": "string"}},
                     "allergens": {"type": "array", "items": {"type": "string"}},
-                    "image_url": {
-                        "type": "string",
-                        "description": (
-                            "Public http(s) URL of a photo the donor uploaded for this listing. "
-                            "If the donor uploaded a food photo in this conversation, pass that "
-                            "exact URL here verbatim. Leave empty only when no photo was uploaded."
-                        ),
-                    },
                 },
                 "required": ["user_id", "title", "quantity", "unit", "category"],
             },
@@ -1145,136 +1072,6 @@ TOOL_DEFINITIONS = [
             },
         },
     },
-    # ---------- AGENTIC EXPANSIONS — memory + donor-messaging ----------
-    {
-        "type": "function",
-        "function": {
-            "name": "remember_user_fact",
-            "description": (
-                "Save a durable fact about the user so it persists across "
-                "future conversations. Use whenever the user says 'remember "
-                "that I…', 'from now on…', 'I always…', or shares a stable "
-                "preference / situation (household size, dietary restrictions, "
-                "allergies, work schedule, transport, chronic constraints). "
-                "Do NOT use for ephemeral things (today's mood, current "
-                "craving). The user can view/delete saved memories in Settings."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "user_id": {"type": "string", "description": "The user this memory belongs to."},
-                    "key": {
-                        "type": "string",
-                        "description": (
-                            "Short snake_case identifier — overwrites any prior fact "
-                            "with the same key. Examples: household_size, "
-                            "dietary_restriction, allergy, transport, work_schedule, "
-                            "preferred_pickup_time, no_oven, has_wheelchair."
-                        ),
-                    },
-                    "value": {
-                        "type": "string",
-                        "description": "Human-readable fact (<200 chars). E.g. '4 people incl. 2 kids', 'vegan', 'no oven'.",
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "description": "0.0-1.0 — how certain you are the fact is durable. Use 1.0 when the user stated it explicitly.",
-                        "default": 1.0,
-                    },
-                },
-                "required": ["user_id", "key", "value"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "forget_user_fact",
-            "description": (
-                "Delete a previously-remembered fact. Use when the user says "
-                "'forget that', 'I no longer…', 'we moved', or otherwise "
-                "invalidates a stored memory."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "user_id": {"type": "string"},
-                    "key": {"type": "string", "description": "The snake_case key of the memory to remove."},
-                },
-                "required": ["user_id", "key"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_user_facts",
-            "description": (
-                "Return everything the assistant currently remembers about "
-                "the user. Use when the user asks 'what do you remember "
-                "about me?' or wants to audit their saved facts."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "user_id": {"type": "string"},
-                },
-                "required": ["user_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "message_donor",
-            "description": (
-                "Send a notification (in-app + optional SMS) to the donor of "
-                "a specific food listing on behalf of the current user. Use "
-                "when a recipient wants to ask the donor a question, "
-                "coordinate a pickup time, or thank them. Includes the "
-                "recipient's name so the donor knows who's reaching out. "
-                "Returns success + the notification id."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "from_user_id": {"type": "string", "description": "The user_id of the recipient sending the message (must match the authenticated user)."},
-                    "listing_id": {"type": "string", "description": "The food listing whose donor is being contacted."},
-                    "message": {"type": "string", "description": "The message body. Keep under 600 characters."},
-                    "topic": {
-                        "type": "string",
-                        "description": "Optional one-line subject (e.g. 'Question about pickup time', 'Running 10 minutes late').",
-                    },
-                },
-                "required": ["from_user_id", "listing_id", "message"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "extend_listing_deadline",
-            "description": (
-                "Push out the pickup_by deadline of a food listing the user "
-                "owns. Use when a donor wants to give recipients more time "
-                "(e.g. 'extend the bread by 4 hours', 'keep my listing open "
-                "until tomorrow noon'). Only the listing owner may extend; "
-                "the new deadline must be in the future."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "user_id": {"type": "string", "description": "Owner of the listing (must match the authenticated user)."},
-                    "listing_id": {"type": "string", "description": "The listing to extend."},
-                    "new_pickup_by": {
-                        "type": "string",
-                        "description": "New deadline as ISO timestamp (YYYY-MM-DDTHH:MM:SSZ) OR a relative spec like '+4h', '+1d', 'tomorrow 18:00'.",
-                    },
-                },
-                "required": ["user_id", "listing_id", "new_pickup_by"],
-            },
-        },
-    },
 ]
 
 
@@ -1314,12 +1111,6 @@ async def execute_tool(name: str, arguments: dict) -> dict:
         "meal_suggestions": _get_recipes,
         "post_food_request": _post_food_request,
         "bulk_post_food_listings": _bulk_import_listings,
-        # Agentic expansion — memory + donor messaging + listing controls
-        "remember_user_fact": _remember_user_fact,
-        "forget_user_fact": _forget_user_fact,
-        "list_user_facts": _list_user_facts,
-        "message_donor": _message_donor,
-        "extend_listing_deadline": _extend_listing_deadline,
     }
 
     handler = handlers.get(name)
@@ -2903,84 +2694,6 @@ async def _mark_notifications_read(
 _LISTING_CATEGORIES = {"produce", "bakery", "dairy", "pantry", "meat", "prepared", "other"}
 
 
-# Mirror of utils/foodImages.js so AI-created listings get a sensible photo
-# even when the donor doesn't upload one. Keeps recipient-side UX consistent.
-_UNSPLASH_BASE = "https://images.unsplash.com/photo-"
-_UNSPLASH_PARAMS = "?w=400&q=80&auto=format&fit=crop"
-
-
-def _u(photo_id: str) -> str:
-    return f"{_UNSPLASH_BASE}{photo_id}{_UNSPLASH_PARAMS}"
-
-
-_KEYWORD_IMAGES: list[tuple[tuple[str, ...], str]] = [
-    (("apple",), _u("1619566636858-adf3ef46400b")),
-    (("banana",), _u("1571771894821-ce9b6c11b08e")),
-    (("orange", "citrus", "lemon", "lime", "grapefruit"), _u("1547514701-42782101795e")),
-    (("strawberr", "berr", "blueberr", "raspberr"), _u("1464965911861-746a04b4bca6")),
-    (("grape",), _u("1537640538966-79f369143f8f")),
-    (("peach", "plum", "apricot", "nectarine"), _u("1528825871115-3581a5387919")),
-    (("mango", "pineapple", "papaya"), _u("1550258987-190a2d41a8ba")),
-    (("watermelon", "melon", "cantaloupe"), _u("1563114773-84221bd62daa")),
-    (("avocado",), _u("1523049673857-eb18f1ddf950")),
-    (("tomato",), _u("1546470427-e26264be0b0d")),
-    (("carrot",), _u("1598170845058-32b9d6a5da37")),
-    (("broccoli",), _u("1459411621453-7b03977f4bfc")),
-    (("lettuce", "salad", "greens", "spinach", "kale"), _u("1540420773420-3366772f4999")),
-    (("potato", "yam"), _u("1518977676693-5ba7e0c27fb4")),
-    (("onion", "garlic"), _u("1518977676693-5ba7e0c27fb4")),
-    (("pepper",), _u("1525609004556-c46c7d6cf023")),
-    (("corn", "zucchini", "squash", "cucumber"), _u("1542838132-92c53300491e")),
-    (("vegetable", "veggie", "produce"), _u("1542838132-92c53300491e")),
-    (("bread", "loaf", "sourdough", "baguette"), _u("1608198093002-ad4e005484ec")),
-    (("muffin", "cupcake", "cake", "pastry", "croissant", "danish"), _u("1551024601-bec78aea704b")),
-    (("cookie", "brownie", "donut"), _u("1499636136210-6f4ee915583a")),
-    (("bagel", "roll", "bun"), _u("1509440159596-0249088772ff")),
-    (("tortilla", "wrap", "pita"), _u("1621996659397-5b5e3f4e7d34")),
-    (("egg",), _u("1582722872445-44dc5f7e3c8f")),
-    (("milk", "dairy", "yogurt", "yoghurt", "cream", "butter"), _u("1563636619-e9143da7973b")),
-    (("cheese",), _u("1486297678162-eb2a19b0a32d")),
-    (("chicken", "poultry", "turkey"), _u("1604908176997-125f25cc6f3d")),
-    (("beef", "steak", "burger", "hamburger"), _u("1558030006-da6fa8fb6f27")),
-    (("pork", "bacon", "sausage", "ham"), _u("1529042410759-befb1204b468")),
-    (("fish", "salmon", "tuna", "seafood", "shrimp"), _u("1580476262798-bddd9f4b7369")),
-    (("rice",), _u("1586201375761-83865001e31c")),
-    (("pasta", "spaghetti", "noodle"), _u("1551462147-37885acc36f1")),
-    (("bean", "lentil", "chickpea"), _u("1515543904431-90b4b23dc9bd")),
-    (("soup", "broth", "stew", "canned"), _u("1593759608892-b0033064e78c")),
-    (("oat", "cereal", "granola"), _u("1606312619070-d48b4c652a52")),
-    (("formula",), _u("1606312619070-d48b4c652a52")),
-    (("coffee", "tea", "juice", "beverage", "drink"), _u("1461023058943-362d6d1c2d0d")),
-    (("snack", "chip", "cracker"), _u("1606312619070-d48b4c652a52")),
-    (("meal", "cooked", "prepared", "leftover", "dinner", "lunch", "breakfast"), _u("1504674900247-0877df9cc836")),
-    (("sandwich",), _u("1528735602780-2552fd46c7f1")),
-]
-
-_CATEGORY_POOLS: dict[str, list[str]] = {
-    "produce": [_u("1542838132-92c53300491e"), _u("1619566636858-adf3ef46400b"), _u("1571771894821-ce9b6c11b08e"), _u("1547514701-42782101795e")],
-    "bakery":  [_u("1608198093002-ad4e005484ec"), _u("1551024601-bec78aea704b"), _u("1499636136210-6f4ee915583a"), _u("1509440159596-0249088772ff")],
-    "dairy":   [_u("1628088062854-d1870b4553da"), _u("1582722872445-44dc5f7e3c8f"), _u("1563636619-e9143da7973b"), _u("1486297678162-eb2a19b0a32d")],
-    "pantry":  [_u("1586201375761-83865001e31c"), _u("1593759608892-b0033064e78c"), _u("1551462147-37885acc36f1"), _u("1606312619070-d48b4c652a52")],
-    "meat":    [_u("1604908176997-125f25cc6f3d"), _u("1558030006-da6fa8fb6f27"), _u("1580476262798-bddd9f4b7369")],
-    "prepared":[_u("1504674900247-0877df9cc836"), _u("1476718406336-4b0cf2c7f74e"), _u("1540420773420-3366772f4999")],
-    "other":   [_u("1512621776951-a57141f2eefd"), _u("1610832958506-aa56368176cf"), _u("1498557850523-fd3d118b962e")],
-}
-
-
-def _assign_food_image(title: str, category: str) -> str:
-    """Return a stable, category-appropriate stock photo URL for a listing."""
-    lower = (title or "").lower()
-    for keywords, url in _KEYWORD_IMAGES:
-        if any(kw in lower for kw in keywords):
-            return url
-    pool = _CATEGORY_POOLS.get(str(category or "other").lower(), _CATEGORY_POOLS["other"])
-    # Stable hash → consistent image per title.
-    h = 0
-    for ch in lower:
-        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
-    return pool[h % len(pool)]
-
-
 async def _create_food_listing(
     user_id: str,
     title: str,
@@ -2990,18 +2703,16 @@ async def _create_food_listing(
     description: Optional[str] = None,
     expiry_date: Optional[str] = None,
     location: Optional[str] = None,
-    address: Optional[str] = None,
-    full_address: Optional[str] = None,
-    latitude: Optional[float] = None,
-    longitude: Optional[float] = None,
     dietary_tags: Optional[list] = None,
     allergens: Optional[list] = None,
-    community_id: Optional[int] = None,
-    image_url: Optional[str] = None,
     **_ignored,
 ) -> dict:
     """Insert a single food donation listing for the authenticated user."""
-    from backend.ai_engine import supabase_post, supabase_get
+    from backend.ai_engine import (
+        supabase_post,
+        fetch_donor_listing_defaults,
+        apply_donor_defaults_to_listing,
+    )
 
     logger.info("create_food_listing: user=%s title=%s qty=%s", user_id, title, quantity)
     if not user_id:
@@ -3023,61 +2734,6 @@ async def _create_food_listing(
     if cat not in _LISTING_CATEGORIES:
         cat = "other"
 
-    # --- Community selection: REQUIRED so listings show up in the right feed.
-    # The AI is instructed to call get_active_communities and ask the donor to
-    # pick one before calling this tool. If it didn't, return a structured error
-    # so the AI can recover by asking the question on the next turn.
-    community_id_int: Optional[int] = None
-    if community_id is not None and community_id != "":
-        try:
-            community_id_int = int(community_id)
-        except (TypeError, ValueError):
-            return {
-                "success": False,
-                "error": "community_id must be an integer matching an entry from get_active_communities",
-                "needs": "community_id",
-            }
-    if community_id_int is None:
-        try:
-            from backend.ai_engine import supabase_get as _sg
-            comms = await _sg("communities", {
-                "select": "id,name",
-                "order": "name.asc",
-                "limit": "50",
-            })
-        except Exception:
-            comms = []
-        return {
-            "success": False,
-            "needs": "community_id",
-            "error": (
-                "Before I can post this, you need to tell me which community to share it with. "
-                "Ask the donor to pick one from the list and call me again with community_id set."
-            ),
-            "communities": [
-                {"id": c.get("id"), "name": c.get("name")}
-                for c in (comms or []) if c.get("id") is not None
-            ],
-        }
-
-    # --- Address normalization: accept several aliases the model might use ---
-    addr_text = (
-        (full_address or "").strip()
-        or (address or "").strip()
-        or (location or "").strip()
-    )
-
-    # Respect a caller-supplied image_url (e.g. a photo the donor just
-    # uploaded). Only fall back to a stock photo when none was provided or
-    # the value is not a usable http(s) URL.
-    chosen_image: Optional[str] = None
-    if isinstance(image_url, str):
-        candidate = image_url.strip()
-        if candidate.startswith("http://") or candidate.startswith("https://"):
-            chosen_image = candidate[:2000]
-    if not chosen_image:
-        chosen_image = _assign_food_image(title_s, cat)
-
     row: dict = {
         "user_id": str(user_id),
         "title": title_s[:200],
@@ -3085,75 +2741,21 @@ async def _create_food_listing(
         "unit": unit_s,
         "category": cat,
         "listing_type": "donation",
-        "status": "active",
-        "community_id": community_id_int,
-        "image_url": chosen_image,
+        "status": "approved",
     }
     if description:
         row["description"] = str(description).strip()[:2000]
     if expiry_date:
-        # food_listings.expiry_date is DATE \u2014 only YYYY-MM-DD will insert.
-        # Drop anything else silently so the whole insert doesn't 400.
-        import re as _re_exp
-        import datetime as _dt_exp
-        m = _re_exp.match(r"^(\d{4}-\d{2}-\d{2})", str(expiry_date).strip())
-        if m:
-            try:
-                _dt_exp.date.fromisoformat(m.group(1))
-                row["expiry_date"] = m.group(1)
-            except ValueError:
-                pass
+        row["expiry_date"] = str(expiry_date).strip()[:40]
+    if location:
+        row["location"] = str(location).strip()[:200]
     if isinstance(dietary_tags, list):
         row["dietary_tags"] = [str(t).strip()[:40] for t in dietary_tags if str(t).strip()][:20]
     if isinstance(allergens, list):
         row["allergens"] = [str(t).strip()[:40] for t in allergens if str(t).strip()][:20]
 
-    if addr_text:
-        row["location"] = addr_text[:200]
-        row["full_address"] = addr_text[:400]
-
-    # --- Resolve coordinates so the listing shows up on the map ---
-    lat_val: Optional[float] = None
-    lng_val: Optional[float] = None
-    try:
-        if latitude is not None and longitude is not None:
-            lat_val = float(latitude)
-            lng_val = float(longitude)
-    except (TypeError, ValueError):
-        lat_val = lng_val = None
-
-    if (lat_val is None or lng_val is None) and addr_text:
-        geo = await _geocode_address(addr_text)
-        if geo:
-            lat_val = geo["latitude"]
-            lng_val = geo["longitude"]
-            row["full_address"] = geo["full_address"][:400]
-
-    if lat_val is None or lng_val is None:
-        # Fall back to the donor's saved profile coordinates so the pin still
-        # lands somewhere reasonable instead of being absent from the map.
-        try:
-            users = await supabase_get("users", {
-                "id": f"eq.{user_id}",
-                "select": "latitude,longitude,address",
-                "limit": "1",
-            })
-            if users:
-                u = users[0]
-                u_lat = u.get("latitude")
-                u_lng = u.get("longitude")
-                if u_lat is not None and u_lng is not None:
-                    lat_val = float(u_lat)
-                    lng_val = float(u_lng)
-                    if not row.get("full_address") and u.get("address"):
-                        row["full_address"] = str(u["address"])[:400]
-                        row.setdefault("location", str(u["address"])[:200])
-        except Exception as exc:
-            logger.warning("create_food_listing: profile coord fallback failed: %s", exc)
-
-    if lat_val is not None and lng_val is not None:
-        row["latitude"] = lat_val
-        row["longitude"] = lng_val
+    donor = await fetch_donor_listing_defaults(str(user_id))
+    row = apply_donor_defaults_to_listing(row, donor)
 
     try:
         result = await supabase_post("food_listings", row)
@@ -3167,7 +2769,6 @@ async def _create_food_listing(
     if not listing_id:
         return {"success": False, "error": "No row returned from database"}
 
-    mapped = lat_val is not None and lng_val is not None
     return {
         "success": True,
         "listing_id": str(listing_id),
@@ -3175,14 +2776,7 @@ async def _create_food_listing(
         "quantity": row["quantity"],
         "unit": row["unit"],
         "category": row["category"],
-        "address": row.get("full_address") or row.get("location"),
-        "latitude": lat_val,
-        "longitude": lng_val,
-        "mapped": mapped,
-        "summary": (
-            f"Posted '{row['title']}' ({row['quantity']} {row['unit']}, {row['category']})."
-            + ("" if mapped else " Warning: no coordinates resolved — it will not appear on the map until an address is added.")
-        ),
+        "summary": f"Posted '{row['title']}' ({row['quantity']} {row['unit']}, {row['category']}).",
     }
 
 
@@ -3283,11 +2877,8 @@ async def _claim_food_listing(
         or "Anonymous"
     )[:200]
 
-    # --- 3b. Compute pickup-by deadline. Prefer the listing's own pickup_by
-    # or expiry_date so receipts reflect the actual donor commitment; only
-    # fall back to the next-Friday default when neither is set. ---
+    # --- 3b. Calculate the next-Friday pickup deadline (UTC) for the receipt ---
     import datetime as _dt
-    import re as _re
 
     def _next_friday_5pm_utc() -> str:
         now_utc = _dt.datetime.utcnow()
@@ -3302,57 +2893,35 @@ async def _claim_food_listing(
         friday_utc = friday_pac + _dt.timedelta(hours=8)
         return friday_utc.strftime('%Y-%m-%dT%H:%M:%S+00:00')
 
-    def _normalize_deadline(val) -> Optional[str]:
-        if not val:
-            return None
-        s = str(val).strip()
-        if not s:
-            return None
-        # Plain date \u2192 use end-of-day UTC so the receipt isn't expired the
-        # moment it's created. Timestamps pass through unchanged.
-        if "T" not in s and " " not in s and len(s) == 10:
-            return f"{s}T23:59:59+00:00"
-        return s
+    pickup_deadline_utc = _next_friday_5pm_utc()
 
-    pickup_deadline_utc = (
-        _normalize_deadline(listing.get("pickup_by"))
-        or _normalize_deadline(listing.get("expiry_date"))
-        or _next_friday_5pm_utc()
-    )
-
-    # --- 3c. Always create a fresh receipt for this claim. Reusing the most
-    # recent pending receipt was bundling unrelated pickups together (wrong
-    # pickup_location, stale pickup_by) — one claim per receipt is cleaner. ---
+    # --- 3c. Find or create a receipt for this user (so the claim appears in Receipts & Activity) ---
     receipt_id = None
     pickup_loc = listing.get("full_address") or listing.get("location") or None
     try:
-        receipt_row: dict = {
-            "user_id": str(user_id),
-            "status": "pending",
-            "pickup_by": pickup_deadline_utc,
-        }
-        if pickup_loc:
-            receipt_row["pickup_location"] = str(pickup_loc)[:255]
-            receipt_row["pickup_address"] = str(pickup_loc)[:500]
-        receipt_result = await supabase_post("receipts", receipt_row)
-        if isinstance(receipt_result, list) and receipt_result:
-            receipt_id = receipt_result[0].get("id")
+        existing_receipts = await supabase_get("receipts", {
+            "user_id": f"eq.{user_id}",
+            "status": "eq.pending",
+            "select": "id",
+            "order": "created_at.desc",
+            "limit": "1",
+        })
+        if existing_receipts:
+            receipt_id = existing_receipts[0].get("id")
+        else:
+            receipt_row: dict = {
+                "user_id": str(user_id),
+                "status": "pending",
+                "pickup_by": pickup_deadline_utc,
+            }
+            if pickup_loc:
+                receipt_row["pickup_location"] = str(pickup_loc)[:255]
+                receipt_row["pickup_address"] = str(pickup_loc)[:500]
+            receipt_result = await supabase_post("receipts", receipt_row)
+            if isinstance(receipt_result, list) and receipt_result:
+                receipt_id = receipt_result[0].get("id")
     except Exception as exc:
-        logger.warning("claim_food_listing: receipt create failed (non-fatal): %s", exc)
-
-    # --- 3d. Validate pickup_date — food_claims.pickup_date is type DATE so
-    # only YYYY-MM-DD will insert. Anything else (datetime, "tomorrow", etc.)
-    # would 400 the entire claim, so drop invalid values silently. ---
-    pickup_date_clean = None
-    if pickup_date:
-        pd_raw = str(pickup_date).strip()[:40]
-        m = _re.match(r"^(\d{4}-\d{2}-\d{2})", pd_raw)
-        if m:
-            try:
-                _dt.date.fromisoformat(m.group(1))
-                pickup_date_clean = m.group(1)
-            except ValueError:
-                pickup_date_clean = None
+        logger.warning("claim_food_listing: receipt create/lookup failed (non-fatal): %s", exc)
 
     claim_row: dict = {
         "food_id": listing_id,
@@ -3360,15 +2929,16 @@ async def _claim_food_listing(
         "requester_name": requester_name,
         "status": "approved",
         "quantity": requested_qty,
+        "pickup_date": str(pickup_date).strip()[:40] if pickup_date else None,
     }
-    if pickup_date_clean:
-        claim_row["pickup_date"] = pickup_date_clean
     if receipt_id:
         claim_row["receipt_id"] = str(receipt_id)
     if user_row.get("email"):
         claim_row["requester_email"] = str(user_row["email"])[:200]
     if user_row.get("phone"):
         claim_row["requester_phone"] = str(user_row["phone"])[:40]
+    if not pickup_date:
+        claim_row.pop("pickup_date", None)
     # `people` is an optional impact-tracking column that may not exist on all
     # Supabase deployments. Skip it to avoid 400 errors on the insert.
     # (The AI response text already conveys how many people will be fed.)
@@ -3698,49 +3268,11 @@ async def _bulk_import_listings(
 
     created_ids: list[str] = []
     errors: list[dict] = []
-    # Fetch donor's profile coords once so rows without their own address
-    # still get a pin.
-    donor_lat: Optional[float] = None
-    donor_lng: Optional[float] = None
-    donor_addr: Optional[str] = None
-    try:
-        from backend.ai_engine import supabase_get
-        users = await supabase_get("users", {
-            "id": f"eq.{user_id}",
-            "select": "latitude,longitude,address",
-            "limit": "1",
-        })
-        if users:
-            u = users[0]
-            if u.get("latitude") is not None and u.get("longitude") is not None:
-                try:
-                    donor_lat = float(u["latitude"])
-                    donor_lng = float(u["longitude"])
-                except (TypeError, ValueError):
-                    pass
-            donor_addr = (u.get("address") or None)
-    except Exception as exc:
-        logger.warning("bulk_import_listings: profile fetch failed: %s", exc)
-
     for idx, raw in enumerate(rows_in):
         norm = _normalize_bulk_row(raw, user_id)
         if not norm:
             errors.append({"index": idx, "error": "Missing title or quantity"})
             continue
-        addr_text = norm.get("location") or donor_addr
-        if addr_text:
-            norm.setdefault("full_address", str(addr_text)[:400])
-            geo = await _geocode_address(str(addr_text))
-            if geo:
-                norm["latitude"] = geo["latitude"]
-                norm["longitude"] = geo["longitude"]
-                norm["full_address"] = geo["full_address"][:400]
-        if "latitude" not in norm and donor_lat is not None and donor_lng is not None:
-            norm["latitude"] = donor_lat
-            norm["longitude"] = donor_lng
-            if donor_addr and not norm.get("full_address"):
-                norm["full_address"] = str(donor_addr)[:400]
-                norm.setdefault("location", str(donor_addr)[:200])
         try:
             result = await supabase_post("food_listings", norm)
             if isinstance(result, list) and result:
@@ -4034,328 +3566,6 @@ async def _post_food_request(
         "unit": row["unit"],
         "category": cat,
         "summary": f"Request posted: {qty} {row['unit']} of '{title}'. It's live for nearby donors.",
-    }
-
-
-# ---------------------------------------------------------------------------
-# Long-term memory tools — remember_user_fact / forget_user_fact / list_user_facts
-# ---------------------------------------------------------------------------
-
-async def _remember_user_fact(
-    user_id: str,
-    key: str,
-    value: str,
-    confidence: float = 1.0,
-    **_ignored,
-) -> dict:
-    """Persist a durable fact about the user (explicit save)."""
-    from backend.ai_engine import upsert_user_memory, _normalize_memory_key
-
-    if not user_id:
-        return {"success": False, "error": "user_id is required"}
-
-    norm_key = _normalize_memory_key(key)
-    if not norm_key:
-        return {
-            "success": False,
-            "error": "Memory key must be a short snake_case identifier (a-z, 0-9, _).",
-        }
-    if not value or not str(value).strip():
-        return {"success": False, "error": "Memory value cannot be empty."}
-
-    saved = await upsert_user_memory(
-        user_id, norm_key, value, confidence=float(confidence or 1.0), source="explicit",
-    )
-    if not saved:
-        return {
-            "success": False,
-            "error": "Memory could not be saved (table missing or DB unreachable).",
-        }
-    return {
-        "success": True,
-        "key": norm_key,
-        "value": saved.get("value", value),
-        "summary": f"Saved: {norm_key.replace('_', ' ')} = {saved.get('value', value)}",
-    }
-
-
-async def _forget_user_fact(user_id: str, key: str, **_ignored) -> dict:
-    """Delete a previously-saved memory."""
-    from backend.ai_engine import delete_user_memory, _normalize_memory_key
-
-    if not user_id:
-        return {"success": False, "error": "user_id is required"}
-    norm_key = _normalize_memory_key(key)
-    if not norm_key:
-        return {"success": False, "error": "Invalid memory key."}
-
-    removed = await delete_user_memory(user_id, norm_key)
-    if removed <= 0:
-        return {
-            "success": True,
-            "removed": 0,
-            "key": norm_key,
-            "summary": f"No memory called '{norm_key.replace('_', ' ')}' was saved — nothing to forget.",
-        }
-    return {
-        "success": True,
-        "removed": int(removed),
-        "key": norm_key,
-        "summary": f"Forgotten: {norm_key.replace('_', ' ')}.",
-    }
-
-
-async def _list_user_facts(user_id: str, **_ignored) -> dict:
-    """Return everything currently remembered about the user."""
-    from backend.ai_engine import get_user_memories
-
-    if not user_id:
-        return {"success": False, "error": "user_id is required"}
-    rows = await get_user_memories(user_id, limit=50)
-    facts = [
-        {
-            "key": r.get("key"),
-            "value": r.get("value"),
-            "confidence": r.get("confidence"),
-            "source": r.get("source"),
-            "last_seen": r.get("last_seen"),
-        }
-        for r in rows
-        if isinstance(r, dict) and r.get("key") and r.get("value")
-    ]
-    if not facts:
-        return {
-            "success": True,
-            "facts": [],
-            "summary": "I don't have any saved facts about you yet. Tell me something like 'remember that I'm vegan' and I'll keep it in mind for next time.",
-        }
-    bullets = "\n".join(f"- {f['key'].replace('_', ' ')}: {f['value']}" for f in facts[:15])
-    summary = (
-        f"Here's what I currently remember about you ({len(facts)} item"
-        f"{'s' if len(facts) != 1 else ''}):\n{bullets}"
-    )
-    return {"success": True, "facts": facts, "summary": summary}
-
-
-# ---------------------------------------------------------------------------
-# message_donor — recipient → donor messaging (in-app notification)
-# ---------------------------------------------------------------------------
-
-async def _message_donor(
-    from_user_id: str,
-    listing_id: str,
-    message: str,
-    topic: Optional[str] = None,
-    **_ignored,
-) -> dict:
-    """Send an in-app notification (and SMS if the donor has opted in) on
-    behalf of the recipient to the donor of a specific food listing.
-    """
-    from backend.ai_engine import supabase_get
-
-    if not from_user_id or not listing_id or not message:
-        return {"success": False, "error": "from_user_id, listing_id and message are required"}
-
-    msg_clean = str(message).strip()
-    if not msg_clean:
-        return {"success": False, "error": "Message cannot be empty"}
-    if len(msg_clean) > 600:
-        msg_clean = msg_clean[:597] + "..."
-
-    # 1. Resolve listing → donor user_id
-    try:
-        listings = await supabase_get("food_listings", {
-            "id": f"eq.{listing_id}",
-            "select": "id,title,user_id",
-            "limit": "1",
-        })
-    except Exception as exc:  # noqa: BLE001
-        logger.error("message_donor listing lookup failed: %s", exc)
-        return {"success": False, "error": f"Could not look up listing: {exc}"}
-    if not listings:
-        return {"success": False, "error": "Listing not found or no longer available."}
-    listing = listings[0]
-    donor_id = listing.get("user_id")
-    if not donor_id:
-        return {"success": False, "error": "Listing has no donor on record."}
-    if str(donor_id) == str(from_user_id):
-        return {
-            "success": False,
-            "error": "You can't message yourself about your own listing.",
-        }
-
-    # 2. Resolve sender → display name for the donor's notification
-    sender_name = "A community member"
-    try:
-        senders = await supabase_get("users", {
-            "id": f"eq.{from_user_id}",
-            "select": "name,full_name",
-            "limit": "1",
-        })
-        if senders:
-            row = senders[0]
-            sender_name = row.get("name") or row.get("full_name") or sender_name
-    except Exception:  # noqa: BLE001
-        pass  # name lookup is best-effort
-
-    listing_title = listing.get("title") or "your listing"
-    topic_clean = (topic or "").strip()
-    title = (topic_clean or f"Message from {sender_name} about {listing_title}")[:120]
-    body = f"{sender_name} (about \"{listing_title}\"): {msg_clean}"
-
-    # 3. Deliver via the existing notification handler so SMS + realtime + RLS
-    #    all behave consistently.
-    notif_result = await _send_notification(
-        user_id=str(donor_id),
-        title=title,
-        message=body[:600],
-        notification_type="system",
-        data={
-            "kind": "donor_message",
-            "from_user_id": str(from_user_id),
-            "from_name": sender_name,
-            "listing_id": str(listing.get("id")),
-            "listing_title": listing_title,
-            "topic": topic_clean or None,
-            "message": msg_clean,
-        },
-    )
-
-    if isinstance(notif_result, dict) and notif_result.get("error"):
-        return {
-            "success": False,
-            "error": notif_result["error"],
-            "listing_id": str(listing.get("id")),
-        }
-    return {
-        "success": True,
-        "listing_id": str(listing.get("id")),
-        "donor_id": str(donor_id),
-        "notification_id": (notif_result or {}).get("notification_id"),
-        "summary": (
-            f"Message delivered to the donor of '{listing_title}'. "
-            "They'll get a notification (and an SMS if they have texts on)."
-        ),
-    }
-
-
-# ---------------------------------------------------------------------------
-# extend_listing_deadline — donor pushes the pickup_by window further
-# ---------------------------------------------------------------------------
-
-_RELATIVE_DELTA_RE = re.compile(r"^\+\s*(\d+)\s*([hd])$", re.IGNORECASE)
-
-
-def _resolve_new_pickup_by(spec: str) -> Optional[datetime]:
-    """Convert a relative or ISO-ish string into a UTC datetime in the future."""
-    if not spec:
-        return None
-    s = str(spec).strip()
-
-    # Relative form: '+4h', '+1d', '+ 12 h'
-    m = _RELATIVE_DELTA_RE.match(s)
-    if m:
-        n = int(m.group(1))
-        unit = m.group(2).lower()
-        delta = timedelta(hours=n) if unit == "h" else timedelta(days=n)
-        return datetime.now(timezone.utc) + delta
-
-    # ISO timestamp (with or without Z)
-    parsed = _parse_dt(s)
-    if parsed:
-        return parsed
-
-    # Loose "tomorrow HH:MM" / "tomorrow"
-    low = s.lower()
-    if low.startswith("tomorrow"):
-        base = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
-            hour=18, minute=0, second=0, microsecond=0,
-        )
-        time_match = re.search(r"(\d{1,2})(?::(\d{2}))?", low)
-        if time_match:
-            hh = max(0, min(23, int(time_match.group(1))))
-            mm = max(0, min(59, int(time_match.group(2) or 0)))
-            base = base.replace(hour=hh, minute=mm)
-        return base
-    if low == "tonight":
-        return datetime.now(timezone.utc).replace(
-            hour=22, minute=0, second=0, microsecond=0,
-        )
-
-    return None
-
-
-async def _extend_listing_deadline(
-    user_id: str,
-    listing_id: str,
-    new_pickup_by: str,
-    **_ignored,
-) -> dict:
-    """Push out (or set) the pickup_by deadline of a listing the user owns."""
-    from backend.ai_engine import supabase_get, supabase_patch
-
-    if not user_id or not listing_id:
-        return {"success": False, "error": "user_id and listing_id are required"}
-
-    # 1. Verify ownership
-    try:
-        listings = await supabase_get("food_listings", {
-            "id": f"eq.{listing_id}",
-            "select": "id,title,user_id,pickup_by,status",
-            "limit": "1",
-        })
-    except Exception as exc:  # noqa: BLE001
-        logger.error("extend_listing_deadline lookup failed: %s", exc)
-        return {"success": False, "error": f"Could not look up listing: {exc}"}
-    if not listings:
-        return {"success": False, "error": "Listing not found."}
-    listing = listings[0]
-    if str(listing.get("user_id")) != str(user_id):
-        return {
-            "success": False,
-            "error": "Only the listing owner can extend its deadline.",
-        }
-
-    # 2. Resolve the new deadline
-    new_dt = _resolve_new_pickup_by(new_pickup_by)
-    if not new_dt:
-        return {
-            "success": False,
-            "error": (
-                "Couldn't parse the new pickup deadline. Use an ISO timestamp "
-                "(e.g. 2026-05-31T18:00:00Z) or a relative spec like '+4h' or '+1d'."
-            ),
-        }
-    now = datetime.now(timezone.utc)
-    if new_dt <= now:
-        return {"success": False, "error": "New deadline must be in the future."}
-
-    # 3. Patch the row
-    iso_value = new_dt.astimezone(timezone.utc).isoformat()
-    try:
-        await supabase_patch(
-            "food_listings",
-            params={
-                "id": f"eq.{listing_id}",
-                "user_id": f"eq.{user_id}",
-            },
-            body={"pickup_by": iso_value},
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.error("extend_listing_deadline update failed: %s", exc)
-        return {"success": False, "error": f"Could not extend listing: {exc}"}
-
-    prev = listing.get("pickup_by")
-    return {
-        "success": True,
-        "listing_id": str(listing.get("id")),
-        "title": listing.get("title"),
-        "previous_pickup_by": prev,
-        "new_pickup_by": iso_value,
-        "summary": (
-            f"Extended '{listing.get('title') or 'your listing'}' — "
-            f"new pickup deadline is {iso_value}."
-        ),
     }
 
 

@@ -1,7 +1,6 @@
 import React from 'react';
 import PropTypes from 'prop-types';
 import { formatDate, getExpirationStatus, reportError } from "../../utils/helpers";
-import { assignFoodImage } from "../../utils/foodImages.js";
 import Card from "../common/Card";
 import Avatar from "../common/Avatar";
 import Button from "../common/Button";
@@ -99,7 +98,7 @@ function FoodCard({
     return (
         <Card
             className={`food-card ${className}`}
-            image={image_url || assignFoodImage(food)}
+            image={image_url}
             title={title}
             subtitle={
                 <div className="space-y-2.5 text-sm">

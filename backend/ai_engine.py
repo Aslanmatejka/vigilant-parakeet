@@ -113,8 +113,8 @@ async def close_http_client() -> None:
 # Supabase REST helpers (used by ai_engine, app.py, and tools.py)
 # ---------------------------------------------------------------------------
 
-def _supabase_headers(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
-    headers: dict[str, str] = {
+def _supabase_headers(extra: Optional[dict] = None) -> dict:
+    headers = {
         "apikey": SUPABASE_SERVICE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
         "Accept": "application/json",
@@ -124,7 +124,7 @@ def _supabase_headers(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
     return headers
 
 
-async def supabase_get(table: str, params: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+async def supabase_get(table: str, params: Optional[dict] = None) -> list[dict]:
     """GET rows from a Supabase table via PostgREST.
 
     Returns the parsed JSON array. Returns [] (instead of raising) when
@@ -158,9 +158,7 @@ async def supabase_get(table: str, params: Optional[dict[str, Any]] = None) -> l
         data = resp.json()
     except Exception:  # noqa: BLE001
         return []
-    if isinstance(data, list):
-        return [row for row in data if isinstance(row, dict)]
-    return []
+    return data if isinstance(data, list) else []
 
 
 async def supabase_post(table: str, body: Any) -> Any:
@@ -184,7 +182,7 @@ async def supabase_post(table: str, body: Any) -> Any:
         return {}
 
 
-async def supabase_patch(table: str, params: dict[str, Any], body: dict[str, Any]) -> Any:
+async def supabase_patch(table: str, params: dict, body: dict) -> Any:
     """Update rows matching the given PostgREST filter params."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return {}
@@ -206,7 +204,7 @@ async def supabase_patch(table: str, params: dict[str, Any], body: dict[str, Any
         return {}
 
 
-async def supabase_delete(table: str, params: dict[str, Any]) -> int:
+async def supabase_delete(table: str, params: dict) -> int:
     """Delete rows matching the given PostgREST params. Returns row count."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return 0
@@ -225,307 +223,62 @@ async def supabase_delete(table: str, params: dict[str, Any]) -> int:
         return 0
 
 
-# ---------------------------------------------------------------------------
-# Persistent long-term memory (ai_user_memory)
-# ---------------------------------------------------------------------------
-#
-# Durable per-user facts the assistant remembers across sessions. Memories
-# are written either explicitly (the user says "remember that I'm vegan")
-# or implicitly (a background extractor scans each chat turn for new stable
-# facts). They are injected into the chat system prompt every turn so the
-# assistant doesn't re-ask the user the same questions.
-#
-# All operations degrade gracefully — if the ai_user_memory table doesn't
-# exist (older deployment without the migration) every helper returns an
-# empty / no-op result instead of raising.
-
-_MEMORY_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,79}$")
-
-
-def _normalize_memory_key(key: Any) -> Optional[str]:
-    """Return a canonical snake_case memory key or None if invalid."""
-    if not isinstance(key, str):
-        return None
-    cleaned = re.sub(r"[^a-z0-9_]+", "_", key.strip().lower())
-    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
-    if not cleaned or len(cleaned) > 80:
-        return None
-    return cleaned if _MEMORY_KEY_RE.match(cleaned) else None
-
-
-def _normalize_memory_value(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if len(text) > 500:
-        text = text[:497] + "..."
-    return text
-
-
-async def get_user_memories(
-    user_id: str,
-    min_confidence: float = 0.0,
-    limit: int = 50,
-) -> list[dict[str, Any]]:
-    """Return the user's stored memories, newest-first.
-
-    Returns [] if Supabase isn't configured or the table doesn't exist
-    (so deployments without the migration still work).
-    """
+async def fetch_donor_listing_defaults(user_id: str) -> dict:
+    """Load donor profile fields to stamp onto new food_listings rows."""
     if not user_id:
-        return []
-    try:
-        rows = await supabase_get("ai_user_memory", {
-            "user_id": f"eq.{user_id}",
-            "select": "id,key,value,confidence,source,last_seen,created_at",
-            "order": "last_seen.desc",
-            "limit": str(max(1, min(limit, 200))),
-        })
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("get_user_memories failed (table may be missing): %s", exc)
-        return []
-    if not isinstance(rows, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        if float(r.get("confidence", 0) or 0) >= min_confidence:
-            out.append(r)
-    return out
+        return {}
+    rows = await supabase_get("users", {
+        "id": f"eq.{user_id}",
+        "select": (
+            "id,name,email,phone,city,state,zip,address,organization,"
+            "community_id,latitude,longitude"
+        ),
+        "limit": "1",
+    })
+    return rows[0] if rows else {}
 
 
-async def upsert_user_memory(
-    user_id: str,
-    key: str,
-    value: str,
-    confidence: float = 0.8,
-    source: str = "extracted",
-) -> Optional[dict[str, Any]]:
-    """Insert or overwrite a single memory keyed by (user_id, key)."""
-    if not user_id:
-        return None
-    norm_key = _normalize_memory_key(key)
-    norm_value = _normalize_memory_value(value)
-    if not norm_key or not norm_value:
-        return None
+def apply_donor_defaults_to_listing(row: dict, donor: dict | None) -> dict:
+    """Copy donor profile + coordinates onto a listing row when missing."""
+    if not donor:
+        return row
+
+    if donor.get("community_id") and not row.get("community_id"):
+        row["community_id"] = donor["community_id"]
+
+    for src, dest in (
+        ("name", "donor_name"),
+        ("email", "donor_email"),
+        ("phone", "donor_phone"),
+        ("city", "donor_city"),
+        ("state", "donor_state"),
+        ("zip", "donor_zip"),
+        ("organization", "donor_type"),
+    ):
+        if donor.get(src) and not row.get(dest):
+            row[dest] = donor[src]
+
+    lat = donor.get("latitude")
+    lng = donor.get("longitude")
     try:
-        conf = float(confidence)
+        if lat is not None and lng is not None and row.get("latitude") is None:
+            row["latitude"] = float(lat)
+            row["longitude"] = float(lng)
     except (TypeError, ValueError):
-        conf = 0.8
-    conf = max(0.0, min(1.0, conf))
-    if source not in {"extracted", "explicit", "profile", "system"}:
-        source = "extracted"
+        pass
 
-    body = {
-        "user_id": user_id,
-        "key": norm_key,
-        "value": norm_value,
-        "confidence": conf,
-        "source": source,
-        "last_seen": datetime.now(timezone.utc).isoformat(),
-    }
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        return body
+    if not row.get("location") and not row.get("full_address"):
+        addr_parts = [
+            donor.get("address"),
+            donor.get("city"),
+            donor.get("state"),
+            donor.get("zip"),
+        ]
+        addr = ", ".join(str(p).strip() for p in addr_parts if p and str(p).strip())
+        if addr:
+            row["location"] = addr[:200]
 
-    client = _get_http_client(SUPABASE_TIMEOUT)
-    try:
-        resp = await client.post(
-            f"{SUPABASE_URL}/rest/v1/ai_user_memory",
-            json=body,
-            headers=_supabase_headers({
-                "Content-Type": "application/json",
-                # Upsert on the (user_id, key) unique constraint so a
-                # second explicit "remember that..." overwrites the first.
-                "Prefer": "return=representation,resolution=merge-duplicates",
-            }),
-            params={"on_conflict": "user_id,key"},
-            timeout=SUPABASE_TIMEOUT,
-        )
-        resp.raise_for_status()
-        rows = resp.json()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("upsert_user_memory failed for user=%s key=%s: %s", user_id, norm_key, exc)
-        return None
-    if isinstance(rows, list) and rows:
-        return rows[0]
-    if isinstance(rows, dict):
-        return rows
-    return body
-
-
-async def delete_user_memory(user_id: str, key: str) -> int:
-    """Delete a single memory by key. Returns rows deleted (0 or 1)."""
-    if not user_id:
-        return 0
-    norm_key = _normalize_memory_key(key)
-    if not norm_key:
-        return 0
-    try:
-        return await supabase_delete("ai_user_memory", {
-            "user_id": f"eq.{user_id}",
-            "key": f"eq.{norm_key}",
-        })
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("delete_user_memory failed for user=%s key=%s: %s", user_id, norm_key, exc)
-        return 0
-
-
-async def clear_user_memories(user_id: str) -> int:
-    """Delete every memory for a user. Returns rows deleted."""
-    if not user_id:
-        return 0
-    try:
-        return await supabase_delete("ai_user_memory", {
-            "user_id": f"eq.{user_id}",
-        })
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("clear_user_memories failed for user=%s: %s", user_id, exc)
-        return 0
-
-
-def format_memories_for_prompt(memories: list[dict], min_confidence: float = 0.5) -> str:
-    """Render memories as a compact system-prompt block, or '' if none usable."""
-    if not memories:
-        return ""
-    lines: list[str] = []
-    for m in memories:
-        try:
-            conf = float(m.get("confidence", 0) or 0)
-        except (TypeError, ValueError):
-            conf = 0
-        if conf < min_confidence:
-            continue
-        key = m.get("key")
-        value = m.get("value")
-        if not key or not value:
-            continue
-        # Render keys human-style: household_size → household size
-        pretty_key = key.replace("_", " ")
-        lines.append(f"- {pretty_key}: {value}")
-        if len(lines) >= 20:
-            break
-    if not lines:
-        return ""
-    return (
-        "## What I Remember About You\n"
-        "These are durable facts I've learned over time. Use them silently — "
-        "never ask the user to repeat them. If something here looks wrong, the "
-        "user can update or remove it in Settings → AI Memory.\n"
-        + "\n".join(lines)
-    )
-
-
-# ---------------------------------------------------------------------------
-# Background memory extraction
-# ---------------------------------------------------------------------------
-
-_MEMORY_EXTRACTOR_PROMPT = (
-    "You are a memory extractor for a food-sharing assistant. Given the user's "
-    "latest message (and the assistant's reply for context), extract any NEW, "
-    "DURABLE facts about the user that would be useful to remember for future "
-    "conversations.\n\n"
-    "KEEP (durable, stable preferences/situation):\n"
-    "  - household_size, dietary_restrictions, allergens, religious_diet\n"
-    "  - has_car / transportation_mode, work_schedule, preferred_pickup_time\n"
-    "  - language_preference, communication_style\n"
-    "  - chronic_constraints (no oven, mobility, limited fridge space)\n"
-    "  - long-term goals ('trying to reduce food waste', 'cooking for elderly parent')\n\n"
-    "SKIP (ephemeral, not durable):\n"
-    "  - today's mood, current location, what they're eating right now\n"
-    "  - one-off questions, momentary curiosity, weather, jokes\n"
-    "  - facts the assistant said about ITSELF — only extract about the USER\n\n"
-    "Return ONLY a JSON object: {\"memories\": [{\"key\": \"snake_case\", "
-    "\"value\": \"concise fact (<200 chars)\", \"confidence\": 0.0-1.0}]}.\n"
-    "Empty list is fine. Be conservative — when in doubt, do not extract."
-)
-
-
-async def extract_and_save_memories(
-    user_id: str,
-    user_message: str,
-    assistant_reply: str,
-    existing_keys: Optional[set[str]] = None,
-) -> list[dict[str, Any]]:
-    """Extract durable facts from a chat turn and persist them.
-
-    Fire-and-forget safe: never raises, logs warnings on failure. Returns the
-    list of memories that were saved (or attempted-and-saved) so callers can
-    surface them in the UI ("✓ I'll remember: vegan").
-    """
-    if not user_id or user_id == "00000000-0000-0000-0000-000000000000":
-        return []
-    if not OPENAI_API_KEY or not user_message:
-        return []
-
-    payload = (
-        f"USER MESSAGE:\n{(user_message or '').strip()[:1200]}\n\n"
-        f"ASSISTANT REPLY (context only):\n{(assistant_reply or '').strip()[:1200]}\n\n"
-        f"Already-known keys (do not re-extract identical facts): "
-        f"{sorted(existing_keys or [])}\n"
-        f"Return JSON now."
-    )
-
-    client = _get_http_client(20)
-    body = {
-        "model": FOLLOWUP_MODEL,
-        "messages": [
-            {"role": "system", "content": _MEMORY_EXTRACTOR_PROMPT},
-            {"role": "user", "content": payload},
-        ],
-        "temperature": 0.1,
-        "max_tokens": 350,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    try:
-        resp = await client.post(
-            f"{OPENAI_BASE_URL}/chat/completions",
-            headers=headers,
-            json=body,
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content) if content else {}
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Memory extraction failed: %s", exc)
-        return []
-
-    candidates = parsed.get("memories") if isinstance(parsed, dict) else None
-    if not isinstance(candidates, list):
-        return []
-
-    saved: list[dict] = []
-    for item in candidates[:8]:  # hard cap per turn
-        if not isinstance(item, dict):
-            continue
-        key = _normalize_memory_key(item.get("key"))
-        value = _normalize_memory_value(item.get("value"))
-        if not key or not value:
-            continue
-        try:
-            confidence = float(item.get("confidence", 0.7))
-        except (TypeError, ValueError):
-            confidence = 0.7
-        if confidence < 0.5:
-            continue  # too uncertain to keep
-        row = await upsert_user_memory(
-            user_id, key, value, confidence=confidence, source="extracted"
-        )
-        if row:
-            saved.append({
-                "key": key, "value": value, "confidence": confidence,
-            })
-    if saved:
-        logger.info("Saved %d memory item(s) for user %s", len(saved), user_id)
-    return saved
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -723,8 +476,8 @@ class AIError(Exception):
         self.http_status = http_status
         self.cause = cause
 
-    def to_dict(self) -> dict[str, Any]:
-        body: dict[str, Any] = {
+    def to_dict(self) -> dict:
+        body = {
             "error_code": self.code.value,
             "message": self.message,
             "retryable": self.retryable,
@@ -880,10 +633,10 @@ async def _openai_with_retry(
     method: str,
     url: str,
     *,
-    headers: dict[str, str],
-    json_payload: dict[str, Any] | None = None,
-    files: dict[str, Any] | None = None,
-    data: dict[str, Any] | None = None,
+    headers: dict,
+    json_payload: dict | None = None,
+    files: dict | None = None,
+    data: dict | None = None,
     timeout: float = TIMEOUT_SECONDS,
     retries: int = MAX_RETRIES,
     label: str = "openai",
@@ -894,7 +647,7 @@ async def _openai_with_retry(
     for attempt in range(retries):
         try:
             client = _get_http_client(timeout)
-            kwargs: dict[str, Any] = {"headers": headers, "timeout": timeout}
+            kwargs: dict = {"headers": headers, "timeout": timeout}
             if json_payload is not None:
                 kwargs["json"] = json_payload
             if files is not None:
@@ -944,14 +697,14 @@ async def _openai_with_retry(
     raise RuntimeError(f"OpenAI request failed after {retries} attempts: {last_exc}")
 
 
-def _extract_content(response: dict[str, Any]) -> str:
+def _extract_content(response: dict) -> str:
     try:
         return response["choices"][0]["message"]["content"]
     except (KeyError, IndexError) as exc:
         raise RuntimeError("Unexpected AI response format") from exc
 
 
-async def legacy_ai_request(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+async def legacy_ai_request(endpoint: str, payload: dict) -> dict:
     """Fire a simple OpenAI chat/completions call (used by recipes, storage tips)."""
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not configured")
@@ -972,7 +725,7 @@ async def legacy_ai_request(endpoint: str, payload: dict[str, Any]) -> dict[str,
 # Training data + system prompt builder
 # ---------------------------------------------------------------------------
 
-def _load_training_data() -> dict[str, Any]:
+def _load_training_data() -> dict:
     try:
         with open(TRAINING_DATA_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -981,7 +734,7 @@ def _load_training_data() -> dict[str, Any]:
         return {}
 
 
-def _build_system_prompt(training_data: dict[str, Any]) -> str:
+def _build_system_prompt(training_data: dict) -> str:
     sections: list[str] = []
 
     if "platform_overview" in training_data:
@@ -1227,23 +980,6 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "    request is satisfied (e.g. 'That's everything I found nearby.', "
         "    'That covers your saved items.'). Don't leave the turn open-"
         "    ended without acknowledging the work is done.\n"
-        "\n"
-        "### FORMATTING FOOD-SEARCH RESULTS (CRITICAL)\n"
-        "When you present results from search_food_near_user, "
-        "get_recent_listings, or any tool that returns a list of food "
-        "items, EVERY item MUST include the pickup address. Use the "
-        "`address` field from the tool result verbatim (it already "
-        "resolves `full_address` → `location` → donor profile). If the "
-        "address is missing/empty for a row, render it as 'address on "
-        "request' — never silently omit the line. Required per-item "
-        "shape (one item per line, numbered):\n"
-        "  '<n>. **<title>** — <qty> <unit>, <distance_km> km away. "
-        "Pickup: <address>. Best by <expiry_date or pickup_by>.'\n"
-        "Drop fields that are null (e.g. omit 'Best by' if neither date "
-        "is set) but NEVER drop the address. Users repeatedly ask 'where "
-        "is it?' when the address is missing — preempt that by always "
-        "showing it.\n"
-
         "Failure mode to avoid: replying with only follow-up questions, only "
         "next-step instructions, or only the data — leaving the user unsure "
         "whether the action actually went through. Lead with the completion "
@@ -1387,17 +1123,7 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "  2. QTY + UNIT — how much (e.g. '3 loaves', '2 trays', "
         "'5 lbs', '1 box'). If the donor says just '3', ask 'three "
         "what?'.\n"
-        "  3. COMMUNITY — which community to share with. ALWAYS ASK, "
-        "NEVER ASSUME. Call get_active_communities first to fetch the "
-        "live list, then present it as a short numbered menu (e.g. "
-        "'Which community should this go to?\\n  1. Do Good Warehouse\\n  "
-        "2. Ruby Bridges Elementary CC\\n  3. NEA/ACLC CC\\n…'). Accept "
-        "either the number or the name; match it back to the integer "
-        "`id` and pass that as `community_id` when you eventually call "
-        "post_food_listing. If the donor says 'everyone' / 'all' / "
-        "'public', default to the Do Good Warehouse community (the "
-        "shared distribution hub).\n"
-        "  4. HANDOFF METHOD — pickup vs drop-off (REQUIRED, ALWAYS "
+        "  3. HANDOFF METHOD — pickup vs drop-off (REQUIRED, ALWAYS "
         "ASK). Say something like 'Will the recipient pick this up "
         "from you, or are you willing to drop it off / deliver?'. "
         "Accept these answers:\n"
@@ -1433,11 +1159,7 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "empty list and move on.\n"
         "  8. PHOTO — 'Could you snap a quick photo? It really helps "
         "people decide.' Photos roughly double pickup rates. If the "
-        "donor declines, accept it and move on. If a [Photo uploaded] "
-        "system note appears in the conversation with a URL, you MUST "
-        "pass that exact URL as image_url when you call "
-        "post_food_listing / create_food_listing — do NOT drop it, do "
-        "NOT replace it with a stock URL.\n"
+        "donor declines, accept it and move on.\n"
         "Optional (only ask if it would actually matter):\n"
         "  9. DIETARY TAGS — vegetarian / vegan / halal / kosher, "
         "etc. Mention this only if relevant to the food.\n"
@@ -1474,19 +1196,6 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "post_food_listing until you see one. If the donor edits "
         "something in their reply ('yes but make it 4 loaves'), "
         "update and re-confirm in one turn.\n"
-        "\n"
-        "## NO PREMATURE CONGRATULATIONS (CRITICAL)\n"
-        "Once the donor confirms, your VERY NEXT action is the "
-        "post_food_listing tool call — nothing else. Do NOT emit any "
-        "user-facing text ahead of that tool call. In particular do "
-        "NOT say 'Posting now…', 'Great, posting it!', 'Awesome, "
-        "putting it up!', 'Thanks for sharing!', 'Posted!', 'Done!', "
-        "'All set!' or any congratulatory / completion phrasing until "
-        "AFTER the tool returns `success: true` with a numeric "
-        "listing_id. Words like 'Posted', 'live', 'up', 'done', 'all "
-        "set' are RESERVED for the post-success message. Saying them "
-        "before the tool returns success is treated as fabricating "
-        "success and breaks user trust.\n"
         "After post_food_listing returns success, say 'Posted! "
         "Listing #N is live at <address>' (read the address back from "
         "the tool result so the donor can verify the pin landed at the "
@@ -1590,16 +1299,6 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "answer, (b) the donor explicitly said 'just post it' / 'skip "
         "the rest', or (c) you've already asked twice and they didn't "
         "answer. Food safety + recipient safety depend on these.\n"
-        "  6a. PHOTO IS MANDATORY TO ASK. Before you call "
-        "post_food_listing, you MUST have asked for a photo at least "
-        "once in the current intake (unless an `image:` URL is already "
-        "in the conversation or carve-outs (b)/(c) above apply). If you "
-        "have title, qty, address, freshness, pickup window, and "
-        "allergens but no photo question yet, your next turn MUST be "
-        "'Want to snap a quick photo? It helps a lot — but I can post "
-        "without one if you'd rather.' Treat skipping this ask as a "
-        "policy violation. Photos roughly double pickup rates.\n"
-
         "  7. ACKNOWLEDGE warmly but BRIEFLY ('Got it.', 'Perfect.', "
         "'Noted.'). No long preambles, no listing-style summaries "
         "until the final confirm sentence.\n"
@@ -2002,7 +1701,7 @@ _SAFE_QUERY_USER_SCOPE = {
 }
 
 
-def _scope_safe_query(fn_args: dict[str, Any], auth_user_id: str) -> dict[str, Any]:
+def _scope_safe_query(fn_args: dict, auth_user_id: str) -> dict:
     """Ensure run_safe_query is always scoped to the authenticated user.
 
     If the caller (an LLM) does not already include a filter binding the
@@ -2027,7 +1726,7 @@ def _scope_safe_query(fn_args: dict[str, Any], auth_user_id: str) -> dict[str, A
 
     auth_str = str(auth_user_id)
 
-    def _binds_to_auth(f: dict[str, Any]) -> bool:
+    def _binds_to_auth(f: dict) -> bool:
         if not isinstance(f, dict):
             return False
         field = str(f.get("field", ""))
@@ -2214,8 +1913,8 @@ class ConversationEngine:
     def _detect_lang_sticky(
         self,
         message: str,
-        history: Optional[list[dict[str, Any]]] = None,
-        profile: Optional[dict[str, Any]] = None,
+        history: Optional[list] = None,
+        profile: Optional[dict] = None,
     ) -> str:
         """Sticky language detection.
 
@@ -2264,7 +1963,7 @@ class ConversationEngine:
 
     # ---- Profile lookup via Supabase --------------------------------------
 
-    async def get_user_profile(self, user_id: str) -> Optional[dict[str, Any]]:
+    async def get_user_profile(self, user_id: str) -> Optional[dict]:
         try:
             rows = await supabase_get("users", {
                 "id": f"eq.{user_id}",
@@ -2320,7 +2019,7 @@ class ConversationEngine:
 
     # ---- History via Supabase ---------------------------------------------
 
-    async def get_conversation_history(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    async def get_conversation_history(self, user_id: str, limit: int = 50) -> list[dict]:
         try:
             rows = await supabase_get("ai_conversations", {
                 "user_id": f"eq.{user_id}",
@@ -2349,7 +2048,7 @@ class ConversationEngine:
         user_id: str,
         role: str,
         message: str,
-        metadata: dict[str, Any] | None = None,
+        metadata: dict | None = None,
     ) -> Optional[str]:
         try:
             result = await supabase_post("ai_conversations", {
@@ -2384,20 +2083,14 @@ class ConversationEngine:
         message: str,
         include_audio: bool = False,
         silent: bool = False,
-    ) -> dict[str, Any]:
+    ) -> dict:
         profile_task = asyncio.create_task(self.get_user_profile(user_id))
         # Pull 30 messages (~15 turns) so multi-step flows — like "find food,
         # show me #3, what's the address, claim it" spread across breaks —
         # don't lose context. Each message is also kept much longer below
         # (4000 char cap instead of 800) so listing IDs / titles survive.
         history_task = asyncio.create_task(self.get_conversation_history(user_id, limit=30))
-        # Persistent long-term memory — durable facts the user has either
-        # explicitly asked us to remember or that the background extractor
-        # has captured over prior conversations.
-        memories_task = asyncio.create_task(get_user_memories(user_id))
-        profile, history, memories = await asyncio.gather(
-            profile_task, history_task, memories_task,
-        )
+        profile, history = await asyncio.gather(profile_task, history_task)
 
         # Sticky language: use the message, then profile preference, then
         # recent history. Prevents short replies like 'sí' / 'ok' from
@@ -2521,16 +2214,6 @@ class ConversationEngine:
                 f"When calling tools that require user_id, always use \"{user_id}\"."
             )
         messages.append({"role": "system", "content": context})
-
-        # Long-term memory injection — durable per-user facts learned over
-        # past conversations. Only memories with confidence >= 0.5 surface
-        # in the prompt; lower-confidence ones remain in storage so the
-        # user can still see + delete them but the model doesn't act on
-        # uncertain inferences.
-        if memories:
-            memory_block = format_memories_for_prompt(memories, min_confidence=0.5)
-            if memory_block:
-                messages.append({"role": "system", "content": memory_block})
 
         # Conversation-awareness reminder. Without this the model treats
         # every turn as fresh and re-asks for things the user already
@@ -2726,24 +2409,6 @@ class ConversationEngine:
             user_id, message, response_text, lang, actions=actions, silent=silent,
         )
 
-        # Fire-and-forget memory extraction. We don't await it so the user
-        # gets the reply immediately; the extractor runs in the background,
-        # quietly upserts any new durable facts, and they show up on the
-        # NEXT turn. Failure here must never block the chat response.
-        if not silent and user_id and user_id != "00000000-0000-0000-0000-000000000000":
-            try:
-                existing_keys = {m.get("key") for m in (memories or []) if isinstance(m, dict) and m.get("key")}
-                asyncio.create_task(
-                    extract_and_save_memories(
-                        user_id,
-                        message,
-                        response_text,
-                        existing_keys=existing_keys,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 — never fail the chat
-                logger.debug("Memory extraction scheduling failed: %s", exc)
-
         audio_b64 = None
         if include_audio:
             audio_b64 = await self._generate_audio_b64(response_text, lang=lang)
@@ -2788,7 +2453,7 @@ class ConversationEngine:
         if not user_id or user_id == "00000000-0000-0000-0000-000000000000":
             return None
         try:
-            assistant_metadata: dict[str, Any] = {"lang": lang}
+            assistant_metadata: dict = {"lang": lang}
             if silent:
                 assistant_metadata["silent_trigger"] = True
             # Strip large payloads but keep the lightweight facts the next
@@ -2819,7 +2484,7 @@ class ConversationEngine:
                             "address": item.get("full_address") or item.get("address"),
                             "donor_name": item.get("donor_name"),
                         })
-                    entry_compact: dict[str, Any] = {
+                    entry_compact: dict = {
                         "tool": a.get("tool"),
                         "ok": a.get("ok"),
                         "summary": (a.get("summary") or "")[:240],
@@ -2982,7 +2647,7 @@ class ConversationEngine:
         "create_reminder",
     }
 
-    async def _call_openai_chat(self, messages: list[dict[str, Any]], lang: str = "en", auth_user_id: Optional[str] = None, actions_out: Optional[list[dict[str, Any]]] = None) -> str:
+    async def _call_openai_chat(self, messages: list[dict], lang: str = "en", auth_user_id: Optional[str] = None, actions_out: Optional[list] = None) -> str:
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY not configured")
 
