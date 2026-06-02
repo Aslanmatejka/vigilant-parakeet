@@ -38,7 +38,16 @@ function NearMePage() {
         setLoading(true);
         try {
             // Fetch all approved and active listings
-            const allListings = await dataService.getFoodListings({ status: ['approved', 'active'] });
+            const rawListings = await dataService.getFoodListings({ status: ['approved', 'active'] });
+            // Defensive dedupe by id in case the query returns duplicates
+            // (e.g. via joins or realtime echo).
+            const seen = new Set();
+            const allListings = [];
+            for (const l of rawListings || []) {
+                if (!l?.id || seen.has(l.id)) continue;
+                seen.add(l.id);
+                allListings.push(l);
+            }
             
             // Filter by distance if location is available
             if (location && location.latitude && location.longitude) {
@@ -144,13 +153,10 @@ function NearMePage() {
                     </div>
 
                     {!location && !locationLoading && (
-                        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
-                            <h2 className="text-lg font-semibold mb-2">Step 1: Enable Location Services</h2>
-                            <p className="text-gray-600 mb-2">
-                                Allow DoGoods to access your location so we can rank listings by distance from you.
-                            </p>
-                            <p className="text-xs text-gray-500 mb-4">
-                                Your browser will ask for permission. Your coordinates stay on your device — we only use them to sort results.
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
+                            <p className="text-sm text-gray-700 flex-1">
+                                Ready to start? Share your location and we'll show food nearby.
+                                Your coordinates stay on your device.
                             </p>
                             <Button
                                 onClick={enableLocation}
