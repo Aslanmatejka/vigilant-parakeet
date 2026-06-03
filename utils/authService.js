@@ -115,10 +115,14 @@ class AuthService {
         if (result && result.__timeout) {
           timedOut = true
           console.warn('Profile fetch timed out; using auth-only data and retrying in background')
-          // Background retry — update state when it eventually resolves
+          // Background retry — update state when it eventually resolves.
+          // Guard against the user having signed out / switched accounts
+          // while this fetch was in flight; otherwise we'd overwrite the
+          // new user with the previous user's profile.
           profilePromise.then(({ data, error: bgError }) => {
             if (bgError) return
             if (!data) return
+            if (!this.currentUser || this.currentUser.id !== user.id) return
             this.currentUser = { ...user, ...data }
             this.isAdmin = this.currentUser.role === 'admin' || this.currentUser.is_admin === true
             localStorage.setItem('currentUser', JSON.stringify(this.currentUser))

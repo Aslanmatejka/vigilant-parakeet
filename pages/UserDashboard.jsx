@@ -54,8 +54,9 @@ function UserDashboard() {
             } catch (_) { /* keep cached value */ }
         })();
         const onRoleChanged = (e) => {
-            if (!e?.detail || e.detail.userId === authUser.id) {
-                setFreshRole(e.detail?.role ?? null);
+            // Only react when the event explicitly targets this user.
+            if (e?.detail && e.detail.userId === authUser.id) {
+                setFreshRole(e.detail.role ?? null);
             }
         };
         window.addEventListener('dogoods:community-role-changed', onRoleChanged);

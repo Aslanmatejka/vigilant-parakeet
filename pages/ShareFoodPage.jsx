@@ -62,7 +62,7 @@ function ShareFoodPageContent() {
                     .from('communities')
                     .select('id')
                     .eq('name', formData.school_district)
-                    .single();
+                    .maybeSingle();
                 if (community) {
                     communityId = community.id;
                 }
