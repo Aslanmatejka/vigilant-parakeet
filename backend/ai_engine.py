@@ -2947,7 +2947,18 @@ class ConversationEngine:
                 logger.error("Follow-up failed: %s", followup_exc)
                 return get_canned_response("tool_error", lang)
 
-        return msg.get("content") or ""
+        content = (msg.get("content") or "").strip()
+        if content:
+            return content
+        # We get here with empty content in two cases:
+        #   1. The model hit MAX_TOOL_ROUNDS with a pending tool_calls message
+        #      (no text yet), or
+        #   2. the model returned an empty assistant message.
+        # Either way, never hand the user a blank reply — fall back to a
+        # helpful canned line so the chat bubble always has content.
+        if msg.get("tool_calls"):
+            logger.warning("Tool loop exhausted (%s rounds) with no final text", round_idx)
+        return get_canned_response("tool_error", lang)
 
     # ---- Whisper + TTS ---------------------------------------------------
 

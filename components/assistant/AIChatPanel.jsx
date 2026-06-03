@@ -654,7 +654,10 @@ function ToolResultCard({ toolResult, language = 'en' }) {
   // we haven't designed a custom card for (e.g. update_user_profile,
   // attach_photos_to_listing, post_food_request, bulk_import_listings,
   // query_distribution_centers, get_user_dashboard, get_mapbox_route).
-  if (ok && (result?.summary || result?.message)) {
+  // Skip pure UI-control tools: their effect is the navigation itself, so a
+  // "Done" card would be redundant noise next to the assistant's reply.
+  const SILENT_UI_TOOLS = new Set(['ui_action', 'navigate_ui', 'mark_notifications_read'])
+  if (ok && !SILENT_UI_TOOLS.has(tool) && (result?.summary || result?.message)) {
     return (
       <ToolCardShell kind="generic" language={language} titleOverride={tool?.replace(/_/g, ' ') || (language === 'es' ? 'Acción' : 'Action')}>
         <div className="text-slate-200 text-[12px]">{result.summary || result.message}</div>
