@@ -2090,16 +2090,22 @@ function AIChatPanel() {
       return
     }
     rec.continuous = true
-    rec.interimResults = true
+    // Final results only — interim results flicker and re-fire on partial
+    // ambient speech, which woke the assistant on words the user never said.
+    rec.interimResults = false
     rec.lang = language === 'es' ? 'es-ES' : 'en-US'
 
     rec.onresult = (event) => {
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const transcript = (event.results[i][0]?.transcript || '').toLowerCase()
-        // Match "nouri", "nour", "noori", "nuri", "nori" as a whole word —
-        // Whisper/STT spell the name several ways. Word boundaries avoid
-        // false hits inside unrelated words.
-        if (/\b(nour|nouri|noori|nuri|nori|noor)\b/.test(transcript)) {
+        const res = event.results[i]
+        // Only act on a finalized phrase — never on an interim guess.
+        if (!res.isFinal) continue
+        const transcript = (res[0]?.transcript || '').toLowerCase()
+        // Match only the distinctive "Nouri" spellings Whisper/STT produce.
+        // Deliberately NOT matching bare "nour" / "nori" / "noor": those are
+        // common words/names (e.g. "nori" seaweed on a food app) and caused
+        // the assistant to wake — and then act — on unrelated conversation.
+        if (/\b(nouri|nourie|nouree|noori|noury|nuri)\b/.test(transcript)) {
           try { rec.onend = null; rec.stop() } catch { /* noop */ }
           wakeRecognitionRef.current = null
           setWakeActive(false)
