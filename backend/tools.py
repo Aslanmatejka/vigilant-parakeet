@@ -2854,6 +2854,16 @@ async def _create_food_listing(
     except (TypeError, ValueError):
         pass
 
+    # If the donor named an explicit pickup address (which may differ from
+    # their saved profile address), geocode THAT address now — BEFORE donor
+    # profile coordinate defaults are applied below. Otherwise a pickup at
+    # "the library on 5th" would inherit the donor's home coordinates and
+    # drop the map pin in the wrong place.
+    if (row.get("latitude") is None or row.get("longitude") is None) and row.get("location"):
+        coords = await _forward_geocode(row.get("full_address") or row.get("location"))
+        if coords:
+            row["latitude"], row["longitude"] = coords
+
     # Resolve community: explicit arg > donor profile default (applied below).
     resolved_community_id, resolved_community_name = await _resolve_community(community_name, community_id)
     if resolved_community_id:
@@ -2862,8 +2872,9 @@ async def _create_food_listing(
     donor = await fetch_donor_listing_defaults(str(user_id))
     row = apply_donor_defaults_to_listing(row, donor)
 
-    # Forward-geocode the address if we still have no coordinates. Without
-    # latitude/longitude the listing won't render on the Near Me map.
+    # Final fallback: still no coordinates (donor gave no explicit pickup
+    # address, so we're relying on the donor's saved address filled in by
+    # apply_donor_defaults_to_listing). Geocode that as a last resort.
     if row.get("latitude") is None or row.get("longitude") is None:
         addr_for_geocode = row.get("full_address") or row.get("location")
         if addr_for_geocode:
