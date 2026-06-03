@@ -196,8 +196,17 @@ class AIChatService {
         transcript: data.transcript || '',
       }
     } catch (error) {
-      console.error('AI voice service error:', error)
-      reportError(error)
+      // Unintelligible / noise audio is filtered server-side and comes back
+      // as a benign `invalid_input` 400. That's an expected, user-side outcome
+      // (background noise, an empty breath, the AI's own echo) — NOT a system
+      // fault, so don't escalate it to reportError and pollute the logs /
+      // error backend. Just surface it to the caller to handle softly.
+      if (error?.aiError?.code === 'invalid_input') {
+        console.debug('Voice input not understood (filtered):', error.message)
+      } else {
+        console.error('AI voice service error:', error)
+        reportError(error)
+      }
       throw error
     }
   }

@@ -375,17 +375,26 @@ export function useAIChat() {
     } catch (err) {
       if (seq !== reqSeqRef.current) return
       const aiErr = err.aiError
+      // "invalid_input" from the voice endpoint means Whisper heard noise /
+      // couldn't make out speech. That's a normal hiccup, not a failure — show
+      // a calm, dismissible nudge (not a red error bubble) so a hands-free
+      // session can simply stand down and try again.
+      const unintelligible = aiErr?.code === 'invalid_input'
       const errorMsg = {
         id: `error-${Date.now()}`,
         role: 'assistant',
-        message: aiErr
+        message: unintelligible
+          ? (language === 'es'
+            ? 'No te escuché con claridad. Intenta hablar de nuevo o escribe tu mensaje.'
+            : "I didn't quite catch that. Please try speaking again or type your message.")
+          : aiErr
           ? friendlyErrorMessage(aiErr.code, language)
           : (language === 'es'
             ? 'No pude procesar tu audio. Por favor usa el campo de texto.'
             : "I couldn't process your voice message. Please try typing instead."),
-        isError: true,
+        isError: !unintelligible,
         errorCode: aiErr?.code || 'internal',
-        errorRetryable: aiErr?.retryable ?? true,
+        errorRetryable: unintelligible ? true : (aiErr?.retryable ?? true),
         errorRetryAfter: aiErr?.retryAfter ?? null,
         requestId: err.requestId || aiErr?.requestId || null,
         retryText: null,
@@ -394,7 +403,8 @@ export function useAIChat() {
       }
 
       setMessages(prev => [...prev, errorMsg])
-      setError(err.message)
+      // Don't latch a global error state for benign "didn't hear you" cases.
+      if (!unintelligible) setError(err.message)
     } finally {
       if (seq === reqSeqRef.current) setIsLoading(false)
     }
