@@ -675,6 +675,8 @@ TOOL_DEFINITIONS = [
                             "'open_listing' (open a food listing's detail/claim view), "
                             "'open_map' (navigate to the Find Food map view), "
                             "'clear_map' (remove AI markers/route from the map), "
+                            "'open_modal' / 'close_modal' / 'toggle_modal' "
+                            "(open a recipient AI helper surface named by 'target'), "
                             "'scroll_to_top', 'scroll_to_bottom', "
                             "'focus' (focus an input by data-ai-id attribute), "
                             "'set_language' (change UI language)."
@@ -682,7 +684,8 @@ TOOL_DEFINITIONS = [
                         "enum": [
                             "navigate", "open_assistant", "close_assistant",
                             "expand_assistant", "open_listing", "open_map",
-                            "clear_map", "scroll_to_top", "scroll_to_bottom",
+                            "clear_map", "open_modal", "close_modal",
+                            "toggle_modal", "scroll_to_top", "scroll_to_bottom",
                             "focus", "set_language",
                         ],
                     },
@@ -696,6 +699,23 @@ TOOL_DEFINITIONS = [
                             "'/near-me', '/how-it-works', '/contact', '/blog', "
                             "'/login', '/signup', '/listings' (my listings), '/settings'."
                         ),
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": (
+                            "For 'open_modal' / 'toggle_modal' / 'close_modal': the "
+                            "recipient AI helper surface to open. One of: "
+                            "'meal-suggestions' (recipes from claimed food), "
+                            "'spoilage-alerts' (what's about to expire), "
+                            "'storage-coach' (how to store a food), "
+                            "'smart-notifications' (tune alert preferences), "
+                            "'pickup-reminders' (pickup reminder settings), "
+                            "'sms-consent' (enable text notifications)."
+                        ),
+                        "enum": [
+                            "meal-suggestions", "spoilage-alerts", "storage-coach",
+                            "smart-notifications", "pickup-reminders", "sms-consent",
+                        ],
                     },
                     "listing_id": {
                         "type": "string",
@@ -1256,12 +1276,24 @@ _UI_ALLOWED_ACTIONS = {
     "navigate", "open_assistant", "close_assistant", "expand_assistant",
     "open_listing", "open_map", "clear_map", "scroll_to_top",
     "scroll_to_bottom", "focus", "set_language",
+    # Modal surfaces (recipient AI helpers). The frontend maps each target
+    # to the right route/overlay via MODAL_TARGET_ROUTES in UIControlContext.
+    "open_modal", "close_modal", "toggle_modal",
+}
+
+# Modal targets the frontend knows how to open (mirrors MODAL_TARGET_ROUTES
+# in utils/UIControlContext.jsx). Keeping this server-side stops the model
+# from naming a modal that doesn't exist.
+_UI_ALLOWED_MODAL_TARGETS = {
+    "meal-suggestions", "spoilage-alerts", "storage-coach",
+    "smart-notifications", "pickup-reminders", "sms-consent",
 }
 
 
 async def _ui_action(
     action: str,
     path: Optional[str] = None,
+    target: Optional[str] = None,
     listing_id: Optional[str] = None,
     target_id: Optional[str] = None,
     lang: Optional[str] = None,
@@ -1291,6 +1323,22 @@ async def _ui_action(
                 "allowed_paths": sorted(_UI_ALLOWED_PATHS),
             }
         payload["path"] = norm
+
+    elif action in ("open_modal", "toggle_modal"):
+        norm_target = str(target or "").strip().replace("_", "-")
+        if not norm_target:
+            return {"ok": False, "error": f"{action} requires a 'target'"}
+        if norm_target not in _UI_ALLOWED_MODAL_TARGETS:
+            return {
+                "ok": False,
+                "error": f"Modal target '{target}' is not a known surface.",
+                "allowed_targets": sorted(_UI_ALLOWED_MODAL_TARGETS),
+            }
+        payload["target"] = norm_target
+
+    elif action == "close_modal":
+        if target:
+            payload["target"] = str(target).strip().replace("_", "-")
 
     elif action == "open_listing":
         if not listing_id:
