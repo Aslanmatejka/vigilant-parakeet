@@ -381,6 +381,7 @@ def get_canned_response(error_type: str, lang: str = "en") -> str:
 # ---------------------------------------------------------------------------
 
 _rate_store: dict[str, list[float]] = {}
+_user_rate_store: dict[str, list[float]] = {}
 
 
 def check_rate_limit(client_ip: str, limit: int = RATE_LIMIT_DEFAULT) -> bool:
@@ -390,6 +391,21 @@ def check_rate_limit(client_ip: str, limit: int = RATE_LIMIT_DEFAULT) -> bool:
     if len(_rate_store[client_ip]) >= limit:
         return False
     _rate_store[client_ip].append(now)
+    return True
+
+
+def check_user_rate_limit(user_id: str, limit: int = RATE_LIMIT_DEFAULT) -> bool:
+    """Per-user-id bucket so shared-IP (NAT, school, mobile) users don't
+    throttle each other and a single authenticated abuser can't drain a
+    shared IP's budget for legitimate neighbours."""
+    if not user_id:
+        return True
+    now = time.time()
+    timestamps = _user_rate_store.setdefault(user_id, [])
+    _user_rate_store[user_id] = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
+    if len(_user_rate_store[user_id]) >= limit:
+        return False
+    _user_rate_store[user_id].append(now)
     return True
 
 
@@ -1907,10 +1923,15 @@ class ConversationEngine:
         from backend.tools import TOOL_DEFINITIONS, execute_tool
         self.tool_definitions = TOOL_DEFINITIONS
         self._execute_tool = execute_tool
+        # Built once. The prompt body only depends on training_data, which
+        # is loaded from disk at boot and never mutated per-turn. Rebuilding
+        # it on every chat round wastes ~8KB of string work and 2–5k tokens
+        # of recomputed context per tool round.
+        self._system_prompt_cached: str = _build_system_prompt(self.training_data)
 
     @property
     def system_prompt(self) -> str:
-        return _build_system_prompt(self.training_data)
+        return self._system_prompt_cached
 
     def _detect_lang(self, text: str) -> str:
         return "es" if detect_spanish(text) else "en"
@@ -2713,6 +2734,14 @@ class ConversationEngine:
         # address) before giving up.
         MAX_TOOL_ROUNDS = 3
         round_idx = 0
+        # Defense-in-depth against runaway tool loops: if the model keeps
+        # invoking the same tool with byte-identical args we stop short of
+        # MAX_TOOL_ROUNDS to protect quota and tail latency.
+        _recent_calls: list[tuple[str, str]] = []
+        # Per-conversation tool-result cache. Same tool + same args inside
+        # one turn returns the cached result instead of hitting the DB/API
+        # twice. Cheap memory, big quota savings.
+        _tool_cache: dict[tuple[str, str], dict[str, Any]] = {}
         while msg.get("tool_calls") and round_idx < MAX_TOOL_ROUNDS:
             round_idx += 1
             tool_messages = list(messages)
@@ -2743,17 +2772,47 @@ class ConversationEngine:
                 # users' listings/requests or read the users table freely.
                 if fn_name == "run_safe_query" and auth_user_id is not None:
                     fn_args = _scope_safe_query(fn_args, auth_user_id)
+                # Same-tool-same-args repetition guard. If the model has
+                # called this exact (name, args) 3 times already inside
+                # this turn, return a short error instead of hitting the
+                # backend again so the model is forced to change tack.
                 try:
-                    result = await self._execute_tool(fn_name, fn_args)
-                except Exception as tool_exc:
-                    # Log full traceback server-side; surface a generic
-                    # message so internal exception text doesn't reach
-                    # the user via the AI's reply.
-                    logger.exception("Tool %s failed", fn_name)
-                    result = {
-                        "success": False,
-                        "error": f"{fn_name} failed. Please try again.",
-                    }
+                    _args_key = json.dumps(fn_args, sort_keys=True, default=str)[:2000]
+                except Exception:
+                    _args_key = str(fn_args)[:2000]
+                _call_key = (fn_name, _args_key)
+                if _recent_calls.count(_call_key) >= 2:
+                    tool_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": json.dumps({
+                            "error": (
+                                f"{fn_name} was already called with these arguments. "
+                                "Try a different tool or different arguments, or answer the user directly."
+                            )
+                        }),
+                    })
+                    _recent_calls.append(_call_key)
+                    continue
+                _recent_calls.append(_call_key)
+                # Per-turn tool-result cache: skip duplicate work cleanly.
+                cached_result = _tool_cache.get(_call_key)
+                if cached_result is not None:
+                    result: dict[str, Any] = cached_result
+                else:
+                    try:
+                        result = await self._execute_tool(fn_name, fn_args)
+                        if isinstance(result, dict) and not result.get("error"):
+                            _tool_cache[_call_key] = result
+                    except Exception as tool_exc:
+                        # Log full traceback server-side; surface a generic
+                        # message so internal exception text doesn't reach
+                        # the user via the AI's reply.
+                        logger.exception("Tool %s failed", fn_name)
+                        result = {
+                            "success": False,
+                            "error": f"{fn_name} failed. Please try again.",
+                        }
 
                 # Trace tool calls so we can debug why the model picked a tool.
                 try:

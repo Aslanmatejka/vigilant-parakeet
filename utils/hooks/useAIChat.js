@@ -27,10 +27,17 @@ function normalizeAssistantAction(action) {
 }
 
 // Pick the best initial UI language:
-//   1) explicit user.language profile preference, if Spanish.
-//   2) navigator.language starting with 'es'.
-//   3) default English.
+//   1) sessionStorage cache from a prior turn this session.
+//   2) explicit user.language profile preference, if Spanish.
+//   3) navigator.language starting with 'es'.
+//   4) default English.
 function pickInitialLanguage(user) {
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      const cached = sessionStorage.getItem('dg.ai.lang')
+      if (cached === 'es' || cached === 'en') return cached
+    }
+  } catch { /* private mode */ }
   const pref = (user?.language || '').toString().toLowerCase()
   if (pref.startsWith('es')) return 'es'
   if (typeof navigator !== 'undefined') {
@@ -46,6 +53,15 @@ export function useAIChat() {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
   const [language, setLanguage] = useState(() => pickInitialLanguage(null))
+  // Mirror the active language into sessionStorage so a page refresh
+  // mid-conversation doesn't snap a Spanish user back to English.
+  useEffect(() => {
+    try {
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem('dg.ai.lang', language)
+      }
+    } catch { /* noop */ }
+  }, [language])
   const [historyLoaded, setHistoryLoaded] = useState(false)
   // Monotonic counter so a slow earlier request can't append after a
   // newer, faster one finished. Prevents out-of-order assistant bubbles
@@ -80,37 +96,41 @@ export function useAIChat() {
 
         const formatted = history
           .filter(msg => {
-            // Filter out internal "silent" prompts that were saved before
-            // the backend learned to skip persisting them. These start
-            // with [Action completed] or [Acción completada] and were
-            // never typed by the user.
+            // Drop internal silent assistant turns (metadata flag preferred;
+            // legacy rows used a "[Action completed]" prefix). Keep them
+            // out of the UI but the backend still uses them as context.
+            if ((msg.metadata && (msg.metadata.silent_trigger || msg.metadata.silent)) === true) return false
             if (msg.role !== 'user') return true
             const text = String(msg.message || '').trimStart()
             return !text.startsWith('[Action completed]')
                 && !text.startsWith('[Acción completada]')
                 && !text.startsWith('[Accion completada]')
           })
-          .map(msg => ({
-            id: msg.id || `hist-${msg.created_at}`,
-            role: msg.role,
-            // Surface backend row id (UUID) so feedback writes target the
-            // correct ai_conversations row instead of a fake "hist-..." key.
-            conversationId: msg.id || null,
-            message: msg.message,
-            metadata: msg.metadata,
-            // Normalize so ToolResultCard / MapContext / UIControlContext
-            // all see the same { tool, ok, summary, result: {...} } shape
-            // regardless of whether the row is live or rehydrated.
-            toolResults: Array.isArray(msg.metadata?.actions)
-              ? normalizeToolResults(msg.metadata.actions)
-              : [],
-            // Mark history rows so effects that should only fire for live
-            // turns (e.g. claim toasts) can skip them.
-            fromHistory: true,
-            timestamp: msg.created_at,
-          }))
+          .map(msg => {
+            // Only treat a real UUID as the backend row id; otherwise we
+            // emit a synthetic local key for React and leave
+            // conversationId null so feedback writes are skipped instead
+            // of being orphaned against a fake "hist-..." id.
+            const isUuid = typeof msg.id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(msg.id)
+            return {
+              id: isUuid ? msg.id : `hist-${msg.created_at}-${msg.role}`,
+              role: msg.role,
+              conversationId: isUuid ? msg.id : null,
+              message: msg.message,
+              metadata: msg.metadata,
+              toolResults: Array.isArray(msg.metadata?.actions)
+                ? normalizeToolResults(msg.metadata.actions)
+                : [],
+              fromHistory: true,
+              timestamp: msg.created_at,
+            }
+          })
 
-        setMessages([INITIAL_MESSAGE, ...formatted])
+        // Preserve the current language for the welcome bubble so a
+        // Spanish session doesn't get an English "Hi! I'm Nouri..."
+        // wedged in at the top after history loads.
+        const welcome = language === 'es' ? INITIAL_MESSAGE_ES : INITIAL_MESSAGE
+        setMessages([welcome, ...formatted])
         setHistoryLoaded(true)
       } catch (err) {
         console.error('Failed to load AI history:', err)
@@ -119,7 +139,7 @@ export function useAIChat() {
 
     loadHistory()
     return () => { cancelled = true }
-  }, [isAuthenticated, user?.id, historyLoaded])
+  }, [isAuthenticated, user?.id, historyLoaded, language])
 
   /**
    * Translate a typed backend error code into a friendly bubble message.
@@ -127,7 +147,12 @@ export function useAIChat() {
    * stuck staring at a raw `error_code` like "model_unavailable".
    */
   const friendlyErrorMessage = useCallback((code, lang = language) => {
-    const isEs = lang === 'es'
+    // Fall back to the user's profile preference if the sticky lang
+    // hasn't resolved yet (e.g. the very first turn errored before the
+    // backend could echo a `lang` field). Without this, a Spanish-only
+    // user can see their first error in English.
+    const profileLang = (user?.language || '').toString().toLowerCase().startsWith('es') ? 'es' : null
+    const isEs = (lang || profileLang || 'en') === 'es'
     switch (code) {
       case 'timeout':
         return isEs
@@ -158,7 +183,7 @@ export function useAIChat() {
           ? 'Estoy teniendo un pequeño problema. ¿Puedes intentar de nuevo?'
           : "I'm having a little trouble right now. Please try again."
     }
-  }, [language])
+  }, [language, user?.language])
 
   /**
    * Core send-and-render pipeline shared by `sendMessage`, `retryMessage`,

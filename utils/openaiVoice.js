@@ -67,27 +67,37 @@ export async function textToSpeech(text, options = {}) {
 export function playAudioBlob(audioBlob, onStart, onEnd) {
   const url = URL.createObjectURL(audioBlob)
   const audio = new Audio(url)
+  // Some browsers fire both `onended` and `onerror` for the same blob
+  // (e.g. tab backgrounding). Revoking the same object URL twice is a
+  // no-op but indicates muddled cleanup; a single flag keeps it tidy.
+  let revoked = false
+  const revoke = () => {
+    if (revoked) return
+    revoked = true
+    try { URL.revokeObjectURL(url) } catch { /* noop */ }
+  }
 
   const stop = () => {
     audio.pause()
     audio.currentTime = 0
-    URL.revokeObjectURL(url)
+    revoke()
     onEnd?.()
   }
 
   const play = new Promise((resolve) => {
     audio.onplay = () => onStart?.()
     audio.onended = () => {
-      URL.revokeObjectURL(url)
+      revoke()
       onEnd?.()
       resolve()
     }
     audio.onerror = () => {
-      URL.revokeObjectURL(url)
+      revoke()
       onEnd?.()
       resolve()
     }
     audio.play().catch(() => {
+      revoke()
       onEnd?.()
       resolve()
     })

@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 from backend.ai_engine import (
     conversation_engine,
     check_rate_limit,
+    check_user_rate_limit,
     _circuit,
     supabase_get,
     supabase_post,
@@ -540,6 +541,31 @@ def _enforce_rate_limit(request: Request) -> None:
         raise HTTPException(429, "Rate limit exceeded. Try again later.")
 
 
+_NIL_UUID = "00000000-0000-0000-0000-000000000000"
+
+
+def _enforce_user_rate_limit(user_id: str) -> None:
+    if user_id and user_id != _NIL_UUID and not check_user_rate_limit(user_id):
+        raise HTTPException(429, "You're sending requests too quickly. Slow down a bit.")
+
+
+async def _require_auth_for_user(request: Request, user_id: str) -> str | None:
+    """Auth gate for user-scoped AI routes.
+
+    — Anonymous chat (nil-UUID) is allowed without an Authorization header,
+      so the landing-page assistant keeps working.
+    — Any real user_id MUST present a matching JWT. We refuse to write
+      under (or read from) someone else's identity.
+    """
+    auth_uid = await _authenticate_request(request)
+    if user_id and user_id != _NIL_UUID:
+        if not auth_uid:
+            raise HTTPException(401, "Authentication required")
+        if auth_uid != user_id:
+            raise HTTPException(403, "user_id does not match authenticated user")
+    return auth_uid
+
+
 import re as _re
 
 _UUID_RE = _re.compile(
@@ -638,11 +664,11 @@ async def ai_chat(body: AIChatRequest, request: Request) -> dict:
     rid = _request_id(request)
     _enforce_rate_limit(request)
     _validate_uuid(body.user_id)
+    _enforce_user_rate_limit(body.user_id)
 
-    # Verify the caller owns this user_id (if auth header present)
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != body.user_id:
-        raise HTTPException(403, "user_id does not match authenticated user")
+    # Verify the caller owns this user_id. Anonymous (nil-UUID) sessions
+    # remain allowed without auth so the landing-page chat keeps working.
+    await _require_auth_for_user(request, body.user_id)
 
     try:
         return await conversation_engine.chat(
@@ -671,11 +697,10 @@ async def ai_history(user_id: str, request: Request, limit: int = 50) -> dict:
     """
     _enforce_rate_limit(request)
     _validate_uuid(user_id)
+    _enforce_user_rate_limit(user_id)
 
     # Verify the caller owns this user_id
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != user_id:
-        raise HTTPException(403, "Cannot access another user's history")
+    await _require_auth_for_user(request, user_id)
 
     if limit < 1 or limit > 200:
         raise HTTPException(400, "limit must be between 1 and 200")
@@ -700,10 +725,9 @@ async def ai_clear_history(user_id: str, request: Request) -> dict:
     """Delete all conversation history for a user."""
     _enforce_rate_limit(request)
     _validate_uuid(user_id)
+    _enforce_user_rate_limit(user_id)
 
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != user_id:
-        raise HTTPException(403, "Cannot clear another user's history")
+    await _require_auth_for_user(request, user_id)
 
     try:
         # Use proper query params instead of encoding filters in the table path
@@ -739,10 +763,9 @@ async def ai_feedback(body: AIFeedbackRequest, request: Request) -> dict:
     _enforce_rate_limit(request)
     _validate_uuid(body.user_id)
     _validate_uuid(body.conversation_id, "conversation_id")
+    _enforce_user_rate_limit(body.user_id)
 
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != body.user_id:
-        raise HTTPException(403, "user_id does not match authenticated user")
+    await _require_auth_for_user(request, body.user_id)
 
     if body.rating not in ("helpful", "not_helpful", "up", "down"):
         raise HTTPException(400, "rating must be helpful or not_helpful")
@@ -788,10 +811,9 @@ async def ai_voice(
     """
     _enforce_rate_limit(request)
     _validate_uuid(user_id)
+    _enforce_user_rate_limit(user_id)
 
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != user_id:
-        raise HTTPException(403, "user_id does not match authenticated user")
+    await _require_auth_for_user(request, user_id)
 
     # Validate file type (strip codec params like ";codecs=opus")
     allowed_types = {
