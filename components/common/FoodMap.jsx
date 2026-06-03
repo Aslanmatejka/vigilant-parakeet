@@ -48,6 +48,51 @@ const colorForCommunity = (id) => {
     return COMMUNITY_COLORS[h % COMMUNITY_COLORS.length];
 };
 
+// Forward-geocode an address string to [lng, lat] via Mapbox, with a
+// sessionStorage cache so the same address isn't looked up twice. Returns
+// null on any failure. This is the client-side safety net for listings that
+// were saved without coordinates — without it they'd render in the sidebar
+// list but have NO marker, so hovering them does nothing on the map.
+const _geocodeCache = new Map();
+const geocodeAddress = async (address) => {
+    const key = String(address || '').trim();
+    if (!key || !MAPBOX_TOKEN) return null;
+    if (_geocodeCache.has(key)) return _geocodeCache.get(key);
+    try {
+        if (typeof sessionStorage !== 'undefined') {
+            const cached = sessionStorage.getItem(`dg.geo.${key}`);
+            if (cached) {
+                const parsed = JSON.parse(cached);
+                _geocodeCache.set(key, parsed);
+                return parsed;
+            }
+        }
+    } catch { /* ignore storage errors */ }
+    try {
+        const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(key)}.json?access_token=${MAPBOX_TOKEN}&limit=1`;
+        const resp = await fetch(url);
+        if (!resp.ok) { _geocodeCache.set(key, null); return null; }
+        const data = await resp.json();
+        const center = data?.features?.[0]?.center;
+        if (!Array.isArray(center) || center.length < 2) {
+            _geocodeCache.set(key, null);
+            return null;
+        }
+        const result = [Number(center[0]), Number(center[1])]; // [lng, lat]
+        _geocodeCache.set(key, result);
+        try {
+            if (typeof sessionStorage !== 'undefined') {
+                sessionStorage.setItem(`dg.geo.${key}`, JSON.stringify(result));
+            }
+        } catch { /* ignore */ }
+        return result;
+    } catch (err) {
+        console.warn('Geocode failed for', key, err);
+        _geocodeCache.set(key, null);
+        return null;
+    }
+};
+
 function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = null }) {
     const navigate = useNavigate();
     const mapContainer = useRef(null);
@@ -65,6 +110,9 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
     const [communities, setCommunities] = useState([]);
     const [loading, setLoading] = useState(true);
     const [mapLoaded, setMapLoaded] = useState(false);
+    // Tracks listing ids we've already attempted to geocode so the
+    // backfill effect never loops on an address Mapbox can't resolve.
+    const geocodeAttemptedRef = useRef(new Set());
     const { aiMarkers, aiRoute, centerRequest } = useMapContext();
     const { location: userLocation, source: userLocationSource } = useEffectiveLocation();
 
@@ -219,6 +267,43 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             console.log('⏳ Waiting for map or data...');
         }
     }, [mapLoaded, foodListings, communities]);
+
+    // Coordinate backfill: some listings are saved with an address but no
+    // latitude/longitude. Those render in the sidebar list but get NO map
+    // marker, so hovering them does nothing. Forward-geocode each such
+    // listing (using its full_address/location) and patch the coordinates
+    // back into state so addMarkers can place a marker for it.
+    useEffect(() => {
+        if (!foodListings.length) return;
+        const needsGeocode = foodListings.filter((l) => {
+            if (l.id == null) return false;
+            if (geocodeAttemptedRef.current.has(l.id)) return false;
+            const hasCoords = !isNaN(parseFloat(l.latitude)) && !isNaN(parseFloat(l.longitude));
+            const address = l.full_address || l.location;
+            return !hasCoords && typeof address === 'string' && address.trim().length > 0;
+        });
+        if (!needsGeocode.length) return;
+
+        let cancelled = false;
+        (async () => {
+            const patches = new Map();
+            for (const listing of needsGeocode) {
+                geocodeAttemptedRef.current.add(listing.id);
+                const coords = await geocodeAddress(listing.full_address || listing.location);
+                if (coords) patches.set(listing.id, coords);
+            }
+            if (cancelled || patches.size === 0) return;
+            setFoodListings((prev) =>
+                prev.map((l) =>
+                    patches.has(l.id)
+                        ? { ...l, longitude: patches.get(l.id)[0], latitude: patches.get(l.id)[1] }
+                        : l
+                )
+            );
+        })();
+
+        return () => { cancelled = true; };
+    }, [foodListings]);
 
     // Apply hover-highlight to the marker whose listing id matches the prop.
     // Re-runs whenever the highlighted id OR the marker set changes so a freshly
