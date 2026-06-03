@@ -2571,11 +2571,16 @@ class ConversationEngine:
                     user_id, "assistant", assistant_msg, metadata=assistant_metadata,
                 )
             else:
-                _, row_id = await asyncio.gather(
-                    self.store_message(user_id, "user", user_msg),
-                    self.store_message(
-                        user_id, "assistant", assistant_msg, metadata=assistant_metadata,
-                    ),
+                # Store SEQUENTIALLY (user first, then assistant) — NOT via
+                # asyncio.gather. created_at defaults to now() at insert time;
+                # two concurrent inserts can land on the same microsecond or
+                # even invert, which makes get_conversation_history (ordered
+                # by created_at) render the assistant bubble BEFORE the user's
+                # message after a refresh. Awaiting in order guarantees the
+                # user row commits with a strictly-earlier timestamp.
+                await self.store_message(user_id, "user", user_msg)
+                row_id = await self.store_message(
+                    user_id, "assistant", assistant_msg, metadata=assistant_metadata,
                 )
             return row_id
         except Exception as exc:
