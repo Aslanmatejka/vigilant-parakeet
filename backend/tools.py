@@ -966,6 +966,16 @@ TOOL_DEFINITIONS = [
                             "required": ["title", "quantity", "unit", "category"],
                         },
                     },
+                    "default_address": {
+                        "type": "string",
+                        "description": (
+                            "Batch-wide pickup address applied to any row that "
+                            "has no address column of its own. Pass the donor's "
+                            "profile address, or an address they give you on a "
+                            "retry. If omitted, the server falls back to the "
+                            "donor's saved profile address."
+                        ),
+                    },
                 },
                 "required": ["user_id"],
             },
@@ -1102,6 +1112,7 @@ TOOL_DEFINITIONS = [
                             "required": ["title", "quantity", "unit", "category"],
                         },
                     },
+                    "default_address": {"type": "string"},
                 },
                 "required": ["user_id"],
             },
@@ -3404,8 +3415,11 @@ def _normalize_bulk_row(raw: dict, user_id: str) -> Optional[dict]:
         qty = float(raw.get("quantity") or raw.get("qty") or raw.get("amount") or 0)
     except (TypeError, ValueError):
         qty = 0
+    # Per the bulk contract the server defaults a missing/zero qty to 1
+    # (the AI is told to double-check). We do NOT drop the row for qty alone
+    # — only a missing title makes a row unusable.
     if qty <= 0:
-        return None
+        qty = 1
     unit = str(raw.get("unit") or raw.get("units") or "items").strip() or "items"
     cat_raw = str(raw.get("category") or raw.get("type") or "other").strip().lower()
     category = cat_raw if cat_raw in _LISTING_CATEGORIES else _CSV_CATEGORY_ALIASES.get(cat_raw, "other")
@@ -3420,10 +3434,15 @@ def _normalize_bulk_row(raw: dict, user_id: str) -> Optional[dict]:
     }
     if raw.get("description"):
         row["description"] = str(raw["description"])[:1000]
-    if raw.get("expiry_date"):
-        row["expiry_date"] = str(raw["expiry_date"])[:40]
-    if raw.get("location"):
-        row["location"] = str(raw["location"])[:400]
+    if raw.get("expiry_date") or raw.get("best_before"):
+        row["expiry_date"] = str(raw.get("expiry_date") or raw.get("best_before"))[:40]
+    # Capture the row's own pickup address from any of the common column names.
+    row_addr = (
+        raw.get("location") or raw.get("address")
+        or raw.get("pickup_address") or raw.get("full_address")
+    )
+    if row_addr:
+        row["location"] = str(row_addr)[:400]
     return row
 
 
@@ -3431,14 +3450,20 @@ async def _bulk_import_listings(
     user_id: str,
     csv_text: Optional[str] = None,
     listings: Optional[list] = None,
+    default_address: Optional[str] = None,
     **_ignored,
 ) -> dict:
-    from backend.ai_engine import supabase_post
+    from backend.ai_engine import (
+        supabase_post,
+        fetch_donor_listing_defaults,
+        apply_donor_defaults_to_listing,
+    )
 
-    logger.info("bulk_import_listings: user=%s csv_len=%s listings=%s",
+    logger.info("bulk_import_listings: user=%s csv_len=%s listings=%s default_address=%s",
                 user_id,
                 len(csv_text) if csv_text else 0,
-                len(listings) if listings else 0)
+                len(listings) if listings else 0,
+                bool(default_address))
     if not user_id:
         return {"success": False, "error": "missing user_id"}
 
@@ -3455,29 +3480,98 @@ async def _bulk_import_listings(
     if len(rows_in) > 100:
         return {"success": False, "error": "Too many rows (max 100 per call)."}
 
+    # Donor profile (address + coordinates) loaded ONCE and reused for every
+    # row that doesn't carry its own pickup address. Mirrors the single-listing
+    # creator so bulk-imported listings get a location + map pin too.
+    donor = await fetch_donor_listing_defaults(str(user_id))
+    donor_addr = str(donor.get("address") or donor.get("location") or "").strip()
+    explicit_default = str(default_address).strip() if default_address else ""
+    # Batch-wide fallback address: the address the AI passed wins over the
+    # donor's saved profile address.
+    fallback_address = explicit_default or donor_addr or None
+
+    # ---- Pre-flight: normalize + classify gaps before inserting anything ----
+    # (1-based row numbers so the AI can talk to the donor in human terms.)
+    normalized: list[Optional[dict]] = []
+    missing_title_rows: list[int] = []
+    missing_address_rows: list[int] = []
+    for idx, raw in enumerate(rows_in):
+        human_row = idx + 1
+        norm = _normalize_bulk_row(raw, user_id)
+        normalized.append(norm)
+        if not norm:
+            missing_title_rows.append(human_row)
+            continue
+        row_addr = str(norm.get("location") or "").strip()
+        if not row_addr and not fallback_address:
+            missing_address_rows.append(human_row)
+
+    if missing_title_rows or missing_address_rows:
+        needs: list[str] = []
+        if missing_title_rows:
+            needs.append("title")
+        if missing_address_rows:
+            needs.append("address")
+        return {
+            "success": False,
+            "posted": 0,
+            "needs": needs,
+            "missing_title_rows": missing_title_rows,
+            "missing_address_rows": missing_address_rows,
+            "fallback_address": fallback_address,
+            "total": len(rows_in),
+            "summary": (
+                "Pre-flight blocked the import: "
+                + (f"{len(missing_title_rows)} row(s) missing a title" if missing_title_rows else "")
+                + (" and " if missing_title_rows and missing_address_rows else "")
+                + (f"{len(missing_address_rows)} row(s) missing a pickup address" if missing_address_rows else "")
+                + ". Nothing was posted."
+            ),
+        }
+
+    # ---- Insert: apply address, donor defaults, and coordinates per row ----
     created_ids: list[str] = []
     errors: list[dict] = []
-    for idx, raw in enumerate(rows_in):
-        norm = _normalize_bulk_row(raw, user_id)
-        if not norm:
-            errors.append({"index": idx, "error": "Missing title or quantity"})
+    # Cache geocode lookups so a batch sharing one address hits Mapbox once.
+    geocode_cache: dict[str, Optional[tuple]] = {}
+    for idx, norm in enumerate(normalized):
+        if not norm:  # unreachable after pre-flight, but keep mypy/readers happy
             continue
+        resolved = (str(norm.get("location") or "").strip() or fallback_address or "")[:400]
+        if resolved:
+            norm["location"] = resolved
+            norm["full_address"] = resolved
+        # Geocode the resolved pickup address BEFORE donor defaults so a row
+        # with its own address gets its OWN pin, not the donor's home coords.
+        if resolved:
+            if resolved not in geocode_cache:
+                geocode_cache[resolved] = await _forward_geocode(resolved)
+            coords = geocode_cache[resolved]
+            if coords:
+                norm["latitude"], norm["longitude"] = coords
+        # Donor defaults fill name/phone/community + coords ONLY where missing.
+        norm = apply_donor_defaults_to_listing(norm, donor)
         try:
             result = await supabase_post("food_listings", norm)
             if isinstance(result, list) and result:
                 created_ids.append(str(result[0].get("id")))
             else:
-                errors.append({"index": idx, "error": "Insert returned no row"})
+                errors.append({"index": idx + 1, "error": "Insert returned no row"})
         except Exception as exc:
-            errors.append({"index": idx, "error": str(exc)})
+            errors.append({"index": idx + 1, "error": str(exc)})
 
+    posted = len(created_ids)
     return {
-        "success": len(created_ids) > 0,
-        "created": len(created_ids),
+        "success": posted > 0,
+        "posted": posted,
+        "verified": posted,
+        "created": posted,
+        "total": len(rows_in),
         "failed": len(errors),
         "ids": created_ids,
         "errors": errors,
-        "summary": f"Imported {len(created_ids)} of {len(rows_in)} listings."
+        "results": errors,
+        "summary": f"Imported {posted} of {len(rows_in)} listings."
                    + (f" {len(errors)} failed." if errors else ""),
     }
 
