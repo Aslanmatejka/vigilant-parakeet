@@ -471,6 +471,14 @@ const TOOL_CARD_TOKENS = {
     accent: 'text-blue-200',
     sub: 'text-blue-300/75',
   },
+  generic: {
+    title: { en: 'Done', es: 'Hecho' },
+    icon: 'fa-circle-check',
+    ring: 'ring-slate-400/30',
+    bg: 'bg-gradient-to-br from-slate-800/40 to-slate-900/40 border-slate-500/20',
+    accent: 'text-slate-200',
+    sub: 'text-slate-300/75',
+  },
 }
 
 function ToolCardShell({ kind, language = 'en', titleOverride, children }) {
@@ -588,6 +596,24 @@ function ToolResultCard({ toolResult, language = 'en' }) {
             {result.category && <span className="text-fuchsia-300/80"> · {result.category}</span>}
           </div>
         )}
+        {result.address && (
+          <div className="text-fuchsia-300/80 text-[11px] mt-1 flex items-start gap-1">
+            <i className="fas fa-map-marker-alt mt-[2px] text-[10px] opacity-70" aria-hidden="true" />
+            <span className="break-words">{result.address}</span>
+          </div>
+        )}
+        {result.community_name && (
+          <div className="text-fuchsia-300/80 text-[11px] mt-0.5 flex items-center gap-1">
+            <i className="fas fa-people-group text-[10px] opacity-70" aria-hidden="true" />
+            <span>{result.community_name}</span>
+          </div>
+        )}
+        {result.on_map === false && (
+          <div className="text-amber-300/90 text-[11px] mt-1 flex items-center gap-1">
+            <i className="fas fa-triangle-exclamation text-[10px]" aria-hidden="true" />
+            <span>{language === 'es' ? 'Sin coordenadas — no aparecerá en el mapa' : 'No coordinates — listing will not appear on the map'}</span>
+          </div>
+        )}
         {(result.summary || result.message) && (
           <div className="text-fuchsia-300/75 mt-1">{result.summary || result.message}</div>
         )}
@@ -619,6 +645,19 @@ function ToolResultCard({ toolResult, language = 'en' }) {
           </div>
         )}
         {result.summary && <div className="text-sky-300/75 mt-1">{result.summary}</div>}
+      </ToolCardShell>
+    )
+  }
+
+  // Generic fallback: any other tool that succeeded with a summary string.
+  // Keeps users informed instead of silently swallowing the result for tools
+  // we haven't designed a custom card for (e.g. update_user_profile,
+  // attach_photos_to_listing, post_food_request, bulk_import_listings,
+  // query_distribution_centers, get_user_dashboard, get_mapbox_route).
+  if (ok && (result?.summary || result?.message)) {
+    return (
+      <ToolCardShell kind="generic" language={language} titleOverride={tool?.replace(/_/g, ' ') || (language === 'es' ? 'Acción' : 'Action')}>
+        <div className="text-slate-200 text-[12px]">{result.summary || result.message}</div>
       </ToolCardShell>
     )
   }

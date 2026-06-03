@@ -145,8 +145,8 @@ function FindFoodPage({ initialCategory }) {
         // Update URL when category changes
         if (name === 'category') {
             const newUrl = value 
-                ? `${location.pathname}?category=${value}`
-                : location.pathname;
+                ? `${routerLocation.pathname}?category=${value}`
+                : routerLocation.pathname;
             navigate(newUrl, { replace: true });
         }
     };
