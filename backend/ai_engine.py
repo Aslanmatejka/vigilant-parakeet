@@ -878,17 +878,21 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "  AI:        'Got it, 2 loaves. Picking them up yourself, or "
         "want to schedule a delivery?'\n"
         "  Recipient: 'pickup'\n"
-        "  AI:        'Perfect. Want me to lock it in now? I'll send you "
-        "a 4-digit code to show at pickup.'\n"
+        "  AI:        'Perfect. Want me to lock it in now?'\n"
         "  Recipient: 'yes'\n"
         "  AI:        <calls claim_listing(listing_id=...), then>\n"
-        "             'Done! I claimed the Sourdough Loaves for you. Your "
-        "pickup code is 4729 — show it to the donor when you arrive at "
-        "379 S Pole St. You have 5 minutes to confirm before it auto-"
-        "releases. Want directions?'\n"
-        "  Recipient: 'I got the code 4729'\n"
+        "             'Done! I claimed the Sourdough Loaves for you — "
+        "pick them up at 379 S Pole St. Just let me know once you've "
+        "got them. Want directions?'\n"
+        "  Recipient: 'picked it up'\n"
         "  AI:        <calls confirm_claim>\n"
         "             'Pickup confirmed! Enjoy the bread 🍞'\n"
+        # TODO(twilio): once Twilio SMS is wired up, claim_listing will
+        # return a `confirm_code` + `sms_delivered` flag and start a
+        # short auto-release timer. Restore the 4-digit-code narration
+        # (e.g. 'Your pickup code is 4729 — show it to the donor … you
+        # have N minutes to confirm before it auto-releases.') and the
+        # 'I got the code 4729' confirm path at that point.
         "\n"
         "Hard rules for this flow:\n"
         "  1. ONE QUESTION PER TURN once the options are on screen. Don't "
@@ -902,14 +906,17 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "are listed, just acknowledge that and proceed; the donor will "
         "hand them the right amount at pickup.\n"
         "  4. CONFIRM BEFORE LOCKING — for non-trivial claims, ask 'Want "
-        "me to lock it in?' before calling claim_listing, so the user "
-        "isn't surprised by the 5-minute timer. Exception: if the user "
-        "said 'claim it' / 'reserve it' / 'I'll take it' explicitly, "
-        "skip the confirmation and claim immediately.\n"
+        "me to lock it in?' before calling claim_listing. Exception: if "
+        "the user said 'claim it' / 'reserve it' / 'I'll take it' "
+        "explicitly, skip the confirmation and claim immediately.\n"
         "  5. AFTER CLAIMING, follow the ANNOUNCE CLAIM SUCCESS rules "
-        "below — lead with the confirmation, share the code (inline if "
-        "SMS failed), mention the 5-minute window, then offer a helpful "
-        "next step ('Want directions?', 'Need the donor's number?').\n"
+        "below — lead with the confirmation, tell them where to pick up, "
+        "then offer a helpful next step ('Want directions?', 'Need the "
+        "donor's number?'). Do NOT invent a confirmation code or a "
+        "countdown timer.\n"
+        # TODO(twilio): when SMS is live, re-add 'share the code (inline
+        # if SMS failed), mention the auto-release window' to rule 5.
+
         "  6. CANCEL FLOW — if the user says 'cancel' / 'never mind' / "
         "'release it', acknowledge ('No problem, releasing it now…'), "
         "call cancel_claim, then confirm ('Released — it's back up for "
@@ -942,12 +949,18 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "'claimed' and the listing's title — e.g. 'Done! I claimed the "
         "Fresh Organic Kale for you.' or 'You\\u2019ve successfully claimed "
         "the Sourdough Loaves.'\n"
-        "  2. Then tell them the next step: a 4-digit confirmation code was "
-        "sent by SMS (or, if the tool result includes confirm_code because "
-        "sms_delivered is false, show that code inline and tell them to "
-        "reply with it to confirm pickup).\n"
-        "  3. Mention the 5-minute auto-release window so they know to "
-        "confirm soon.\n"
+        "  2. Then tell them the next step: where to pick up (use the "
+        "pickup_location from the tool result if present) and that they "
+        "can tell you once they've picked it up so you can confirm it. "
+        "Do NOT mention a confirmation code or an SMS — none is sent "
+        "today.\n"
+        "  3. If they want, offer directions or the donor's contact "
+        "info as a helpful next step.\n"
+        # TODO(twilio): when claim_listing returns confirm_code /
+        # sms_delivered and an auto-release timer is live, restore step 2
+        # ('a 4-digit code was sent by SMS; show confirm_code inline if
+        # sms_delivered is false') and step 3 ('mention the auto-release
+        # window so they confirm soon').
         "After confirm_claim returns successfully, lead with 'Pickup "
         "confirmed!' (or equivalent) and the listing title, and remind them "
         "where/when to pick up if you have that info.\n"
@@ -1525,8 +1538,11 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "    presented options first), recipient phone on profile (the "
         "    server enforces this — if missing, prompt to add one via "
         "    update_user_profile before retrying).\n"
-        "  • confirm_claim → 4-digit code from the user, the matching "
+        "  • confirm_claim → the user telling you they've picked it up "
+        "    ('got it', 'picked it up', 'all done'), and the matching "
         "    claim_id from earlier in this conversation.\n"
+        # TODO(twilio): when SMS confirmation codes exist, accept the
+        # 4-digit code from the user here as the confirm trigger.
         "  • attach_photos_to_listing → listing_id (read from a recent "
         "    tool result, never ask the user for a numeric id), one or "
         "    more image URLs (/uploads/ai/<uuid>.jpg or http(s)).\n"
@@ -2234,9 +2250,11 @@ class ConversationEngine:
                     "address in Settings if nearby search fails."
                 )
             if profile.get("phone"):
-                facts.append(f"phone on file: {profile['phone']} (required to claim listings; SMS codes go here)")
+                facts.append(f"phone on file: {profile['phone']} (recommended for pickup coordination)")
             else:
-                facts.append("NO phone on file (claim_listing will fail until they add one)")
+                # TODO(twilio): once SMS confirmation is live, a phone will be
+                # required to claim — restore the 'claim will fail' warning then.
+                facts.append("NO phone on file (suggest adding one so the donor can coordinate pickup)")
             if profile.get("dietary_restrictions"):
                 facts.append(f"dietary restrictions: {profile['dietary_restrictions']}")
             if profile.get("allergens"):
@@ -2333,7 +2351,8 @@ class ConversationEngine:
                 "post_food_request), confirm briefly once before calling. "
                 "(3) For small updates (e.g. adding an allergy, opting into SMS), act immediately and report what changed. "
                 "(4) When the user says things like 'I'll take it', 'reserve that', 'grab #42', "
-                "call claim_listing. Then tell them to watch for the SMS code. "
+                "call claim_listing. Then tell them where to pick up and to let you know once "
+                "they've got it so you can confirm the pickup. "
                 "(5) If a tool returns an error, explain it plainly and suggest the next step. "
                 "(6) ALWAYS CONFIRM COMPLETION: after a tool returns success, lead your reply "
                 "with an explicit completion phrase ('Done!', 'Posted!', 'Sent!', 'Updated.', "
