@@ -769,7 +769,19 @@ TOOL_DEFINITIONS = [
                     },
                     "location": {
                         "type": "string",
-                        "description": "Optional pickup location / address hint.",
+                        "description": "Pickup location / full street address. STRONGLY recommended — without an address the listing has no map pin.",
+                    },
+                    "community_name": {
+                        "type": "string",
+                        "description": "Name of the community / school / neighborhood this listing is shared with (e.g. 'Alameda Unified', 'Oakland Tech'). Ask the donor which community to post to if it's not obvious from context.",
+                    },
+                    "latitude": {
+                        "type": "number",
+                        "description": "Optional explicit latitude for the pickup spot. The server will auto-geocode the location string if omitted.",
+                    },
+                    "longitude": {
+                        "type": "number",
+                        "description": "Optional explicit longitude for the pickup spot.",
                     },
                     "dietary_tags": {
                         "type": "array",
@@ -890,7 +902,10 @@ TOOL_DEFINITIONS = [
                     },
                     "description": {"type": "string"},
                     "expiry_date": {"type": "string", "description": "ISO date YYYY-MM-DD."},
-                    "location": {"type": "string"},
+                    "location": {"type": "string", "description": "Pickup street address — required for the listing to appear on the map."},
+                    "community_name": {"type": "string", "description": "Community/school the donation is shared with."},
+                    "latitude": {"type": "number"},
+                    "longitude": {"type": "number"},
                     "dietary_tags": {"type": "array", "items": {"type": "string"}},
                     "allergens": {"type": "array", "items": {"type": "string"}},
                 },
@@ -2694,6 +2709,74 @@ async def _mark_notifications_read(
 _LISTING_CATEGORIES = {"produce", "bakery", "dairy", "pantry", "meat", "prepared", "other"}
 
 
+MAPBOX_GEOCODE_URL = "https://api.mapbox.com/geocoding/v5/mapbox.places"
+
+
+async def _forward_geocode(address: str) -> Optional[tuple[float, float]]:
+    """Return (lat, lng) for an address string via Mapbox, or None on failure."""
+    if not address or not MAPBOX_TOKEN:
+        return None
+    from urllib.parse import quote
+    try:
+        url = f"{MAPBOX_GEOCODE_URL}/{quote(address.strip(), safe='')}.json"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, params={"access_token": MAPBOX_TOKEN, "limit": "1"})
+        if resp.status_code != 200:
+            logger.warning("Mapbox geocode HTTP %s for %r", resp.status_code, address[:80])
+            return None
+        features = resp.json().get("features") or []
+        if not features:
+            return None
+        center = features[0].get("center") or []
+        if len(center) < 2:
+            return None
+        # Mapbox returns [lng, lat]
+        return float(center[1]), float(center[0])
+    except Exception as exc:
+        logger.warning("Mapbox geocode failed for %r: %s", address[:80], exc)
+        return None
+
+
+async def _resolve_community(community_name: Optional[str], community_id: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a community name or id to (id, name). Returns (None, None) on miss."""
+    from backend.ai_engine import supabase_get
+
+    if community_id:
+        try:
+            rows = await supabase_get("communities", {
+                "id": f"eq.{community_id}",
+                "select": "id,name",
+                "limit": "1",
+            })
+            if rows:
+                return str(rows[0]["id"]), rows[0].get("name")
+        except Exception as exc:
+            logger.warning("community lookup by id failed: %s", exc)
+
+    name = (community_name or "").strip()
+    if not name:
+        return None, None
+    try:
+        # Try exact match first (case-insensitive via ilike).
+        rows = await supabase_get("communities", {
+            "name": f"ilike.{name}",
+            "select": "id,name",
+            "limit": "1",
+        })
+        if not rows:
+            # Fall back to fuzzy contains match.
+            rows = await supabase_get("communities", {
+                "name": f"ilike.*{name}*",
+                "select": "id,name",
+                "limit": "1",
+            })
+        if rows:
+            return str(rows[0]["id"]), rows[0].get("name")
+    except Exception as exc:
+        logger.warning("community lookup by name failed: %s", exc)
+    return None, None
+
+
 async def _create_food_listing(
     user_id: str,
     title: str,
@@ -2705,6 +2788,10 @@ async def _create_food_listing(
     location: Optional[str] = None,
     dietary_tags: Optional[list] = None,
     allergens: Optional[list] = None,
+    community_name: Optional[str] = None,
+    community_id: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
     **_ignored,
 ) -> dict:
     """Insert a single food donation listing for the authenticated user."""
@@ -2748,14 +2835,41 @@ async def _create_food_listing(
     if expiry_date:
         row["expiry_date"] = str(expiry_date).strip()[:40]
     if location:
-        row["location"] = str(location).strip()[:200]
+        loc_s = str(location).strip()[:200]
+        row["location"] = loc_s
+        # full_address powers the address line on search cards + the map pin
+        # popover. Keep it in sync with location so AI-posted listings render
+        # the same as form-posted ones.
+        row["full_address"] = loc_s
     if isinstance(dietary_tags, list):
         row["dietary_tags"] = [str(t).strip()[:40] for t in dietary_tags if str(t).strip()][:20]
     if isinstance(allergens, list):
         row["allergens"] = [str(t).strip()[:40] for t in allergens if str(t).strip()][:20]
 
+    # Explicit coords from the model win over donor profile defaults.
+    try:
+        if latitude is not None and longitude is not None:
+            row["latitude"] = float(latitude)
+            row["longitude"] = float(longitude)
+    except (TypeError, ValueError):
+        pass
+
+    # Resolve community: explicit arg > donor profile default (applied below).
+    resolved_community_id, resolved_community_name = await _resolve_community(community_name, community_id)
+    if resolved_community_id:
+        row["community_id"] = resolved_community_id
+
     donor = await fetch_donor_listing_defaults(str(user_id))
     row = apply_donor_defaults_to_listing(row, donor)
+
+    # Forward-geocode the address if we still have no coordinates. Without
+    # latitude/longitude the listing won't render on the Near Me map.
+    if row.get("latitude") is None or row.get("longitude") is None:
+        addr_for_geocode = row.get("full_address") or row.get("location")
+        if addr_for_geocode:
+            coords = await _forward_geocode(addr_for_geocode)
+            if coords:
+                row["latitude"], row["longitude"] = coords
 
     try:
         result = await supabase_post("food_listings", row)
@@ -2769,6 +2883,16 @@ async def _create_food_listing(
     if not listing_id:
         return {"success": False, "error": "No row returned from database"}
 
+    on_map = row.get("latitude") is not None and row.get("longitude") is not None
+    summary_bits = [
+        f"Posted '{row['title']}' ({row['quantity']} {row['unit']}, {row['category']})"
+    ]
+    if row.get("full_address") or row.get("location"):
+        summary_bits.append(f"at {row.get('full_address') or row.get('location')}")
+    if resolved_community_name:
+        summary_bits.append(f"in {resolved_community_name}")
+    summary_bits.append("— live on the map." if on_map else "— note: no map coordinates yet, recipients can still see it in the feed.")
+
     return {
         "success": True,
         "listing_id": str(listing_id),
@@ -2776,7 +2900,13 @@ async def _create_food_listing(
         "quantity": row["quantity"],
         "unit": row["unit"],
         "category": row["category"],
-        "summary": f"Posted '{row['title']}' ({row['quantity']} {row['unit']}, {row['category']}).",
+        "address": row.get("full_address") or row.get("location"),
+        "latitude": row.get("latitude"),
+        "longitude": row.get("longitude"),
+        "community_id": row.get("community_id"),
+        "community_name": resolved_community_name,
+        "on_map": on_map,
+        "summary": " ".join(summary_bits),
     }
 
 
