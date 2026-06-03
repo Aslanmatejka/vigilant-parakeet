@@ -2424,10 +2424,16 @@ class ConversationEngine:
         # not the user's last message. Sticky-lang already handles short
         # replies, but the response text itself is the strongest signal:
         # if the model wrote in Spanish, the chips must be Spanish too.
+        # Conversely, if sticky lang said "es" but the reply is plain
+        # English (e.g. the model ignored a Spanish profile), chips
+        # should match the visible reply, not the inferred locale.
         chip_lang = lang
         try:
-            if response_text and detect_spanish(response_text):
-                chip_lang = "es"
+            if response_text:
+                if detect_spanish(response_text):
+                    chip_lang = "es"
+                elif lang == "es" and detect_english(response_text):
+                    chip_lang = "en"
         except Exception:
             pass
 

@@ -1363,7 +1363,13 @@ function AIChatPanel() {
   const quickActions = language === 'es' ? QUICK_ACTIONS_ES : QUICK_ACTIONS_EN
 
   // ─── Autocomplete: filter the suggestion pool by current input ───
-  const suggestionPool = language === 'es' ? SUGGESTIONS_ES : SUGGESTIONS_EN
+  // Detect Spanish live from what the user is typing so suggestions
+  // adapt before the first AI exchange. Spanish punctuation (¿/¡/ñ) or
+  // accented chars are reliable signals; we don't try to detect Spanish
+  // words on their own (too noisy for autocomplete).
+  const inputLooksSpanish = /[¿¡ñáéíóúü]/i.test(inputText)
+  const effectiveLang = inputLooksSpanish ? 'es' : language
+  const suggestionPool = effectiveLang === 'es' ? SUGGESTIONS_ES : SUGGESTIONS_EN
   const filteredSuggestions = useMemo(() => {
     const q = inputText.trim().toLowerCase()
     if (!q) return []

@@ -26,12 +26,26 @@ function normalizeAssistantAction(action) {
   return action
 }
 
+// Pick the best initial UI language:
+//   1) explicit user.language profile preference, if Spanish.
+//   2) navigator.language starting with 'es'.
+//   3) default English.
+function pickInitialLanguage(user) {
+  const pref = (user?.language || '').toString().toLowerCase()
+  if (pref.startsWith('es')) return 'es'
+  if (typeof navigator !== 'undefined') {
+    const nav = (navigator.language || (navigator.languages && navigator.languages[0]) || '').toLowerCase()
+    if (nav.startsWith('es')) return 'es'
+  }
+  return 'en'
+}
+
 export function useAIChat() {
   const { user, isAuthenticated } = useAuthContext()
   const [messages, setMessages] = useState([INITIAL_MESSAGE])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [language, setLanguage] = useState('en')
+  const [language, setLanguage] = useState(() => pickInitialLanguage(null))
   const [historyLoaded, setHistoryLoaded] = useState(false)
   // Monotonic counter so a slow earlier request can't append after a
   // newer, faster one finished. Prevents out-of-order assistant bubbles
@@ -43,9 +57,14 @@ export function useAIChat() {
   // new session starts clean and re-fetches the right history.
   useEffect(() => {
     setHistoryLoaded(false)
-    setMessages([language === 'es' ? INITIAL_MESSAGE_ES : INITIAL_MESSAGE])
+    // Adopt the freshly-logged-in user's preferred language if they
+    // have one set. Falls back to current state (which already honored
+    // navigator.language at mount). Never auto-flips an EN session to
+    // ES once the user has chosen a language explicitly via the toggle.
+    const preferred = pickInitialLanguage(user)
+    setLanguage((prev) => (preferred !== 'en' ? preferred : prev))
+    setMessages([preferred === 'es' ? INITIAL_MESSAGE_ES : INITIAL_MESSAGE])
     setError(null)
-    // language intentionally excluded — switching language shouldn't wipe chat.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, isAuthenticated])
 
