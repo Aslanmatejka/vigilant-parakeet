@@ -1360,6 +1360,12 @@ function AIChatPanel() {
   const [isVoiceSpeaking, setIsVoiceSpeaking] = useState(false)
   const [voiceError, setVoiceError] = useState(null)
   const [voiceTranscript, setVoiceTranscript] = useState('')
+  // ─── Wake word ("Nouri") hands-free state ───────
+  // wakeWordEnabled: user opted in to always-listening wake activation.
+  // wakeActive: a SpeechRecognition session is currently listening for the
+  // wake word in the background (used to drive the standby indicator).
+  const [wakeWordEnabled, setWakeWordEnabled] = useState(false)
+  const [wakeActive, setWakeActive] = useState(false)
   // ─── Upload (photo + CSV → bulk-listings) state ───────
   // pendingUpload shape: { kind:'photo'|'csv', rows:[], filename, confidence?, error?, parseErrors? }
   const [pendingUpload, setPendingUpload] = useState(null)
@@ -1391,6 +1397,24 @@ function AIChatPanel() {
   const analyserRef = useRef(null)
   const silenceTimerRef = useRef(null)
   const vadFrameRef = useRef(null)
+  // ─── Wake word ("Nouri") refs ───────
+  // Browser SpeechRecognition is event-driven and set up once, so the handlers
+  // read the latest values through refs instead of stale closures.
+  const wakeRecognitionRef = useRef(null)      // active SpeechRecognition instance
+  const wakeWordEnabledRef = useRef(false)     // mirror of wakeWordEnabled state
+  const handsFreeRef = useRef(false)           // a wake-triggered conversation turn is live
+  const wakeCooldownRef = useRef(0)            // debounce repeated wake detections
+  const isVoiceSpeakingRef = useRef(false)     // mirror of isVoiceSpeaking
+  const startWakeListeningRef = useRef(null)   // late-bound startWakeListening
+  const triggerWakeRef = useRef(null)          // late-bound triggerWake
+  const endHandsFreeTurnRef = useRef(null)     // late-bound endHandsFreeTurn
+  const prevSpeakingRef = useRef(false)        // edge-detect speaking → idle
+
+  // Wake word relies on the Web Speech API, which Safari/Firefox expose
+  // inconsistently. Detect support once so we can hide the toggle when the
+  // browser can't deliver continuous recognition.
+  const wakeWordSupported = typeof window !== 'undefined'
+    && !!(window.SpeechRecognition || window.webkitSpeechRecognition)
 
   useEffect(() => { sendVoiceRef.current = sendVoice }, [sendVoice])
 
@@ -1882,12 +1906,19 @@ function AIChatPanel() {
         setAudioLevel(0)
 
         const chunks = audioChunksRef.current
-        if (!chunks.length) { setIsVoiceListening(false); return }
+        if (!chunks.length) {
+          setIsVoiceListening(false)
+          // Hands-free re-arm produced no audio → the user is done talking.
+          // Stand down to wake-word standby instead of looping.
+          if (handsFreeRef.current) endHandsFreeTurnRef.current?.()
+          return
+        }
 
         const audioBlob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' })
         // Skip tiny recordings (< 0.5s of data, ~noise)
         if (audioBlob.size < 5000) {
           setIsVoiceListening(false)
+          if (handsFreeRef.current) endHandsFreeTurnRef.current?.()
           return
         }
 
@@ -1916,6 +1947,10 @@ function AIChatPanel() {
       const SILENCE_THRESHOLD = 15  // RMS level below which = silence
       const SILENCE_DURATION = 1800 // ms of silence before auto-stop
       const MAX_DURATION = 30000    // max recording duration
+      // If the user never starts speaking (e.g. a hands-free re-arm where they
+      // had nothing to add), don't hold the mic for the full MAX_DURATION —
+      // give up after a short grace window so we can stand down to standby.
+      const NO_SPEECH_TIMEOUT = 7000
       const dataArray = new Uint8Array(analyser.frequencyBinCount)
       const startTime = Date.now()
 
@@ -1924,6 +1959,12 @@ function AIChatPanel() {
 
         // Auto-stop at max duration
         if (Date.now() - startTime > MAX_DURATION) {
+          stopRecording()
+          return
+        }
+
+        // Auto-stop if no speech ever started within the grace window.
+        if (!speechDetected && Date.now() - startTime > NO_SPEECH_TIMEOUT) {
           stopRecording()
           return
         }
@@ -2015,6 +2056,203 @@ function AIChatPanel() {
       startVoiceListening()
     }
   }, [isVoiceSpeaking, isVoiceListening, isLoading, interruptSpeaking, stopRecording, startVoiceListening])
+
+  // ─── Wake word ("Nouri") — hands-free activation ──────────────────────
+  // Keep isVoiceSpeaking mirrored in a ref so the wake handlers (set up once)
+  // can read the live value without re-binding.
+  useEffect(() => { isVoiceSpeakingRef.current = isVoiceSpeaking }, [isVoiceSpeaking])
+
+  // Stop the background wake-word recognizer and release its mic grab.
+  const stopWakeListening = useCallback(() => {
+    setWakeActive(false)
+    const rec = wakeRecognitionRef.current
+    wakeRecognitionRef.current = null
+    if (rec) {
+      try { rec.onend = null; rec.onerror = null; rec.onresult = null; rec.stop() } catch { /* already stopped */ }
+    }
+  }, [])
+
+  // Start a continuous SpeechRecognition session that listens only for the
+  // wake word. On a hit it hands off to the full Whisper voice pipeline.
+  const startWakeListening = useCallback(() => {
+    if (!wakeWordEnabledRef.current) return
+    if (wakeRecognitionRef.current) return            // already running
+    // Never contend with an active recording / voice turn for the mic.
+    if (voiceModeRef.current || handsFreeRef.current) return
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') return
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SR) return
+
+    let rec
+    try {
+      rec = new SR()
+    } catch {
+      return
+    }
+    rec.continuous = true
+    rec.interimResults = true
+    rec.lang = language === 'es' ? 'es-ES' : 'en-US'
+
+    rec.onresult = (event) => {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = (event.results[i][0]?.transcript || '').toLowerCase()
+        // Match "nouri", "nour", "noori", "nuri", "nori" as a whole word —
+        // Whisper/STT spell the name several ways. Word boundaries avoid
+        // false hits inside unrelated words.
+        if (/\b(nour|nouri|noori|nuri|nori|noor)\b/.test(transcript)) {
+          try { rec.onend = null; rec.stop() } catch { /* noop */ }
+          wakeRecognitionRef.current = null
+          setWakeActive(false)
+          triggerWakeRef.current?.()
+          return
+        }
+      }
+    }
+
+    rec.onerror = (event) => {
+      // Permission problems are terminal — turn the feature off so we don't
+      // busy-loop restarting a recognizer the browser will keep rejecting.
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        wakeWordEnabledRef.current = false
+        setWakeWordEnabled(false)
+        setWakeActive(false)
+        wakeRecognitionRef.current = null
+      }
+      // 'no-speech' / 'aborted' / 'network' just end the session; onend
+      // handles the restart.
+    }
+
+    rec.onend = () => {
+      wakeRecognitionRef.current = null
+      setWakeActive(false)
+      // Auto-restart so "continuous" survives the browser's periodic resets,
+      // but only while enabled and idle (not mid-conversation).
+      if (
+        wakeWordEnabledRef.current
+        && !handsFreeRef.current
+        && !voiceModeRef.current
+        && (!mediaRecorderRef.current || mediaRecorderRef.current.state !== 'recording')
+      ) {
+        setTimeout(() => startWakeListeningRef.current?.(), 400)
+      }
+    }
+
+    try {
+      rec.start()
+      wakeRecognitionRef.current = rec
+      setWakeActive(true)
+    } catch {
+      // start() throws if a session is already live — ignore.
+      wakeRecognitionRef.current = null
+    }
+  }, [language])
+
+  // Wake detected → open the assistant, enter voice mode, and start listening
+  // for the user's command. Debounced so a stray double-match can't double-fire.
+  const triggerWake = useCallback(() => {
+    const now = Date.now()
+    if (now - wakeCooldownRef.current < 3000) return
+    wakeCooldownRef.current = now
+    handsFreeRef.current = true
+    stopWakeListening()
+    setIsOpen(true)
+    if (!voiceModeRef.current) enterVoiceMode()
+    // Let the voice overlay mount + the wake recognizer fully release the mic
+    // before we grab it for recording.
+    setTimeout(() => {
+      if (!isVoiceSpeakingRef.current
+          && (!mediaRecorderRef.current || mediaRecorderRef.current.state !== 'recording')) {
+        startVoiceListening()
+      }
+    }, 450)
+  }, [stopWakeListening, enterVoiceMode, startVoiceListening])
+
+  // A hands-free turn ended (user fell silent). Stand down: leave voice mode,
+  // release the mic, and resume background wake-word listening if still on.
+  const endHandsFreeTurn = useCallback(() => {
+    handsFreeRef.current = false
+    if (voiceModeRef.current) exitVoiceMode()
+    if (wakeWordEnabledRef.current) {
+      setTimeout(() => startWakeListeningRef.current?.(), 700)
+    }
+  }, [exitVoiceMode])
+
+  // Late-bind refs so the once-registered recognition handlers always call
+  // the current callbacks.
+  useEffect(() => { startWakeListeningRef.current = startWakeListening }, [startWakeListening])
+  useEffect(() => { triggerWakeRef.current = triggerWake }, [triggerWake])
+  useEffect(() => { endHandsFreeTurnRef.current = endHandsFreeTurn }, [endHandsFreeTurn])
+
+  // Toggle handler — flips the feature and starts/stops the recognizer.
+  const toggleWakeWord = useCallback(() => {
+    setWakeWordEnabled((prev) => {
+      const next = !prev
+      wakeWordEnabledRef.current = next
+      try { localStorage.setItem('dg.ai.wakeword', next ? '1' : '0') } catch { /* private mode */ }
+      if (next) {
+        if (!voiceModeRef.current
+            && (!mediaRecorderRef.current || mediaRecorderRef.current.state !== 'recording')) {
+          setTimeout(() => startWakeListeningRef.current?.(), 100)
+        }
+      } else {
+        handsFreeRef.current = false
+        stopWakeListening()
+      }
+      return next
+    })
+  }, [stopWakeListening])
+
+  // Restore the saved preference on mount and arm the recognizer.
+  useEffect(() => {
+    let saved = '0'
+    try { saved = localStorage.getItem('dg.ai.wakeword') || '0' } catch { /* noop */ }
+    if (saved === '1' && wakeWordSupported) {
+      setWakeWordEnabled(true)
+      wakeWordEnabledRef.current = true
+      setTimeout(() => startWakeListeningRef.current?.(), 300)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Re-arm the mic for the user's follow-up after Nouri finishes speaking,
+  // so a wake-triggered conversation flows turn-by-turn without any taps.
+  useEffect(() => {
+    const was = prevSpeakingRef.current
+    prevSpeakingRef.current = isVoiceSpeaking
+    if (was && !isVoiceSpeaking && voiceMode && handsFreeRef.current && !isLoading) {
+      const t = setTimeout(() => {
+        if (voiceModeRef.current
+            && handsFreeRef.current
+            && !isVoiceSpeakingRef.current
+            && (!mediaRecorderRef.current || mediaRecorderRef.current.state !== 'recording')) {
+          startVoiceListening()
+        }
+      }, 700)
+      return () => clearTimeout(t)
+    }
+  }, [isVoiceSpeaking, voiceMode, isLoading, startVoiceListening])
+
+  // Tear down the wake recognizer on unmount.
+  useEffect(() => {
+    return () => {
+      wakeWordEnabledRef.current = false
+      const rec = wakeRecognitionRef.current
+      wakeRecognitionRef.current = null
+      if (rec) { try { rec.onend = null; rec.stop() } catch { /* noop */ } }
+    }
+  }, [])
+
+  // Voice mode and the wake recognizer both need the mic. Pause wake listening
+  // whenever voice mode is open; resume it once the user returns to chat (and
+  // wake word is still enabled and no hands-free turn is mid-flight).
+  useEffect(() => {
+    if (voiceMode) {
+      stopWakeListening()
+    } else if (wakeWordEnabledRef.current && !handsFreeRef.current) {
+      const t = setTimeout(() => startWakeListeningRef.current?.(), 500)
+      return () => clearTimeout(t)
+    }
+  }, [voiceMode, stopWakeListening])
 
   // Voice mode is manual — user taps the orb to start each recording
 
@@ -2400,6 +2638,29 @@ function AIChatPanel() {
               <span aria-hidden="true">{language === 'es' ? '🇪🇸' : '🇺🇸'}</span>
               {language === 'es' ? 'Español' : 'English'}
             </span>
+
+            {/* Wake-word toggle — enable always-listening "Nouri" from voice mode. */}
+            {wakeWordSupported && (
+              <button
+                onClick={toggleWakeWord}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold tracking-wide ring-1 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 ${
+                  wakeWordEnabled
+                    ? 'bg-emerald-500/15 ring-emerald-400/40 text-emerald-300'
+                    : 'bg-white/5 ring-white/10 text-slate-400 hover:text-emerald-200'
+                }`}
+                title={
+                  wakeWordEnabled
+                    ? (language === 'es' ? 'Manos libres activado — di “Nouri”' : 'Hands-free on — say “Nouri”')
+                    : (language === 'es' ? 'Activar manos libres “Nouri”' : 'Enable hands-free “Nouri”')
+                }
+                aria-pressed={wakeWordEnabled}
+              >
+                <i className="fas fa-assistive-listening-systems" aria-hidden="true" />
+                {wakeWordEnabled
+                  ? (language === 'es' ? 'Manos libres' : 'Hands-free')
+                  : '“Nouri”'}
+              </button>
+            )}
           </div>
 
           {/* ─── Center: Animated Orb ─── */}
@@ -2854,6 +3115,33 @@ function AIChatPanel() {
               aria-controls="ai-chat-suggestions"
             />
           </div>
+
+          {/* Wake word ("Nouri") toggle — hands-free always-listening mode */}
+          {wakeWordSupported && (
+            <button
+              type="button"
+              onClick={toggleWakeWord}
+              className={`flex-shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-full transition-all border ${
+                wakeWordEnabled
+                  ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
+                  : 'border-slate-600/50 bg-slate-800/60 text-slate-300 hover:text-emerald-200 hover:bg-emerald-500/10 hover:border-emerald-400/30'
+              }`}
+              title={
+                wakeWordEnabled
+                  ? (language === 'es' ? 'Palabra de activación activada — di “Nouri”' : 'Wake word on — say “Nouri”')
+                  : (language === 'es' ? 'Activar manos libres con “Nouri”' : 'Enable hands-free wake word “Nouri”')
+              }
+              aria-label={language === 'es' ? 'Alternar palabra de activación Nouri' : 'Toggle Nouri wake word'}
+              aria-pressed={wakeWordEnabled}
+            >
+              <span className="relative inline-flex items-center justify-center">
+                <i className={`fas fa-assistive-listening-systems text-[13px] ${wakeActive ? 'animate-pulse' : ''}`} aria-hidden="true" />
+                {wakeActive && (
+                  <span className="absolute -top-1.5 -right-1.5 h-2 w-2 rounded-full bg-emerald-400 animate-ping" aria-hidden="true" />
+                )}
+              </span>
+            </button>
+          )}
 
           {/* Voice mode — AI speaks responses aloud */}
           <button
