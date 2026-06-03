@@ -506,16 +506,27 @@ function ToolResultCard({ toolResult, language = 'en' }) {
       <ToolCardShell kind="search" language={language} titleOverride={`${t.title[language] || t.title.en} · ${searchItems.length}`}>
         <ul className="space-y-1.5">
           {searchItems.slice(0, 3).map(item => {
-            const distance = item.distance_km != null
-              ? `${item.distance_km} km`
-              : item.distance_miles != null
-                ? `${item.distance_miles} mi`
-                : null
+            // Backend returns km; the rest of the app uses miles, so
+            // convert for display. Fall back to distance_miles if the
+            // tool already returned that, or hide if neither is set.
+            const miles = item.distance_miles != null
+              ? Number(item.distance_miles)
+              : (item.distance_km != null ? Number(item.distance_km) * 0.621371 : null)
+            const distance = miles != null && Number.isFinite(miles)
+              ? `${miles.toFixed(miles < 10 ? 1 : 0)} mi`
+              : null
             const meta = [distance, item.category, item.pickup_by].filter(Boolean).join(' · ')
+            const address = item.address || item.full_address || item.pickup_location || null
             return (
               <li key={item.id} className="rounded-lg bg-slate-900/40 px-2.5 py-2 border border-emerald-500/15">
                 <div className={`font-medium ${t.accent}`}>{item.title}</div>
                 {meta && <div className={`${t.sub} text-[11px] mt-0.5`}>{meta}</div>}
+                {address && (
+                  <div className={`${t.sub} text-[11px] mt-0.5 flex items-start gap-1`}>
+                    <i className="fas fa-map-marker-alt mt-[2px] text-[10px] opacity-70" aria-hidden="true" />
+                    <span className="break-words">{address}</span>
+                  </div>
+                )}
                 {item.dietary_tags?.length > 0 && (
                   <div className="flex gap-1 mt-1.5 flex-wrap">
                     {item.dietary_tags.map(tag => (
