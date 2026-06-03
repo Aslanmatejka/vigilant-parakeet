@@ -936,6 +936,10 @@ _WHISPER_NOISE_WORDS = {
 def _is_whisper_noise(text: str) -> bool:
     """Return True if the transcription looks like Whisper hallucination."""
     stripped = text.strip()
+    # Pure-number replies (e.g. "1", "2") are valid listing picks in the
+    # voice claim flow — never treat them as noise.
+    if stripped.isdigit():
+        return False
     if len(stripped) < 3:
         return True
 

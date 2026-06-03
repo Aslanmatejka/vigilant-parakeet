@@ -147,9 +147,10 @@ function UserSettings() {
                     sms_notifications_enabled: formData.sms_notifications_enabled
                 };
                 
-                // Only update opt-in status if user is opting in (cannot un-opt-in, only disable)
-                if (formData.sms_opt_in && !formData.sms_opt_in) {
-                    updates.sms_opt_in = true;
+                // Persist the consent flag to match the user's current choice.
+                // Stamp the opt-in date when enabling so we have a consent record.
+                updates.sms_opt_in = !!formData.sms_opt_in;
+                if (formData.sms_opt_in) {
                     updates.sms_opt_in_date = new Date().toISOString();
                 }
                 

@@ -273,7 +273,7 @@ function Header({ menuItems: menuItemsProp }) {
                                                 My Listings
                                             </a>
                                             */}
-                                            {authUser?.role === 'admin' && (
+                                            {(authUser?.is_admin === true || authUser?.role === 'admin') && (
                                                 <a
                                                     href="/admin"
                                                     className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
@@ -421,7 +421,7 @@ function Header({ menuItems: menuItemsProp }) {
                                                 </a>
                                             </li>
                                             */}
-                                            {authUser?.role === 'admin' && (
+                                            {(authUser?.is_admin === true || authUser?.role === 'admin') && (
                                                 <li>
                                                     <a
                                                         href="/admin"

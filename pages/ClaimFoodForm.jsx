@@ -61,7 +61,7 @@ export default function ClaimFoodForm() {
                     .from('communities')
                     .select('*')
                     .eq('id', food.community_id)
-                    .single();
+                    .maybeSingle();
 
                 if (data) {
                     // Merge with static data for contact info

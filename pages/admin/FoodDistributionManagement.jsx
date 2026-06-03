@@ -313,7 +313,7 @@ function FoodDistributionManagement() {
                                                     <Button
                                                         variant="secondary"
                                                         size="sm"
-                                                        onClick={() => handleStatusChange(listing.id, 'available')}
+                                                        onClick={() => handleStatusChange(listing.id, 'active')}
                                                     >
                                                         Make Available
                                                     </Button>
