@@ -234,8 +234,12 @@ async def fetch_donor_listing_defaults(user_id: str) -> dict[str, Any]:
         return {}
     rows = await supabase_get("users", {
         "id": f"eq.{user_id}",
+        # Only select columns that actually exist on `users`. Requesting
+        # missing columns (city/state/zip) makes PostgREST 400 the whole
+        # query, which silently returned {} and left AI-posted listings with
+        # no location / map pin. `address` + `location` cover the pickup spot.
         "select": (
-            "id,name,email,phone,city,state,zip,address,organization,"
+            "id,name,email,phone,address,location,organization,"
             "community_id,latitude,longitude"
         ),
         "limit": "1",
@@ -255,9 +259,6 @@ def apply_donor_defaults_to_listing(row: dict[str, Any], donor: dict[str, Any] |
         ("name", "donor_name"),
         ("email", "donor_email"),
         ("phone", "donor_phone"),
-        ("city", "donor_city"),
-        ("state", "donor_state"),
-        ("zip", "donor_zip"),
         ("organization", "donor_type"),
     ):
         if donor.get(src) and not row.get(dest):
@@ -272,16 +273,15 @@ def apply_donor_defaults_to_listing(row: dict[str, Any], donor: dict[str, Any] |
     except (TypeError, ValueError):
         pass
 
+    # When the donor didn't dictate a pickup address, fall back to the address
+    # saved on their profile so the listing still shows a location on the card
+    # and a pin on the map.
     if not row.get("location") and not row.get("full_address"):
-        addr_parts = [
-            donor.get("address"),
-            donor.get("city"),
-            donor.get("state"),
-            donor.get("zip"),
-        ]
-        addr = ", ".join(str(p).strip() for p in addr_parts if p and str(p).strip())
-        if addr:
-            row["location"] = addr[:200]
+        donor_addr = (donor.get("address") or donor.get("location") or "")
+        donor_addr = str(donor_addr).strip()
+        if donor_addr:
+            row["location"] = donor_addr[:200]
+            row["full_address"] = donor_addr[:200]
 
     return row
 
