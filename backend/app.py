@@ -2767,7 +2767,12 @@ def _normalize_listing_row(
         # Accept ISO date strings; PostgREST will reject malformed values per-row.
         row["expiry_date"] = item.expiry_date.strip()[:40]
     if item.location:
-        row["location"] = item.location.strip()[:200]
+        loc_s = item.location.strip()[:200]
+        row["location"] = loc_s
+        # full_address powers address line on search cards + map pin popover.
+        # Keep it in sync with location so bulk/photo listings render the same
+        # as manually-posted ones (mirrors _create_food_listing logic).
+        row["full_address"] = loc_s
     if item.dietary_tags:
         row["dietary_tags"] = [str(t).strip()[:40] for t in item.dietary_tags if str(t).strip()][:20]
     if item.allergens:

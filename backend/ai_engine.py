@@ -238,9 +238,10 @@ async def fetch_donor_listing_defaults(user_id: str) -> dict[str, Any]:
         # Only select columns that actually exist on `users`. Requesting
         # missing columns (city/state/zip) makes PostgREST 400 the whole
         # query, which silently returned {} and left AI-posted listings with
-        # no location / map pin. `address` + `location` cover the pickup spot.
+        # no location / map pin. Use `address` (text) for the pickup address;
+        # `location` is a JSON {lat,lng} column and is excluded intentionally.
         "select": (
-            "id,name,email,phone,address,location,organization,"
+            "id,name,email,phone,address,organization,"
             "community_id,latitude,longitude"
         ),
         "limit": "1",
@@ -277,9 +278,11 @@ def apply_donor_defaults_to_listing(row: dict[str, Any], donor: dict[str, Any] |
     # When the donor didn't dictate a pickup address, fall back to the address
     # saved on their profile so the listing still shows a location on the card
     # and a pin on the map.
+    # IMPORTANT: use only `address` (plain text) — `location` in the users table
+    # is a JSON {latitude, longitude} column and must NOT be used as an address
+    # string. Coordinates are already applied above from latitude/longitude.
     if not row.get("location") and not row.get("full_address"):
-        donor_addr = (donor.get("address") or donor.get("location") or "")
-        donor_addr = str(donor_addr).strip()
+        donor_addr = str(donor.get("address") or "").strip()
         if donor_addr:
             row["location"] = donor_addr[:200]
             row["full_address"] = donor_addr[:200]
