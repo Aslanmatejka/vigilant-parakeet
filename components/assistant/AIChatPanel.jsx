@@ -491,6 +491,19 @@ function ToolResultCard({ toolResult, language = 'en' }) {
   const searchItems = result.listings ?? result.results ?? []
   if ((tool === 'search_food_near_user' || tool === 'search_food_nearby' || tool === 'get_recent_listings') && searchItems.length > 0) {
     const t = TOOL_CARD_TOKENS.search
+
+    /** Format an ISO date string (YYYY-MM-DD) as a short human-readable label. */
+    const fmtDate = (iso) => {
+      if (!iso) return null
+      try {
+        // Parse as local date (slice to YYYY-MM-DD avoids UTC-shift on date-only strings)
+        const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number)
+        return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+      } catch {
+        return iso
+      }
+    }
+
     return (
       <ToolCardShell kind="search" language={language} titleOverride={`${t.title[language] || t.title.en} · ${searchItems.length}`}>
         <ul className="space-y-1.5">
@@ -504,7 +517,12 @@ function ToolResultCard({ toolResult, language = 'en' }) {
             const distance = miles != null && Number.isFinite(miles)
               ? `${miles.toFixed(miles < 10 ? 1 : 0)} mi`
               : null
-            const meta = [distance, item.category, item.pickup_by].filter(Boolean).join(' · ')
+
+            // Expiry: prefer expiry_date, fall back to pickup_by
+            const expiryRaw = item.expiry_date || item.pickup_by || null
+            const expiryLabel = fmtDate(expiryRaw)
+
+            const meta = [distance, item.category, expiryLabel ? `Exp ${expiryLabel}` : null].filter(Boolean).join(' · ')
             const address = item.address || item.full_address || item.pickup_location || null
             return (
               <li key={item.id} className="rounded-lg bg-slate-900/40 px-2.5 py-2 border border-emerald-500/15">
@@ -514,6 +532,12 @@ function ToolResultCard({ toolResult, language = 'en' }) {
                   <div className={`${t.sub} text-[11px] mt-0.5 flex items-start gap-1`}>
                     <i className="fas fa-map-marker-alt mt-[2px] text-[10px] opacity-70" aria-hidden="true" />
                     <span className="break-words">{address}</span>
+                  </div>
+                )}
+                {item.community_name && (
+                  <div className={`${t.sub} text-[11px] mt-0.5 flex items-center gap-1`}>
+                    <i className="fas fa-people-group text-[10px] opacity-70" aria-hidden="true" />
+                    <span>{item.community_name}</span>
                   </div>
                 )}
                 {item.dietary_tags?.length > 0 && (

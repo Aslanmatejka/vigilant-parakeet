@@ -1287,7 +1287,8 @@ async def _get_recent_listings(
     params: dict = {
         "select": (
             "id,title,description,category,quantity,unit,"
-            "latitude,longitude,full_address,donor_name,"
+            "latitude,longitude,full_address,location,donor_name,"
+            "community_id,communities(id,name),"
             "expiry_date,pickup_by,status,dietary_tags,allergens,created_at"
         ),
         "status": "in.(approved,active)",
@@ -1328,12 +1329,17 @@ async def _get_recent_listings(
             "unit": row.get("unit"),
             "latitude": row.get("latitude"),
             "longitude": row.get("longitude"),
-            "address": row.get("full_address"),
+            "address": row.get("full_address") or _extract_location_text(row.get("location")),
             "pickup_by": row.get("pickup_by"),
             "expiry_date": row.get("expiry_date"),
             "donor_name": row.get("donor_name"),
             "created_at": created_at,
             "hours_ago": hours_ago,
+            "community_name": (
+                (row.get("communities") or {}).get("name")
+                or row.get("community_name")
+                or None
+            ),
         })
 
     if not listings:
@@ -1547,7 +1553,8 @@ async def _search_food_near_user(
     params: dict = {
         "select": (
             "id,title,description,category,quantity,unit,"
-            "latitude,longitude,full_address,donor_name,"
+            "latitude,longitude,full_address,location,donor_name,"
+            "community_id,communities(id,name),"
             "expiry_date,pickup_by,status,"
             "dietary_tags,allergens,created_at"
         ),
@@ -1621,6 +1628,11 @@ async def _search_food_near_user(
             "distance_km": round(dist, 1) if dist is not None else None,
             "latitude": lat,
             "longitude": lng,
+            "community_name": (
+                (listing.get("communities") or {}).get("name")
+                or listing.get("community_name")
+                or None
+            ),
         }
         results.append(result)
 
