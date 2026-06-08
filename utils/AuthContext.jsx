@@ -68,6 +68,9 @@ export const AuthProvider = ({ children }) => {
   const backfilledRef = useRef(new Map());
   useEffect(() => {
     if (!user?.id || !user?.address) return;
+    // Only backfill if coordinates are actually missing — don't overwrite
+    // existing (possibly manually adjusted) coordinates.
+    if (user?.latitude && user?.longitude) return;
     const addrKey = `${user.id}:${String(user.address).trim()}`;
     if (backfilledRef.current.get(user.id) === addrKey) return;
     backfilledRef.current.set(user.id, addrKey);

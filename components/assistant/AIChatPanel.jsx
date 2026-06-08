@@ -2270,7 +2270,7 @@ function AIChatPanel() {
 
         setIsVoiceSpeaking(true)
         try {
-          const audioBlob = await textToSpeech(cleanText, { lang: lastAssistantMessage.message?.match(/[\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]/) ? 'es' : 'en' })
+          const audioBlob = await textToSpeech(cleanText, { lang: language === 'es' ? 'es' : 'en' })
           const { play, stop } = playAudioBlob(
             audioBlob,
             () => { setTapToHear(null); setIsVoiceSpeaking(true) },
@@ -2298,7 +2298,7 @@ function AIChatPanel() {
         if (typeof window !== 'undefined' && window.speechSynthesis) {
           await new Promise((resolve) => {
             const utterance = new SpeechSynthesisUtterance(cleanText.slice(0, 500))
-            utterance.lang = lastAssistantMessage.message?.match(/[\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]/) ? 'es-ES' : 'en-US'
+            utterance.lang = language === 'es' ? 'es-ES' : 'en-US'
             utterance.rate = 1.0
             utterance.onend = resolve
             utterance.onerror = resolve
@@ -2319,7 +2319,7 @@ function AIChatPanel() {
       }
     }
     speakWithOpenAI()
-  }, [voiceMode, lastAssistantMessage, isLoading])
+  }, [voiceMode, lastAssistantMessage, isLoading, language])
 
   // Cleanup on unmount
   useEffect(() => {
