@@ -52,6 +52,32 @@ def _parse_dt(value) -> Optional[datetime]:
         return None
 
 
+def _extract_location_text(location_field) -> str:
+    """Safely extract a plain-text address from a food_listings.location value.
+
+    food_listings.location is a JSONB column that can hold either:
+      - A plain string: "123 Main St, Oakland, CA"
+      - A JSON string: '{"address": "123 Main St", "latitude": 37.8, ...}'
+      - A dict (returned by PostgREST for JSONB): {"address": "...", ...}
+    Returns a plain text string or "" when nothing useful is found.
+    """
+    if not location_field:
+        return ""
+    if isinstance(location_field, dict):
+        return str(location_field.get("address") or location_field.get("full_address") or "").strip()
+    if isinstance(location_field, str):
+        trimmed = location_field.strip()
+        if trimmed.startswith("{"):
+            try:
+                parsed = json.loads(trimmed)
+                if isinstance(parsed, dict):
+                    return str(parsed.get("address") or parsed.get("full_address") or "").strip()
+            except (ValueError, TypeError):
+                pass
+        return trimmed
+    return ""
+
+
 def _normalize_expiry_date(*candidates: Optional[str]) -> Optional[str]:
     """Return YYYY-MM-DD from the first valid expiry candidate."""
     for raw in candidates:
@@ -1586,7 +1612,7 @@ async def _search_food_near_user(
             "category": listing.get("category"),
             "quantity": listing.get("quantity"),
             "unit": listing.get("unit"),
-            "address": listing.get("full_address") or listing.get("location", ""),
+            "address": listing.get("full_address") or _extract_location_text(listing.get("location")),
             "donor_name": listing.get("donor_name"),
             "expiry_date": listing.get("expiry_date"),
             "pickup_by": listing.get("pickup_by"),
@@ -1686,7 +1712,9 @@ async def _get_user_profile(user_id: str) -> dict:
                 "organization": profile.get("organization"),
                 "is_admin": profile.get("is_admin", False),
                 "member_since": profile.get("created_at"),
-                "address": profile.get("address") or profile.get("location"),
+                # Use only `address` (plain text) — users.location is a JSON
+                # {latitude,longitude} dict used for coordinates, not display.
+                "address": profile.get("address") or "",
                 "latitude": lat_val,
                 "longitude": lng_val,
                 "address_geocoded_at": profile.get("address_geocoded_at"),
@@ -1824,7 +1852,7 @@ async def _get_pickup_schedule(
                     food_title = food_rows[0].get("title", food_title)
                     claim["address"] = (
                         food_rows[0].get("full_address")
-                        or food_rows[0].get("location", "")
+                        or _extract_location_text(food_rows[0].get("location"))
                     )
             except Exception:
                 pass
@@ -2346,7 +2374,7 @@ async def _check_pickup_schedule(
                     f = food_rows[0]
                     food_info = {
                         "title": f.get("title", "Food item"),
-                        "address": f.get("full_address") or f.get("location", ""),
+                        "address": f.get("full_address") or _extract_location_text(f.get("location")),
                         "pickup_by": f.get("pickup_by"),
                         "expiry_date": f.get("expiry_date"),
                     }
@@ -3261,7 +3289,7 @@ async def _claim_food_listing(
 
     # --- 3c. Find or create a receipt for this user (so the claim appears in Receipts & Activity) ---
     receipt_id = None
-    pickup_loc = listing.get("full_address") or listing.get("location") or None
+    pickup_loc = listing.get("full_address") or _extract_location_text(listing.get("location")) or None
     try:
         existing_receipts = await supabase_get("receipts", {
             "user_id": f"eq.{user_id}",
@@ -3687,7 +3715,9 @@ async def _bulk_import_listings(
     # Donor profile (address + coordinates) loaded ONCE and reused for every
     # row that doesn't carry its own pickup address. Mirrors the single-listing
     # creator so bulk-imported listings get a location + map pin too.
-    donor_addr = str(donor.get("address") or donor.get("location") or "").strip()
+    # Use only `address` (plain text) — users.location is a JSON {latitude,longitude}
+    # dict used for coordinates, not as a human-readable address string.
+    donor_addr = str(donor.get("address") or "").strip()
     explicit_default = str(default_address).strip() if default_address else ""
     # Batch-wide fallback address: the address the AI passed wins over the
     # donor's saved profile address.
