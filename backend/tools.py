@@ -1640,7 +1640,8 @@ async def _get_user_profile(user_id: str) -> dict:
             "select": (
                 "id,name,email,phone,location,"
                 "is_admin,avatar_url,role,account_type,organization,community_role,"
-                "created_at,address,latitude,longitude,address_geocoded_at"
+                "created_at,address,latitude,longitude,address_geocoded_at,"
+                "dietary_restrictions,allergies"
             ),
         })
         if not rows:
@@ -1689,6 +1690,8 @@ async def _get_user_profile(user_id: str) -> dict:
                 "latitude": lat_val,
                 "longitude": lng_val,
                 "address_geocoded_at": profile.get("address_geocoded_at"),
+                "dietary_restrictions": profile.get("dietary_restrictions"),
+                "allergies": profile.get("allergies"),
             },
             "activity": {
                 "listings_shared": listings_count,
