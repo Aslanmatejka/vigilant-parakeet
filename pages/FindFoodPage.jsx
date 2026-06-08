@@ -52,7 +52,7 @@ function FindFoodPage({ initialCategory }) {
     
     const [searchTerm, setSearchTerm] = useState('');
     const [isSearchActive, setIsSearchActive] = useState(false);
-    const [visibleCount, setVisibleCount] = useState(4);
+    const [visibleCount, setVisibleCount] = useState(12);
     const [hoveredFoodId, setHoveredFoodId] = useState(null);
     const [voiceModalOpen, setVoiceModalOpen] = useState(false);
     const [communityNames, setCommunityNames] = useState({});
@@ -82,12 +82,8 @@ function FindFoodPage({ initialCategory }) {
         }
     }, [routerLocation.search]);
 
-    // Auto-filter by user's community if they have one assigned
-    useEffect(() => {
-        if (user?.community_id && !filters.community) {
-            setFilters(prev => ({ ...prev, community: String(user.community_id) }));
-        }
-    }, [user?.community_id]);
+    // NOTE: intentionally NOT auto-filtering by the user's community —
+    // users should see all available food, not just from their own community.
 
     useEffect(() => {
         let cancelled = false;
