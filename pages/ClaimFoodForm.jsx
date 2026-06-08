@@ -102,8 +102,13 @@ export default function ClaimFoodForm() {
             const startOfDay = new Date();
             startOfDay.setHours(0, 0, 0, 0);
 
-            const pickupLocationName = community?.name || food.location || 'Community Location';
-            const pickupAddress = community?.location || 'Address not available';
+            // food_listings.location is a JSONB column (dict from frontend writes);
+            // always extract a plain-text address before using it as a string.
+            const foodAddressText = food.full_address
+                || (typeof food.location === 'string' ? food.location : food.location?.address)
+                || '';
+            const pickupLocationName = community?.name || foodAddressText || 'Community Location';
+            const pickupAddress = community?.location || foodAddressText || 'Address not available';
 
             const { data: existingReceipts, error: receiptCheckError } = await supabase
                 .from('receipts')
@@ -207,7 +212,7 @@ export default function ClaimFoodForm() {
                         claimerPhone: user.phone,
                         claimerName: user.name || 'there',
                         foodTitle: food.title || food.name,
-                        pickupLocation: community?.name || food.location,
+                        pickupLocation: community?.name || foodAddressText || 'your pickup location',
                         pickupDeadline: formatPickupDate(pickupDeadline),
                     });
                 }
@@ -219,7 +224,7 @@ export default function ClaimFoodForm() {
                         donorName: food.donor_name || 'Donor',
                         claimerName: user.name || 'A community member',
                         foodTitle: food.title || food.name,
-                        pickupLocation: community?.name || food.location,
+                        pickupLocation: community?.name || foodAddressText || 'the pickup location',
                     });
                 }
             } catch (smsError) {

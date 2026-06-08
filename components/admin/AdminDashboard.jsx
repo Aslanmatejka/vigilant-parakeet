@@ -581,7 +581,7 @@ function AdminDashboard() {
                                             icon="fa-utensils"
                                             accent="bg-emerald-50 text-emerald-700"
                                             title={l.title || l.name || 'Untitled listing'}
-                                            subtitle={l.users?.name ? `by ${l.users.name}` : (l.location || '')}
+                                            subtitle={l.users?.name ? `by ${l.users.name}` : (l.full_address || (typeof l.location === 'string' ? l.location : l.location?.address) || '')}
                                             time={relativeTime(l.created_at)}
                                             onClick={() => navigate('/admin/share-food')}
                                         />

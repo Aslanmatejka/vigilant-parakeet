@@ -32,12 +32,17 @@ function FoodList({
             let matchesFilters = true;
 
             // Location filter
-            if (filters.locationEnabled && userLocation && food.location) {
-                const isNearby = locationService.isWithinRadius(
-                    userLocation,
-                    food.location,
-                    filters.radius
-                );
+            if (filters.locationEnabled && userLocation && (food.latitude != null || food.location?.latitude != null)) {
+                // Prefer dedicated lat/lng columns; fall back to JSONB location dict for legacy rows.
+                const foodLat = food.latitude ?? food.location?.latitude;
+                const foodLng = food.longitude ?? food.location?.longitude;
+                const isNearby = foodLat != null && foodLng != null
+                    ? locationService.isWithinRadius(
+                        userLocation,
+                        { latitude: foodLat, longitude: foodLng },
+                        filters.radius
+                    )
+                    : true; // No coords — keep visible, can't filter by distance.
                 if (!isNearby) matchesFilters = false;
             }
 
@@ -67,18 +72,23 @@ function FoodList({
         // Sort by distance if location is enabled
         if (filters.locationEnabled && userLocation) {
             filtered.sort((a, b) => {
-                if (!a.location || !b.location) return 0;
+                const aLat = a.latitude ?? a.location?.latitude;
+                const aLng = a.longitude ?? a.location?.longitude;
+                const bLat = b.latitude ?? b.location?.latitude;
+                const bLng = b.longitude ?? b.location?.longitude;
+                if (aLat == null || aLng == null) return 1;
+                if (bLat == null || bLng == null) return -1;
                 const distA = locationService.calculateDistance(
                     userLocation.latitude,
                     userLocation.longitude,
-                    a.location.latitude,
-                    a.location.longitude
+                    aLat,
+                    aLng
                 );
                 const distB = locationService.calculateDistance(
                     userLocation.latitude,
                     userLocation.longitude,
-                    b.location.latitude,
-                    b.location.longitude
+                    bLat,
+                    bLng
                 );
                 return distA - distB;
             });
@@ -170,12 +180,12 @@ function FoodList({
                         food={food}
                         onClaim={onClaim}
                         distance={
-                            userLocation && food.location
+                            userLocation && (food.latitude != null || food.location?.latitude != null)
                                 ? locationService.calculateDistance(
                                     userLocation.latitude,
                                     userLocation.longitude,
-                                    food.location.latitude,
-                                    food.location.longitude
+                                    food.latitude ?? food.location?.latitude,
+                                    food.longitude ?? food.location?.longitude
                                 )
                                 : null
                         }
