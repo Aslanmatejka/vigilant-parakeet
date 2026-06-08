@@ -3,7 +3,7 @@
 // NOTE: OpenAI API key is backend-only. All AI calls go through /api/ai/*
 window.__ENV__ = {
     // Mapbox Configuration
-    VITE_MAPBOX_TOKEN: '', // Set your Mapbox token here
+    VITE_MAPBOX_TOKEN: 'pk.eyJ1Ijoic2lnbndpc2UiLCJhIjoiY21rc2tjNjQ3MGFjajNkcHJ1cTNsbWV6dyJ9.xbJQFP3HCM2jmG87wvwC1Q',
     
     // API Settings
     API_TIMEOUT: '30000',
