@@ -142,28 +142,41 @@ export const useFoodListings = (filters = {}, limit = null) => {
     fetchListings()
   }, [fetchListings])
 
+  // Keep a stable ref to fetchListings so the realtime subscription can
+  // always call the latest version without needing to re-subscribe when
+  // non-status filters (community, category, etc.) change.
+  const fetchListingsRef = useRef(fetchListings)
+  useEffect(() => { fetchListingsRef.current = fetchListings }, [fetchListings])
+
   // Real-time subscription
   useEffect(() => {
     const allowedStatuses = filters.status
       ? (Array.isArray(filters.status) ? filters.status : [filters.status])
       : null;
 
+    // Debounce re-fetches so bursts of events (e.g. bulk import) only trigger
+    // one round-trip. We store the timer in a ref so the closure always sees
+    // the latest value without requiring it in the dependency array.
+    let refetchTimer = null;
+    const scheduleRefetch = () => {
+      clearTimeout(refetchTimer);
+      refetchTimer = setTimeout(() => { fetchListingsRef.current(); }, 400);
+    };
+
     const subscription = dataService.subscribeToFoodListings((payload) => {
       if (payload.eventType === 'INSERT') {
-        // Only add if the new listing matches the status filter
+        // Only react if the new listing matches the status filter
         if (allowedStatuses && !allowedStatuses.includes(payload.new?.status)) return;
-        setListings(prev => [payload.new, ...prev])
+        // Re-fetch with full JOIN so community_name, expiry_date etc. are
+        // all populated correctly (payload.new is a raw DB row with no joins).
+        scheduleRefetch();
       } else if (payload.eventType === 'UPDATE') {
         const matchesFilter = !allowedStatuses || allowedStatuses.includes(payload.new?.status);
         if (matchesFilter) {
-          // Upsert: update if exists, add if newly matching
-          setListings(prev => {
-            const exists = prev.some(l => l.id === payload.new.id);
-            if (exists) return prev.map(l => l.id === payload.new.id ? payload.new : l);
-            return [payload.new, ...prev];
-          })
+          // Re-fetch to get joined community name and other enriched fields.
+          scheduleRefetch();
         } else {
-          // Status no longer matches — remove from list
+          // Status no longer matches — remove from list immediately.
           setListings(prev => prev.filter(l => l.id !== payload.new.id))
         }
       } else if (payload.eventType === 'DELETE') {
@@ -172,7 +185,8 @@ export const useFoodListings = (filters = {}, limit = null) => {
     })
 
     return () => {
-      dataService.unsubscribe('food_listings')
+      clearTimeout(refetchTimer);
+      dataService.unsubscribe('food_listings');
     }
   }, [JSON.stringify(filters.status)])
 
