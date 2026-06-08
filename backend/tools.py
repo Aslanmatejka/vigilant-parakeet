@@ -1664,8 +1664,8 @@ async def _get_user_profile(user_id: str) -> dict:
         rows = await supabase_get("users", {
             "id": f"eq.{user_id}",
             "select": (
-                "id,name,email,phone,location,"
-                "is_admin,avatar_url,role,account_type,organization,community_role,"
+                "id,name,email,phone,"
+                "is_admin,avatar_url,account_type,organization,community_role,"
                 "created_at,address,latitude,longitude,address_geocoded_at,"
                 "dietary_restrictions,allergies"
             ),
@@ -1706,7 +1706,9 @@ async def _get_user_profile(user_id: str) -> dict:
             "profile": {
                 "name": profile.get("name") or profile.get("email"),
                 "email": profile.get("email"),
-                "role": profile.get("role", "member"),
+                # community_role holds the user-facing role (donor/recipient/volunteer).
+                # users.role is the Supabase auth role (e.g. 'authenticated') and is
+                # NOT selected here to avoid confusing the AI with meaningless values.
                 "community_role": profile.get("community_role"),
                 "account_type": profile.get("account_type"),
                 "organization": profile.get("organization"),

@@ -2404,6 +2404,7 @@ def _query_tool_specs(is_admin: bool) -> list[dict]:
 
 
 def _slim_listing(row: dict) -> dict:
+    from backend.tools import _extract_location_text
     return {
         "id": row.get("id"),
         "title": row.get("title"),
@@ -2411,7 +2412,9 @@ def _slim_listing(row: dict) -> dict:
         "quantity": row.get("quantity"),
         "unit": row.get("unit"),
         "status": row.get("status"),
-        "location": row.get("location") or row.get("full_address"),
+        # food_listings.location is JSONB (dict from frontend writes); always
+        # extract the human-readable address string via the helper.
+        "location": row.get("full_address") or _extract_location_text(row.get("location")),
         "pickup_by": row.get("pickup_by"),
         "expiry_date": row.get("expiry_date"),
         "dietary_tags": row.get("dietary_tags") or [],
