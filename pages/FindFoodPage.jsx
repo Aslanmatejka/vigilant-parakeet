@@ -168,13 +168,22 @@ function FindFoodPage({ initialCategory }) {
 
         // Client-side safety: hide any listing whose expiry_date is in the past
         // or whose status is 'expired'. This ensures stale cache never shows expired items.
-        const todayStart = new Date();
-        todayStart.setHours(0, 0, 0, 0);
+        //
+        // IMPORTANT: food.expiry_date is a YYYY-MM-DD string. new Date("YYYY-MM-DD")
+        // parses as UTC midnight, so in US timezones (UTC-7/8) a listing expiring
+        // "today" would evaluate as expired at 5pm the day before. Compare date
+        // strings directly using local-timezone date to avoid this off-by-one.
+        const now = new Date();
+        const todayStr = [
+            now.getFullYear(),
+            String(now.getMonth() + 1).padStart(2, '0'),
+            String(now.getDate()).padStart(2, '0'),
+        ].join('-');
         result = result.filter(food => {
             if (food.status === 'expired') return false;
             if (!food.expiry_date) return true;
-            const exp = new Date(food.expiry_date);
-            return !isNaN(exp.getTime()) && exp >= todayStart;
+            // ISO date string comparison: "2026-06-08" >= "2026-06-08" → keep.
+            return String(food.expiry_date).slice(0, 10) >= todayStr;
         });
 
         if (!isSearchActive && searchTerm) {
@@ -415,6 +424,9 @@ function FindFoodPage({ initialCategory }) {
                                             variant="secondary"
                                             onClick={() => {
                                                 setSearchTerm('');
+                                                // Also exit search mode so the full
+                                                // listings replace the search results.
+                                                setIsSearchActive(false);
                                                 setFilters({
                                                     category: '',
                                                     type: 'all',

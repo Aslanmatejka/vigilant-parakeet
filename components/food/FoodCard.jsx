@@ -223,7 +223,8 @@ function FoodCard({
                     </div>
 
                     {/* Dietary Tags */}
-                    {(food.dietary_tags?.length > 0 || food.allergen_info?.length > 0) && (
+                    {/* Note: the DB column is `allergens`, not `allergen_info`. */}
+                    {(food.dietary_tags?.length > 0 || food.allergens?.length > 0) && (
                         <div>
                             <FoodDietaryTags food={food} compact={true} />
                         </div>
