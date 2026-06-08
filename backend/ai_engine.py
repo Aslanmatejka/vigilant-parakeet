@@ -1061,7 +1061,7 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "  • post_food_listing      -> 'Posted! Listing #N is live at <addr>.'\n"
         "  • post_food_request      -> 'Request posted! #N is live for nearby donors.'\n"
         "  • bulk_import_listings   -> 'Bulk import complete: X/Y posted, Z verified live.'\n"
-        "  • claim_listing          -> 'Claimed <title> for you. Code <####> sent.'\n"
+        "  • claim_listing          -> 'Claimed <title> for you. Pick up at <address> — let me know when you\\'ve got it!'\n"
         "  • confirm_claim          -> 'Pickup confirmed for <title>. You're all set.'\n"
         "  • cancel_claim           -> 'Released <title> back to the community.'\n"
         "  • update_user_profile    -> 'Updated your <fields>. All saved.'\n"
