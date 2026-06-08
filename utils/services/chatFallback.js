@@ -154,7 +154,22 @@ const DEFAULT_REPLIES = [
 ]
 
 const DEFAULT_SUGGESTIONS = ['Find food', 'Share food', 'See recipes']
+const DEFAULT_SUGGESTIONS_ES = ['Buscar comida', 'Compartir comida', 'Ver recetas']
 const DEFAULT_ACTION = { label: 'Open dashboard', href: '/dashboard' }
+const DEFAULT_ACTION_ES = { label: 'Abrir panel', href: '/dashboard' }
+
+function _looksSpanish(text) {
+    const raw = String(text || '')
+    if (/[¿¡]/.test(raw)) return true
+    if ((raw.match(/[áéíóúü]/gi) || []).length >= 2) return true
+    const lower = raw.toLowerCase()
+    const markers = ['hola', 'gracias', 'comida', 'buscar', 'quiero', 'necesito', 'cómo', 'donde', 'dónde']
+    let hits = 0
+    for (const m of markers) {
+        if (lower.includes(m)) hits += 1
+    }
+    return hits >= 2
+}
 
 // Module-level rotation cursor so consecutive defaults don't repeat verbatim.
 let _defaultCursor = 0
@@ -184,15 +199,16 @@ const _pickVariant = (replies, message) => {
  */
 export function buildChatFallback(message) {
     const raw = (message || '').trim()
+    const isEs = _looksSpanish(raw)
     let chosenText = null
-    let suggestions = DEFAULT_SUGGESTIONS
-    let action = DEFAULT_ACTION
+    let suggestions = isEs ? DEFAULT_SUGGESTIONS_ES : DEFAULT_SUGGESTIONS
+    let action = isEs ? DEFAULT_ACTION_ES : DEFAULT_ACTION
 
     if (raw) {
         for (const route of ROUTES) {
             if (route.match.test(raw)) {
                 chosenText = _pickVariant(route.replies, raw)
-                suggestions = route.suggestions || DEFAULT_SUGGESTIONS
+                suggestions = route.suggestions || (isEs ? DEFAULT_SUGGESTIONS_ES : DEFAULT_SUGGESTIONS)
                 action = route.action || null
                 break
             }
@@ -200,16 +216,31 @@ export function buildChatFallback(message) {
     }
 
     if (!chosenText) {
-        chosenText = _pickDefault()
+        chosenText = isEs
+            ? 'No estoy seguro de haber entendido — ¿quieres buscar comida, compartir comida o ver tu panel?'
+            : _pickDefault()
     }
 
     return {
         response: chosenText,
-        lang: 'en',
+        lang: isEs ? 'es' : 'en',
         audioUrl: null,
         conversationId: null,
         toolResults: [],
-        suggestions,
+        suggestions: isEs
+            ? suggestions.map((s) => {
+                const map = {
+                    'Find food': 'Buscar comida',
+                    'Share food': 'Compartir comida',
+                    'See recipes': 'Ver recetas',
+                    'Open dashboard': 'Abrir panel',
+                    'Find food near me': 'Buscar comida cerca',
+                    'View impact': 'Ver impacto',
+                    'How it works': 'Cómo funciona',
+                }
+                return map[s] || s
+            })
+            : suggestions,
         action,
         degraded: true,
         source: 'local',

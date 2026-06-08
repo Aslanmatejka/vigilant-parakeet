@@ -205,14 +205,29 @@ class DataService {
       let claims = [];
 
       if (listingIds.length > 0) {
-        const { data: userClaims, error: claimsError } = await supabase
-          .from('food_claims')
-          .select('id, food_id, members_count, people, school_staff, students, status, created_at')
-          .in('food_id', listingIds)
-          .eq('status', 'approved');
-
-        if (claimsError) throw claimsError;
-        claims = userClaims || [];
+        let userClaims = [];
+        try {
+          const { data, error: claimsError } = await supabase
+            .from('food_claims')
+            .select('id, food_id, members_count, people, school_staff, students, status, created_at')
+            .in('food_id', listingIds)
+            .eq('status', 'approved');
+          if (claimsError) throw claimsError;
+          userClaims = data || [];
+        } catch (err) {
+          if (err && err.code === '42703') {
+            const { data, error: claimsError2 } = await supabase
+              .from('food_claims')
+              .select('id, food_id, members_count, school_staff, students, status, created_at')
+              .in('food_id', listingIds)
+              .eq('status', 'approved');
+            if (claimsError2) throw claimsError2;
+            userClaims = data || [];
+          } else {
+            throw err;
+          }
+        }
+        claims = userClaims;
       }
 
       // Calculate metrics
@@ -492,11 +507,20 @@ class DataService {
             name,
             avatar_url,
             organization,
-            email
+            email,
+            address
+          ),
+          communities:community_id (
+            id,
+            name
           )
         `;
 
-      const selectWithoutCommunity = selectWithCommunity.replace(/\n\s*community_id,?/, '\n');
+      const selectWithoutCommunityJoin = selectWithCommunity.replace(
+        /\n\s*communities:community_id \([\s\S]*?\)\n/,
+        '\n'
+      );
+      const selectWithoutCommunity = selectWithoutCommunityJoin.replace(/\n\s*community_id,?/, '\n');
 
       // Helper to build query given a select string
       const buildQuery = (selectStr) => {
@@ -539,11 +563,16 @@ class DataService {
       const timeoutId = setTimeout(() => controller.abort(), 15000);
 
       // First attempt: include community_id
-      const withDonor = (listing) => ({
-        ...listing,
-        image_url: listing.image_url || assignFoodImage(listing),
-        donor: listing.users,
-      });
+      const withDonor = (listing) => {
+        const community = listing.communities;
+        const communityRecord = Array.isArray(community) ? community[0] : community;
+        return {
+          ...listing,
+          image_url: listing.image_url || assignFoodImage(listing),
+          donor: listing.users,
+          community_name: communityRecord?.name || listing.community_name || null,
+        };
+      };
       try {
         const q1 = buildQuery(selectWithCommunity);
         const { data, error } = await q1.order('created_at', { ascending: false }).abortSignal(controller.signal);
@@ -552,6 +581,17 @@ class DataService {
         return data.map(withDonor);
       } catch (err) {
         clearTimeout(timeoutId);
+        const errMsg = err?.message || '';
+        const missingRelationship = err?.code === 'PGRST200' || errMsg.includes('relationship');
+        if (missingRelationship) {
+          const controllerJoin = new AbortController();
+          const timeoutJoin = setTimeout(() => controllerJoin.abort(), 15000);
+          const qJoin = buildQuery(selectWithoutCommunityJoin);
+          const { data: dataJoin, error: errorJoin } = await qJoin.order('created_at', { ascending: false }).abortSignal(controllerJoin.signal);
+          clearTimeout(timeoutJoin);
+          if (errorJoin) throw errorJoin;
+          return dataJoin.map(withDonor);
+        }
         // If community_id column doesn't exist, retry without it
         if (err && err.code === '42703') {
           const controller2 = new AbortController();
@@ -656,12 +696,23 @@ class DataService {
         dietary_tags: listingData.dietary_tags || [],
         allergens: listingData.allergens || [],
         ingredients: listingData.ingredients || null,
-        location: listingData.donor_city || listingData.donor_state ? {
-          address: [listingData.donor_city, listingData.donor_state, listingData.donor_zip].filter(Boolean).join(', ').trim(),
-          latitude: listingData.latitude,
-          longitude: listingData.longitude
-        } : (listingData.full_address || null)
       };
+
+      const fullAddress = listingData.full_address?.trim?.() || listingData.full_address || null;
+      if (fullAddress) {
+        listing.full_address = fullAddress;
+        listing.location = {
+          address: fullAddress,
+          latitude: listingData.latitude || null,
+          longitude: listingData.longitude || null,
+        };
+      } else if (listingData.donor_city || listingData.donor_state) {
+        listing.location = {
+          address: [listingData.donor_city, listingData.donor_state, listingData.donor_zip].filter(Boolean).join(', ').trim(),
+          latitude: listingData.latitude || null,
+          longitude: listingData.longitude || null,
+        };
+      }
 
       // Use direct REST API to avoid Supabase JS client auth issues
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -1577,6 +1628,8 @@ class DataService {
         .replace(/\s+/g, ' ')
         .trim()
 
+      const todayStr = new Date().toISOString().slice(0, 10);
+
       let query = supabase
         .from('food_listings')
         .select(`
@@ -1591,10 +1644,6 @@ class DataService {
         .in('status', ['approved', 'active'])
         .or(`title.ilike.%${safeTerm}%,description.ilike.%${safeTerm}%`)
 
-      // Exclude expired listings
-      const todayStr = new Date().toISOString().slice(0, 10);
-      query = query.or(`expiry_date.is.null,expiry_date.gte.${todayStr}`);
-
       // Apply additional filters
       if (filters.category) {
         query = query.eq('category', filters.category)
@@ -1607,7 +1656,14 @@ class DataService {
 
       if (error) throw error
 
-      return data.map(listing => ({
+      // Expiry filter applied client-side — a second .or() would overwrite the
+      // title/description .or() above (PostgREST uses searchParams.set).
+      const activeRows = (data || []).filter((row) => {
+        if (!row.expiry_date) return true
+        return String(row.expiry_date).slice(0, 10) >= todayStr
+      })
+
+      return activeRows.map(listing => ({
         ...listing,
         image_url: listing.image_url || assignFoodImage(listing),
         donor: listing.users
@@ -2343,7 +2399,7 @@ class DataService {
     try {
       const { data, error } = await supabase
         .from('donation_schedules')
-        .select('total_donated, donation_count')
+        .select('total_donated, donation_count, status')
         .eq('user_id', userId)
 
       if (error) throw error

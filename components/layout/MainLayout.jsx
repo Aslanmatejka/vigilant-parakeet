@@ -53,8 +53,8 @@ function MainLayout({ children }) {
     return (
         <div data-name="main-layout" className="min-h-screen flex flex-col bg-gradient-to-br from-cyan-50 via-white to-cyan-100">
             <Header/>
-            <main className="flex-grow container mx-auto px-4 py-8">
-                <div className="rounded-3xl shadow-2xl bg-white/80 backdrop-blur-md border border-cyan-100 p-6 md:p-10 transition-all duration-300">
+            <main className="flex-grow container mx-auto px-3 sm:px-4 py-4 sm:py-8">
+                <div className="rounded-2xl sm:rounded-3xl shadow-xl sm:shadow-2xl bg-white/80 backdrop-blur-md border border-cyan-100 p-4 sm:p-6 md:p-10 transition-all duration-300">
                     {children}
                 </div>
             </main>

@@ -284,7 +284,8 @@ function AdminLayout({ children, active, pendingApprovals = 0 }) {
 
                                 <div className="hidden sm:block h-6 w-px bg-slate-200 mx-1" aria-hidden="true" />
 
-                                {/* User menu */}
+                                {/* User menu — pt-2 bridges the hover gap so the menu
+                                    doesn't disappear when moving the cursor down. */}
                                 <div className="relative" ref={userMenuRef}>
                                     <button
                                         type="button"
@@ -302,9 +303,10 @@ function AdminLayout({ children, active, pendingApprovals = 0 }) {
                                     </button>
 
                                     {showUserMenu && (
+                                        <div className="absolute right-0 top-full pt-2 z-50">
                                         <div
                                             role="menu"
-                                            className="absolute right-0 mt-2 w-64 rounded-xl bg-white shadow-xl border border-slate-200 py-2 z-50 animate-[admin-fade-in_120ms_ease-out]"
+                                            className="w-64 rounded-xl bg-white shadow-xl border border-slate-200 py-2 animate-[admin-fade-in_120ms_ease-out]"
                                         >
                                             <div className="px-4 py-2 border-b border-slate-100">
                                                 <p className="text-[13px] font-semibold text-slate-900 truncate">{adminName}</p>
@@ -346,6 +348,7 @@ function AdminLayout({ children, active, pendingApprovals = 0 }) {
                                                 <i className="fas fa-right-from-bracket text-rose-500 w-4" aria-hidden="true" />
                                                 Sign out
                                             </button>
+                                        </div>
                                         </div>
                                     )}
                                 </div>

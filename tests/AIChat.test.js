@@ -5,7 +5,7 @@ import '@testing-library/jest-dom'
 // ── Mocks ────────────────────────────────────────────────────
 
 // Mock AuthContext
-const mockAuthCtx = { user: { id: 'u1', name: 'Test User' }, isAuthenticated: true, isAdmin: false }
+const mockAuthCtx = { user: { id: 'u1', name: 'Test User' }, isAuthenticated: true, isAdmin: false, initialized: true }
 jest.mock('../utils/AuthContext.jsx', () => ({
   useAuthContext: () => mockAuthCtx,
 }))

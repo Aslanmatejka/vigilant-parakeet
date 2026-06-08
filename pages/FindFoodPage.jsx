@@ -12,6 +12,8 @@ import { useAuthContext } from "../utils/AuthContext";
 import UrgencyService from "../utils/urgencyService";
 import { useMapContext } from "../utils/MapContext.jsx";
 import aiChatService from "../utils/services/aiChatService";
+import { isBayAreaCoord } from "../utils/mapBounds";
+import supabase from "../utils/supabaseClient";
 
 // Category mapping for URL parameters
 const CATEGORY_MAPPING = {
@@ -53,6 +55,7 @@ function FindFoodPage({ initialCategory }) {
     const [visibleCount, setVisibleCount] = useState(4);
     const [hoveredFoodId, setHoveredFoodId] = useState(null);
     const [voiceModalOpen, setVoiceModalOpen] = useState(false);
+    const [communityNames, setCommunityNames] = useState({});
     const [filters, setFilters] = useState({
         category: initialCategory || '',
         type: 'all',
@@ -86,7 +89,19 @@ function FindFoodPage({ initialCategory }) {
         }
     }, [user?.community_id]);
 
-    // Refresh listings every 60s so expired items disappear in near real-time.
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            const { data } = await supabase.from('communities').select('id, name');
+            if (cancelled || !data) return;
+            const map = {};
+            for (const c of data) map[String(c.id)] = c.name;
+            setCommunityNames(map);
+        })();
+        return () => { cancelled = true; };
+    }, []);
+
+    // Refresh listings every 60s
     // Also refresh when the tab regains focus or a donor publishes via AI/Share Food.
     useEffect(() => {
         const interval = setInterval(() => {
@@ -201,9 +216,9 @@ function FindFoodPage({ initialCategory }) {
             const withCoords = [];
             const withoutCoords = [];
             result.forEach(food => {
-                const lat = food.latitude || food.location?.latitude;
-                const lng = food.longitude || food.location?.longitude;
-                if (lat && lng) {
+                const lat = food.latitude ?? food.location?.latitude;
+                const lng = food.longitude ?? food.location?.longitude;
+                if (lat != null && lng != null && !Number.isNaN(Number(lat)) && !Number.isNaN(Number(lng))) {
                     withCoords.push({ ...food, _lat: lat, _lng: lng });
                 } else {
                     withoutCoords.push(food);
@@ -250,7 +265,7 @@ function FindFoodPage({ initialCategory }) {
         }
 
         return result;
-    }, [foods, searchResults, isSearchActive, searchTerm, filters]);
+    }, [foods, searchResults, isSearchActive, searchTerm, filters, currentLocation]);
 
     const LoadingSpinner = () => (
         <div className="text-center py-12" role="status">
@@ -277,21 +292,48 @@ function FindFoodPage({ initialCategory }) {
     return (
         <div
             data-name="find-food-page"
-            className="container mx-auto px-4"
+            className="container mx-auto px-3 sm:px-4"
             role="main"
         >
-            <div className="pt-0 pb-10">
-                <div className="mb-4 text-center">
-                    <h1 className="text-2xl font-bold drop-shadow-sm mb-1" style={{ color: '#2CABE3' }}>Find Food Assistance</h1>
-                    <p className="mt-1 text-sm text-gray-600">
-                        Browse available food listings and claim what you need for your school, family, or organization. All requests are confidential and reviewed promptly.
+            <div className="pt-0 pb-6 sm:pb-10">
+                <div className="mb-3 sm:mb-4 text-center">
+                    <h1 className="text-xl sm:text-2xl font-bold drop-shadow-sm mb-1" style={{ color: '#2CABE3' }}>Find Food Assistance</h1>
+                    <p className="mt-1 text-xs sm:text-sm text-gray-600 max-w-lg mx-auto leading-relaxed">
+                        Browse nearby food listings and claim what you need. All requests are confidential.
                     </p>
                 </div>
 
-                <div className="mb-8 flex flex-col sm:flex-row sm:items-center gap-3">
-                    {/* Search + Category — left */}
-                    <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto sm:max-w-xl">
-                        <div className="relative sm:w-72">
+                {/* Mobile: quick jump between map and listings */}
+                <nav
+                    aria-label="Page sections"
+                    className="lg:hidden sticky top-[4.25rem] z-30 -mx-3 sm:-mx-4 px-3 sm:px-4 py-2 mb-4 bg-white/95 backdrop-blur-md border-y border-gray-100 shadow-sm"
+                >
+                    <div className="flex gap-2">
+                        <a
+                            href="#food-map-heading"
+                            className="flex-1 inline-flex items-center justify-center gap-1.5 min-h-[44px] rounded-full bg-cyan-50 text-cyan-800 text-sm font-semibold border border-cyan-100 touch-manipulation"
+                        >
+                            <i className="fas fa-map-marked-alt text-xs" aria-hidden="true" />
+                            Map
+                        </a>
+                        <a
+                            href="#food-listings-heading"
+                            className="flex-1 inline-flex items-center justify-center gap-1.5 min-h-[44px] rounded-full bg-white text-gray-700 text-sm font-semibold border border-gray-200 touch-manipulation"
+                        >
+                            <i className="fas fa-list text-xs" aria-hidden="true" />
+                            Listings
+                            {filteredFoods.length > 0 && (
+                                <span className="ml-0.5 inline-flex min-w-[1.25rem] justify-center rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-bold text-gray-600">
+                                    {filteredFoods.length}
+                                </span>
+                            )}
+                        </a>
+                    </div>
+                </nav>
+
+                <div className="mb-6 sm:mb-8 flex flex-col gap-3">
+                    <div className="flex flex-col sm:flex-row gap-2 w-full sm:max-w-xl">
+                        <div className="relative flex-1">
                             <i className="fas fa-search absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none" aria-hidden="true"></i>
                             <input
                                 type="text"
@@ -300,14 +342,14 @@ function FindFoodPage({ initialCategory }) {
                                 onChange={e => setSearchTerm(e.target.value)}
                                 onKeyDown={e => { if (e.key === 'Enter') handleSearch(); }}
                                 placeholder="Search food..."
-                                className="w-full pl-10 pr-3 py-2 rounded-full bg-white border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3]"
+                                className="w-full min-h-[44px] pl-10 pr-3 py-2.5 rounded-full bg-white border border-gray-200 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3]"
                             />
                         </div>
                         <select
                             name="category"
                             value={filters.category}
                             onChange={handleFilterChange}
-                            className="rounded-full bg-white border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3] sm:w-48"
+                            className="w-full sm:w-48 min-h-[44px] rounded-full bg-white border border-gray-200 px-4 py-2.5 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3]"
                         >
                             <option value="">All categories</option>
                             <option value="produce">Produce</option>
@@ -318,34 +360,59 @@ function FindFoodPage({ initialCategory }) {
                             <option value="prepared">Prepared</option>
                         </select>
                         {isSearchActive && (
-                            <Button variant="secondary" onClick={handleClearSearch}>Clear</Button>
+                            <Button variant="secondary" className="min-h-[44px] w-full sm:w-auto" onClick={handleClearSearch}>Clear</Button>
                         )}
                     </div>
 
-                    {/* Voice + GPS — right */}
                     <button
                         type="button"
                         onClick={() => setVoiceModalOpen(true)}
-                        className="sm:ml-auto inline-flex items-center justify-center gap-2 rounded-full bg-gradient-to-r from-[#2CABE3] to-[#1d8fbf] px-4 py-2 text-xs font-semibold text-white shadow-md shadow-[#2CABE3]/25 hover:shadow-lg hover:shadow-[#2CABE3]/30 transition whitespace-nowrap"
+                        className="w-full sm:w-auto sm:self-end inline-flex items-center justify-center gap-2 min-h-[44px] rounded-full bg-gradient-to-r from-[#2CABE3] to-[#1d8fbf] px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-[#2CABE3]/25 hover:shadow-lg hover:shadow-[#2CABE3]/30 transition touch-manipulation"
                     >
-                        <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/20">
-                            <i className="fas fa-microphone text-[11px]" aria-hidden="true" />
+                        <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/20">
+                            <i className="fas fa-microphone text-xs" aria-hidden="true" />
                         </span>
                         Voice + GPS finder
                     </button>
                 </div>
-                <div className="mt-12">
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        {/* Listings: 2-column compact grid, equal width with map */}
-                        <div>
-                            <h2 className="text-2xl font-bold text-gray-800 mb-4">Available Food Listings</h2>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm [&_.h-48]:h-32">
+                <div className="mt-4 sm:mt-12">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+                        {/* Map first on mobile for location-first discovery */}
+                        <aside aria-labelledby="food-map-heading" className="order-1 lg:order-2">
+                            <div className="lg:sticky lg:top-24 overflow-visible">
+                                <h2
+                                    id="food-map-heading"
+                                    className="scroll-mt-28 text-lg sm:text-2xl font-bold text-gray-800 mb-3 sm:mb-4 flex items-center"
+                                >
+                                    <i className="fas fa-map-marked-alt text-cyan-600 mr-2" aria-hidden="true"></i>
+                                    Food Locations Map
+                                </h2>
+                                <div className="relative isolate overflow-visible rounded-xl sm:rounded-2xl shadow-lg border border-gray-100 h-[min(52vh,420px)] sm:h-[480px] lg:h-[600px]">
+                                    <FoodMap
+                                        showSignupPrompt={!isAuthenticated}
+                                        highlightedFoodId={hoveredFoodId}
+                                    />
+                                </div>
+                            </div>
+                        </aside>
+
+                        <div className="order-2 lg:order-1">
+                            <h2
+                                id="food-listings-heading"
+                                className="scroll-mt-28 text-lg sm:text-2xl font-bold text-gray-800 mb-3 sm:mb-4"
+                            >
+                                Available Food Listings
+                                {filteredFoods.length > 0 && (
+                                    <span className="ml-2 text-sm font-normal text-gray-500">({filteredFoods.length})</span>
+                                )}
+                            </h2>
+                            <div className="grid grid-cols-2 gap-2 sm:gap-4 text-xs sm:text-sm [&_.h-48]:h-28 sm:[&_.h-48]:h-32 [&_#card-title]:text-sm [&_#card-title]:leading-snug [&_#card-title]:line-clamp-2 sm:[&_#card-title]:text-lg sm:[&_#card-title]:line-clamp-none [&_.p-4]:p-2.5 sm:[&_.p-4]:p-4">
                                 {foodsLoading && foods.length === 0 ? (
-                                    <div className="sm:col-span-2"><LoadingSpinner /></div>
+                                    <div className="col-span-2"><LoadingSpinner /></div>
                                 ) : foodsError ? (
-                                    <div className="sm:col-span-2"><ErrorDisplay /></div>
+                                    <div className="col-span-2"><ErrorDisplay /></div>
                                 ) : filteredFoods.length === 0 ? (
-                                    <div className="sm:col-span-2 text-center py-12" role="status">
+                                    <div className="col-span-2 text-center py-12" role="status">
                                         <i className="fas fa-search text-gray-400 text-4xl mb-4" aria-hidden="true"></i>
                                         <p className="text-gray-600 mb-4">No food listings found</p>
                                         <Button
@@ -355,7 +422,9 @@ function FindFoodPage({ initialCategory }) {
                                                 setFilters({
                                                     category: '',
                                                     type: 'all',
-                                                    distance: 10
+                                                    radius: '10',
+                                                    sortBy: 'newest',
+                                                    community: ''
                                                 });
                                             }}
                                         >
@@ -375,6 +444,10 @@ function FindFoodPage({ initialCategory }) {
                                             <FoodCard
                                                 food={food}
                                                 onClaim={handleClaim}
+                                                communityName={
+                                                    food.community_name
+                                                    || (food.community_id ? communityNames[String(food.community_id)] : null)
+                                                }
                                             />
                                         </div>
                                     ))
@@ -385,7 +458,7 @@ function FindFoodPage({ initialCategory }) {
                                     <button
                                         type="button"
                                         onClick={() => setVisibleCount(c => c + 4)}
-                                        className="inline-flex items-center gap-2 px-5 py-2 rounded-full bg-white border border-gray-200 shadow-sm text-sm font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition"
+                                        className="inline-flex items-center justify-center gap-2 min-h-[44px] w-full sm:w-auto px-5 py-2.5 rounded-full bg-white border border-gray-200 shadow-sm text-sm font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition touch-manipulation"
                                     >
                                         <i className="fas fa-ellipsis-h text-gray-400" aria-hidden="true"></i>
                                         {filteredFoods.length - visibleCount} More
@@ -393,25 +466,6 @@ function FindFoodPage({ initialCategory }) {
                                 </div>
                             )}
                         </div>
-
-                        {/* Map: right side, equal width, sticky on large screens */}
-                        <aside aria-labelledby="food-map-heading">
-                            <div className="lg:sticky lg:top-24">
-                                <h2
-                                    id="food-map-heading"
-                                    className="text-2xl font-bold text-gray-800 mb-4 flex items-center"
-                                >
-                                    <i className="fas fa-map-marked-alt text-cyan-600 mr-2"></i>
-                                    Food Locations Map
-                                </h2>
-                                <div
-                                    className="bg-white rounded-2xl shadow-lg overflow-hidden border border-gray-100"
-                                    style={{ height: '600px' }}
-                                >
-                                    <FoodMap showSignupPrompt={!isAuthenticated} highlightedFoodId={hoveredFoodId} />
-                                </div>
-                            </div>
-                        </aside>
                     </div>
                 </div>
             </div>
@@ -451,7 +505,9 @@ function FindFoodPage({ initialCategory }) {
                                     const originLng = Number(currentLocation?.longitude);
                                     const haveCoords =
                                         Number.isFinite(destLat) && Number.isFinite(destLng) &&
-                                        Number.isFinite(originLat) && Number.isFinite(originLng);
+                                        Number.isFinite(originLat) && Number.isFinite(originLng) &&
+                                        isBayAreaCoord(destLat, destLng) &&
+                                        isBayAreaCoord(originLat, originLng);
 
                                     if (haveCoords) {
                                         clearAIOverlays();
@@ -473,7 +529,7 @@ function FindFoodPage({ initialCategory }) {
                                                 // Still center on the destination so user sees the marker.
                                                 centerOn({ lat: destLat, lng: destLng, zoom: 14 });
                                             });
-                                    } else if (Number.isFinite(destLat) && Number.isFinite(destLng)) {
+                                    } else if (Number.isFinite(destLat) && Number.isFinite(destLng) && isBayAreaCoord(destLat, destLng)) {
                                         // No user location available — at least center on the listing.
                                         centerOn({ lat: destLat, lng: destLng, zoom: 14 });
                                     }

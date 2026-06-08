@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo } from 'react'
+import { isBayAreaCoord } from './mapBounds'
 
 /**
  * MapContext — bridges AI chat tool results to the FoodMap component.
@@ -64,6 +65,10 @@ export function MapProvider({ children }) {
     }
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return
     if (!Number.isFinite(zoom)) zoom = 13
+    if (!isBayAreaCoord(lat, lng)) {
+      console.warn('MapContext: ignoring centerOn outside Bay Area', lat, lng)
+      return
+    }
     setState(prev => ({
       ...prev,
       centerRequest: { lat, lng, zoom, ts: Date.now() },
@@ -110,7 +115,7 @@ export function MapProvider({ children }) {
           .map(l => {
             const lat = parseFloat(l.latitude ?? l.lat)
             const lng = parseFloat(l.longitude ?? l.lng)
-            if (Number.isNaN(lat) || Number.isNaN(lng)) return null
+            if (Number.isNaN(lat) || Number.isNaN(lng) || !isBayAreaCoord(lat, lng)) return null
             return {
               id: l.id || `${tool}-${lat}-${lng}`,
               lat,
@@ -141,7 +146,7 @@ export function MapProvider({ children }) {
           .map(c => {
             const lat = parseFloat(c.latitude ?? c.lat)
             const lng = parseFloat(c.longitude ?? c.lng)
-            if (Number.isNaN(lat) || Number.isNaN(lng)) return null
+            if (Number.isNaN(lat) || Number.isNaN(lng) || !isBayAreaCoord(lat, lng)) return null
             return {
               id: c.id || `dist-${lat}-${lng}`,
               lat,
@@ -180,29 +185,39 @@ export function MapProvider({ children }) {
           profile: routePayload.profile ?? result.profile,
         }
         if (origin && destination) {
-          const endpointMarkers = [
-            {
-              id: 'route-origin',
-              lat: origin.lat,
-              lng: origin.lng,
-              title: 'Start',
-              kind: 'pin',
-            },
-            {
-              id: 'route-destination',
-              lat: destination.lat,
-              lng: destination.lng,
-              title: 'Destination',
-              kind: 'pin',
-            },
-          ]
-          nextMarkers = (nextMarkers || []).concat(endpointMarkers)
-          if (!nextCenter) {
-            nextCenter = {
-              lat: (origin.lat + destination.lat) / 2,
-              lng: (origin.lng + destination.lng) / 2,
-              zoom: 11,
+          const oLat = Number(origin.lat);
+          const oLng = Number(origin.lng);
+          const dLat = Number(destination.lat);
+          const dLng = Number(destination.lng);
+          const endpointsInRegion =
+            isBayAreaCoord(oLat, oLng) && isBayAreaCoord(dLat, dLng);
+          if (endpointsInRegion) {
+            const endpointMarkers = [
+              {
+                id: 'route-origin',
+                lat: oLat,
+                lng: oLng,
+                title: 'Start',
+                kind: 'pin',
+              },
+              {
+                id: 'route-destination',
+                lat: dLat,
+                lng: dLng,
+                title: 'Destination',
+                kind: 'pin',
+              },
+            ]
+            nextMarkers = (nextMarkers || []).concat(endpointMarkers)
+            if (!nextCenter) {
+              nextCenter = {
+                lat: (oLat + dLat) / 2,
+                lng: (oLng + dLng) / 2,
+                zoom: 11,
+              }
             }
+          } else {
+            nextRoute = null
           }
         }
       }

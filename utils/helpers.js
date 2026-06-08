@@ -1,14 +1,22 @@
-// Date formatting
+// Date formatting — date-only strings (YYYY-MM-DD) are parsed as local dates
+// so they don't shift a day in US timezones.
 export function formatDate(date) {
+    if (date == null || date === '') return '';
     try {
-        return new Date(date).toLocaleDateString('en-US', {
+        const str = String(date).trim();
+        const dateOnly = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        const parsed = dateOnly
+            ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+            : new Date(str);
+        if (Number.isNaN(parsed.getTime())) return str;
+        return parsed.toLocaleDateString('en-US', {
             year: 'numeric',
             month: 'long',
             day: 'numeric'
         });
     } catch (error) {
         console.error('Date formatting error:', error);
-        return date;
+        return String(date);
     }
 }
 
@@ -92,23 +100,68 @@ export function calculateDistance(lat1, lon1, lat2, lon2) {
     }
 }
 
+function parseExpiryDate(expiryDate) {
+    if (expiryDate == null || expiryDate === '') return null;
+    const str = String(expiryDate).trim();
+    const dateOnly = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    const parsed = dateOnly
+        ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+        : new Date(str);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 // Food expiration status
 export function getExpirationStatus(expiryDate) {
     try {
+        const expiry = parseExpiryDate(expiryDate);
+        if (!expiry) {
+            return {
+                status: 'unknown',
+                label: 'No expiry date',
+                badgeClass: 'badge-warning',
+                days: 0,
+                color: 'gray',
+            };
+        }
         const now = new Date();
-        const expiry = new Date(expiryDate);
+        now.setHours(0, 0, 0, 0);
+        expiry.setHours(0, 0, 0, 0);
         const daysUntilExpiry = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
 
         if (daysUntilExpiry < 0) {
-            return { status: 'Expired', days: Math.abs(daysUntilExpiry), color: 'red' };
-        } else if (daysUntilExpiry <= 3) {
-            return { status: 'Expires soon', days: daysUntilExpiry, color: 'yellow' };
-        } else {
-            return { status: 'Fresh', days: daysUntilExpiry, color: 'green' };
+            return {
+                status: 'expired',
+                label: 'Expired',
+                badgeClass: 'badge-expired',
+                days: Math.abs(daysUntilExpiry),
+                color: 'red',
+            };
         }
+        if (daysUntilExpiry <= 3) {
+            return {
+                status: 'warning',
+                label: 'Expires soon',
+                badgeClass: 'badge-warning',
+                days: daysUntilExpiry,
+                color: 'yellow',
+            };
+        }
+        return {
+            status: 'fresh',
+            label: 'Fresh',
+            badgeClass: 'badge-fresh',
+            days: daysUntilExpiry,
+            color: 'green',
+        };
     } catch (error) {
         console.error('Expiration status error:', error);
-        return { status: 'Unknown', days: 0, color: 'gray' };
+        return {
+            status: 'unknown',
+            label: 'Unknown',
+            badgeClass: 'badge-warning',
+            days: 0,
+            color: 'gray',
+        };
     }
 }
 

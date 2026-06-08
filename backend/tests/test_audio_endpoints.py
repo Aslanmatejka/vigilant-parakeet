@@ -41,6 +41,20 @@ def client():
     return TestClient(app, raise_server_exceptions=False)
 
 
+@pytest.fixture(autouse=True)
+def _authenticated():
+    """Treat HTTP requests as authenticated as TEST_USER_ID.
+
+    The voice endpoint enforces ``_require_auth_for_user``: any real (non
+    nil-UUID) user_id must present a matching Supabase JWT. The TestClient
+    can't mint a real token, so we patch the JWT validator to return the
+    test user. Production auth is unchanged — this only affects the harness.
+    """
+    with patch("backend.app._authenticate_request", new_callable=AsyncMock,
+               return_value=TEST_USER_ID):
+        yield
+
+
 def _fake_audio_file(content: bytes = b"fake-audio-data", filename: str = "test.webm", content_type: str = "audio/webm"):
     """Build an UploadFile-compatible tuple for TestClient multipart."""
     return ("audio", (filename, io.BytesIO(content), content_type))

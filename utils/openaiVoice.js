@@ -62,11 +62,15 @@ export async function textToSpeech(text, options = {}) {
  * @param {Blob} audioBlob - Audio blob to play
  * @param {Function} onStart - Called when playback starts
  * @param {Function} onEnd - Called when playback ends
- * @returns {{ play: Promise<void>, stop: Function }}
+ * @param {Function} [onBlocked] - Called when the browser blocks autoplay
+ *   (e.g. iOS Safari requires a user gesture). Receives a `replay` function
+ *   that can be called from inside a click/tap handler to start playback.
+ * @returns {{ play: Promise<void>, stop: Function, audio: HTMLAudioElement }}
  */
-export function playAudioBlob(audioBlob, onStart, onEnd) {
+export function playAudioBlob(audioBlob, onStart, onEnd, onBlocked) {
   const url = URL.createObjectURL(audioBlob)
   const audio = new Audio(url)
+  audio.playsInline = true // iOS: avoid forcing fullscreen native player
   // Some browsers fire both `onended` and `onerror` for the same blob
   // (e.g. tab backgrounding). Revoking the same object URL twice is a
   // no-op but indicates muddled cleanup; a single flag keeps it tidy.
@@ -96,7 +100,20 @@ export function playAudioBlob(audioBlob, onStart, onEnd) {
       onEnd?.()
       resolve()
     }
-    audio.play().catch(() => {
+    audio.play().catch((err) => {
+      // iOS Safari (and some mobile browsers) reject autoplay that isn't
+      // tied to a user gesture with a NotAllowedError. Surface a `replay`
+      // handler so the UI can show a "Tap to hear" button; tapping it calls
+      // replay() from within a real gesture, which is allowed. Other errors
+      // (decode, network) just resolve so the caller continues.
+      const isAutoplayBlock = err && (err.name === 'NotAllowedError' || err.name === 'AbortError')
+      if (isAutoplayBlock && typeof onBlocked === 'function') {
+        const replay = () => audio.play().catch(() => { revoke(); onEnd?.() })
+        onBlocked(replay)
+        // Do NOT revoke yet — the blob must stay alive for the replay.
+        resolve()
+        return
+      }
       revoke()
       onEnd?.()
       resolve()
@@ -105,3 +122,4 @@ export function playAudioBlob(audioBlob, onStart, onEnd) {
 
   return { play, stop, audio }
 }
+

@@ -52,6 +52,32 @@ def _parse_dt(value) -> Optional[datetime]:
         return None
 
 
+def _normalize_expiry_date(*candidates: Optional[str]) -> Optional[str]:
+    """Return YYYY-MM-DD from the first valid expiry candidate."""
+    for raw in candidates:
+        if raw is None:
+            continue
+        s = str(raw).strip()
+        if not s:
+            continue
+        if len(s) >= 10 and s[4:5] == "-" and s[7:8] == "-":
+            try:
+                return datetime.fromisoformat(s[:10]).date().isoformat()
+            except ValueError:
+                pass
+        dt = _parse_dt(s)
+        if dt:
+            return dt.date().isoformat()
+    return None
+
+
+def _suggested_expiry_for_category(category: str) -> str:
+    cat = str(category or "other").strip().lower()
+    hours = _PERISHABLE_CATEGORY_MAX_AGE_HOURS.get(cat, 72)
+    days = max(1, int(math.ceil(hours / 24)))
+    return (datetime.now(timezone.utc).date() + timedelta(days=days)).isoformat()
+
+
 def _listing_is_fresh_enough(listing: dict, now: Optional[datetime] = None) -> bool:
     """Return True when a listing is still safe enough for the AI to surface.
 
@@ -785,7 +811,11 @@ TOOL_DEFINITIONS = [
                     },
                     "expiry_date": {
                         "type": "string",
-                        "description": "Optional ISO date (YYYY-MM-DD) the food expires.",
+                        "description": "Required best-by / expiration date as YYYY-MM-DD. Ask the donor before posting.",
+                    },
+                    "expiration_date": {
+                        "type": "string",
+                        "description": "Alias for expiry_date (prefer expiry_date).",
                     },
                     "location": {
                         "type": "string",
@@ -793,7 +823,15 @@ TOOL_DEFINITIONS = [
                     },
                     "community_name": {
                         "type": "string",
-                        "description": "Name of the community / school / neighborhood this listing is shared with (e.g. 'Alameda Unified', 'Oakland Tech'). Ask the donor which community to post to if it's not obvious from context.",
+                        "description": "Name of the community / school this listing is shared with (e.g. 'Alameda Unified'). REQUIRED — ask the donor and get explicit confirmation before posting.",
+                    },
+                    "community_id": {
+                        "type": "string",
+                        "description": "Optional community UUID if already known from get_active_communities.",
+                    },
+                    "community_confirmed": {
+                        "type": "boolean",
+                        "description": "Must be true. Set only after the donor explicitly confirms which community/school the listing is for (yes to profile default or picks a name).",
                     },
                     "latitude": {
                         "type": "number",
@@ -814,7 +852,7 @@ TOOL_DEFINITIONS = [
                         "description": "Optional allergens present (e.g. 'nuts','dairy','gluten').",
                     },
                 },
-                "required": ["user_id", "title", "quantity", "unit", "category"],
+                "required": ["user_id", "title", "quantity", "unit", "category", "expiry_date"],
             },
         },
     },
@@ -921,15 +959,18 @@ TOOL_DEFINITIONS = [
                         "enum": ["produce", "bakery", "dairy", "pantry", "meat", "prepared", "other"],
                     },
                     "description": {"type": "string"},
-                    "expiry_date": {"type": "string", "description": "ISO date YYYY-MM-DD."},
+                    "expiry_date": {"type": "string", "description": "Required. Best-by / expiration date as YYYY-MM-DD."},
+                    "expiration_date": {"type": "string", "description": "Alias for expiry_date (prefer expiry_date)."},
                     "location": {"type": "string", "description": "Pickup street address — required for the listing to appear on the map."},
-                    "community_name": {"type": "string", "description": "Community/school the donation is shared with."},
+                    "community_name": {"type": "string", "description": "Community/school the donation is shared with — required after donor confirms."},
+                    "community_id": {"type": "string", "description": "Optional community UUID if already known."},
+                    "community_confirmed": {"type": "boolean", "description": "Must be true after the donor confirms the community."},
                     "latitude": {"type": "number"},
                     "longitude": {"type": "number"},
                     "dietary_tags": {"type": "array", "items": {"type": "string"}},
                     "allergens": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["user_id", "title", "quantity", "unit", "category"],
+                "required": ["user_id", "title", "quantity", "unit", "category", "expiry_date"],
             },
         },
     },
@@ -975,6 +1016,22 @@ TOOL_DEFINITIONS = [
                             "retry. If omitted, the server falls back to the "
                             "donor's saved profile address."
                         ),
+                    },
+                    "default_expiry_date": {
+                        "type": "string",
+                        "description": (
+                            "Batch-wide best-by date (YYYY-MM-DD) applied to rows "
+                            "missing expiry_date. Ask the donor before importing."
+                        ),
+                    },
+                    "community_name": {
+                        "type": "string",
+                        "description": "Community/school for the whole batch — required after donor confirms.",
+                    },
+                    "community_id": {"type": "string", "description": "Optional community UUID if known."},
+                    "community_confirmed": {
+                        "type": "boolean",
+                        "description": "Must be true after the donor confirms the community for this batch.",
                     },
                 },
                 "required": ["user_id"],
@@ -1113,6 +1170,9 @@ TOOL_DEFINITIONS = [
                         },
                     },
                     "default_address": {"type": "string"},
+                    "community_name": {"type": "string"},
+                    "community_id": {"type": "string"},
+                    "community_confirmed": {"type": "boolean"},
                 },
                 "required": ["user_id"],
             },
@@ -2844,11 +2904,14 @@ async def _create_food_listing(
     category: str,
     description: Optional[str] = None,
     expiry_date: Optional[str] = None,
+    expiration_date: Optional[str] = None,
+    best_before: Optional[str] = None,
     location: Optional[str] = None,
     dietary_tags: Optional[list] = None,
     allergens: Optional[list] = None,
     community_name: Optional[str] = None,
     community_id: Optional[str] = None,
+    community_confirmed: bool = False,
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
     **_ignored,
@@ -2880,6 +2943,44 @@ async def _create_food_listing(
     if cat not in _LISTING_CATEGORIES:
         cat = "other"
 
+    donor = await fetch_donor_listing_defaults(str(user_id))
+
+    if not community_confirmed:
+        suggested_id, suggested_name = (None, None)
+        if donor.get("community_id"):
+            suggested_id, suggested_name = await _resolve_community(None, str(donor["community_id"]))
+        return {
+            "success": False,
+            "error": "community_not_confirmed",
+            "message": (
+                "Ask the donor which community/school this donation is for and get "
+                "explicit confirmation before posting. Mention their profile community "
+                "if they have one, then call post_food_listing with community_name "
+                "(or community_id) and community_confirmed=true."
+            ),
+            "suggested_community_name": suggested_name,
+            "suggested_community_id": suggested_id,
+        }
+
+    resolved_community_id, resolved_community_name = await _resolve_community(
+        community_name, community_id
+    )
+    if not resolved_community_id:
+        suggested_id, suggested_name = (None, None)
+        if donor.get("community_id"):
+            suggested_id, suggested_name = await _resolve_community(None, str(donor["community_id"]))
+        return {
+            "success": False,
+            "error": "community_required",
+            "message": (
+                "Could not resolve the community. Ask the donor to pick one "
+                "(call get_active_communities if needed), confirm their choice, "
+                "then pass community_name with community_confirmed=true."
+            ),
+            "suggested_community_name": suggested_name,
+            "suggested_community_id": suggested_id,
+        }
+
     row: dict = {
         "user_id": str(user_id),
         "title": title_s[:200],
@@ -2891,8 +2992,22 @@ async def _create_food_listing(
     }
     if description:
         row["description"] = str(description).strip()[:2000]
-    if expiry_date:
-        row["expiry_date"] = str(expiry_date).strip()[:40]
+
+    resolved_expiry = _normalize_expiry_date(expiry_date, expiration_date, best_before)
+    if not resolved_expiry:
+        return {
+            "success": False,
+            "error": "expiry_date_required",
+            "message": (
+                "Ask the donor when the food expires or was made (best-by date). "
+                "Map their answer to expiry_date as YYYY-MM-DD before calling "
+                "post_food_listing. Examples: made today → today's date; "
+                "good for 24h → tomorrow; bakery → 2 days out."
+            ),
+            "suggested_expiry_date": _suggested_expiry_for_category(cat),
+        }
+    row["expiry_date"] = resolved_expiry
+
     if location:
         loc_s = str(location).strip()[:200]
         row["location"] = loc_s
@@ -2923,13 +3038,11 @@ async def _create_food_listing(
         if coords:
             row["latitude"], row["longitude"] = coords
 
-    # Resolve community: explicit arg > donor profile default (applied below).
-    resolved_community_id, resolved_community_name = await _resolve_community(community_name, community_id)
-    if resolved_community_id:
-        row["community_id"] = resolved_community_id
+    row["community_id"] = resolved_community_id
 
-    donor = await fetch_donor_listing_defaults(str(user_id))
     row = apply_donor_defaults_to_listing(row, donor)
+    # Never inherit community silently from profile — only the confirmed choice.
+    row["community_id"] = resolved_community_id
 
     # Final fallback: still no coordinates (donor gave no explicit pickup
     # address, so we're relying on the donor's saved address filled in by
@@ -2975,6 +3088,7 @@ async def _create_food_listing(
         "longitude": row.get("longitude"),
         "community_id": row.get("community_id"),
         "community_name": resolved_community_name,
+        "expiry_date": row.get("expiry_date"),
         "on_map": on_map,
         "summary": " ".join(summary_bits),
     }
@@ -3434,8 +3548,12 @@ def _normalize_bulk_row(raw: dict, user_id: str) -> Optional[dict]:
     }
     if raw.get("description"):
         row["description"] = str(raw["description"])[:1000]
-    if raw.get("expiry_date") or raw.get("best_before"):
-        row["expiry_date"] = str(raw.get("expiry_date") or raw.get("best_before"))[:40]
+    if raw.get("expiry_date") or raw.get("expiration_date") or raw.get("best_before"):
+        row["expiry_date"] = _normalize_expiry_date(
+            raw.get("expiry_date"),
+            raw.get("expiration_date"),
+            raw.get("best_before"),
+        )
     # Capture the row's own pickup address from any of the common column names.
     row_addr = (
         raw.get("location") or raw.get("address")
@@ -3451,6 +3569,10 @@ async def _bulk_import_listings(
     csv_text: Optional[str] = None,
     listings: Optional[list] = None,
     default_address: Optional[str] = None,
+    default_expiry_date: Optional[str] = None,
+    community_name: Optional[str] = None,
+    community_id: Optional[str] = None,
+    community_confirmed: bool = False,
     **_ignored,
 ) -> dict:
     from backend.ai_engine import (
@@ -3466,6 +3588,38 @@ async def _bulk_import_listings(
                 bool(default_address))
     if not user_id:
         return {"success": False, "error": "missing user_id"}
+
+    donor = await fetch_donor_listing_defaults(str(user_id))
+
+    if not community_confirmed:
+        suggested_id, suggested_name = (None, None)
+        if donor.get("community_id"):
+            suggested_id, suggested_name = await _resolve_community(None, str(donor["community_id"]))
+        return {
+            "success": False,
+            "error": "community_not_confirmed",
+            "message": (
+                "Confirm which community/school this batch is for before importing. "
+                "Then call bulk_import_listings with community_name and "
+                "community_confirmed=true."
+            ),
+            "suggested_community_name": suggested_name,
+            "suggested_community_id": suggested_id,
+        }
+
+    resolved_community_id, resolved_community_name = await _resolve_community(
+        community_name, community_id
+    )
+    if not resolved_community_id:
+        return {
+            "success": False,
+            "error": "community_required",
+            "message": (
+                "Could not resolve the community for this batch. Ask the donor to "
+                "pick one, confirm it, then retry with community_name and "
+                "community_confirmed=true."
+            ),
+        }
 
     rows_in: list[dict] = []
     if csv_text:
@@ -3483,7 +3637,6 @@ async def _bulk_import_listings(
     # Donor profile (address + coordinates) loaded ONCE and reused for every
     # row that doesn't carry its own pickup address. Mirrors the single-listing
     # creator so bulk-imported listings get a location + map pin too.
-    donor = await fetch_donor_listing_defaults(str(user_id))
     donor_addr = str(donor.get("address") or donor.get("location") or "").strip()
     explicit_default = str(default_address).strip() if default_address else ""
     # Batch-wide fallback address: the address the AI passed wins over the
@@ -3495,6 +3648,8 @@ async def _bulk_import_listings(
     normalized: list[Optional[dict]] = []
     missing_title_rows: list[int] = []
     missing_address_rows: list[int] = []
+    missing_expiry_rows: list[int] = []
+    batch_expiry = _normalize_expiry_date(default_expiry_date)
     for idx, raw in enumerate(rows_in):
         human_row = idx + 1
         norm = _normalize_bulk_row(raw, user_id)
@@ -3505,19 +3660,24 @@ async def _bulk_import_listings(
         row_addr = str(norm.get("location") or "").strip()
         if not row_addr and not fallback_address:
             missing_address_rows.append(human_row)
+        if not norm.get("expiry_date") and not batch_expiry:
+            missing_expiry_rows.append(human_row)
 
-    if missing_title_rows or missing_address_rows:
+    if missing_title_rows or missing_address_rows or missing_expiry_rows:
         needs: list[str] = []
         if missing_title_rows:
             needs.append("title")
         if missing_address_rows:
             needs.append("address")
+        if missing_expiry_rows:
+            needs.append("expiry_date")
         return {
             "success": False,
             "posted": 0,
             "needs": needs,
             "missing_title_rows": missing_title_rows,
             "missing_address_rows": missing_address_rows,
+            "missing_expiry_rows": missing_expiry_rows,
             "fallback_address": fallback_address,
             "total": len(rows_in),
             "summary": (
@@ -3525,7 +3685,9 @@ async def _bulk_import_listings(
                 + (f"{len(missing_title_rows)} row(s) missing a title" if missing_title_rows else "")
                 + (" and " if missing_title_rows and missing_address_rows else "")
                 + (f"{len(missing_address_rows)} row(s) missing a pickup address" if missing_address_rows else "")
-                + ". Nothing was posted."
+                + (" and " if (missing_title_rows or missing_address_rows) and missing_expiry_rows else "")
+                + (f"{len(missing_expiry_rows)} row(s) missing expiry_date" if missing_expiry_rows else "")
+                + ". Ask the donor for a batch best-by date (default_expiry_date) or per-row expiry. Nothing was posted."
             ),
         }
 
@@ -3537,6 +3699,8 @@ async def _bulk_import_listings(
     for idx, norm in enumerate(normalized):
         if not norm:  # unreachable after pre-flight, but keep mypy/readers happy
             continue
+        if not norm.get("expiry_date") and batch_expiry:
+            norm["expiry_date"] = batch_expiry
         resolved = (str(norm.get("location") or "").strip() or fallback_address or "")[:400]
         if resolved:
             norm["location"] = resolved
@@ -3549,8 +3713,9 @@ async def _bulk_import_listings(
             coords = geocode_cache[resolved]
             if coords:
                 norm["latitude"], norm["longitude"] = coords
-        # Donor defaults fill name/phone/community + coords ONLY where missing.
+        # Donor defaults fill name/phone + coords ONLY where missing.
         norm = apply_donor_defaults_to_listing(norm, donor)
+        norm["community_id"] = resolved_community_id
         try:
             result = await supabase_post("food_listings", norm)
             if isinstance(result, list) and result:
@@ -3604,7 +3769,7 @@ async def _get_donor_expiring_listings(
     try:
         rows = await supabase_get("food_listings", {
             "user_id": f"eq.{user_id}",
-            "status": "eq.active",
+            "status": "in.(approved,active)",
             # Donor view: their donations expiring soon, never their requests.
             "listing_type": "eq.donation",
             "expiry_date": f"lte.{cutoff}",

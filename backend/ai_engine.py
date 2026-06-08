@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import time
+from collections import deque
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
@@ -451,6 +452,48 @@ class CircuitBreaker:
 _circuit = CircuitBreaker()
 
 
+class _UpstreamMetrics:
+    """Rolling success/error counter for upstream (OpenAI) calls.
+
+    Tracks the outcome of the last ``window`` requests so operations can verify
+    the live error rate (target < 5%). In-process only; resets on restart.
+    """
+
+    def __init__(self, window: int = 200):
+        self._outcomes: deque[bool] = deque(maxlen=window)
+        self.total = 0
+        self.errors = 0
+
+    def record(self, ok: bool) -> None:
+        self._outcomes.append(ok)
+        self.total += 1
+        if not ok:
+            self.errors += 1
+
+    @property
+    def error_rate(self) -> float:
+        """Error rate over the rolling window (0.0–1.0)."""
+        if not self._outcomes:
+            return 0.0
+        return sum(1 for ok in self._outcomes if not ok) / len(self._outcomes)
+
+    def snapshot(self) -> dict[str, Any]:
+        window = len(self._outcomes)
+        rate = self.error_rate
+        return {
+            "window": window,
+            "window_errors": sum(1 for ok in self._outcomes if not ok),
+            "error_rate": round(rate, 4),
+            "error_rate_pct": round(rate * 100, 2),
+            "within_threshold": rate < 0.05,
+            "total_requests": self.total,
+            "total_errors": self.errors,
+        }
+
+
+_upstream_metrics = _UpstreamMetrics()
+
+
 # ---------------------------------------------------------------------------
 # Structured errors — machine-readable codes so the frontend can decide
 # whether to offer Retry, escalate to support, or auto-back-off.
@@ -701,9 +744,11 @@ async def _openai_with_retry(
 
             resp.raise_for_status()
             _circuit.record_success()
+            _upstream_metrics.record(ok=True)
             _log_token_usage(resp, label=label)
             return resp
         except httpx.HTTPStatusError:
+            _upstream_metrics.record(ok=False)
             raise
         except (httpx.TimeoutException, httpx.RequestError) as exc:
             last_exc = exc
@@ -715,6 +760,7 @@ async def _openai_with_retry(
             if attempt < retries - 1:
                 await asyncio.sleep(min(2 ** attempt + 1, 10))
 
+    _upstream_metrics.record(ok=False)
     raise RuntimeError(f"OpenAI request failed after {retries} attempts: {last_exc}")
 
 
@@ -1204,26 +1250,35 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "outright. Wait for an explicit yes/no/different address before "
         "moving on. The address you record is where recipients will "
         "see the pin on the map, so it must be right.\n"
+        "  5. COMMUNITY — which school/community this listing is shared "
+        "with. ALWAYS CONFIRM, NEVER ASSUME. Ask explicitly: 'Which "
+        "community should I list this under?' If their profile has a "
+        "default community, propose it ('Should I post this to Alameda "
+        "Unified?') but wait for explicit yes or a different name. Call "
+        "get_active_communities if they aren't sure. Do NOT call "
+        "post_food_listing until they confirm — then pass community_name "
+        "(or community_id) AND community_confirmed=true.\n"
         "Strongly recommended (ASK if not volunteered, don't skip):\n"
-        "  5. FRESHNESS / EXPIRATION — 'When was it made?' / 'best by "
+        "  6. FRESHNESS / EXPIRATION — 'When was it made?' / 'best by "
         "when?' / 'how long until it spoils?'. Critical for food "
-        "safety. Map their answer to expiration_date.\n"
-        "  6. PICKUP WINDOW — 'When can people pick this up?' (e.g. "
+        "safety. Map their answer to expiry_date (YYYY-MM-DD) on "
+        "post_food_listing. The server REJECTS posts without expiry_date.\n"
+        "  7. PICKUP WINDOW — 'When can people pick this up?' (e.g. "
         "'today 5–8pm', 'tomorrow morning', 'anytime in the next "
         "24h'). Map to pickup_window_start / pickup_window_end. "
         "Default to next 48h ONLY if the donor explicitly says "
         "'whenever' or similar.\n"
-        "  7. ALLERGENS — 'Any allergens I should flag? (nuts, dairy, "
+        "  8. ALLERGENS — 'Any allergens I should flag? (nuts, dairy, "
         "gluten, eggs, soy, shellfish)'. Important for recipient "
         "safety. If donor says 'no allergens' or 'none', record an "
         "empty list and move on.\n"
-        "  8. PHOTO — 'Could you snap a quick photo? It really helps "
+        "  9. PHOTO — 'Could you snap a quick photo? It really helps "
         "people decide.' Photos roughly double pickup rates. If the "
         "donor declines, accept it and move on.\n"
         "Optional (only ask if it would actually matter):\n"
-        "  9. DIETARY TAGS — vegetarian / vegan / halal / kosher, "
+        "  10. DIETARY TAGS — vegetarian / vegan / halal / kosher, "
         "etc. Mention this only if relevant to the food.\n"
-        "  10. DESCRIPTION EXTRAS — anything else useful (homemade, "
+        "  11. DESCRIPTION EXTRAS — anything else useful (homemade, "
         "frozen, individually wrapped, refrigerated, etc.) — append to "
         "the same description field that holds the handoff note.\n"
         "\n"
@@ -1246,11 +1301,12 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "Once you've gathered enough, write ONE short summary covering "
         "title, qty, handoff method (pickup vs drop-off + radius if "
         "any), freshness, pickup window, address (read it back so the "
-        "donor can verify), allergens, photo (yes/no), and ask for an "
-        "explicit go-ahead:\n"
+        "donor can verify), community name (read it back), allergens, "
+        "photo (yes/no), and ask for an explicit go-ahead:\n"
         "  'Quick check — 3 loaves of sourdough, baked yesterday, "
         "pickup at your place at 1423 Park St (your profile address), "
-        "tonight 6–8pm, contains gluten, photo attached. Post it?'\n"
+        "listed under Alameda Unified, tonight 6–8pm, contains "
+        "gluten, photo attached. Post it?'\n"
         "Then WAIT for an affirmative ('yes', 'sure', 'go ahead', "
         "'post it', 'do it', '👍', 'sí'). Do NOT call "
         "post_food_listing until you see one. If the donor edits "
@@ -1278,6 +1334,9 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "Park St, Alameda CA — for the pickup spot, or a different "
         "one?'\n"
         "  Donor: 'yes use that one'\n"
+        "  AI:    'Which community should I list this under — Alameda "
+        "Unified, or a different school?'\n"
+        "  Donor: 'Alameda Unified'\n"
         "  AI:    'When were they baked / best-by?'\n"
         "  Donor: 'baked yesterday'\n"
         "  AI:    'Got it. When can people pick them up?'\n"
@@ -1287,12 +1346,13 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "  AI:    'Want to snap a quick photo? Helps a lot.'\n"
         "  Donor: 'sure' [uploads image]\n"
         "  AI:    'Quick check — 3 loaves of sourdough, pickup at "
-        "1423 Park St, baked yesterday, tonight 6–8pm, contains "
-        "gluten and eggs, photo attached. Post it?'\n"
+        "1423 Park St, for Alameda Unified, baked yesterday, tonight "
+        "6–8pm, contains gluten and eggs, photo attached. Post it?'\n"
         "  Donor: 'yes'\n"
         "  AI:    <calls post_food_listing(title='Sourdough bread', "
         "qty=3, unit='loaves', address='1423 Park St, Alameda CA', "
-        "description='Pickup only.', expiration_date=…, "
+        "community_name='Alameda Unified', community_confirmed=true, "
+        "description='Pickup only.', expiry_date='2026-06-10', "
         "pickup_window_start=…, pickup_window_end=…, "
         "allergens=['gluten','eggs'], images=[…])>\n"
         "         'Posted! Listing #42 is live at 1423 Park St.'\n"
@@ -1337,7 +1397,9 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "St, default window (next 48h). Confirm?'\n"
         "  Donor: 'yes'\n"
         "  AI:    <calls post_food_listing(title='Bread', qty=3, "
-        "address='1423 Park St', description='Pickup only.')>\n"
+        "address='1423 Park St', expiry_date='2026-06-08', "
+        "description='Pickup only.', community_name='Alameda Unified', "
+        "community_confirmed=true)>\n"
         "         'Posted! #42 is live.'\n"
         "\n"
         "## Hard rules (DO NOT BREAK)\n"
@@ -1361,11 +1423,16 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "  5b. ALWAYS ask which community/school the donation is for "
         "before posting (e.g. 'Which community is this for — Alameda "
         "Unified, Oakland Tech, or another?'). If the donor's profile "
-        "already has a community and they don't object, you may use it "
-        "as the default — but still mention it in the confirm sentence "
-        "so they can override. Pass the chosen community as the "
-        "`community_name` argument to post_food_listing so the listing "
-        "shows up in that community's feed.\n"
+        "already has a community, propose it as the default — but still "
+        "get explicit confirmation. Pass the chosen community as "
+        "`community_name` (or `community_id`) AND set "
+        "`community_confirmed=true` on post_food_listing. The server "
+        "REJECTS the call without community_confirmed=true.\n"
+        "  5c. ALWAYS ask when the food expires or was made before posting. "
+        "Pass the confirmed date as `expiry_date` (YYYY-MM-DD). The server "
+        "REJECTS post_food_listing without expiry_date. If the donor says "
+        "'made today' / 'good for 24h' / 'expires tomorrow', convert to a "
+        "concrete date before calling the tool.\n"
         "  6. NEVER skip the freshness, pickup-window, allergen, or "
         "photo questions UNLESS (a) the donor already volunteered the "
         "answer, (b) the donor explicitly said 'just post it' / 'skip "
@@ -1441,15 +1508,20 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "       (c) the donor's profile address.\n"
         "     If NONE of those exist for a row, the server refuses the "
         "whole batch (pre-flight).\n"
+        "  4. COMMUNITY — one community for the whole batch. Confirm "
+        "with the donor which school/community before calling "
+        "bulk_import_listings. Pass community_name and "
+        "community_confirmed=true — the server rejects the batch "
+        "without it.\n"
         "Strongly recommended (ask once, apply to all rows if they "
         "agree):\n"
-        "  4. PICKUP WINDOW — 'When can people pick these up? (default "
+        "  5. PICKUP WINDOW — 'When can people pick these up? (default "
         "is the next 48h.)' Apply the same window to every row unless "
         "the CSV has its own column.\n"
-        "  5. FRESHNESS — 'Anything in this batch close to spoiling? "
+        "  6. FRESHNESS — 'Anything in this batch close to spoiling? "
         "(I'll mark those high-perishability and shorten the "
         "expiration.)'\n"
-        "  6. ALLERGENS — if everything in the batch shares an allergen "
+        "  7. ALLERGENS — if everything in the batch shares an allergen "
         "(e.g. all bakery → gluten), call it out so the donor can "
         "confirm/edit.\n"
         "\n"
@@ -1531,14 +1603,18 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "needs. If something is missing, ASK — never guess for fields "
         "that affect food safety, location, or who gets the food.\n"
         "\n"
-        "  • post_food_listing  → title, qty, address (call OR profile). "
-        "    Recommended: pickup window, expiration/freshness, "
-        "    allergens, photo. The server will default unit, category, "
-        "    perishability, and the pickup window if you omit them.\n"
+        "  • post_food_listing  → title, qty, address (call OR profile), "
+        "    confirmed community (community_name + community_confirmed=true), "
+        "    and expiry_date (YYYY-MM-DD — ask the donor; server rejects without it). "
+        "    Recommended: pickup window, allergens, photo. The server will default "
+        "    unit, category, and pickup window if you omit them.\n"
         "  • bulk_import_listings → csv_text (with header row). For "
         "    EVERY row: title + qty + address (row OR default_address "
-        "    arg OR donor profile). The server pre-flights and refuses "
-        "    the whole batch if any row is missing title or address.\n"
+        "    arg OR donor profile) + expiry_date (row OR default_expiry_date). "
+        "    Also: confirmed community for the batch (community_name + "
+        "community_confirmed=true). The server pre-flights and refuses the "
+        "    whole batch if any row is missing title, address, or expiry, "
+        "    or if community is not confirmed.\n"
         "  • post_food_request → title, qty, recipient address (or "
         "    delivery vs pickup), urgency. Recommended: dietary "
         "    restrictions, household size.\n"
@@ -1569,18 +1645,15 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "St, pickup after 5pm'), extract everything in one shot — don't "
         "re-ask things they already told you. Then ask only the next "
         "still-missing piece (freshness, allergens, photo, etc.).\n"
-        "  • SERVER DEFAULTS exist as a SAFETY NET, not a shortcut. The "
-        "server will fill pickup_window (next 48h), expiration_date "
-        "(from perishability), unit ('units'), perishability "
-        "('medium'), and category (guessed from title) if you omit "
-        "them. But you should still ASK the donor about freshness, "
-        "pickup window, and allergens unless they've already told you "
-        "or asked you to skip — defaults can mismatch real-world food "
-        "safety.\n"
-        "  • TRULY-REQUIRED fields are: title, qty, and an address (the "
-        "donor's profile address counts). If you only have those, you "
-        "CAN post — but a thorough human-style intake covers freshness, "
-        "pickup window, allergens, and a photo too.\n"
+        "  • SERVER DEFAULTS exist only for pickup_window (next 48h), unit "
+        "('units'), and category (guessed from title) when omitted. "
+        "expiry_date is NOT auto-filled — you MUST ask the donor when "
+        "the food expires or was made and pass expiry_date (YYYY-MM-DD) "
+        "on post_food_listing. The server REJECTS posts without it.\n"
+        "  • TRULY-REQUIRED fields before post_food_listing: title, qty, "
+        "confirmed address, confirmed community (community_confirmed=true), "
+        "and expiry_date. Also ask pickup window and allergens unless the "
+        "donor already answered or asked you to skip.\n"
         "  • TONE: warm, brief, neighborly. Use contractions. Vary "
         "phrasing across turns. Avoid corporate language ('please "
         "provide', 'kindly specify', 'in order to proceed').\n"
@@ -1969,6 +2042,192 @@ def _build_memory_snapshot(history: list[dict[str, Any]]) -> Optional[str]:
             lines.append(f"  - claim_id={cid} listing_id={lid} title={title}")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Context-window management, anonymous gating, and TTS normalization
+# ---------------------------------------------------------------------------
+
+# Nil UUID marks an anonymous (not-logged-in) landing-page session. Personal
+# data tools must refuse to run for it.
+NIL_UUID = "00000000-0000-0000-0000-000000000000"
+
+
+def _is_anonymous_user(user_id: Optional[str]) -> bool:
+    """True when the caller is the explicit anonymous landing-page session.
+
+    Only the nil-UUID marks an anonymous user. A ``None`` here means auth was
+    not enforced (dev/test harness), NOT an anonymous end-user, so it is left
+    ungated — the real chat flow always passes a concrete user_id.
+    """
+    return str(user_id) == NIL_UUID
+
+
+# Tools that read or write a specific person's private data. The anonymous
+# landing-page assistant must NOT be able to invoke these — it has no
+# verified identity, so any result would be empty (best case) or leak/scribble
+# on whatever id the model hallucinated (worst case). We short-circuit them
+# with a `login_required` signal so the model asks the user to sign in.
+_PERSONAL_DATA_TOOLS = frozenset({
+    "get_user_profile",
+    "update_user_profile",
+    "get_user_dashboard",
+    "get_pickup_schedule",
+    "check_pickup_schedule",
+    "create_reminder",
+    "get_user_notifications",
+    "send_notification",
+    "mark_notifications_read",
+    "claim_listing",
+    "confirm_claim",
+    "cancel_claim",
+    "create_food_listing",
+    "post_food_listing",
+    "post_food_request",
+    "bulk_import_listings",
+    "bulk_post_food_listings",
+    "get_donor_expiring_listings",
+    "attach_photos_to_listing",
+    "search_food_near_user",  # needs the user's saved location → personal
+})
+
+# Tools whose primary payload is a list of results. Used to detect the
+# "no_results" case so the model handles an empty search gracefully instead
+# of inventing listings or claiming nothing was searched.
+_LIST_RESULT_TOOLS = frozenset({
+    "search_food_near_user",
+    "get_recent_listings",
+    "query_distribution_centers",
+    "get_pickup_schedule",
+    "check_pickup_schedule",
+    "get_user_notifications",
+    "get_active_communities",
+    "get_donor_expiring_listings",
+    "get_recipes",
+    "meal_suggestions",
+})
+
+# Total character budget for replayed conversation history (a sliding window).
+# Re-injecting the full 30-message history unbounded let long multi-step
+# chats grow past the model's effective attention span, causing "context
+# drift" (the model forgetting or contradicting earlier facts). We keep the
+# MOST RECENT messages that fit in this budget; the system prompt, profile
+# block, and memory snapshot are ALWAYS re-injected separately and are never
+# part of this budget, so the model never loses its training/profile grounding.
+_HISTORY_CHAR_BUDGET = int(os.getenv("AI_HISTORY_CHAR_BUDGET", "12000"))
+_HISTORY_PER_MSG_CAP = int(os.getenv("AI_HISTORY_PER_MSG_CAP", "4000"))
+
+
+def _apply_sliding_window(
+    history: list[dict[str, Any]],
+    char_budget: int = _HISTORY_CHAR_BUDGET,
+    per_msg_cap: int = _HISTORY_PER_MSG_CAP,
+) -> list[dict[str, Any]]:
+    """Trim conversation history to the most recent messages that fit a budget.
+
+    Walks newest → oldest, accumulating the (capped) length of each message,
+    and drops everything older than the budget allows. Returns the kept
+    messages in chronological order (oldest → newest). This bounds total
+    context size so older turns can't crowd out the system/profile prompts
+    or push the live message out of the model's effective window.
+    """
+    if not history:
+        return []
+    kept: list[dict[str, Any]] = []
+    used = 0
+    for msg in reversed(history):
+        content = msg.get("message") or msg.get("content") or ""
+        length = min(len(content), per_msg_cap)
+        # Always keep at least the single most recent message, even if it
+        # alone exceeds the budget, so the model never sees an empty history.
+        if kept and used + length > char_budget:
+            break
+        kept.append(msg)
+        used += length
+    kept.reverse()
+    return kept
+
+
+def _annotate_no_results(fn_name: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Tag empty list-style tool results with status='no_results'.
+
+    Searches/lookups that legitimately find nothing return an empty list, not
+    an error. Without a clear signal the model sometimes invents listings or
+    tells the user it "couldn't search". A `status: no_results` marker makes
+    the empty case unambiguous so the model says "nothing found right now"
+    and suggests a next step (widen radius, check back later).
+    """
+    if not isinstance(result, dict) or result.get("error"):
+        return result
+    if fn_name not in _LIST_RESULT_TOOLS:
+        return result
+    # The list payload lives under one of these keys depending on the tool.
+    payload = None
+    for key in ("results", "listings", "centers", "notifications",
+                "communities", "recipes", "items", "schedule"):
+        if key in result and isinstance(result[key], list):
+            payload = result[key]
+            break
+    if payload is not None and len(payload) == 0:
+        result.setdefault("status", "no_results")
+        result.setdefault("total", 0)
+    return result
+
+
+# Markdown / formatting artefacts that should never be spoken aloud.
+_TTS_MARKDOWN_RE = re.compile(r"[*_`#~]+")
+_TTS_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_TTS_MULTISPACE_RE = re.compile(r"[ \t]{2,}")
+_TTS_MULTINEWLINE_RE = re.compile(r"\n{2,}")
+
+# Common abbreviations expanded so TTS pronounces them naturally. Spanish
+# entries fix the most frequent mispronunciations (e.g. "kg", "min", ordinals).
+_TTS_ABBREV_EN = {
+    "min": "minutes",
+    "hr": "hours",
+    "hrs": "hours",
+    "kg": "kilograms",
+    "approx": "approximately",
+}
+_TTS_ABBREV_ES = {
+    "kg": "kilogramos",
+    "g": "gramos",
+    "min": "minutos",
+    "hr": "horas",
+    "hrs": "horas",
+    "km": "kilómetros",
+    "aprox": "aproximadamente",
+    "ud": "unidad",
+    "uds": "unidades",
+    "1ro": "primero",
+    "2do": "segundo",
+    "3ro": "tercero",
+}
+
+
+def _normalize_for_tts(text: str, lang: str = "en") -> str:
+    """Clean and normalize text before sending it to the TTS engine.
+
+    Strips markdown/symbols, expands abbreviations, and collapses whitespace
+    so the spoken output sounds natural. For Spanish this also fixes the most
+    common mispronunciations (units, ordinals) that the raw text would
+    otherwise read out letter-by-letter or in English.
+    """
+    if not text:
+        return ""
+    # Render markdown links as just their label.
+    out = _TTS_LINK_RE.sub(r"\1", text)
+    # Drop emphasis / heading / code markers.
+    out = _TTS_MARKDOWN_RE.sub("", out)
+    # Expand whole-word abbreviations (case-insensitive, word-boundary safe).
+    abbrevs = _TTS_ABBREV_ES if lang == "es" else _TTS_ABBREV_EN
+    for short, full in abbrevs.items():
+        out = re.sub(rf"(?<![\wáéíóúñ]){re.escape(short)}(?![\wáéíóúñ])", full, out, flags=re.IGNORECASE)
+    # Collapse newlines into sentence breaks and squeeze runs of spaces.
+    out = _TTS_MULTINEWLINE_RE.sub(". ", out)
+    out = out.replace("\n", ". ")
+    out = _TTS_MULTISPACE_RE.sub(" ", out)
+    return out.strip()
 
 
 class ConversationEngine:
@@ -2442,19 +2701,25 @@ class ConversationEngine:
             "[acción completada]",
             "[accion completada]",
         )
-        for msg in history:
+        # Sliding window: keep only the most recent turns that fit the char
+        # budget so a long conversation can't push the system prompt / live
+        # message out of the model's effective attention (context drift). The
+        # system prompt, profile facts, and memory snapshot are re-injected
+        # separately below and are never trimmed.
+        windowed_history = _apply_sliding_window(history)
+        for msg in windowed_history:
             role = msg.get("role", "user")
             content = msg.get("message", "")
             if role == "user" and isinstance(content, str) and content.strip().lower().startswith(_SILENT_USER_PREFIXES):
                 continue
             if role == "assistant" and (msg.get("metadata") or {}).get("silent_trigger"):
                 continue
-            # Per-message cap raised from 800 → 4000 so previous assistant
-            # turns that enumerated listings (with ids/titles/distances)
-            # survive intact. Without this, "claim #3" can't be resolved
-            # because the original list was sliced mid-item.
-            if len(content) > 4000:
-                content = content[:4000] + "... [truncated]"
+            # Per-message cap so previous assistant turns that enumerated
+            # listings (with ids/titles/distances) survive intact. Without
+            # this, "claim #3" can't be resolved because the original list
+            # was sliced mid-item.
+            if len(content) > _HISTORY_PER_MSG_CAP:
+                content = content[:_HISTORY_PER_MSG_CAP] + "... [truncated]"
             messages.append({"role": role, "content": content})
 
         # Replay recent tool-result summaries so the model retains the
@@ -2506,23 +2771,10 @@ class ConversationEngine:
         if include_audio:
             audio_b64 = await self._generate_audio_b64(response_text, lang=lang)
 
-        # Quick-reply chips must reflect the LANGUAGE OF THE AI'S REPLY,
-        # not the user's last message. Sticky-lang already handles short
-        # replies, but the response text itself is the strongest signal:
-        # if the model wrote in Spanish, the chips must be Spanish too.
-        # Conversely, if sticky lang said "es" but the reply is plain
-        # English (e.g. the model ignored a Spanish profile), chips
-        # should match the visible reply, not the inferred locale.
-        chip_lang = lang
-        try:
-            if response_text:
-                if detect_spanish(response_text):
-                    chip_lang = "es"
-                elif lang == "es" and detect_english(response_text):
-                    chip_lang = "en"
-        except Exception:
-            pass
-
+        # Quick-reply chips always follow the sticky conversation language
+        # (`lang`) from the user's own messages — never re-detect from the
+        # assistant reply. Mixed-language replies (e.g. English prose ending
+        # in "¿Quieres que lo publique?") must not flip chips to Spanish.
         return {
             "text": response_text,
             "audio_url": audio_b64,  # data URL, or None
@@ -2532,7 +2784,7 @@ class ConversationEngine:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "tool_results": actions,
             "actions": actions,
-            "suggestions": generate_quick_replies(response_text, chip_lang),
+            "suggestions": generate_quick_replies(response_text, lang),
         }
 
     async def _persist_conversation(
@@ -2865,6 +3117,31 @@ class ConversationEngine:
                     _recent_calls.append(_call_key)
                     continue
                 _recent_calls.append(_call_key)
+                # Anonymous gate: the landing-page assistant (nil-UUID / no
+                # auth) must not touch personal data. Refuse the tool with a
+                # structured login_required signal so the model asks the user
+                # to sign in instead of operating on an empty/forged identity.
+                if fn_name in _PERSONAL_DATA_TOOLS and _is_anonymous_user(auth_user_id):
+                    login_msg = (
+                        "Inicia sesión para que pueda hacer eso por ti."
+                        if lang == "es"
+                        else "Please sign in so I can do that for you."
+                    )
+                    tool_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": json.dumps({
+                            "error": "login_required",
+                            "message": (
+                                f"{fn_name} requires the user to be logged in. "
+                                "Politely tell the user they need to sign in or "
+                                "create an account to use this, and offer to help "
+                                "with general (non-personal) questions meanwhile."
+                            ),
+                            "user_message": login_msg,
+                        }),
+                    })
+                    continue
                 # Per-turn tool-result cache: skip duplicate work cleanly.
                 cached_result = _tool_cache.get(_call_key)
                 if cached_result is not None:
@@ -2872,6 +3149,23 @@ class ConversationEngine:
                 else:
                     try:
                         result = await self._execute_tool(fn_name, fn_args)
+                        # Validate the shape: handlers must return a dict. A
+                        # non-dict (None, list, str) means a buggy/legacy tool
+                        # path — coerce it into a structured error so the model
+                        # never tries to read fields off a bad value.
+                        if not isinstance(result, dict):
+                            logger.warning(
+                                "Tool %s returned non-dict %s; coercing to error",
+                                fn_name, type(result).__name__,
+                            )
+                            result = {
+                                "success": False,
+                                "error": f"{fn_name} returned an unexpected result. Please try again.",
+                            }
+                        # Annotate empty list-style results so the model
+                        # explicitly handles the "no_results" case instead of
+                        # hallucinating items or claiming it didn't search.
+                        result = _annotate_no_results(fn_name, result)
                         if isinstance(result, dict) and not result.get("error"):
                             _tool_cache[_call_key] = result
                     except Exception as tool_exc:
@@ -3037,7 +3331,11 @@ class ConversationEngine:
     async def generate_speech(self, text: str, lang: str = "en") -> bytes:
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY not configured")
-        truncated = text[:4096]
+        # Normalize markdown/abbreviations before TTS so the spoken output
+        # sounds natural and Spanish is pronounced correctly (units, ordinals)
+        # rather than read out letter-by-letter or in English.
+        normalized = _normalize_for_tts(text, lang=lang)
+        truncated = normalized[:4096]
         voice = TTS_VOICE_ES if lang == "es" else TTS_VOICE_EN
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -3062,6 +3360,49 @@ class ConversationEngine:
         except Exception as exc:
             logger.warning("Audio generation failed: %s", exc)
             return None
+
+
+def _chip_language(reply_text: str, conv_lang: str) -> str:
+    """Decide which language the quick-reply chips should render in.
+
+    The conversation language (``conv_lang``) — derived by sticky detection
+    from the *user's own* messages — is the baseline and is trusted. We only
+    override it when the AI's reply is *unambiguously* in the other language,
+    judged by a dominance score rather than a stray accent or loan-word.
+
+    This fixes Spanish chips leaking into English conversations: an English
+    reply that merely mentions "jalapeño", "piña", "café" or "résumé" must
+    NOT flip the chips (and their tapped input) to Spanish. ``detect_spanish``
+    treats a single ``ñ`` / two accents as conclusive, which is correct for
+    classifying a user's own message but too eager for re-classifying the
+    assistant's reply against an already-established conversation language.
+    """
+    base = "es" if conv_lang == "es" else "en"
+    if not reply_text:
+        return base
+
+    lower = reply_text.lower()
+
+    # Inverted question/exclamation marks only ever appear in genuine Spanish
+    # prose — never inside an English loan-word — so they are conclusive.
+    strong_es_punct = bool(re.search(r"[¿¡]", lower))
+
+    words = set(re.split(r"\W+", lower))
+    es_hits = len(words & _SPANISH_MARKERS)
+    en_hits = len(words & _ENGLISH_MARKERS)
+
+    if base == "es":
+        # Established Spanish chat: stay Spanish unless the reply is clearly,
+        # predominantly English (model ignored a Spanish profile).
+        if not strong_es_punct and en_hits >= 2 and en_hits > es_hits:
+            return "en"
+        return "es"
+
+    # Established English (or unknown) chat: only switch to Spanish on a
+    # strong, dominant Spanish signal — not a lone accented loan-word.
+    if strong_es_punct or (es_hits >= 3 and es_hits > en_hits):
+        return "es"
+    return "en"
 
 
 def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
@@ -3122,21 +3463,61 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
 
     # ---- Specific intent branches (run before any generic fallback) -----
 
-    # Final confirm: any phrasing where the AI is asking the donor/recipient
-    # to greenlight posting the listing/request. The AI's confirm summary
-    # always ends with one of these — match generously so chips are right.
+    # Address confirmation — run BEFORE post-confirm so "does that look good?"
+    # about a street address doesn't mis-fire as a publish prompt.
+    address_cues = (
+        "address", "street", " st ", " st.", " ave", "location", "pickup at",
+        "dirección", "direccion", "calle", "main st", "your profile",
+    )
+    has_address_cue = any(c in full for c in address_cues)
+    if has_address_cue and any(k in t for k in (
+            "profile address", "use your address", "what address",
+            "address on file", "saved address", "a different address",
+            "does that look good", "does this look good", "look good to you",
+            "look right", "right address", "correct address", "that address",
+            "dirección de tu perfil", "dirección del perfil", "tu dirección guardada",
+            "uso tu dirección", "uso la dirección", "qué dirección", "que direccion",
+            "otra dirección", "¿es correcta", "es correcta",
+    )):
+        if es:
+            add("Sí, usa esa", "Es otra dirección", "No tengo una guardada")
+        else:
+            add("Yes, use that one", "Use a different address", "I don't have one saved")
+        return out
+
+    # Community confirmation — before final post confirm.
+    community_cues = (
+        "community", "school", "district", "neighborhood", "comunidad",
+        "escuela", "distrito",
+    )
+    if any(c in full for c in community_cues) and any(k in t for k in (
+            "which community", "what community", "community is this", "community should",
+            "post to", "share with", "listed under", "list this under", "list under",
+            "for which community", "profile community", "your community",
+            "confirm the community", "is this for",
+            "qué comunidad", "que comunidad", "cuál comunidad", "cual comunidad",
+            "para qué comunidad", "a qué comunidad", "tu comunidad",
+            "comunidad de tu perfil", "bajo qué comunidad",
+    )):
+        if es:
+            add("Sí, esa comunidad", "Es otra comunidad", "No estoy seguro")
+        else:
+            add("Yes, that community", "Different community", "Not sure")
+        return out
+
+    # Final confirm: explicit post/publish phrasing only — avoid bare
+    # "look good" / "sounds good" which appear in unrelated questions.
     confirm_post_keys = (
         "post it", "post that", "post this", "post the listing",
         "publish it", "publish that", "publish this", "publish the listing",
         "should i post", "shall i post", "want me to post", "ok to post",
         "ready to post", "ready to publish", "go ahead and post",
-        "good to post", "good to publish", "look good", "looks good",
-        "sound good", "sounds good", "all set", "all good",
-        "confirm?", "confirm and post", "shall i go ahead", "should i go ahead",
+        "good to post", "good to publish",
+        "confirm and post", "shall i go ahead", "should i go ahead",
         # Spanish
         "publicarlo", "publicar la", "publicar el", "publico la", "publico el",
-        "¿confirmas", "¿lo publico", "¿lo publicamos", "¿publicamos",
-        "¿está bien", "¿esta bien", "¿se ve bien", "¿todo bien",
+        "lo publique", "que lo publique", "quieres que lo publique",
+        "¿lo publico", "¿lo publicamos", "¿publicamos",
         "listo para publicar",
     )
     if any(k in t for k in confirm_post_keys):
@@ -3167,22 +3548,6 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
                 add("Within 5 mi", "Within 10 mi")
         return out
 
-    # Address confirmation — require an explicit address-related cue,
-    # not just the word "different"/"diferente" which appears in many
-    # unrelated questions.
-    if any(k in t for k in (
-            "profile address", "use your address", "what address",
-            "address on file", "saved address", "a different address",
-            "dirección de tu perfil", "dirección del perfil", "tu dirección guardada",
-            "uso tu dirección", "uso la dirección", "qué dirección", "que direccion",
-            "otra dirección",
-    )):
-        if es:
-            add("Sí, usa esa", "Es otra dirección", "No tengo una guardada")
-        else:
-            add("Yes, use that one", "Use a different address", "I don't have one saved")
-        return out
-
     # Allergens
     if "allerg" in t or "alérgen" in t or "alergia" in t:
         if es:
@@ -3191,8 +3556,25 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
             add("No allergens", "Just gluten", "Dairy", "Nuts")
         return out
 
-    # Photo
-    if "photo" in t or "picture" in t or "foto" in t or "imagen" in t:
+    # Photo — only when the AI asks the donor to ATTACH one. Viewing /
+    # reviewing an existing photo ("Can I see the photo first?") must not
+    # offer add/skip chips.
+    photo_view_keys = (
+        "see the photo", "see photo", "view the photo", "view photo",
+        "show me the photo", "show the photo", "can i see", "look at the photo",
+        "ver la foto", "ver foto", "mostrar la foto", "mirar la foto",
+    )
+    photo_add_keys = (
+        "add a photo", "add photo", "attach a photo", "attach photo",
+        "include a photo", "upload a photo", "send a photo", "add an image",
+        "like to add a photo", "want to add a photo", "would you like to add",
+        "añadir foto", "adjuntar foto", "subir foto", "agregar foto",
+        "quieres agregar una foto", "te gustaría agregar", "te gustaria agregar",
+    )
+    if (
+        not any(k in t for k in photo_view_keys)
+        and any(k in t for k in photo_add_keys)
+    ):
         if es:
             add("Adjuntar foto", "Sin foto", "Después")
         else:
@@ -3210,6 +3592,7 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
 
     # Freshness / expiration
     if any(k in t for k in ("best by", "expir", "fresh", "baked", "made it",
+                            "when was", "how long", "good for", "spoils",
                             "caduc", "vence", "fresco", "horneado", "preparado")):
         if es:
             add("Hecho hoy", "Hecho ayer", "Vence mañana")

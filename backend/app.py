@@ -37,6 +37,7 @@ from backend.ai_engine import (
     check_rate_limit,
     check_user_rate_limit,
     _circuit,
+    _upstream_metrics,
     supabase_get,
     supabase_post,
     fetch_donor_listing_defaults,
@@ -64,6 +65,11 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
 REMINDER_CHECK_INTERVAL = int(os.getenv("REMINDER_CHECK_INTERVAL", "900"))  # 15 min
+
+# Process-level lock so two overlapping scheduler ticks can't both iterate the
+# pending-reminders queue at once (the cross-process race is handled by the
+# atomic per-reminder claim in _claim_reminder).
+_reminder_job_lock = asyncio.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -139,10 +145,72 @@ async def process_pending_reminders() -> int:
     """Find due reminders, look up user phone, send SMS, mark as sent.
 
     Returns the number of reminders processed.
+
+    Race-safety: each reminder is atomically *claimed* before any SMS is
+    sent, using the `sent` flag as a compare-and-swap lock. The claim is a
+    conditional PATCH (id == rid AND sent == false → sent = true). Only the
+    worker whose PATCH actually returns a row owns the reminder; everyone
+    else skips it. Combined with the process-level lock this guarantees a
+    reminder is sent at most once even if the scheduler overlaps runs or
+    multiple replicas are deployed.
     """
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return 0
 
+    # Prevent two overlapping invocations in THIS process from racing each
+    # other (the cross-replica race is handled by the atomic claim below).
+    if _reminder_job_lock.locked():
+        logger.info("Reminder job already running — skipping overlapping run")
+        return 0
+
+    async with _reminder_job_lock:
+        return await _process_pending_reminders_locked()
+
+
+async def _claim_reminder(rid: str) -> bool:
+    """Atomically claim a reminder. Returns True only if THIS call won it.
+
+    Conditional update: only flips `sent` false → true. PostgREST returns the
+    updated rows; an empty list means another worker already claimed it.
+    """
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.patch(
+                f"{SUPABASE_URL}/rest/v1/ai_reminders",
+                params={"id": f"eq.{rid}", "sent": "eq.false"},
+                json={
+                    "sent": True,
+                    "sent_at": datetime.now(timezone.utc).isoformat(),
+                },
+                headers=headers,
+            )
+        if resp.status_code not in (200, 204):
+            logger.warning(
+                "Reminder claim for %s returned HTTP %s", rid, resp.status_code
+            )
+            return False
+        try:
+            rows = resp.json()
+        except Exception:
+            rows = None
+        # With return=representation, a successful claim returns the row(s).
+        # Empty list → already claimed by someone else.
+        if isinstance(rows, list):
+            return len(rows) > 0
+        # Some PostgREST configs return 204/no body; treat 200 as success.
+        return resp.status_code == 200
+    except Exception as exc:
+        logger.error("Failed to claim reminder %s: %s", rid, exc)
+        return False
+
+
+async def _process_pending_reminders_locked() -> int:
     now_iso = datetime.now(timezone.utc).isoformat()
     processed = 0
 
@@ -165,6 +233,15 @@ async def process_pending_reminders() -> int:
         msg = reminder.get("message", "")
         rtype = reminder.get("reminder_type", "general")
 
+        if not rid:
+            continue
+
+        # Atomically claim BEFORE sending. If we don't win the claim, another
+        # worker is handling this reminder — skip to avoid a double SMS.
+        if not await _claim_reminder(rid):
+            logger.info("Reminder %s already claimed elsewhere — skipping", rid)
+            continue
+
         # Look up user phone
         phone = None
         try:
@@ -180,8 +257,8 @@ async def process_pending_reminders() -> int:
         except Exception as exc:
             logger.error("User phone lookup for reminder %s failed: %s", rid, exc)
 
-        # Send SMS if phone available
-        sms_result = {"sent": False}
+        # Send SMS if phone available. The reminder is already marked sent
+        # (claimed), so it will not be re-processed regardless of SMS outcome.
         if phone:
             prefix = {
                 "pickup": "🍎 Pickup Reminder",
@@ -190,34 +267,17 @@ async def process_pending_reminders() -> int:
                 "general": "📋 Reminder",
             }.get(rtype, "📋 Reminder")
             sms_body = f"[DoGoods] {prefix}: {msg}"
-            sms_result = await send_sms_via_twilio(phone, sms_body)
+            try:
+                await send_sms_via_twilio(phone, sms_body)
+            except Exception as exc:
+                logger.error("SMS send for reminder %s failed: %s", rid, exc)
         else:
             logger.info(
-                "No phone/SMS opt-in for user %s, marking reminder %s as sent",
+                "No phone/SMS opt-in for user %s, reminder %s claimed without SMS",
                 uid, rid,
             )
 
-        # Mark reminder as sent regardless (avoid re-processing)
-        try:
-            headers = {
-                "apikey": SUPABASE_SERVICE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                "Content-Type": "application/json",
-                "Prefer": "return=representation",
-            }
-            async with httpx.AsyncClient(timeout=10) as client:
-                await client.patch(
-                    f"{SUPABASE_URL}/rest/v1/ai_reminders",
-                    params={"id": f"eq.{rid}"},
-                    json={
-                        "sent": True,
-                        "sent_at": datetime.now(timezone.utc).isoformat(),
-                    },
-                    headers=headers,
-                )
-            processed += 1
-        except Exception as exc:
-            logger.error("Failed to mark reminder %s as sent: %s", rid, exc)
+        processed += 1
 
     if processed:
         logger.info("Processed %d reminder(s)", processed)
@@ -1070,7 +1130,7 @@ async def _gather_recipient_data(user_id: str) -> dict:
     pending_claims = await supabase_get("food_claims", {
         "claimer_id": f"eq.{user_id}",
         "status": "in.(pending,approved)",
-        "select": "id,status,created_at,quantity,food_listing_id",
+        "select": "id,status,created_at,quantity,food_id",
         "order": "created_at.desc",
         "limit": "10",
     })
@@ -1108,8 +1168,8 @@ async def _gather_donor_data(user_id: str) -> dict:
     claims_received = []
     if listing_ids:
         claims_received = await supabase_get("food_claims", {
-            "food_listing_id": f"in.({','.join(listing_ids)})",
-            "select": "id,status,quantity,created_at,food_listing_id,claimer_id",
+            "food_id": f"in.({','.join(listing_ids)})",
+            "select": "id,status,quantity,created_at,food_id,claimer_id",
             "order": "created_at.desc",
             "limit": "20",
         })
@@ -1124,7 +1184,7 @@ async def _gather_dispatcher_data(user_id: str) -> dict:
     now_iso = datetime.now(timezone.utc).isoformat()
     approved_claims = await supabase_get("food_claims", {
         "status": "in.(approved,pending)",
-        "select": "id,status,quantity,created_at,food_listing_id,claimer_id",
+        "select": "id,status,quantity,created_at,food_id,claimer_id",
         "order": "created_at.desc",
         "limit": "30",
     })
@@ -1450,7 +1510,7 @@ def _summarize_data_for_prompt(role: str, user_row: dict, data: dict) -> str:
         for item in claims[:10]:
             lines.append(
                 f"- claim#{item.get('id')} status={item.get('status')} "
-                f"listing#{item.get('food_listing_id')} qty={item.get('quantity')}"
+                f"listing#{item.get('food_id')} qty={item.get('quantity')}"
             )
         for ev in events[:5]:
             lines.append(
@@ -1477,9 +1537,7 @@ async def ai_insights(body: AIInsightsRequest, request: Request) -> dict:
     _enforce_rate_limit(request)
     _validate_uuid(body.user_id)
 
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != body.user_id:
-        raise HTTPException(403, "user_id does not match authenticated user")
+    await _require_auth_for_user(request, body.user_id)
 
     try:
         role, user_row = await _resolve_user_role(body.user_id, body.role_hint)
@@ -1723,9 +1781,7 @@ async def ai_voice_search(body: VoiceSearchRequest, request: Request) -> dict:
     _enforce_rate_limit(request)
     _validate_uuid(body.user_id)
 
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != body.user_id:
-        raise HTTPException(403, "user_id does not match authenticated user")
+    await _require_auth_for_user(request, body.user_id)
 
     try:
         filters = await _parse_voice_query(body.transcript)
@@ -2077,9 +2133,7 @@ async def ai_recipes(body: RecipeRequest, request: Request) -> dict:
     _enforce_rate_limit(request)
     _validate_uuid(body.user_id)
 
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != body.user_id:
-        raise HTTPException(403, "user_id does not match authenticated user")
+    await _require_auth_for_user(request, body.user_id)
 
     # Profile context (dietary restrictions, community_role for household hint).
     user_rows = await supabase_get("users", {
@@ -2769,9 +2823,7 @@ async def ai_enrich_listings(body: EnrichListingsRequest, request: Request) -> d
     """
     _enforce_rate_limit(request)
     _validate_uuid(body.user_id)
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != body.user_id:
-        raise HTTPException(403, "user_id does not match authenticated user")
+    await _require_auth_for_user(request, body.user_id)
     originals = [item.model_dump() for item in body.rows]
     fallback = {
         "rows": originals,
@@ -2893,15 +2945,35 @@ async def ai_bulk_listings(body: BulkListingsRequest, request: Request) -> dict:
     """
     _enforce_rate_limit(request)
     _validate_uuid(body.user_id)
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != body.user_id:
-        raise HTTPException(403, "user_id does not match authenticated user")
+    await _require_auth_for_user(request, body.user_id)
     donor = await fetch_donor_listing_defaults(body.user_id)
+    # Geocode each row's own pickup address so it gets an accurate map pin
+    # instead of always inheriting the donor's home coords. Falls back to the
+    # donor defaults (applied in _normalize_listing_row) when a row has no
+    # address or geocoding fails. Cache so a batch sharing an address hits
+    # Mapbox once.
+    from backend.tools import _forward_geocode
+    geocode_cache: dict[str, tuple | None] = {}
     created_ids: List[str] = []
     errors: List[dict] = []
     for idx, item in enumerate(body.listings):
         try:
+            addr = str(item.location or "").strip()
+            pre_coords = None
+            if addr:
+                if addr not in geocode_cache:
+                    geocode_cache[addr] = await _forward_geocode(addr)
+                pre_coords = geocode_cache[addr]
             row = _normalize_listing_row(item, body.user_id, donor=donor)
+            # Geocode BEFORE donor defaults so a failed geocode doesn't leave
+            # the donor's home pin on a row with its own pickup address.
+            if pre_coords:
+                row["latitude"], row["longitude"] = pre_coords
+            elif addr:
+                # Row had its own address but geocoding failed — strip any
+                # donor coords inherited by apply_donor_defaults_to_listing.
+                row.pop("latitude", None)
+                row.pop("longitude", None)
             result = await supabase_post("food_listings", row)
             if isinstance(result, list) and result:
                 rid = result[0].get("id")
@@ -2951,9 +3023,7 @@ async def ai_vision_listing(
     """
     _enforce_rate_limit(request)
     _validate_uuid(user_id)
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != user_id:
-        raise HTTPException(403, "user_id does not match authenticated user")
+    await _require_auth_for_user(request, user_id)
     if not OPENAI_API_KEY:
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured")
 
@@ -3059,9 +3129,7 @@ async def ai_query(body: QueryRequest, request: Request) -> dict:
     _enforce_rate_limit(request)
     _validate_uuid(body.user_id)
 
-    auth_uid = await _authenticate_request(request)
-    if auth_uid and auth_uid != body.user_id:
-        raise HTTPException(403, "user_id does not match authenticated user")
+    await _require_auth_for_user(request, body.user_id)
 
     # Resolve admin flag from DB (never trust client claims).
     user_rows = await supabase_get("users", {
@@ -3100,11 +3168,15 @@ async def health() -> dict:
     ai_ok = bool(OPENAI_API_KEY)
     db_ok = bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)
     all_ok = ai_ok and db_ok
+    metrics = _upstream_metrics.snapshot()
     return {
         "status": "ok" if all_ok else "degraded",
         "ai_configured": ai_ok,
         "database_configured": db_ok,
         "circuit_state": _circuit.state.value,
+        "upstream": metrics,
+        "error_rate_pct": metrics["error_rate_pct"],
+        "error_rate_ok": metrics["within_threshold"],
     }
 
 

@@ -37,17 +37,15 @@ with patch.dict("os.environ", _ENV, clear=False):
         ConversationEngine,
         _build_memory_snapshot,
         _build_system_prompt,
+        _chip_language,
         _load_training_data,
         check_rate_limit,
         detect_spanish,
+        generate_quick_replies,
         get_canned_response,
         _rate_store,
     )
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 TEST_USER_ID = "c4dcbd93-081e-4160-87eb-1d51d444413a"
 
@@ -127,6 +125,71 @@ class TestSpanishDetection:
 
     def test_spanish_multiple_markers(self):
         assert detect_spanish("Hola, quiero buscar comida por favor") is True
+
+
+# ===================================================================
+# 1b. Quick-reply chips (generate_quick_replies)
+# ===================================================================
+
+class TestQuickReplyChips:
+    def test_english_conv_stays_english_even_with_spanish_question_in_reply(self):
+        reply = "Claro! Here is your listing summary. ¿Quieres que lo publique?"
+        chips = generate_quick_replies(reply, "en")
+        assert chips
+        assert all(not c.startswith("Sí") for c in chips)
+        assert "Yes, post it" in chips
+
+    def test_address_look_good_not_post_confirm(self):
+        reply = "The pickup is at 123 Main St. Does that look good to you?"
+        chips = generate_quick_replies(reply, "en")
+        assert "Yes, use that one" in chips
+        assert "Yes, post it" not in chips
+
+    def test_community_confirm_not_post_confirm(self):
+        reply = (
+            "Should I list this under Alameda Unified, or a different community?"
+        )
+        chips = generate_quick_replies(reply, "en")
+        assert "Yes, that community" in chips
+        assert "Different community" in chips
+        assert "Yes, post it" not in chips
+
+    def test_community_confirm_spanish(self):
+        reply = "¿Para qué comunidad debo publicarlo — Alameda Unified u otra?"
+        chips = generate_quick_replies(reply, "es")
+        assert "Sí, esa comunidad" in chips
+
+    def test_view_photo_not_add_photo_chips(self):
+        reply = "Can I see the photo first before posting?"
+        chips = generate_quick_replies(reply, "en")
+        assert chips == []
+
+    def test_add_photo_prompt_gets_add_chips(self):
+        reply = "Would you like to add a photo to your listing?"
+        chips = generate_quick_replies(reply, "en")
+        assert "I'll add one" in chips
+
+    def test_open_ended_wh_question_returns_no_guess_chips(self):
+        reply = "What are your upcoming pickups this week?"
+        assert generate_quick_replies(reply, "en") == []
+
+    def test_spanish_food_question_gets_spanish_chips(self):
+        reply = "Perfecto. ¿Qué comida quieres compartir?"
+        chips = generate_quick_replies(reply, "es")
+        assert "Pan" in chips
+
+    def test_freshness_question_gets_expiry_chips(self):
+        reply = "When was it made and how long is it good for?"
+        chips = generate_quick_replies(reply, "en")
+        assert "Made today" in chips
+        assert "Good for 24h" in chips
+
+    def test_chip_language_helper_does_not_override_en_conv(self):
+        reply = "Sure — ¿Quieres que lo publique ahora?"
+        assert _chip_language(reply, "en") == "es"
+        # Engine must ignore _chip_language and pass conv lang directly:
+        chips = generate_quick_replies(reply, "en")
+        assert "Yes, post it" in chips
 
 
 # ===================================================================

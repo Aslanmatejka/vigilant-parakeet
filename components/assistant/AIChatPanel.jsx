@@ -12,25 +12,6 @@ import { assignImagestoRows, assignFoodImage } from '../../utils/foodImages.js'
 import dataService from '../../utils/dataService.js'
 import { toast } from 'react-toastify'
 
-// ─── Quick action presets ─────────────────────────────
-const QUICK_ACTIONS_EN = [
-  { label: '🔍 Find food near me', message: 'What food is available near me?' },
-  { label: '📦 My pickups', message: 'What are my upcoming pickups?' },
-  { label: '🍳 Suggest a recipe', message: 'Can you suggest a recipe from available food?' },
-  { label: '🤝 Share food', message: 'I want to share some food' },
-  { label: '📅 Upcoming events', message: 'What distribution events are coming up?' },
-  { label: '❓ How it works', message: 'How does DoGoods work?' },
-]
-
-const QUICK_ACTIONS_ES = [
-  { label: '🔍 Buscar comida', message: '¿Qué comida hay disponible cerca de mí?' },
-  { label: '📦 Mis recogidas', message: '¿Cuáles son mis próximas recogidas?' },
-  { label: '🍳 Sugerir receta', message: '¿Puedes sugerirme una receta con comida disponible?' },
-  { label: '🤝 Compartir comida', message: 'Quiero compartir comida' },
-  { label: '📅 Eventos', message: '¿Qué eventos de distribución hay próximamente?' },
-  { label: '❓ Cómo funciona', message: '¿Cómo funciona DoGoods?' },
-]
-
 // ─── Welcome hero categories (richer onboarding surface) ───────────
 // Replaces the flat 6-pill row when the chat is empty. Each category
 // surfaces 2 starter prompts so the user immediately understands what
@@ -726,6 +707,7 @@ function MessageBubble({
   onRetry,
   onRegenerate,
   showRegenerate = false,
+  showSuggestionChips = false,
 }) {
   const [feedbackGiven, setFeedbackGiven] = useState(null)
   const [avatarBroken, setAvatarBroken] = useState(false)
@@ -858,8 +840,9 @@ function MessageBubble({
             <ToolResultCard key={i} toolResult={tr} language={language} />
           ))}
 
-          {/* Suggested actions */}
-          {suggestionItems.length > 0 && !isUser && (
+          {/* Suggested actions — only on the latest assistant turn so stale
+              chips from earlier questions don't linger in the scrollback. */}
+          {showSuggestionChips && suggestionItems.length > 0 && !isUser && (
             <div className="flex flex-wrap gap-1.5 mt-2">
               {suggestionItems.map((action, i) => (
                 <SuggestedActionButton
@@ -1358,6 +1341,10 @@ function AIChatPanel() {
   const [audioLevel, setAudioLevel] = useState(0)
   const [isVoiceListening, setIsVoiceListening] = useState(false)
   const [isVoiceSpeaking, setIsVoiceSpeaking] = useState(false)
+  // iOS Safari blocks autoplay outside a user gesture. When that happens we
+  // stash a replay() callback here and surface a "Tap to hear" button; tapping
+  // it replays the audio from inside a real tap, which the browser allows.
+  const [tapToHear, setTapToHear] = useState(null)
   const [voiceError, setVoiceError] = useState(null)
   const [voiceTranscript, setVoiceTranscript] = useState('')
   // ─── Wake word ("Nouri") hands-free state ───────
@@ -1437,16 +1424,9 @@ function AIChatPanel() {
     return null
   }, [messages])
 
-  const quickActions = language === 'es' ? QUICK_ACTIONS_ES : QUICK_ACTIONS_EN
-
-  // ─── Autocomplete: filter the suggestion pool by current input ───
-  // Detect Spanish live from what the user is typing so suggestions
-  // adapt before the first AI exchange. Spanish punctuation (¿/¡/ñ) or
-  // accented chars are reliable signals; we don't try to detect Spanish
-  // words on their own (too noisy for autocomplete).
-  const inputLooksSpanish = /[¿¡ñáéíóúü]/i.test(inputText)
-  const effectiveLang = inputLooksSpanish ? 'es' : language
-  const suggestionPool = effectiveLang === 'es' ? SUGGESTIONS_ES : SUGGESTIONS_EN
+  // Autocomplete always follows the sticky conversation language — never
+  // flip pools mid-typing from accent marks in English loan-words.
+  const suggestionPool = language === 'es' ? SUGGESTIONS_ES : SUGGESTIONS_EN
   const filteredSuggestions = useMemo(() => {
     const q = inputText.trim().toLowerCase()
     if (!q) return []
@@ -1934,6 +1914,7 @@ function AIChatPanel() {
           console.error('[Voice] Backend voice processing failed:', err)
           setVoiceError(language === 'es' ? 'Error de voz' : 'Voice processing failed')
           setVoiceTranscript('')
+          if (handsFreeRef.current) endHandsFreeTurnRef.current?.()
         }
       }
 
@@ -2017,6 +1998,7 @@ function AIChatPanel() {
     setIsVoiceListening(false)
     setVoiceError(null)
     setVoiceTranscript('')
+    setTapToHear(null)
     setAudioLevel(0)
     stopRecording()
     // Release mic stream
@@ -2043,6 +2025,7 @@ function AIChatPanel() {
       window.speechSynthesis.cancel()
     }
     setIsVoiceSpeaking(false)
+    setTapToHear(null)
   }, [])
 
   // Orb tap: interrupt when speaking, start listening when idle
@@ -2290,8 +2273,18 @@ function AIChatPanel() {
           const audioBlob = await textToSpeech(cleanText, { lang: lastAssistantMessage.message?.match(/[\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]/) ? 'es' : 'en' })
           const { play, stop } = playAudioBlob(
             audioBlob,
-            () => setIsVoiceSpeaking(true),
-            () => setIsVoiceSpeaking(false)
+            () => { setTapToHear(null); setIsVoiceSpeaking(true) },
+            () => setIsVoiceSpeaking(false),
+            // Autoplay blocked (iOS): expose a replay handler for the
+            // "Tap to hear" button instead of silently dropping the audio.
+            (replay) => {
+              setIsVoiceSpeaking(false)
+              setTapToHear(() => () => {
+                setTapToHear(null)
+                setIsVoiceSpeaking(true)
+                replay()
+              })
+            }
           )
           currentAudioRef.current = stop
           await play
@@ -2786,6 +2779,22 @@ function AIChatPanel() {
 
           {/* ─── Bottom: persistent transcript + status + end button ─── */}
           <div className="relative flex flex-col items-center gap-3 z-10 w-full">
+            {/* "Tap to hear" — shown when the browser blocked autoplay (iOS
+                Safari requires a user gesture). Tapping replays the audio
+                from inside a real tap, which is allowed. */}
+            {tapToHear && (
+              <button
+                type="button"
+                onClick={() => { try { tapToHear() } catch { /* noop */ } }}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium bg-teal-500/15 text-teal-200 ring-1 ring-teal-400/40 hover:bg-teal-500/25 transition-colors"
+                aria-label={language === 'es' ? 'Toca para escuchar la respuesta' : 'Tap to hear the response'}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
+                </svg>
+                {language === 'es' ? 'Toca para escuchar' : 'Tap to hear'}
+              </button>
+            )}
             {/* Transcript region — fixed min-height so layout doesn't jump
                 when text appears/disappears. */}
             <div className="min-h-[40px] flex items-center justify-center px-4">
@@ -2932,6 +2941,7 @@ function AIChatPanel() {
                     onRetry={retryMessage}
                     onRegenerate={regenerateLast}
                     showRegenerate={idx === lastAssistantIdx}
+                    showSuggestionChips={idx === lastAssistantIdx && !isLoading}
                   />
                 </React.Fragment>
               )
@@ -2951,28 +2961,7 @@ function AIChatPanel() {
         />
       </div>
 
-      {/* Quick-chip rail — persistent contextual prompts for first turn.
-          After the welcome state, this becomes a thin horizontally-scrolling
-          rail so users always have one-tap access to common requests
-          without retyping. */}
-      {messages.length > 1 && messages.length <= 3 && !isLoading && (
-        <div className="px-4 pb-2 flex-shrink-0">
-          <div className="flex gap-1.5 overflow-x-auto nourish-scrollbar-h" role="list" aria-label={language === 'es' ? 'Sugerencias rápidas' : 'Quick suggestions'}>
-            {quickActions.map((qa, i) => (
-              <button
-                key={i}
-                onClick={() => handleQuickAction(qa.message)}
-                className="whitespace-nowrap text-[11px] bg-slate-800/60 text-slate-200 hover:bg-cyan-500/15 hover:text-cyan-100 px-3 py-1.5 rounded-full transition-all border border-slate-600/40 hover:border-cyan-400/40 flex-shrink-0"
-                role="listitem"
-              >
-                {qa.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Upload preview card — photo / CSV → bulk-listings */}
+      {/* Input area */}
       {pendingUpload && (
         <BulkUploadPreview
           pending={pendingUpload}

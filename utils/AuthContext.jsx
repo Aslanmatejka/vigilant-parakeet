@@ -65,12 +65,12 @@ export const AuthProvider = ({ children }) => {
   // Self-heal: if the user has an address but no geocoded coords (e.g. saved
   // before geocoding was added), backfill them silently exactly once per
   // session so the map / AI distance features have a fallback location.
-  const backfilledRef = useRef(new Set());
+  const backfilledRef = useRef(new Map());
   useEffect(() => {
     if (!user?.id || !user?.address) return;
-    if (user.latitude != null && user.longitude != null) return;
-    if (backfilledRef.current.has(user.id)) return;
-    backfilledRef.current.add(user.id);
+    const addrKey = `${user.id}:${String(user.address).trim()}`;
+    if (backfilledRef.current.get(user.id) === addrKey) return;
+    backfilledRef.current.set(user.id, addrKey);
 
     let cancelled = false;
     (async () => {

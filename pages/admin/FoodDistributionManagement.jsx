@@ -309,15 +309,6 @@ function FoodDistributionManagement() {
                                                         </Button>
                                                     </>
                                                 )}
-                                                {listing.status === 'approved' && (
-                                                    <Button
-                                                        variant="secondary"
-                                                        size="sm"
-                                                        onClick={() => handleStatusChange(listing.id, 'active')}
-                                                    >
-                                                        Make Available
-                                                    </Button>
-                                                )}
                                                 <Button
                                                     variant="danger"
                                                     size="sm"

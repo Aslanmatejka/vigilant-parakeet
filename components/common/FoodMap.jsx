@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import supabase from '../../utils/supabaseClient';
 import { API_CONFIG } from '../../utils/config';
+import { bayAreaGeocodeParams, isBayAreaCoord } from '../../utils/mapBounds';
 import { useMapContext } from '../../utils/MapContext.jsx';
 import { useEffectiveLocation } from '../../utils/hooks/useLocation';
+import CommunityPinIcon, { getCommunityPinDimensions, renderCommunityPinSvg } from './CommunityPinIcon.jsx';
 
 // Mapbox is loaded via CDN in index.html
 // Access it from window.mapboxgl
@@ -23,29 +25,6 @@ const escapeHtml = (value) => {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
-};
-
-// Distinct, readable colors for community markers. Each community gets a
-// stable color based on its id so it stays the same across renders.
-const COMMUNITY_COLORS = [
-    '#2563eb', // blue
-    '#16a34a', // green
-    '#db2777', // pink
-    '#7c3aed', // purple
-    '#ea580c', // orange
-    '#0891b2', // cyan
-    '#ca8a04', // amber
-    '#dc2626', // red
-    '#0d9488', // teal
-    '#9333ea', // violet
-    '#65a30d', // lime
-    '#be185d', // rose
-];
-const colorForCommunity = (id) => {
-    const key = String(id ?? '');
-    let h = 0;
-    for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
-    return COMMUNITY_COLORS[h % COMMUNITY_COLORS.length];
 };
 
 // Forward-geocode an address string to [lng, lat] via Mapbox, with a
@@ -69,7 +48,7 @@ const geocodeAddress = async (address) => {
         }
     } catch { /* ignore storage errors */ }
     try {
-        const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(key)}.json?access_token=${MAPBOX_TOKEN}&limit=1`;
+        const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(key)}.json?access_token=${MAPBOX_TOKEN}&limit=1&${bayAreaGeocodeParams()}`;
         const resp = await fetch(url);
         if (!resp.ok) { _geocodeCache.set(key, null); return null; }
         const data = await resp.json();
@@ -78,7 +57,13 @@ const geocodeAddress = async (address) => {
             _geocodeCache.set(key, null);
             return null;
         }
-        const result = [Number(center[0]), Number(center[1])]; // [lng, lat]
+        const lng = Number(center[0]);
+        const lat = Number(center[1]);
+        if (!isBayAreaCoord(lat, lng)) {
+            _geocodeCache.set(key, null);
+            return null;
+        }
+        const result = [lng, lat]; // [lng, lat]
         _geocodeCache.set(key, result);
         try {
             if (typeof sessionStorage !== 'undefined') {
@@ -93,7 +78,69 @@ const geocodeAddress = async (address) => {
     }
 };
 
-function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = null }) {
+const MAPBOX_UI_STYLE_ID = 'dogoods-mapbox-ui-overrides';
+
+function ensureMapboxControlStyles() {
+    if (typeof document === 'undefined' || document.getElementById(MAPBOX_UI_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = MAPBOX_UI_STYLE_ID;
+    style.textContent = `
+        /* Canvas can paint over built-in controls — keep attribution above tiles only */
+        .dogoods-food-map .mapboxgl-canvas-container {
+            z-index: 1 !important;
+        }
+        .dogoods-food-map .mapboxgl-control-container {
+            z-index: 2 !important;
+            pointer-events: none;
+        }
+        .dogoods-food-map .mapboxgl-control-container .mapboxgl-ctrl {
+            pointer-events: auto;
+        }
+        .dogoods-food-map .mapboxgl-ctrl-bottom-right,
+        .dogoods-food-map .mapboxgl-ctrl-bottom-left {
+            z-index: 2 !important;
+        }
+        .dogoods-food-map .mapboxgl-ctrl-bottom-right {
+            bottom: 8px !important;
+            right: 8px !important;
+        }
+        .dogoods-food-map-legend {
+            z-index: 90 !important;
+            top: auto !important;
+            left: 10px !important;
+            bottom: 44px !important;
+            pointer-events: none;
+        }
+        .dogoods-food-map-legend > * {
+            pointer-events: auto;
+        }
+        .dogoods-food-map-zoom {
+            z-index: 100 !important;
+            top: auto !important;
+            right: 10px !important;
+            bottom: 72px !important;
+            pointer-events: auto;
+        }
+        .dogoods-food-map-overlay {
+            z-index: 25 !important;
+            pointer-events: none;
+        }
+        @media (max-width: 1023px) {
+            .dogoods-food-map-zoom {
+                bottom: 5.5rem !important;
+                right: 10px !important;
+            }
+            .dogoods-food-map-legend {
+                left: 8px !important;
+                bottom: 40px !important;
+                max-width: calc(100% - 4.5rem) !important;
+            }
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = null, className = '' }) {
     const navigate = useNavigate();
     const mapContainer = useRef(null);
     const map = useRef(null);
@@ -115,6 +162,10 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
     const geocodeAttemptedRef = useRef(new Set());
     const { aiMarkers, aiRoute, centerRequest } = useMapContext();
     const { location: userLocation, source: userLocationSource } = useEffectiveLocation();
+
+    useEffect(() => {
+        ensureMapboxControlStyles();
+    }, []);
 
     useEffect(() => {
         // Prevent double initialization from React Strict Mode
@@ -154,6 +205,8 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             return;
         }
 
+        ensureMapboxControlStyles();
+
         mapInitialized.current = true;        try {
             console.log('🗺️ Creating Mapbox map...');
             
@@ -184,6 +237,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
 
             map.current.on('load', () => {
                 console.log('✅ Map loaded successfully!');
+                ensureMapboxControlStyles();
                 setMapLoaded(true);
             });
 
@@ -219,11 +273,6 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 setMapLoaded(true);
             }
         }, 2000);
-
-        // Add navigation controls
-        if (map.current && mapboxgl) {
-            map.current.addControl(new mapboxgl.NavigationControl(), 'top-right');
-        }
 
         console.log('🎯 Map initialization complete. Waiting for tiles...');
         console.log('📍 Map center:', map.current?.getCenter());
@@ -294,11 +343,15 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             }
             if (cancelled || patches.size === 0) return;
             setFoodListings((prev) =>
-                prev.map((l) =>
-                    patches.has(l.id)
-                        ? { ...l, longitude: patches.get(l.id)[0], latitude: patches.get(l.id)[1] }
-                        : l
-                )
+                prev.map((l) => {
+                    const coords = patches.get(l.id);
+                    if (!coords) return l;
+                    return {
+                        ...l,
+                        latitude: coords[1],
+                        longitude: coords[0],
+                    };
+                })
             );
         })();
 
@@ -333,7 +386,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             const listing = foodListings.find(l => l.id === highlightedFoodId);
             const lat = listing ? parseFloat(listing.latitude) : NaN;
             const lng = listing ? parseFloat(listing.longitude) : NaN;
-            if (!isNaN(lat) && !isNaN(lng)) {
+            if (!isNaN(lat) && !isNaN(lng) && isBayAreaCoord(lat, lng)) {
                 try {
                     const bounds = map.current.getBounds();
                     if (bounds && !bounds.contains([lng, lat])) {
@@ -430,6 +483,10 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 console.error('❌ Invalid coordinates for listing', listing.title);
                 return;
             }
+            if (!isBayAreaCoord(lat, lng)) {
+                console.warn('⚠️ Skipping out-of-region listing marker:', listing.title, lat, lng);
+                return;
+            }
             
             console.log('✅ Adding food marker:', listing.title);
             console.log('  Database values - lat:', listing.latitude, 'lng:', listing.longitude);
@@ -485,10 +542,9 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 console.error('❌ Invalid coordinates for', community.name, '- lat:', community.latitude, 'lng:', community.longitude);
                 return;
             }
-            
-            // San Francisco Bay Area bounds check: lat ~37-38, lng ~-122 to -121
-            if (lat < 36 || lat > 39 || lng > -121 || lng < -123) {
-                console.warn('⚠️ Coordinates outside Bay Area for', community.name, '- lat:', lat, 'lng:', lng);
+            if (!isBayAreaCoord(lat, lng)) {
+                console.warn('⚠️ Skipping out-of-region community marker:', community.name, lat, lng);
+                return;
             }
             
             console.log('✅ Adding community marker:', community.name);
@@ -497,36 +553,11 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             console.log('  Mapbox format [lng, lat]:', [lng, lat]);
 
             const count = listingCountsByCommunity[community.id] || 0;
-            const countStr = String(count);
-
-            // Simple circular pin in the community's color, with a small red
-            // badge in the top-right showing the active listing count.
-            const dotR = 13;
-            const badgeR = countStr.length >= 3 ? 11 : 9;
-            const pad = badgeR + 2;
-            const svgW = dotR * 2 + pad * 2;
-            const svgH = dotR * 2 + pad * 2;
-            const dotCx = svgW / 2;
-            const dotCy = svgH / 2;
-
-            const badgeCx = dotCx + dotR - 2;
-            const badgeCy = dotCy - dotR + 2;
-
-            const color = '#2563eb';
-
-            const svg = `
-                <svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" style="display:block;overflow:visible;filter:drop-shadow(0 2px 3px rgba(0,0,0,0.3));">
-                    <circle cx="${dotCx}" cy="${dotCy}" r="${dotR}"
-                            fill="${color}" stroke="#ffffff" stroke-width="3" />
-                    ${count > 0 ? `
-                        <circle cx="${badgeCx}" cy="${badgeCy}" r="${badgeR}"
-                                fill="#ef4444" stroke="#ffffff" stroke-width="1.75" />
-                        <text x="${badgeCx}" y="${badgeCy}" text-anchor="middle" dominant-baseline="central"
-                              fill="#ffffff" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif"
-                              font-weight="700" font-size="${countStr.length >= 3 ? 9 : 11}">${countStr}</text>
-                    ` : ''}
-                </svg>
-            `;
+            const svg = renderCommunityPinSvg({
+                communityId: community.id,
+                count,
+            });
+            const { width: svgW, height: svgH } = getCommunityPinDimensions(count);
 
             const el = document.createElement('div');
             el.className = 'community-marker';
@@ -869,7 +900,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             // First time we successfully place the user pin, gently center the map
             // on it so the user can immediately see it. Subsequent updates (e.g. live
             // GPS) leave the map alone so we don't fight user panning.
-            if (!userPinCenteredRef.current) {
+            if (!userPinCenteredRef.current && isBayAreaCoord(nLat, nLng)) {
                 userPinCenteredRef.current = true;
                 try {
                     map.current.easeTo({
@@ -878,6 +909,9 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                         duration: 600,
                     });
                 } catch (_) { /* ignore */ }
+            } else if (!userPinCenteredRef.current) {
+                userPinCenteredRef.current = true;
+                console.warn('Skipping map center on out-of-region user location:', nLat, nLng);
             }
         } catch (err) {
             console.error('Failed to add user-location marker:', err);
@@ -904,6 +938,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
         // Add AI-driven markers (food, distribution, route endpoints)
         (aiMarkers || []).forEach(m => {
             if (typeof m.lat !== 'number' || typeof m.lng !== 'number') return;
+            if (!isBayAreaCoord(m.lat, m.lng)) return;
             const el = document.createElement('div');
             el.className = 'ai-map-marker';
             el.style.width = '26px';
@@ -975,7 +1010,14 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                         (b, c) => b.extend(c),
                         new (getMapboxgl()).LngLatBounds(coords[0], coords[0])
                     );
-                    m.fitBounds(bounds, { padding: 60, duration: 800 });
+                    const ne = bounds.getNorthEast();
+                    const sw = bounds.getSouthWest();
+                    const spanLat = Math.abs(ne.lat - sw.lat);
+                    const spanLng = Math.abs(ne.lng - sw.lng);
+                    // Skip continent-scale fits (e.g. bad geocodes) that jump to Austin/NYC.
+                    if (spanLat <= 1.5 && spanLng <= 1.5) {
+                        m.fitBounds(bounds, { padding: 60, duration: 800, maxZoom: 14 });
+                    }
                 }
             } catch (err) {
                 console.error('Failed to draw AI route:', err);
@@ -985,13 +1027,19 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
         return () => { removeRoute(); };
     }, [aiRoute, mapLoaded]);
 
-    // Honor centerOn requests from the AI
+    // Honor centerOn requests from the AI — skip outlier coords that would
+    // jump the map to test data (Austin, NYC, etc.) far from the Bay Area.
     useEffect(() => {
         if (!mapLoaded || !map.current || !centerRequest) return;
+        const { lat, lng, zoom } = centerRequest;
+        if (!isBayAreaCoord(lat, lng)) {
+            console.warn('Skipping map flyTo to outlier coordinate:', lat, lng);
+            return;
+        }
         try {
             map.current.flyTo({
-                center: [centerRequest.lng, centerRequest.lat],
-                zoom: centerRequest.zoom || 13,
+                center: [lng, lat],
+                zoom: zoom || 13,
                 duration: 800,
             });
         } catch (err) {
@@ -999,11 +1047,30 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
         }
     }, [centerRequest, mapLoaded]);
 
+    const handleZoomIn = () => {
+        try {
+            map.current?.zoomIn({ duration: 250 });
+        } catch (err) {
+            console.error('Zoom in failed:', err);
+        }
+    };
+
+    const handleZoomOut = () => {
+        try {
+            map.current?.zoomOut({ duration: 250 });
+        } catch (err) {
+            console.error('Zoom out failed:', err);
+        }
+    };
+
     return (
-        <div className="relative w-full" style={{ height: '600px', backgroundColor: '#f0f0f0' }}>
+        <div
+            className={`dogoods-food-map relative isolate w-full h-full min-h-[280px] sm:min-h-[400px] lg:min-h-[500px] overflow-visible ${className}`.trim()}
+            style={{ backgroundColor: '#f0f0f0' }}
+        >
             {/* Static map-like background - shows instantly */}
             <div 
-                className="absolute inset-0" 
+                className="absolute inset-0 pointer-events-none" 
                 style={{
                     backgroundImage: `
                         linear-gradient(rgba(220, 220, 220, 0.5) 1px, transparent 1px),
@@ -1025,7 +1092,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             
             <div 
                 ref={mapContainer} 
-                className="absolute inset-0" 
+                className="absolute inset-0 z-0 overflow-hidden rounded-2xl" 
                 style={{ 
                     width: '100%', 
                     height: '100%',
@@ -1034,8 +1101,32 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 }} 
             />
 
+            {mapLoaded && (
+                <div
+                    className="dogoods-food-map-zoom absolute flex flex-col rounded-xl overflow-hidden shadow-[0_2px_10px_rgba(0,0,0,0.15)] border border-gray-200/80 bg-white/95 backdrop-blur-sm"
+                    aria-label="Map zoom controls"
+                >
+                    <button
+                        type="button"
+                        onClick={handleZoomIn}
+                        className="flex h-11 w-11 items-center justify-center text-gray-700 hover:bg-gray-50 active:bg-gray-100 border-b border-gray-200/80 touch-manipulation"
+                        aria-label="Zoom in"
+                    >
+                        <i className="fas fa-plus text-base" aria-hidden="true" />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={handleZoomOut}
+                        className="flex h-11 w-11 items-center justify-center text-gray-700 hover:bg-gray-50 active:bg-gray-100 touch-manipulation"
+                        aria-label="Zoom out"
+                    >
+                        <i className="fas fa-minus text-base" aria-hidden="true" />
+                    </button>
+                </div>
+            )}
+
             {loading && (
-                <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-white rounded-lg shadow-lg px-4 py-2 z-10">
+                <div className="dogoods-food-map-overlay absolute top-4 left-1/2 transform -translate-x-1/2 bg-white rounded-lg shadow-lg px-4 py-2">
                     <div className="flex items-center gap-2">
                         <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-[#2CABE3]"></div>
                         <span className="text-sm text-gray-600">Loading food locations...</span>
@@ -1044,7 +1135,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             )}
 
             {!loading && foodListings.length === 0 && communities.length === 0 && (
-                <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-white/90 backdrop-blur-sm rounded-lg shadow-lg px-5 py-3 z-10 text-center max-w-sm">
+                <div className="dogoods-food-map-overlay absolute top-4 left-1/2 transform -translate-x-1/2 bg-white/90 backdrop-blur-sm rounded-lg shadow-lg px-5 py-3 text-center max-w-sm">
                     <div className="text-gray-600 flex items-center gap-3">
                         <i className="fas fa-map-marker-alt text-xl text-gray-400"></i>
                         <div className="text-left">
@@ -1055,19 +1146,24 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 </div>
             )}
 
-            <div className="absolute bottom-4 left-4 bg-white rounded-lg shadow-lg px-4 py-2 z-10">
-                <div className="flex items-center gap-4 text-sm flex-wrap">
-                    <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full bg-[#dc2626] border-2 border-white shadow-[0_1px_2px_rgba(0,0,0,0.3)]"></div>
+            <div
+                role="note"
+                aria-label="Map legend"
+                className="dogoods-food-map-legend absolute bg-white/95 backdrop-blur-sm rounded-xl shadow-[0_2px_10px_rgba(0,0,0,0.12)] px-2.5 py-1.5 sm:px-3 sm:py-2 max-w-[calc(100%-4.5rem)] sm:max-w-[calc(100%-6rem)]"
+            >
+                <div className="flex items-center gap-2 sm:gap-3 text-[11px] sm:text-sm flex-wrap leading-tight">
+                    <div className="flex items-center gap-1.5">
+                        <div className="w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full bg-[#dc2626] border-2 border-white shadow-[0_1px_2px_rgba(0,0,0,0.3)] shrink-0"></div>
                         <span className="font-medium text-gray-700">{foodListings.length} Listings</span>
                     </div>
-                    <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full bg-[#2563eb] border-2 border-white shadow-[0_1px_2px_rgba(0,0,0,0.3)]"></div>
+                    <div className="flex items-center gap-1.5">
+                        <CommunityPinIcon size={14} className="sm:hidden shrink-0" />
+                        <CommunityPinIcon size={16} className="hidden sm:block shrink-0" />
                         <span className="font-medium text-gray-700">{communities.length} Communities</span>
                     </div>
                     {userLocation?.latitude != null && userLocation?.longitude != null && (
-                        <div className="flex items-center gap-2">
-                            <i className="fas fa-map-marker-alt text-[#ea4335] text-base"></i>
+                        <div className="flex items-center gap-1.5">
+                            <i className="fas fa-map-marker-alt text-[#ea4335] text-xs sm:text-base shrink-0" aria-hidden="true"></i>
                             <span className="font-medium text-gray-700">
                                 {userLocationSource === 'profile' ? 'Your address' : 'You'}
                             </span>

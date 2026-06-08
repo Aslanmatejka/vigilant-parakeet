@@ -43,6 +43,16 @@ export function clearAiAuthCache() {
   _tokenCache = { value: null, expiresAt: 0 }
 }
 
+// Invalidate the cached bearer whenever the auth session changes. Without this
+// the 30s cache can keep serving a stale token after a refresh (→ 401s) or a
+// leftover token after sign-out. Guarded so the test mock (which only stubs
+// getSession) doesn't blow up at import time.
+if (typeof supabase?.auth?.onAuthStateChange === 'function') {
+  supabase.auth.onAuthStateChange(() => {
+    clearAiAuthCache()
+  })
+}
+
 /**
  * Parse a failed Response into our structured error object, or null if the
  * body isn't the typed AIError shape.

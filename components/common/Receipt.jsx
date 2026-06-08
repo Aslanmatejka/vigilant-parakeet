@@ -61,7 +61,6 @@ export default function Receipt({ receipt, items, onUpdate }) {
         if (effectiveStatus === 'completed') {
             return {
                 headerClass: 'bg-gray-400',
-                headerText: 'DATE COMPLETE',
                 buttonText: 'Complete',
                 buttonClass: 'bg-gray-400 cursor-not-allowed',
                 buttonDisabled: true
@@ -69,7 +68,6 @@ export default function Receipt({ receipt, items, onUpdate }) {
         } else if (effectiveStatus === 'expired') {
             return {
                 headerClass: 'bg-orange-500',
-                headerText: 'CLAIM EXPIRED',
                 buttonText: 'Reclaim',
                 buttonClass: 'bg-primary-600 hover:bg-primary-700 shadow-lg',
                 buttonDisabled: false
@@ -77,7 +75,6 @@ export default function Receipt({ receipt, items, onUpdate }) {
         } else {
             return {
                 headerClass: 'bg-primary-600',
-                headerText: 'DATE CLAIMED',
                 buttonText: 'Pick Up',
                 buttonClass: 'bg-primary-600 hover:bg-primary-700 shadow-lg',
                 buttonDisabled: false
@@ -305,7 +302,6 @@ export default function Receipt({ receipt, items, onUpdate }) {
             {/* Header */}
             <div className={`${state.headerClass} text-white px-6 py-4`}>
                 <h3 className="text-xl font-bold">Receipt</h3>
-                <p className="text-sm font-medium mt-1">{state.headerText}</p>
             </div>
 
             {/* Expired Notice (if applicable) */}
@@ -357,6 +353,17 @@ export default function Receipt({ receipt, items, onUpdate }) {
                     {loading ? 'Processing...' : state.buttonText}
                 </button>
             </div>
+
+            {effectiveStatus === 'expired' && (
+                <div className="bg-orange-500 text-white px-6 py-4 text-center border-t-4 border-orange-600">
+                    <p className="text-xs font-bold uppercase tracking-wider text-orange-100 mb-1">
+                        Expiration date
+                    </p>
+                    <p className="text-lg font-extrabold tracking-tight">
+                        {formatDate(receipt.expired_at || receipt.pickup_by)}
+                    </p>
+                </div>
+            )}
         </div>
     );
 }

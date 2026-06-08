@@ -48,7 +48,7 @@ function pickInitialLanguage(user) {
 }
 
 export function useAIChat() {
-  const { user, isAuthenticated } = useAuthContext()
+  const { user, isAuthenticated, initialized } = useAuthContext()
   const [messages, setMessages] = useState([INITIAL_MESSAGE])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -67,11 +67,13 @@ export function useAIChat() {
   // newer, faster one finished. Prevents out-of-order assistant bubbles
   // when the user double-sends or retries quickly.
   const reqSeqRef = useRef(0)
+  const isLoadingRef = useRef(false)
 
   // When the active user changes (logout → login as a different account,
   // or guest → authenticated), we MUST forget the previous chat so the
   // new session starts clean and re-fetches the right history.
   useEffect(() => {
+    reqSeqRef.current += 1
     setHistoryLoaded(false)
     // Adopt the freshly-logged-in user's preferred language if they
     // have one set. Falls back to current state (which already honored
@@ -84,15 +86,22 @@ export function useAIChat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, isAuthenticated])
 
-  // Load conversation history from backend when user logs in
+  // Load conversation history from backend when user logs in.
+  // Gate on `initialized` so we don't fire this authenticated call during the
+  // cold-load window where isAuthenticated is true (restored from localStorage)
+  // but the Supabase session token isn't ready yet — that race returned 401s.
   useEffect(() => {
-    if (!isAuthenticated || !user?.id || historyLoaded) return
+    if (!initialized || !isAuthenticated || !user?.id || historyLoaded) return
 
     let cancelled = false
     const loadHistory = async () => {
       try {
         const history = await aiChatService.getHistory(user.id, 50)
-        if (cancelled || !history?.length) return
+        if (cancelled) return
+        if (!history?.length) {
+          setHistoryLoaded(true)
+          return
+        }
 
         const formatted = history
           .filter(msg => {
@@ -134,12 +143,13 @@ export function useAIChat() {
         setHistoryLoaded(true)
       } catch (err) {
         console.error('Failed to load AI history:', err)
+        if (!cancelled) setHistoryLoaded(true)
       }
     }
 
     loadHistory()
     return () => { cancelled = true }
-  }, [isAuthenticated, user?.id, historyLoaded, language])
+  }, [initialized, isAuthenticated, user?.id, historyLoaded, language])
 
   /**
    * Translate a typed backend error code into a friendly bubble message.
@@ -196,6 +206,7 @@ export function useAIChat() {
   const runChatTurn = useCallback(async (text, { userMessage = null, replaceErrorId = null } = {}) => {
     if (!text?.trim()) return
     const seq = ++reqSeqRef.current
+    isLoadingRef.current = true
     setIsLoading(true)
     setError(null)
 
@@ -286,14 +297,17 @@ export function useAIChat() {
       setMessages(prev => [...prev, errorBubble])
       setError(err.message)
     } finally {
-      if (seq === reqSeqRef.current) setIsLoading(false)
+      if (seq === reqSeqRef.current) {
+        isLoadingRef.current = false
+        setIsLoading(false)
+      }
     }
   }, [language, user?.id, friendlyErrorMessage])
 
   const sendMessage = useCallback(async (text) => {
-    if (!text?.trim() || isLoading) return
+    if (!text?.trim() || isLoadingRef.current) return
     await runChatTurn(text)
-  }, [isLoading, runChatTurn])
+  }, [runChatTurn])
 
   /**
    * Retry a failed assistant turn. Resends the original user text (stashed
@@ -328,9 +342,10 @@ export function useAIChat() {
   }, [isLoading, messages, runChatTurn])
 
   const sendVoice = useCallback(async (audioBlob) => {
-    if (isLoading || !audioBlob) return
+    if (isLoadingRef.current || !audioBlob) return
 
     const seq = ++reqSeqRef.current
+    isLoadingRef.current = true
     setIsLoading(true)
     setError(null)
 
@@ -406,9 +421,12 @@ export function useAIChat() {
       // Don't latch a global error state for benign "didn't hear you" cases.
       if (!unintelligible) setError(err.message)
     } finally {
-      if (seq === reqSeqRef.current) setIsLoading(false)
+      if (seq === reqSeqRef.current) {
+        isLoadingRef.current = false
+        setIsLoading(false)
+      }
     }
-  }, [isLoading, language, user?.id, friendlyErrorMessage])
+  }, [language, user?.id, friendlyErrorMessage])
 
   const clearHistory = useCallback(async () => {
     try {
@@ -426,9 +444,9 @@ export function useAIChat() {
 
   const submitFeedback = useCallback(async (messageId, rating) => {
     if (!isAuthenticated || !user?.id) return
-    // Find the message to get real conversation UUID from backend
     const msg = messages.find(m => m.id === messageId)
-    const convId = msg?.conversationId || messageId
+    const convId = msg?.conversationId
+    if (!convId) return
     try {
       await aiChatService.submitFeedback(convId, user.id, rating)
     } catch (err) {
@@ -470,6 +488,11 @@ export function useAIChat() {
         silent: true,
       })
       if (result.lang && result.lang !== language) setLanguage(result.lang)
+      if (result.error) {
+        console.warn('sendSilentMessage backend error:', result.error.code)
+        return
+      }
+      if (!result.response) return
       const assistantMsg = {
         id: `assistant-${Date.now()}`,
         role: 'assistant',
