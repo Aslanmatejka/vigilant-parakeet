@@ -57,6 +57,21 @@ TTS_MODEL = os.getenv("AI_TTS_MODEL", "tts-1")
 TTS_VOICE_EN = os.getenv("AI_TTS_VOICE", "nova")
 TTS_VOICE_ES = os.getenv("AI_TTS_VOICE_ES", "nova")
 
+# Fallback model chains: if the primary model is unavailable on this API key
+# (404 / model_not_found), the backend automatically tries the next model in
+# the list so users never see the "AI service down" message just because the
+# account can't access gpt-4.1.
+CHAT_MODEL_FALLBACKS: list[str] = [
+    m.strip() for m in
+    os.getenv("AI_CHAT_MODEL_FALLBACKS", "gpt-4o,gpt-4o-mini").split(",")
+    if m.strip()
+]
+FOLLOWUP_MODEL_FALLBACKS: list[str] = [
+    m.strip() for m in
+    os.getenv("AI_FOLLOWUP_MODEL_FALLBACKS", "gpt-4o-mini").split(",")
+    if m.strip()
+]
+
 MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "3"))
 TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT", "60"))
 
@@ -765,6 +780,60 @@ async def _openai_with_retry(
 
     _upstream_metrics.record(ok=False)
     raise RuntimeError(f"OpenAI request failed after {retries} attempts: {last_exc}")
+
+
+def _is_model_access_error(exc: httpx.HTTPStatusError) -> bool:
+    """Return True when OpenAI says the model is unknown / not available."""
+    if exc.response.status_code not in (404, 422):
+        return False
+    try:
+        body = exc.response.json()
+        msg = str(body.get("error", {}).get("message", "")).lower()
+        code = str(body.get("error", {}).get("code", "")).lower()
+        return "model" in msg or code in ("model_not_found", "invalid_model")
+    except Exception:
+        return exc.response.status_code == 404
+
+
+async def _openai_chat_with_model_fallback(
+    primary_model: str,
+    fallbacks: list[str],
+    json_payload: dict[str, Any],
+    headers: dict[str, Any],
+    label: str = "openai",
+) -> httpx.Response:
+    """Try primary_model; on model-access error, try each fallback in order.
+
+    All other errors (network, rate-limit, 5xx, auth) are raised immediately
+    so the caller can apply its own retry / fallback logic.
+    """
+    models_to_try = [primary_model] + fallbacks
+    for model in models_to_try:
+        payload = {**json_payload, "model": model}
+        try:
+            resp = await _openai_with_retry(
+                "POST",
+                f"{OPENAI_BASE_URL}/chat/completions",
+                headers=headers,
+                json_payload=payload,
+                label=label,
+            )
+            if model != primary_model:
+                logger.info("Chat succeeded with fallback model %s (primary=%s)", model, primary_model)
+            return resp
+        except httpx.HTTPStatusError as exc:
+            if _is_model_access_error(exc) and model != models_to_try[-1]:
+                logger.warning(
+                    "Model %s not accessible (%s), trying next fallback",
+                    model, exc.response.status_code,
+                )
+                # Don't count a model-access error as a circuit failure —
+                # it's a permanent config issue, not a transient outage.
+                _circuit.failure_count = max(0, _circuit.failure_count - 1)
+                continue
+            raise
+    # Should never reach here, but satisfy the type-checker
+    raise RuntimeError("All models in fallback chain failed")
 
 
 def _extract_content(response: dict[str, Any]) -> str:
@@ -2949,11 +3018,12 @@ class ConversationEngine:
             "Content-Type": "application/json",
         }
         try:
-            resp = await _openai_with_retry(
-                "POST",
-                f"{OPENAI_BASE_URL}/chat/completions",
-                headers=headers,
+            resp = await _openai_chat_with_model_fallback(
+                primary_model=CHAT_MODEL,
+                fallbacks=CHAT_MODEL_FALLBACKS,
                 json_payload=payload,
+                headers=headers,
+                label="public-chat",
             )
             data = resp.json()
             return data["choices"][0]["message"].get("content", "").strip() or get_canned_response("general_error", lang)
@@ -3050,11 +3120,11 @@ class ConversationEngine:
             "Content-Type": "application/json",
         }
 
-        resp = await _openai_with_retry(
-            "POST",
-            f"{OPENAI_BASE_URL}/chat/completions",
-            headers=headers,
+        resp = await _openai_chat_with_model_fallback(
+            primary_model=CHAT_MODEL,
+            fallbacks=CHAT_MODEL_FALLBACKS,
             json_payload=payload,
+            headers=headers,
         )
         data = resp.json()
         choice = data["choices"][0]
@@ -3295,11 +3365,12 @@ class ConversationEngine:
                 "tools": self.tool_definitions,
             }
             try:
-                resp = await _openai_with_retry(
-                    "POST",
-                    f"{OPENAI_BASE_URL}/chat/completions",
-                    headers=headers,
+                resp = await _openai_chat_with_model_fallback(
+                    primary_model=FOLLOWUP_MODEL,
+                    fallbacks=FOLLOWUP_MODEL_FALLBACKS,
                     json_payload=followup_payload,
+                    headers=headers,
+                    label="openai-followup",
                 )
                 followup_data = resp.json()
                 msg = followup_data["choices"][0]["message"]

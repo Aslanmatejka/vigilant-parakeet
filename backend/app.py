@@ -3208,6 +3208,31 @@ async def health() -> dict:
 async def health_ai() -> dict:
     return await health()
 
+
+@app.post("/api/ai/reset-circuit")
+async def reset_circuit(request: Request) -> dict:
+    """Admin-only endpoint: clear the OpenAI circuit breaker so normal traffic
+    resumes immediately instead of waiting for the cooldown timeout.
+
+    Requires the ADMIN_RESET_TOKEN env var to be set; callers must supply it
+    as a Bearer token so the endpoint cannot be abused publicly.
+    """
+    reset_token = os.getenv("ADMIN_RESET_TOKEN", "")
+    if reset_token:
+        auth_header = request.headers.get("Authorization", "")
+        provided = auth_header.removeprefix("Bearer ").strip()
+        if provided != reset_token:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+    prev_state = _circuit.state.value
+    _circuit.record_success()  # forces state → CLOSED and resets failure_count
+    logger.info("Circuit breaker manually reset via /api/ai/reset-circuit (was %s)", prev_state)
+    return {
+        "ok": True,
+        "previous_state": prev_state,
+        "current_state": _circuit.state.value,
+    }
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
