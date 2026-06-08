@@ -177,4 +177,82 @@ CountdownTimer.propTypes = {
   deadline: PropTypes.string.isRequired
 };
 
+/**
+ * ExpiryCountdown Component
+ * Live color-coded countdown pill shown on every food card that has an expiry
+ * or pickup deadline. Updates every minute (every second when < 1 hour left).
+ */
+export function ExpiryCountdown({ foodListing }) {
+  const [display, setDisplay] = useState(null);
+  const intervalRef = React.useRef(null);
+
+  useEffect(() => {
+    if (!foodListing) return;
+    const deadline = UrgencyService.getDeadline(foodListing);
+    if (!deadline) return;
+
+    const tick = () => {
+      const seconds = UrgencyService.getSecondsRemaining(deadline);
+      if (seconds <= 0) {
+        setDisplay(null);
+        return;
+      }
+
+      const totalHours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const days = Math.floor(totalHours / 24);
+      const remHours = totalHours % 24;
+
+      let text;
+      if (days > 0) {
+        text = remHours > 0 ? `${days}d ${remHours}h left` : `${days}d left`;
+      } else if (totalHours > 0) {
+        text = `${totalHours}h ${minutes}m left`;
+      } else {
+        text = `${minutes}m left`;
+      }
+
+      const urgency = seconds <= 6 * 3600  ? 'critical'
+                    : seconds <= 24 * 3600 ? 'high'
+                    : seconds <= 72 * 3600 ? 'medium'
+                    : 'normal';
+
+      setDisplay({ text, urgency });
+
+      // Reschedule at appropriate frequency
+      clearInterval(intervalRef.current);
+      intervalRef.current = setInterval(tick, seconds < 3600 ? 1000 : 60000);
+    };
+
+    tick();
+    return () => clearInterval(intervalRef.current);
+  }, [foodListing]);
+
+  if (!display) return null;
+
+  const colorMap = {
+    critical: 'bg-red-50 text-red-700 border-red-300',
+    high:     'bg-orange-50 text-orange-700 border-orange-200',
+    medium:   'bg-yellow-50 text-yellow-700 border-yellow-200',
+    normal:   'bg-green-50 text-green-700 border-green-200',
+  };
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] sm:text-xs font-semibold ${colorMap[display.urgency]} ${display.urgency === 'critical' ? 'animate-pulse' : ''}`}
+      aria-label={`Expires in ${display.text}`}
+    >
+      <i className="fas fa-hourglass-half text-[9px] sm:text-[10px]" aria-hidden="true" />
+      {display.text}
+    </span>
+  );
+}
+
+ExpiryCountdown.propTypes = {
+  foodListing: PropTypes.shape({
+    pickup_by: PropTypes.string,
+    expiry_date: PropTypes.string,
+  }).isRequired,
+};
+
 export default UrgencyBadge;

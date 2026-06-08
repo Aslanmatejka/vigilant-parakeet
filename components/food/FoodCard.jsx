@@ -5,7 +5,7 @@ import Card from "../common/Card";
 import Avatar from "../common/Avatar";
 import Button from "../common/Button";
 import { useAI } from "../../utils/hooks/useSupabase";
-import { UrgencyIndicator } from "./UrgencyBadge";
+import { UrgencyIndicator, ExpiryCountdown } from "./UrgencyBadge";
 import VerificationStatus from "./VerificationStatus";
 import FoodDietaryTags from "./FoodDietaryTags";
 import CommunityPinIcon from "../common/CommunityPinIcon";
@@ -194,16 +194,19 @@ function FoodCard({
                         </span>
                     </div>
 
-                    {/* Expiry date */}
+                    {/* Expiry date + live countdown */}
                     <div className="flex items-center text-gray-600 min-w-0">
                         <i className="fas fa-calendar-alt text-green-500 mr-1.5 sm:mr-2 text-[10px] sm:text-sm shrink-0" aria-hidden="true"></i>
-                        <span className="min-w-0">
-                            <span className="font-medium text-gray-500 mr-1">
-                                {pickup_by && !expiry_date ? 'Pickup by:' : 'Expires:'}
+                        <span className="min-w-0 flex flex-wrap items-center gap-1.5">
+                            <span>
+                                <span className="font-medium text-gray-500 mr-1">
+                                    {pickup_by && !expiry_date ? 'Pickup by:' : 'Expires:'}
+                                </span>
+                                <span className="whitespace-nowrap sm:whitespace-normal">
+                                    {displayExpiryDate ? formatDate(displayExpiryDate) : 'No expiry date'}
+                                </span>
                             </span>
-                            <span className="whitespace-nowrap sm:whitespace-normal">
-                                {displayExpiryDate ? formatDate(displayExpiryDate) : 'No expiry date'}
-                            </span>
+                            {displayExpiryDate && <ExpiryCountdown foodListing={food} />}
                         </span>
                     </div>
 
