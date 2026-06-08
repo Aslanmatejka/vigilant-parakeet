@@ -2135,9 +2135,12 @@ async def ai_recipes(body: RecipeRequest, request: Request) -> dict:
 
     await _require_auth_for_user(request, body.user_id)
 
-    # Profile context (dietary restrictions, community_role for household hint).
+    # Profile context (dietary restrictions + allergies, community_role for household hint).
     user_rows = await supabase_get("users", {
-        "select": "id,name,community_role,dietary_restrictions",
+        # Fetch both dietary_restrictions AND allergies — both are safety-critical
+        # for recipe generation. Missing allergies here would let the AI suggest
+        # nut-containing recipes to someone with a nut allergy.
+        "select": "id,name,community_role,dietary_restrictions,allergies",
         "id": f"eq.{body.user_id}",
         "limit": "1",
     })
@@ -2149,9 +2152,16 @@ async def ai_recipes(body: RecipeRequest, request: Request) -> dict:
         dietary.extend([str(d).strip() for d in raw_diet if str(d).strip()])
     elif isinstance(raw_diet, str) and raw_diet.strip():
         dietary.extend([p.strip() for p in raw_diet.split(",") if p.strip()])
+    # Always include allergies so the recipe AI never suggests food containing
+    # an ingredient the user is allergic to (e.g. nut allergy → no nut recipes).
+    raw_allergies = user_row.get("allergies")
+    if isinstance(raw_allergies, list):
+        dietary.extend([str(a).strip() for a in raw_allergies if str(a).strip()])
+    elif isinstance(raw_allergies, str) and raw_allergies.strip():
+        dietary.extend([p.strip() for p in raw_allergies.split(",") if p.strip()])
     if body.dietary_overrides:
         dietary.extend([str(d).strip() for d in body.dietary_overrides if str(d).strip()])
-    dietary = list(dict.fromkeys([d.lower() for d in dietary]))[:8]
+    dietary = list(dict.fromkeys([d.lower() for d in dietary]))[:12]
 
     # Ingredient list: explicit > claimed pickups.
     explicit = [str(i).strip() for i in (body.ingredients or []) if str(i).strip()]
@@ -2512,7 +2522,10 @@ async def _tool_get_my_impact_summary(_args: dict, ctx: dict) -> dict:
 
 async def _tool_get_my_profile(_args: dict, ctx: dict) -> dict:
     rows = await supabase_get("users", {
-        "select": "id,name,community_role,location,dietary_restrictions,is_admin",
+        # Use `address` (plain text) instead of `location` (legacy JSON column).
+        # `location` was null or a JSON blob for most users so queries like
+        # "what address do you have for me?" would return nothing.
+        "select": "id,name,community_role,address,dietary_restrictions,allergies,is_admin",
         "id": f"eq.{ctx['user_id']}",
         "limit": "1",
     })
@@ -2521,8 +2534,9 @@ async def _tool_get_my_profile(_args: dict, ctx: dict) -> dict:
         "id": row.get("id"),
         "name": row.get("name"),
         "community_role": row.get("community_role"),
-        "location": row.get("location"),
+        "address": row.get("address"),
         "dietary_restrictions": row.get("dietary_restrictions") or [],
+        "allergies": row.get("allergies") or [],
         "is_admin": bool(row.get("is_admin")),
     }
 
