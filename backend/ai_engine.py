@@ -2349,7 +2349,9 @@ class ConversationEngine:
             "phone": user.get("phone"),
             "address": user.get("address"),
             "dietary_restrictions": user.get("dietary_restrictions"),
-            "allergens": user.get("allergens"),
+            # DB column is `allergies`; older rows may have used `allergens` —
+            # accept both so migrated profiles work without a data fix.
+            "allergens": user.get("allergies") or user.get("allergens"),
             "household_size": user.get("household_size"),
             "sms_consent": (
                 user.get("sms_consent")

@@ -1743,6 +1743,22 @@ async def _update_user_profile(user_id: str, **fields) -> dict:
         from datetime import datetime, timezone
         updates.setdefault("sms_opt_in_date", datetime.now(timezone.utc).isoformat())
 
+    # If address is changing, geocode the new value so search_food_near_user
+    # and community distance sorting work immediately — without this the
+    # old (or null) latitude/longitude stays in the DB until the user
+    # manually re-saves their profile through the React UI.
+    new_address = updates.get("address")
+    if new_address and isinstance(new_address, str) and new_address.strip():
+        try:
+            coords = await _forward_geocode(new_address.strip())
+            if coords:
+                from datetime import datetime, timezone as _tz
+                updates["latitude"] = coords[0]
+                updates["longitude"] = coords[1]
+                updates["address_geocoded_at"] = datetime.now(_tz.utc).isoformat()
+        except Exception as geo_exc:
+            logger.warning("update_user_profile: address geocode failed (non-fatal): %s", geo_exc)
+
     if not updates:
         return {
             "success": False,
@@ -4013,7 +4029,16 @@ async def _post_food_request(
         # food_listings.expiry_date doubles as 'needed_by' for requests
         row["expiry_date"] = str(needed_by).strip()[:40]
     if location:
-        row["location"] = str(location)[:400]
+        loc_s = str(location)[:400]
+        row["location"] = loc_s
+        row["full_address"] = loc_s
+        # Geocode so the request appears on the map with the correct pin.
+        try:
+            coords = await _forward_geocode(loc_s)
+            if coords:
+                row["latitude"], row["longitude"] = coords
+        except Exception as geo_exc:
+            logger.warning("post_food_request: geocode failed (non-fatal): %s", geo_exc)
     if people is not None:
         try:
             # food_listings has no `people` column; fold into description.
