@@ -1477,9 +1477,10 @@ def _summarize_data_for_prompt(role: str, user_row: dict, data: dict) -> str:
     """Compact human-readable summary of role-specific data for the prompt."""
     name = user_row.get("name") or "there"
     lines = [f"User: {name} (role={role})"]
-    location = ", ".join(filter(None, [user_row.get("city"), user_row.get("state")]))
-    if location:
-        lines.append(f"Location: {location}")
+    # users.address is the correct plain-text column (no city/state columns exist).
+    address = (user_row.get("address") or "").strip()
+    if address:
+        lines.append(f"Location: {address}")
 
     if role == "recipient":
         listings = data.get("nearby_listings", [])

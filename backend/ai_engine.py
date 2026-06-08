@@ -2680,8 +2680,15 @@ class ConversationEngine:
 
         # Role-specific behaviour + profile-gap nudges (best-effort; non-fatal)
         try:
+            # community_role ("donor","recipient","volunteer","dispatcher","admin")
+            # is the field that determines which role-behavior block fires.
+            # profile["role"] is the Supabase auth role ("member","admin") and
+            # does NOT match the _ROLE_BEHAVIOR_EN keys — using it meant the
+            # entire block (including the "POSTING/CLAIMING NOT ALLOWED" safety
+            # guardrails) was silently skipped for every non-admin user.
             role_prompt = _role_behavior_prompt(
-                (profile or {}).get("role"), lang=lang
+                (profile or {}).get("community_role") or (profile or {}).get("role"),
+                lang=lang,
             )
             if role_prompt:
                 messages.append({"role": "system", "content": role_prompt})
