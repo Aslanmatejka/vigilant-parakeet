@@ -851,6 +851,10 @@ TOOL_DEFINITIONS = [
                         "items": {"type": "string"},
                         "description": "Optional allergens present (e.g. 'nuts','dairy','gluten').",
                     },
+                    "image_url": {
+                        "type": "string",
+                        "description": "Optional public URL of a photo for this listing (https://... Supabase storage URL). Include when the donor uploads a photo before posting.",
+                    },
                 },
                 "required": ["user_id", "title", "quantity", "unit", "category", "expiry_date"],
             },
@@ -969,6 +973,7 @@ TOOL_DEFINITIONS = [
                     "longitude": {"type": "number"},
                     "dietary_tags": {"type": "array", "items": {"type": "string"}},
                     "allergens": {"type": "array", "items": {"type": "string"}},
+                    "image_url": {"type": "string", "description": "Optional public photo URL (https://...). Include when the donor provides a photo."},
                 },
                 "required": ["user_id", "title", "quantity", "unit", "category", "expiry_date"],
             },
@@ -2579,28 +2584,46 @@ async def _get_active_communities(
     if not communities:
         return {"communities": [], "total": 0, "summary": "No active communities found."}
 
-    # If user_id provided, get their location and sort by distance
+    # If user_id provided, get their location and sort by distance.
+    # Prefer the geocoded latitude/longitude columns (set when user saves
+    # their address). Fall back to the legacy location JSON column for
+    # older rows that pre-date geocoding.
     user_lat = user_lng = None
     if user_id:
         try:
             rows = await supabase_get("users", {
                 "id": f"eq.{user_id}",
-                "select": "location",
+                "select": "latitude,longitude,location",
             })
             if rows:
-                loc = rows[0].get("location")
-                if isinstance(loc, str):
-                    import json as _json
+                profile = rows[0]
+                # 1. New canonical columns (numeric — PostgREST may return strings)
+                raw_lat = profile.get("latitude")
+                raw_lng = profile.get("longitude")
+                if raw_lat is not None and raw_lng is not None:
                     try:
-                        loc = _json.loads(loc)
-                    except (ValueError, TypeError):
-                        loc = None
-                if isinstance(loc, dict):
-                    lat_val = loc.get("latitude") or loc.get("lat")
-                    lng_val = loc.get("longitude") or loc.get("lng") or loc.get("lon")
-                    if lat_val and lng_val:
-                        user_lat = float(lat_val)
-                        user_lng = float(lng_val)
+                        user_lat = float(raw_lat)
+                        user_lng = float(raw_lng)
+                    except (TypeError, ValueError):
+                        pass
+                # 2. Legacy JSON column fallback (older profiles)
+                if user_lat is None or user_lng is None:
+                    loc = profile.get("location")
+                    if isinstance(loc, str):
+                        import json as _json
+                        try:
+                            loc = _json.loads(loc)
+                        except (ValueError, TypeError):
+                            loc = None
+                    if isinstance(loc, dict):
+                        lat_val = loc.get("latitude") or loc.get("lat")
+                        lng_val = loc.get("longitude") or loc.get("lng") or loc.get("lon")
+                        if lat_val and lng_val:
+                            try:
+                                user_lat = float(lat_val)
+                                user_lng = float(lng_val)
+                            except (TypeError, ValueError):
+                                pass
         except Exception as exc:
             logger.warning("Could not get user location: %s", exc)
 
@@ -2914,6 +2937,7 @@ async def _create_food_listing(
     community_confirmed: bool = False,
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
+    image_url: Optional[str] = None,
     **_ignored,
 ) -> dict:
     """Insert a single food donation listing for the authenticated user."""
@@ -3019,6 +3043,8 @@ async def _create_food_listing(
         row["dietary_tags"] = [str(t).strip()[:40] for t in dietary_tags if str(t).strip()][:20]
     if isinstance(allergens, list):
         row["allergens"] = [str(t).strip()[:40] for t in allergens if str(t).strip()][:20]
+    if image_url and isinstance(image_url, str) and image_url.strip().startswith(("http://", "https://")):
+        row["image_url"] = image_url.strip()[:2000]
 
     # Explicit coords from the model win over donor profile defaults.
     try:
@@ -4016,4 +4042,66 @@ async def _post_food_request(
         "summary": f"Request posted: {qty} {row['unit']} of '{title}'. It's live for nearby donors.",
     }
 
+
+# ---------------------------------------------------------------------------
+# _get_profile_gaps — nudge AI to prompt for missing profile fields
+# ---------------------------------------------------------------------------
+
+_PROFILE_FIELDS_EN: list[tuple[str, str]] = [
+    ("phone", "Add a phone number so donors can coordinate pickup with you."),
+    ("address", "Add your address so we can show you food nearby and auto-fill pickup locations."),
+    ("dietary_restrictions", "Share any dietary restrictions so we can filter food recommendations for you."),
+    ("community_role", "Let us know if you're a donor or recipient so we can personalise your experience."),
+]
+
+_PROFILE_FIELDS_ES: list[tuple[str, str]] = [
+    ("phone", "Agrega tu teléfono para que los donantes puedan coordinar la recogida contigo."),
+    ("address", "Agrega tu dirección para mostrarte comida cercana y rellenar automáticamente la ubicación."),
+    ("dietary_restrictions", "Comparte tus restricciones alimentarias para filtrar recomendaciones."),
+    ("community_role", "Cuéntanos si eres donante o recipiente para personalizar tu experiencia."),
+]
+
+
+async def _get_profile_gaps(user_id: str) -> dict:
+    """Return a list of nudge prompts for profile fields the user hasn't filled in.
+
+    Called by ai_engine._profile_gap_prompt() to inject gentle reminders
+    into the system prompt so the model can naturally ask the user to
+    complete their profile without being aggressive.
+    """
+    from backend.ai_engine import supabase_get
+
+    if not user_id:
+        return {"prompts_en": [], "prompts_es": []}
+
+    try:
+        rows = await supabase_get("users", {
+            "id": f"eq.{user_id}",
+            "select": "phone,address,dietary_restrictions,community_role",
+            "limit": "1",
+        })
+    except Exception as exc:
+        logger.warning("_get_profile_gaps: fetch failed: %s", exc)
+        return {"prompts_en": [], "prompts_es": []}
+
+    if not rows:
+        return {"prompts_en": [], "prompts_es": []}
+
+    profile = rows[0]
+    prompts_en: list[str] = []
+    prompts_es: list[str] = []
+
+    for (field, msg_en), (_, msg_es) in zip(_PROFILE_FIELDS_EN, _PROFILE_FIELDS_ES):
+        val = profile.get(field)
+        is_missing = (
+            val is None
+            or val == ""
+            or val == []
+            or (isinstance(val, list) and len(val) == 0)
+        )
+        if is_missing:
+            prompts_en.append(msg_en)
+            prompts_es.append(msg_es)
+
+    return {"prompts_en": prompts_en, "prompts_es": prompts_es}
 
