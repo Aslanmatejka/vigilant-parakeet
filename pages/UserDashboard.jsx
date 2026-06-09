@@ -177,22 +177,30 @@ function UserDashboard() {
     const dashboardNotifications = React.useMemo(() => {
         if (!userListings) return [];
         
+        // Compare dates as local-timezone strings to avoid the UTC-midnight
+        // off-by-one: new Date('YYYY-MM-DD') parses as UTC so in Pacific time
+        // a listing expiring "tomorrow" evaluates as 0 days away after 5 PM.
+        const now = new Date();
+        const msPerDay = 1000 * 60 * 60 * 24;
+
         return userListings
             .filter(listing => {
-                const daysUntilExpiry = Math.ceil(
-                    (new Date(listing.expiry_date) - new Date()) / (1000 * 60 * 60 * 24)
-                );
+                if (!listing.expiry_date) return false;
+                const expiryLocal = new Date(listing.expiry_date + 'T00:00:00');
+                const daysUntilExpiry = Math.ceil((expiryLocal - now) / msPerDay);
                 return daysUntilExpiry <= 3 && daysUntilExpiry > 0;
             })
-            .map(listing => ({
-                title: 'Listing Expiring Soon',
-                message: `Your listing "${listing.title}" expires in ${Math.ceil(
-                    (new Date(listing.expiry_date) - new Date()) / (1000 * 60 * 60 * 24)
-                )} days`,
-                time: formatDate(new Date()),
-                read: false,
-                type: 'warning'
-            }));
+            .map(listing => {
+                const expiryLocal = new Date(listing.expiry_date + 'T00:00:00');
+                const daysUntilExpiry = Math.ceil((expiryLocal - now) / msPerDay);
+                return {
+                    title: 'Listing Expiring Soon',
+                    message: `Your listing "${listing.title}" expires in ${daysUntilExpiry} day${daysUntilExpiry === 1 ? '' : 's'}`,
+                    time: formatDate(new Date()),
+                    read: false,
+                    type: 'warning'
+                };
+            });
     }, [userListings]);
 
     if (loading) {

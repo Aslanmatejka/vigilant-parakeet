@@ -56,8 +56,11 @@ export const FilterPanel = ({ onFilterChange }) => {
     const enableLocation = async () => {
         try {
             await locationService.getCurrentPosition();
-            setFilters(prev => ({ ...prev, locationEnabled: true }));
-            onFilterChange({ ...filters, locationEnabled: true });
+            setFilters(prev => {
+                const updated = { ...prev, locationEnabled: true };
+                onFilterChange(updated);
+                return updated;
+            });
         } catch (error) {
             console.error('Error getting location:', error);
             setFilters(prev => ({ ...prev, locationEnabled: false }));
@@ -66,13 +69,19 @@ export const FilterPanel = ({ onFilterChange }) => {
 
     const handleRadiusChange = (value) => {
         const newRadius = parseInt(value) || 10;
-        setFilters(prev => ({ ...prev, radius: newRadius }));
-        onFilterChange({ ...filters, radius: newRadius });
+        setFilters(prev => {
+            const updated = { ...prev, radius: newRadius };
+            onFilterChange(updated);
+            return updated;
+        });
     };
 
     const handleFoodTypeChange = (value) => {
-        setFilters(prev => ({ ...prev, foodType: value }));
-        onFilterChange({ ...filters, foodType: value });
+        setFilters(prev => {
+            const updated = { ...prev, foodType: value };
+            onFilterChange(updated);
+            return updated;
+        });
     };
 
     const handleDietaryChange = (preference) => {
