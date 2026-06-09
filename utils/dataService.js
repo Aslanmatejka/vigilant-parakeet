@@ -789,9 +789,9 @@ class DataService {
       }
 
       // Remove non-column fields that shouldn't be sent to DB
+      // NOTE: full_address IS a real DB column — do NOT delete it.
       delete toUpdate.image;
       delete toUpdate.school_district;
-      delete toUpdate.full_address;
       delete toUpdate.donor;
       delete toUpdate.users;
 
