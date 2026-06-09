@@ -1127,6 +1127,7 @@ async def _resolve_user_role(user_id: str, role_hint: str | None) -> tuple[str, 
 
 async def _gather_recipient_data(user_id: str) -> dict:
     now_iso = datetime.now(timezone.utc).isoformat()
+    today_iso = datetime.now(timezone.utc).date().isoformat()
     pending_claims = await supabase_get("food_claims", {
         "claimer_id": f"eq.{user_id}",
         "status": "in.(pending,approved)",
@@ -1136,6 +1137,7 @@ async def _gather_recipient_data(user_id: str) -> dict:
     })
     nearby_listings = await supabase_get("food_listings", {
         "status": "in.(approved,active)",
+        "or": f"(expiry_date.is.null,expiry_date.gte.{today_iso})",
         "select": "id,title,category,quantity,unit,expiry_date,pickup_by,location,image_url,created_at",
         "order": "created_at.desc",
         "limit": "12",
@@ -1429,10 +1431,17 @@ _INSIGHTS_JSON_INSTRUCTIONS = (
 
 
 async def _call_openai_json(system_prompt: str, user_payload: str) -> dict:
-    """Call OpenAI chat completions in JSON-mode and return parsed dict."""
+    """Call OpenAI chat completions in JSON-mode and return parsed dict.
+
+    Appends _INSIGHTS_JSON_INSTRUCTIONS to enforce the {headline, insights}
+    output schema required by the dashboard insights endpoint.
+    Retries once on 429 / 5xx before failing.
+    """
     if not OPENAI_API_KEY:
         return {"headline": "AI insights offline", "insights": []}
 
+    import asyncio
+    import json as _json
     from backend.ai_engine import _get_http_client, OPENAI_BASE_URL, FOLLOWUP_MODEL
     client = _get_http_client(30)
     payload = {
@@ -1449,28 +1458,92 @@ async def _call_openai_json(system_prompt: str, user_payload: str) -> dict:
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
-    resp = await client.post(
-        f"{OPENAI_BASE_URL}/chat/completions",
-        headers=headers,
-        json=payload,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    content = data["choices"][0]["message"]["content"]
+    for attempt in range(3):
+        try:
+            resp = await client.post(
+                f"{OPENAI_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            if resp.status_code in (429,) or resp.status_code >= 500:
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                resp.raise_for_status()
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            try:
+                parsed = _json.loads(content)
+            except Exception:
+                return {"headline": "Insights unavailable", "insights": []}
+            if not isinstance(parsed, dict):
+                return {"headline": "Insights unavailable", "insights": []}
+            insights = parsed.get("insights") or []
+            if not isinstance(insights, list):
+                insights = []
+            return {
+                "headline": str(parsed.get("headline") or "")[:200],
+                "insights": insights[:5],
+            }
+        except Exception as exc:
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+            else:
+                logger.error("_call_openai_json failed after retries: %s", exc)
+    return {"headline": "Insights unavailable", "insights": []}
+
+
+async def _call_openai_raw_json(messages: list, max_tokens: int = 400) -> dict:
+    """Call OpenAI chat completions in JSON-mode with caller-supplied messages.
+
+    Unlike _call_openai_json, this does NOT append any fixed schema instructions —
+    the caller is responsible for the full prompt (system + user). Returns the raw
+    parsed JSON dict, or {} on error.
+    """
+    if not OPENAI_API_KEY:
+        return {}
+
+    import asyncio
     import json as _json
-    try:
-        parsed = _json.loads(content)
-    except Exception:
-        return {"headline": "Insights unavailable", "insights": []}
-    if not isinstance(parsed, dict):
-        return {"headline": "Insights unavailable", "insights": []}
-    insights = parsed.get("insights") or []
-    if not isinstance(insights, list):
-        insights = []
-    return {
-        "headline": str(parsed.get("headline") or "")[:200],
-        "insights": insights[:5],
+    from backend.ai_engine import _get_http_client, OPENAI_BASE_URL, FOLLOWUP_MODEL
+    client = _get_http_client(30)
+    payload = {
+        "model": FOLLOWUP_MODEL,
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
     }
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    for attempt in range(3):
+        try:
+            resp = await client.post(
+                f"{OPENAI_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            if resp.status_code in (429,) or resp.status_code >= 500:
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                resp.raise_for_status()
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            try:
+                return _json.loads(content)
+            except Exception:
+                return {}
+        except Exception as exc:
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+            else:
+                logger.warning("_call_openai_raw_json failed: %s", exc)
+    return {}
 
 
 def _summarize_data_for_prompt(role: str, user_row: dict, data: dict) -> str:
@@ -1767,8 +1840,16 @@ async def _parse_voice_query(transcript: str) -> dict:
     if not OPENAI_API_KEY:
         return fallback
     try:
-        parsed = await _call_openai_json(_VOICE_SEARCH_FILTER_PROMPT, transcript.strip())
-        # _call_openai_json is tuned for {headline,insights}; merge safely:
+        # Use _call_openai_raw_json so only _VOICE_SEARCH_FILTER_PROMPT is in play —
+        # _call_openai_json appends _INSIGHTS_JSON_INSTRUCTIONS which would override
+        # the filter schema and make the LLM return {headline, insights} instead.
+        parsed = await _call_openai_raw_json(
+            [
+                {"role": "system", "content": _VOICE_SEARCH_FILTER_PROMPT},
+                {"role": "user", "content": transcript.strip()},
+            ],
+            max_tokens=200,
+        )
         merged = {**fallback, **{k: v for k, v in parsed.items() if k in fallback}}
         return merged
     except Exception as exc:  # noqa: BLE001
