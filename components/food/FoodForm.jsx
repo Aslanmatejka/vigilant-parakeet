@@ -698,7 +698,7 @@ function FoodForm({
                         value={formData.expiry_date}
                         onChange={handleChange}
                         error={errors.expiry_date}
-                        min={new Date().toISOString().split('T')[0]}
+                        min={(() => { const _d = new Date(); return [_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-'); })()}
                         aria-describedby="expiry_date-error"
                         helperText="Required for all except produce."
                     />
@@ -711,7 +711,7 @@ function FoodForm({
                     value={formData.pickup_by}
                     onChange={handleChange}
                     error={errors.pickup_by}
-                    min={new Date().toISOString().slice(0, 16)}
+                    min={(() => { const _d = new Date(); return `${[_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-')}T${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`; })()}
                     aria-describedby="pickup_by-error"
                     helperText="Set a specific time when food must be picked up by. Creates urgency for recipients!"
                 />

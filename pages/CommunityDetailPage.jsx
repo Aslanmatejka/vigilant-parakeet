@@ -40,7 +40,10 @@ function CommunityDetailPage() {
                 // Fetch food donation listings for this community (both approved and active).
                 // Exclude expired items and food requests (listing_type='request') since those
                 // are not items members can claim.
-                const todayStr = new Date().toISOString().slice(0, 10);
+                // Use local date to avoid dropping today's listings after 4 PM Pacific (UTC-8)
+                // when toISOString() rolls to the next UTC day.
+                const _t = new Date();
+                const todayStr = [_t.getFullYear(), String(_t.getMonth() + 1).padStart(2, '0'), String(_t.getDate()).padStart(2, '0')].join('-');
                 const { data: listings, error: listingsError } = await supabase
                     .from('food_listings')
                     .select('*')
