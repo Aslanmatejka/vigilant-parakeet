@@ -2204,7 +2204,9 @@ async def _get_user_dashboard(user_id: str) -> dict:
 
     profile_q = _safe(supabase_get("users", {
         "id": f"eq.{user_id}",
-        "select": "id,name,email,phone,address,is_admin,community_role,role,organization,created_at",
+        # Note: users.role is the Supabase auth role ("authenticated") — never
+        # expose it to the AI. Only community_role is the meaningful user role.
+        "select": "id,name,email,phone,address,is_admin,community_role,organization,created_at",
     }))
     listings_q = _safe(supabase_get("food_listings", {
         "user_id": f"eq.{user_id}",
@@ -2254,10 +2256,10 @@ async def _get_user_dashboard(user_id: str) -> dict:
             "name": p.get("name") or p.get("email", ""),
             "email": p.get("email"),
             "phone": p.get("phone"),
-            # community_role is the user-facing role (donor/recipient/volunteer);
-            # role is the Supabase auth role ("member" for most users) — never use
-            # the auth role for business logic shown to the AI.
-            "role": p.get("community_role") or p.get("role") or "member",
+            # community_role is the user-facing role (donor/recipient/volunteer).
+            # users.role is the Supabase auth role ("authenticated") — it is NOT
+            # selected and should never be passed to the AI.
+            "role": p.get("community_role") or "member",
             "organization": p.get("organization"),
             "is_admin": p.get("is_admin", False),
             "member_since": p.get("created_at"),
