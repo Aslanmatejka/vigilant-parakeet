@@ -546,8 +546,11 @@ class DataService {
 
         // Safety filter: exclude already-expired listings unless caller is viewing own listings.
         // Items with null expiry_date are kept (no expiration set).
+        // Use local date so listings don't vanish from results several hours before
+        // they actually expire in the user's timezone (UTC-7/8 after 5pm/4pm).
         if (!filters.user_id && !filters.includeExpired) {
-          const todayStr = new Date().toISOString().slice(0, 10);
+          const _d = new Date();
+          const todayStr = [_d.getFullYear(), String(_d.getMonth() + 1).padStart(2, '0'), String(_d.getDate()).padStart(2, '0')].join('-');
           q = q.or(`expiry_date.is.null,expiry_date.gte.${todayStr}`);
         }
         if (filters.page && filters.limit) {
@@ -1628,7 +1631,8 @@ class DataService {
         .replace(/\s+/g, ' ')
         .trim()
 
-      const todayStr = new Date().toISOString().slice(0, 10);
+      const _sd = new Date();
+      const todayStr = [_sd.getFullYear(), String(_sd.getMonth() + 1).padStart(2, '0'), String(_sd.getDate()).padStart(2, '0')].join('-');
 
       let query = supabase
         .from('food_listings')
