@@ -63,7 +63,7 @@ function AdminReports() {
 
             const [listings, users, claims, posts] = await Promise.all([
                 dataService.getFoodListings({ status: ['pending', 'approved', 'active', 'completed', 'expired', 'declined', 'cancelled'] }),
-                supabase.from('users').select('*'),
+                supabase.from('users').select('id'),
                 supabase.from('food_claims').select('*, people, students, school_staff'),
                 dataService.getCommunityPosts()
             ]);

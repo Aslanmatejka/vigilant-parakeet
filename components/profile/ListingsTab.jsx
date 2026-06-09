@@ -18,7 +18,11 @@ function ListingsTab({
 
     const filteredListings = listings.filter(listing => {
         const matchesSearch = listing.title.toLowerCase().includes(searchTerm.toLowerCase());
-        const matchesStatus = activeTab === 'all' || listing.status === activeTab;
+        // 'active' tab should include both 'active' and 'approved' DB statuses
+        const matchesStatus = activeTab === 'all'
+            || (activeTab === 'active'
+                ? listing.status === 'active' || listing.status === 'approved'
+                : listing.status === activeTab);
         return matchesSearch && matchesStatus;
     });
 

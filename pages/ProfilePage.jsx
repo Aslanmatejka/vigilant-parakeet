@@ -16,7 +16,7 @@ function ProfilePageContent() {
     const navigate = useNavigate();
     const { user: authUser, isAuthenticated, uploadAvatar } = useAuthContext();
     const { profile, loading: profileLoading, error: profileError } = useUserProfile(authUser?.id);
-    const { listings, loading: listingsLoading, error: listingsError } = useFoodListings({ user_id: authUser?.id });
+    const { listings, loading: listingsLoading, error: listingsError, deleteListing } = useFoodListings({ user_id: authUser?.id });
 
     const [activeTab, setActiveTab] = React.useState('profile');
     const [impact, setImpact] = React.useState(null);
@@ -137,9 +137,7 @@ function ProfilePageContent() {
         if (!window.confirm('Are you sure you want to delete this listing?')) return;
 
         try {
-            // This will be handled by the useFoodListings hook
-            // The listing will be removed from the list automatically
-            alert('Listing deleted successfully');
+            await deleteListing(listing.id);
         } catch (error) {
             console.error('Delete listing error:', error);
             alert('Failed to delete listing. Please try again.');
