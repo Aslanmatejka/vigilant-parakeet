@@ -173,25 +173,13 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             // Map already initialized from a previous mount (Strict Mode remount)
             // We have a NEW mapLoaded state (starts false), so we need to sync it
             if (map.current) {
-                console.log('🔄 Map already initialized (Strict Mode remount), syncing state...');
                 if (map.current.loaded()) {
-                    console.log('✅ Map already loaded, setting mapLoaded=true');
                     setMapLoaded(true);
                 } else {
-                    // Listen for load on existing map
-                    const onLoad = () => {
-                        console.log('✅ Map loaded (from remount listener)');
-                        setMapLoaded(true);
-                    };
+                    const onLoad = () => setMapLoaded(true);
                     map.current.on('load', onLoad);
-                    // Fallback timeout
-                    const remountTimeout = setTimeout(() => {
-                        console.warn('⚠️ Remount fallback: forcing mapLoaded=true');
-                        setMapLoaded(true);
-                    }, 2000);
-                    return () => {
-                        clearTimeout(remountTimeout);
-                    };
+                    const remountTimeout = setTimeout(() => setMapLoaded(true), 10000);
+                    return () => clearTimeout(remountTimeout);
                 }
             }
             return;
@@ -208,22 +196,8 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
         ensureMapboxControlStyles();
 
         mapInitialized.current = true;        try {
-            console.log('🗺️ Creating Mapbox map...');
-            
-            // Check if Mapbox is actually available
-            if (!mapboxgl) {
-                console.error('❌ Mapbox GL JS not loaded from CDN');
-                return;
-            }
-            
-            // Validate token
-            if (!MAPBOX_TOKEN || MAPBOX_TOKEN.length < 20) {
-                console.error('❌ Invalid Mapbox token');
-                return;
-            }
-            
             mapboxgl.accessToken = MAPBOX_TOKEN;
-            
+
             map.current = new mapboxgl.Map({
                 container: mapContainer.current,
                 style: 'mapbox://styles/mapbox/streets-v12',
@@ -233,64 +207,28 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 renderWorldCopies: false,
                 preserveDrawingBuffer: false
             });
-            console.log('🗺️ Map object created:', map.current);
-
             map.current.on('load', () => {
-                console.log('✅ Map loaded successfully!');
                 ensureMapboxControlStyles();
                 setMapLoaded(true);
             });
 
             map.current.on('error', (e) => {
-                console.error('❌ Map error event:', e);
-                console.error('❌ Error type:', e.error?.message || 'Unknown');
-                console.error('❌ Error status:', e.error?.status || 'No status');
-            });
-
-            // Log data requests to see if Mapbox is trying to load tiles
-            map.current.on('dataloading', (e) => {
-                console.log('📡 Mapbox data loading:', e.dataType);
-            });
-
-            map.current.on('data', (e) => {
-                console.log('📦 Mapbox data received:', e.dataType);
-            });
-
-            map.current.on('sourcedataloading', (e) => {
-                console.log('🔄 Mapbox source loading:', e.sourceId);
+                console.error('Mapbox error:', e.error?.message || e);
             });
 
         } catch (error) {
-            console.error('❌ Map creation failed with error:', error);
-            console.error('❌ Error stack:', error.stack);
+            console.error('Map creation failed:', error);
         }
 
-        // Aggressive fallback - if map doesn't load in 2 seconds, force it anyway
+        // Fallback: if map doesn't fire 'load' within 10s, show it anyway.
         const loadTimeout = setTimeout(() => {
-            if (map.current) {
-                console.warn('⚠️ Map load timeout (2s) - forcing mapLoaded=true to show map');
-                console.warn('⚠️ Check Network tab for failed Mapbox API requests');
-                setMapLoaded(true);
-            }
-        }, 2000);
-
-        console.log('🎯 Map initialization complete. Waiting for tiles...');
-        console.log('📍 Map center:', map.current?.getCenter());
-        console.log('🔍 Map zoom:', map.current?.getZoom());
+            if (map.current) setMapLoaded(true);
+        }, 10000);
 
         return () => {
-            // Skip cleanup during React Strict Mode's double-mount behavior in development
-            // The map should persist after the first mount
-            console.log('🔍 Cleanup called. mapInitialized:', mapInitialized.current);
-            
-            // Only truly cleanup when the component is actually being destroyed
-            // (not during Strict Mode's test unmount-remount cycle)
-            if (import.meta.env.DEV && mapInitialized.current) {
-                console.log('⏭️ Skipping cleanup in development - keeping map alive');
-                return;
-            }
-            
-            console.log('🧹 Cleanup: Removing map');
+            // Skip cleanup during React Strict Mode's double-mount in development.
+            if (import.meta.env.DEV && mapInitialized.current) return;
+
             clearTimeout(loadTimeout);
             if (map.current) {
                 map.current.remove();
@@ -307,13 +245,8 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
     }, []);
 
     useEffect(() => {
-        // Add markers as soon as both map and data are ready
-        console.log('🗺️ Map loaded:', mapLoaded, 'Listings:', foodListings.length, 'Communities:', communities.length);
         if (mapLoaded && (foodListings.length > 0 || communities.length > 0)) {
-            console.log('✅ Calling addMarkers()');
             addMarkers();
-        } else {
-            console.log('⏳ Waiting for map or data...');
         }
     }, [mapLoaded, foodListings, communities]);
 
@@ -432,7 +365,6 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 throw error;
             }
             
-            console.log('Fetched food listings:', data?.length || 0);
             setFoodListings(data || []);
         } catch (error) {
             console.error('Error fetching food listings:', error);
@@ -456,8 +388,6 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 throw error;
             }
             
-            console.log('Fetched communities:', data);
-            console.log('Number of communities with coordinates:', data?.length || 0);
             setCommunities(data || []);
         } catch (error) {
             console.error('Error fetching communities:', error);
@@ -466,18 +396,10 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
     };
 
     const addMarkers = () => {
-        if (!map.current || !map.current.getContainer()) {
-            console.warn('⚠️ Map not ready yet, skipping marker addition');
-            return;
-        }
-        
-        console.log('Adding markers for', foodListings.length, 'listings and', communities.length, 'communities');
-        
+        if (!map.current || !map.current.getContainer()) return;
+
         const mapboxgl = getMapboxgl();
-        if (!mapboxgl || !map.current) {
-            console.warn('⚠️ Mapbox not ready for markers');
-            return;
-        }
+        if (!mapboxgl || !map.current) return;
         
         // Remove existing markers
         markersRef.current.forEach(marker => marker.remove());
@@ -491,19 +413,8 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             const lng = parseFloat(listing.longitude);
             
             // Validate coordinates
-            if (isNaN(lat) || isNaN(lng)) {
-                console.error('❌ Invalid coordinates for listing', listing.title);
-                return;
-            }
-            if (!isBayAreaCoord(lat, lng)) {
-                console.warn('⚠️ Skipping out-of-region listing marker:', listing.title, lat, lng);
-                return;
-            }
-            
-            console.log('✅ Adding food marker:', listing.title);
-            console.log('  Database values - lat:', listing.latitude, 'lng:', listing.longitude);
-            console.log('  Parsed as numbers - lat:', lat, 'lng:', lng);
-            console.log('  Mapbox format [lng, lat]:', [lng, lat]);
+            if (isNaN(lat) || isNaN(lng)) return;
+            if (!isBayAreaCoord(lat, lng)) return;
             
             // Create simple marker element for testing
             const el = document.createElement('div');
@@ -528,7 +439,6 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
 
                 markersRef.current.push(marker);
                 if (listing.id != null) foodMarkerElsRef.current.set(listing.id, el);
-                console.log('  ✓ Marker added at coordinates:', [lng, lat]);
             } catch (error) {
                 console.error('❌ Failed to add food marker for', listing.title, ':', error.message);
             }
@@ -550,19 +460,8 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             const lng = parseFloat(community.longitude);
             
             // Validate coordinates are valid numbers and in correct ranges
-            if (isNaN(lat) || isNaN(lng)) {
-                console.error('❌ Invalid coordinates for', community.name, '- lat:', community.latitude, 'lng:', community.longitude);
-                return;
-            }
-            if (!isBayAreaCoord(lat, lng)) {
-                console.warn('⚠️ Skipping out-of-region community marker:', community.name, lat, lng);
-                return;
-            }
-            
-            console.log('✅ Adding community marker:', community.name);
-            console.log('  Database values - lat:', community.latitude, 'lng:', community.longitude);
-            console.log('  Parsed as numbers - lat:', lat, 'lng:', lng);
-            console.log('  Mapbox format [lng, lat]:', [lng, lat]);
+            if (isNaN(lat) || isNaN(lng)) return;
+            if (!isBayAreaCoord(lat, lng)) return;
 
             const count = listingCountsByCommunity[community.id] || 0;
             const svg = renderCommunityPinSvg({
@@ -597,10 +496,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
 
     const showPopup = (listing) => {
         const mapboxgl = getMapboxgl();
-        if (!mapboxgl || !map.current) {
-            console.warn('⚠️ Mapbox not ready for popup');
-            return;
-        }
+        if (!mapboxgl || !map.current) return;
 
         // Safely extract a plain-text address from the listing.
         // food_listings.location is a JSONB column — direct string interpolation
@@ -751,10 +647,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
 
     const showCommunityPopup = (community) => {
         const mapboxgl = getMapboxgl();
-        if (!mapboxgl || !map.current) {
-            console.warn('⚠️ Mapbox not ready for popup');
-            return;
-        }
+        if (!mapboxgl || !map.current) return;
         
         // Remove existing popup if clicking on a different community
         if (popupRef.current) {
@@ -874,17 +767,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
         const nLng = Number(lng);
         const valid = Number.isFinite(nLat) && Number.isFinite(nLng);
 
-        // Diagnostics: helps quickly spot why the user pin isn't showing.
-        // eslint-disable-next-line no-console
-        console.log('📍 User-pin effect:', {
-            mapLoaded,
-            hasMap: !!map.current,
-            source: userLocationSource,
-            lat,
-            lng,
-            valid,
-        });
-
+        // Diagnostics removed — user-pin effect
         // Remove any prior marker before re-adding (handles updates + cleanup)
         if (userMarkerRef.current) {
             try { userMarkerRef.current.remove(); } catch (_) { /* ignore */ }
@@ -930,8 +813,6 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 )
                 .addTo(map.current);
             userMarkerRef.current = marker;
-            // eslint-disable-next-line no-console
-            console.log('✅ User pin added at', [nLng, nLat]);
 
             // First time we successfully place the user pin, gently center the map
             // on it so the user can immediately see it. Subsequent updates (e.g. live
@@ -947,7 +828,6 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 } catch (_) { /* ignore */ }
             } else if (!userPinCenteredRef.current) {
                 userPinCenteredRef.current = true;
-                console.warn('Skipping map center on out-of-region user location:', nLat, nLng);
             }
         } catch (err) {
             console.error('Failed to add user-location marker:', err);
@@ -1068,10 +948,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
     useEffect(() => {
         if (!mapLoaded || !map.current || !centerRequest) return;
         const { lat, lng, zoom } = centerRequest;
-        if (!isBayAreaCoord(lat, lng)) {
-            console.warn('Skipping map flyTo to outlier coordinate:', lat, lng);
-            return;
-        }
+        if (!isBayAreaCoord(lat, lng)) return;
         try {
             map.current.flyTo({
                 center: [lng, lat],
