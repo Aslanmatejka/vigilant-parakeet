@@ -108,6 +108,10 @@ function FoodForm({
     const [imagePreview, setImagePreview] = useState(null);
     const [submitError, setSubmitError] = useState(null);
     const [geocodeTimeout, setGeocodeTimeout] = useState(null);
+    // Ref holds the active debounce timer so the cleanup always cancels the
+    // most-recently-scheduled call. Using state caused a re-render per keystroke
+    // and the cleanup closed over a stale (previous) timer id.
+    const geocodeTimerRef = React.useRef(null);
 
     useEffect(() => {
         if (initialData?.image_url) {
@@ -117,26 +121,25 @@ function FoodForm({
 
     // Auto-geocode when address changes (with debounce)
     useEffect(() => {
-        // Clear previous timeout
-        if (geocodeTimeout) {
-            clearTimeout(geocodeTimeout);
+        // Clear any previously scheduled geocode call
+        if (geocodeTimerRef.current) {
+            clearTimeout(geocodeTimerRef.current);
+            geocodeTimerRef.current = null;
         }
 
         // Only geocode if address exists and coordinates are not already set
         if (formData.full_address && formData.full_address.trim().length > 10 && !formData.latitude && !formData.longitude) {
-            console.log('Setting geocode timeout for address:', formData.full_address);
-            const timeout = setTimeout(() => {
-                console.log('Auto-geocoding address after delay');
+            geocodeTimerRef.current = setTimeout(() => {
+                geocodeTimerRef.current = null;
                 geocodeAddress(formData.full_address);
             }, 1500); // 1.5 second delay after user stops typing
-
-            setGeocodeTimeout(timeout);
         }
 
-        // Cleanup timeout on unmount
+        // Cleanup timeout on unmount or before next run
         return () => {
-            if (geocodeTimeout) {
-                clearTimeout(geocodeTimeout);
+            if (geocodeTimerRef.current) {
+                clearTimeout(geocodeTimerRef.current);
+                geocodeTimerRef.current = null;
             }
         };
     }, [formData.full_address]);

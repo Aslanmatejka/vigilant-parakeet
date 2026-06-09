@@ -175,15 +175,10 @@ export default function Receipt({ receipt, items, onUpdate }) {
             }
 
             // STEP 2: Create the new receipt now that we know every item is available.
-            const pickupBy = new Date();
-            let daysUntilFriday = (5 - pickupBy.getDay() + 7) % 7;
-            if (daysUntilFriday === 0) daysUntilFriday = 7; // If Friday, push to next Friday
-            pickupBy.setDate(pickupBy.getDate() + daysUntilFriday);
-            pickupBy.setHours(23, 59, 59, 0);
-
-            // Use plain REST for receipt insert/update/delete — the Supabase JS
-            // client is known to hang on this app, which left the old expired
-            // receipt undeleted and let users reclaim it repeatedly.
+            // pickup_by is intentionally omitted — the DB BEFORE INSERT trigger
+            // (set_receipt_pickup_deadline) computes the correct Friday 11:59 PM
+            // Pacific deadline. Setting it here with local-time arithmetic would
+            // produce an incorrect UTC value (off by 7-8 h for Pacific users).
             const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
             const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
             let accessToken = supabaseKey;
@@ -206,7 +201,7 @@ export default function Receipt({ receipt, items, onUpdate }) {
                     pickup_location: receipt.pickup_location,
                     pickup_address: receipt.pickup_address,
                     pickup_window: receipt.pickup_window,
-                    pickup_by: pickupBy.toISOString(),
+                    // pickup_by omitted — DB trigger sets Friday 11:59 PM Pacific
                 }),
             });
             if (!insertResp.ok) {
