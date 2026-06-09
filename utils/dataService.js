@@ -1650,9 +1650,9 @@ class DataService {
       if (filters.category) {
         query = query.eq('category', filters.category)
       }
-      if (filters.listing_type) {
-        query = query.eq('listing_type', filters.listing_type)
-      }
+      // Default to donations only — requests are a separate feed.
+      // Caller can override by passing listing_type explicitly.
+      query = query.eq('listing_type', filters.listing_type || 'donation')
 
       const { data, error } = await query.order('created_at', { ascending: false })
 
