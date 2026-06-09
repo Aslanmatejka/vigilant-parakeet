@@ -3267,6 +3267,23 @@ async def _claim_food_listing(
     if requested_qty > int(available_qty):
         requested_qty = int(available_qty) if available_qty >= 1 else 1
 
+    # --- 2b. Prevent duplicate claims on the same listing ---
+    try:
+        existing_claim = await supabase_get("food_claims", {
+            "food_id": f"eq.{listing_id}",
+            "claimer_id": f"eq.{user_id}",
+            "status": "in.(pending,approved)",
+            "select": "id",
+            "limit": "1",
+        })
+        if existing_claim:
+            return {
+                "success": False,
+                "error": "You already have an active claim on this listing. Use cancel_claim to release it first if you want to re-claim.",
+            }
+    except Exception as exc:
+        logger.warning("claim_food_listing: duplicate claim check failed (non-fatal): %s", exc)
+
     # --- 3. Fetch the claimant profile for requester_* fields ---
     try:
         users = await supabase_get("users", {
@@ -3285,42 +3302,32 @@ async def _claim_food_listing(
         or "Anonymous"
     )[:200]
 
-    # --- 3b. Calculate the next-Friday pickup deadline (UTC) for the receipt ---
-    import datetime as _dt
-
-    def _next_friday_5pm_utc() -> str:
-        now_utc = _dt.datetime.utcnow()
-        # Approximate Pacific offset (-8 for PST; good enough for deadline calc)
-        now_pac = now_utc - _dt.timedelta(hours=8)
-        # Python weekday: Mon=0, Fri=4
-        days_until = (4 - now_pac.weekday()) % 7
-        if days_until == 0 and now_pac.hour >= 17:
-            days_until = 7
-        target_date = (now_pac + _dt.timedelta(days=days_until)).date() if days_until > 0 else now_pac.date()
-        friday_pac = _dt.datetime.combine(target_date, _dt.time(17, 0, 0))
-        friday_utc = friday_pac + _dt.timedelta(hours=8)
-        return friday_utc.strftime('%Y-%m-%dT%H:%M:%S+00:00')
-
-    pickup_deadline_utc = _next_friday_5pm_utc()
-
     # --- 3c. Find or create a receipt for this user (so the claim appears in Receipts & Activity) ---
+    # pickup_by is intentionally NOT set here. The DB BEFORE INSERT trigger
+    # (set_receipt_pickup_deadline → calculate_pickup_deadline) computes the
+    # correct Friday 11:59 PM Pacific deadline automatically.
+    # The old _next_friday_5pm_utc() helper was wrong: it used Friday 5 PM
+    # (pre-migration deadline) and hardcoded PST -8h (incorrect during PDT,
+    # Apr–Oct, when the offset should be -7h).
     receipt_id = None
+    pickup_deadline_db: Optional[str] = None
     pickup_loc = listing.get("full_address") or _extract_location_text(listing.get("location")) or None
     try:
         existing_receipts = await supabase_get("receipts", {
             "user_id": f"eq.{user_id}",
             "status": "eq.pending",
-            "select": "id",
+            "select": "id,pickup_by",
             "order": "created_at.desc",
             "limit": "1",
         })
         if existing_receipts:
             receipt_id = existing_receipts[0].get("id")
+            pickup_deadline_db = existing_receipts[0].get("pickup_by")
         else:
             receipt_row: dict = {
                 "user_id": str(user_id),
                 "status": "pending",
-                "pickup_by": pickup_deadline_utc,
+                # pickup_by omitted — DB trigger sets Friday 11:59 PM Pacific
             }
             if pickup_loc:
                 receipt_row["pickup_location"] = str(pickup_loc)[:255]
@@ -3328,6 +3335,7 @@ async def _claim_food_listing(
             receipt_result = await supabase_post("receipts", receipt_row)
             if isinstance(receipt_result, list) and receipt_result:
                 receipt_id = receipt_result[0].get("id")
+                pickup_deadline_db = receipt_result[0].get("pickup_by")
     except Exception as exc:
         logger.warning("claim_food_listing: receipt create/lookup failed (non-fatal): %s", exc)
 
@@ -3390,7 +3398,7 @@ async def _claim_food_listing(
         "unit": unit,
         "remaining_on_listing": max(remaining, 0),
         "pickup_location": pickup_loc,
-        "pickup_deadline": pickup_deadline_utc,
+        "pickup_deadline": pickup_deadline_db,
         "summary": summary,
     }
 
@@ -3638,7 +3646,10 @@ def _normalize_bulk_row(raw: dict, user_id: str) -> Optional[dict]:
         "unit": unit[:40],
         "category": category,
         "listing_type": "donation",
-        "status": "active",
+        # Use "approved" (not "active") to match _create_food_listing so all
+        # AI-posted listings appear with the same status. Both show in the
+        # find-food feed but "approved" is semantically correct for new AI posts.
+        "status": "approved",
     }
     if raw.get("description"):
         row["description"] = str(raw["description"])[:1000]
