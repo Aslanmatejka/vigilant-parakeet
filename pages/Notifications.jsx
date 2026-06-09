@@ -4,6 +4,7 @@ import Button from "../components/common/Button";
 import ErrorBoundary from "../components/common/ErrorBoundary";
 import { reportError } from "../utils/helpers";
 import { useAuth, useNotifications } from "../utils/hooks/useSupabase";
+import supabase from "../utils/supabaseClient";
 
 function Notifications() {
     const { user: authUser, isAuthenticated } = useAuth();
@@ -58,8 +59,12 @@ function Notifications() {
 
     const deleteNotification = async (notificationId) => {
         try {
-            // TODO: Implement delete notification functionality in useNotifications hook
-            console.log('Delete notification functionality not implemented yet');
+            const { error } = await supabase
+                .from('notifications')
+                .delete()
+                .eq('id', notificationId);
+            if (error) throw error;
+            // Realtime subscription handles removing from local state
         } catch (error) {
             console.error('Error deleting notification:', error);
             reportError(error);
