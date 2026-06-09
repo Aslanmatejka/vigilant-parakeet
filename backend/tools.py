@@ -2127,6 +2127,11 @@ async def _query_distribution_centers(
     try:
         rows = await supabase_get("distribution_events", {
             "event_date": f"gte.{today_str}",
+            # Apply upper-bound so days_ahead is actually respected.
+            # Without this, future_str was computed but never used and
+            # events months away would leak into results whenever there
+            # were fewer than max_results events in the requested window.
+            "and": f"(event_date.lte.{future_str})",
             "status": f"eq.{status}",
             "select": (
                 "id,title,description,location,event_date,"
