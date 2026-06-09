@@ -46,8 +46,8 @@ function FoodList({
                 if (!isNearby) matchesFilters = false;
             }
 
-            // Food type filter
-            if (filters.foodType && food.type !== filters.foodType) {
+            // Food type filter — DB column is listing_type; fall back to legacy type
+            if (filters.foodType && (food.listing_type || food.type) !== filters.foodType) {
                 matchesFilters = false;
             }
 

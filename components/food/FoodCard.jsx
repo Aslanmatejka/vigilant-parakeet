@@ -83,8 +83,12 @@ function FoodCard({
         donor_name,
         donor_city,
         donor_state,
-        type = 'donation', // 'donation' or 'trade'
+        listing_type,
+        type: legacyType,
     } = food;
+    // DB column is listing_type ('donation' | 'request').
+    // Fall back to legacy type field for any old in-memory objects.
+    const type = listing_type || legacyType || 'donation';
 
     const donor = {
         name: donor_name || (users?.[0] || users)?.organization || (users?.[0] || users)?.name || 'Anonymous',
