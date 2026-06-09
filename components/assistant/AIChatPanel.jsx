@@ -820,7 +820,20 @@ function MessageBubble({
                   : 'bg-slate-800/70 text-slate-100 rounded-bl-md border border-slate-600/40 backdrop-blur-sm shadow-sm'
             }`}
           >
-            <p className="whitespace-pre-wrap">{msg.message}</p>
+            {/* Inline photo message: show thumbnail instead of raw URL */}
+            {/^image:\s*https?:\/\//i.test(msg.message) ? (
+              <div className="flex items-center gap-2">
+                <img
+                  src={msg.message.replace(/^image:\s*/i, '')}
+                  alt="uploaded"
+                  className="max-h-32 max-w-[200px] rounded-lg object-cover ring-1 ring-white/20"
+                  onError={(e) => { e.currentTarget.style.display = 'none' }}
+                />
+                <span className="text-[11px] opacity-70">📷</span>
+              </div>
+            ) : (
+              <p className="whitespace-pre-wrap">{msg.message}</p>
+            )}
 
             {/* Typed error metadata: small chip + retry button. Only renders
                 when the bubble carries an errorCode from the backend. The
@@ -1307,6 +1320,11 @@ function AIChatPanel() {
           { autoClose: 4000, position: 'top-center' }
         )
       }
+      // Notify FoodMap and FindFoodPage to refresh so the new listing pin
+      // appears immediately without requiring a page reload.
+      if ((tr.tool === 'create_food_listing' || tr.tool === 'post_food_listing') && ok) {
+        window.dispatchEvent(new CustomEvent('foodShared'))
+      }
     }
   }, [messages, language])
 
@@ -1388,6 +1406,7 @@ function AIChatPanel() {
   const uploadSessionRef = useRef(0)
   const photoInputRef = useRef(null)
   const csvInputRef = useRef(null)
+  const inlinePhotoInputRef = useRef(null)
   const messagesEndRef = useRef(null)
   // Container ref + state for the scroll-to-bottom pill. We show the pill
   // only when the user has scrolled away from the latest message so it
@@ -1559,6 +1578,56 @@ function AIChatPanel() {
     if (uploadBusy || isLoading) return
     csvInputRef.current?.click()
   }, [uploadBusy, isLoading])
+
+  const triggerInlinePhotoUpload = useCallback(() => {
+    if (uploadBusy || isLoading) return
+    inlinePhotoInputRef.current?.click()
+  }, [uploadBusy, isLoading])
+
+  // Inline photo upload: upload to storage and inject "image: <url>" as a
+  // regular chat message so the AI handles it per CASE A (include in the
+  // upcoming listing) or CASE B (attach to the most recent listing).
+  const handleInlinePhotoSelected = useCallback(async (e) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      appendLocalMessage({ role: 'assistant', message: language === 'es' ? 'Selecciona una imagen.' : 'Please select an image.', isError: true })
+      return
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      appendLocalMessage({ role: 'assistant', message: language === 'es' ? 'La imagen es demasiado grande (máx 8 MB).' : 'Image too large (max 8 MB).', isError: true })
+      return
+    }
+    setUploadBusy(true)
+    try {
+      let imageUrl = null
+      if (authUser?.id) {
+        try {
+          const res = await dataService.uploadFile(file, 'food-images')
+          imageUrl = res?.url || null
+        } catch (err) {
+          console.warn('Inline photo upload failed:', err?.message || err)
+        }
+      }
+      if (!imageUrl) {
+        appendLocalMessage({
+          role: 'assistant',
+          message: language === 'es'
+            ? 'No pude subir la foto. ¿Puedes intentar de nuevo?'
+            : "I couldn't upload that photo. Please try again.",
+          isError: true,
+        })
+        return
+      }
+      // Send as a regular chat message — the AI system prompt recognises
+      // messages starting with "image: https://" and uses the URL as the
+      // listing's image_url (CASE A) or attaches it (CASE B).
+      sendMessage(`image: ${imageUrl}`)
+    } finally {
+      setUploadBusy(false)
+    }
+  }, [appendLocalMessage, authUser?.id, language, sendMessage])
 
   const cancelPendingUpload = useCallback(() => {
     if (uploadBusy) return
@@ -3009,6 +3078,15 @@ function AIChatPanel() {
         tabIndex={-1}
       />
       <input
+        ref={inlinePhotoInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleInlinePhotoSelected}
+        aria-hidden="true"
+        tabIndex={-1}
+      />
+      <input
         ref={csvInputRef}
         type="file"
         accept=".csv,text/csv,application/vnd.ms-excel"
@@ -3062,6 +3140,24 @@ function AIChatPanel() {
                     </span>
                     <span className="block text-[10px] text-slate-400 leading-tight mt-0.5">
                       {language === 'es' ? 'IA detecta artículos' : 'AI auto-detects items'}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { setShowAttachMenu(false); triggerInlinePhotoUpload() }}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-slate-200 hover:bg-sky-500/15 hover:text-sky-100 transition-colors border-t border-slate-700/50"
+                >
+                  <span className="inline-flex w-8 h-8 rounded-lg bg-sky-500/15 text-sky-300 items-center justify-center">
+                    <i className="fas fa-image text-[13px]" aria-hidden="true" />
+                  </span>
+                  <span className="flex-1 text-left">
+                    <span className="block font-medium leading-tight">
+                      {language === 'es' ? 'Enviar foto al chat' : 'Send photo to chat'}
+                    </span>
+                    <span className="block text-[10px] text-slate-400 leading-tight mt-0.5">
+                      {language === 'es' ? 'Añade foto a tu publicación actual' : 'Add photo to your current listing'}
                     </span>
                   </span>
                 </button>

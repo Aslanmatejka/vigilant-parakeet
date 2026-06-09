@@ -242,6 +242,12 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
         // Fetch listings and communities immediately
         fetchFoodListings();
         fetchCommunities();
+
+        // Re-fetch whenever a new listing is shared (e.g. via AI chat or form)
+        // so the map pin appears without requiring a page reload.
+        const onFoodShared = () => fetchFoodListings();
+        window.addEventListener('foodShared', onFoodShared);
+        return () => window.removeEventListener('foodShared', onFoodShared);
     }, []);
 
     useEffect(() => {
