@@ -302,9 +302,13 @@ async def check_missed_pickups() -> int:
 
     from datetime import timedelta
 
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(hours=PICKUP_GRACE_HOURS)
-    ).strftime("%Y-%m-%d")
+    # Use a strict less-than on today's date so same-day pickups are NEVER
+    # flagged as missed before the day ends. `pickup_date` is a date-only
+    # column, so hour-level grace (PICKUP_GRACE_HOURS) cannot be expressed
+    # in a date comparison — the only safe boundary is midnight (start of
+    # today). Pickups from strictly before today are overdue; today's
+    # pickups are still in progress regardless of the current time.
+    today_iso = datetime.now(timezone.utc).date().isoformat()
 
     headers = {
         "apikey": SUPABASE_SERVICE_KEY,
@@ -317,7 +321,7 @@ async def check_missed_pickups() -> int:
     try:
         overdue_claims = await supabase_get("food_claims", {
             "status": "eq.approved",
-            "pickup_date": f"lte.{cutoff}",
+            "pickup_date": f"lt.{today_iso}",
             "select": "id,claimer_id,food_id,pickup_date",
             "limit": "50",
         })
