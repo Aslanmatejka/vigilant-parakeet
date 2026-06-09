@@ -1721,17 +1721,17 @@ class DataService {
   // Admin functions
   async getAdminStats() {
     try {
+      // trades table does not exist in this schema — query only existing tables.
       const [
         { count: totalUsers },
         { count: totalListings },
-        { count: activeTrades },
         { count: totalDonations }
       ] = await Promise.all([
         supabase.from('users').select('*', { count: 'exact', head: true }),
         supabase.from('food_listings').select('*', { count: 'exact', head: true }),
-        supabase.from('trades').select('*', { count: 'exact', head: true }).eq('status', 'active'),
         supabase.from('food_listings').select('*', { count: 'exact', head: true }).eq('listing_type', 'donation')
       ])
+      const activeTrades = 0; // trades table not yet implemented
 
       return {
         totalUsers,
