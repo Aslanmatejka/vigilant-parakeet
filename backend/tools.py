@@ -3919,6 +3919,7 @@ async def _get_donor_expiring_listings(
     window = max(1, min(window, 14))
 
     cutoff = (datetime.now(timezone.utc) + timedelta(days=window)).date().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
 
     try:
         rows = await supabase_get("food_listings", {
@@ -3926,7 +3927,11 @@ async def _get_donor_expiring_listings(
             "status": "in.(approved,active)",
             # Donor view: their donations expiring soon, never their requests.
             "listing_type": "eq.donation",
-            "expiry_date": f"lte.{cutoff}",
+            # Lower bound (gte today) so already-expired listings are excluded.
+            # Without it, lte.cutoff would also return past-expiry rows which
+            # would confuse the AI into narrating stale items as "expiring soon".
+            "expiry_date": f"gte.{today}",
+            "and": f"(expiry_date.lte.{cutoff})",
             "select": "id,title,quantity,unit,category,expiry_date,pickup_by,full_address",
             "order": "expiry_date.asc",
             "limit": "20",
