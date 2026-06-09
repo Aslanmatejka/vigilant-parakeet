@@ -20,8 +20,10 @@ const getNextFriday = () => {
     const nextFriday = new Date(today);
     nextFriday.setDate(today.getDate() + daysUntilFriday);
     
-    // Return ISO date string (YYYY-MM-DD) for database column type "date"
-    return nextFriday.toISOString().split('T')[0];
+    // Return local date string (YYYY-MM-DD) for database column type "date"
+    // Use local year/month/day — toISOString() rolls to the next UTC day after
+    // ~5 PM Pacific, so the displayed Friday deadline would appear as Saturday.
+    return [nextFriday.getFullYear(), String(nextFriday.getMonth() + 1).padStart(2, '0'), String(nextFriday.getDate()).padStart(2, '0')].join('-');
 };
 
 // Human-readable version for display purposes

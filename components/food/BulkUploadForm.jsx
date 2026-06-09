@@ -235,10 +235,10 @@ Milk,Organic Whole Milk,1,gallon,dairy,2025-08-08`;
                 const item = {};
                 headers.forEach((header, index) => {
                     if (header === 'expiryDate' && (!values[index] || values[index] === '')) {
-                        // Set default expiry date to 7 days from now
+                        // Set default expiry date to 7 days from now (local date)
                         const defaultDate = new Date();
                         defaultDate.setDate(defaultDate.getDate() + 7);
-                        item[header] = defaultDate.toISOString().split('T')[0];
+                        item[header] = [defaultDate.getFullYear(), String(defaultDate.getMonth() + 1).padStart(2, '0'), String(defaultDate.getDate()).padStart(2, '0')].join('-');
                     } else {
                         item[header] = values[index] || '';
                     }
