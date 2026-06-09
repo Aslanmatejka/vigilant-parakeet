@@ -139,7 +139,7 @@ class DataService {
       }, 0);
       
       const neighborsHelped = claims.length;
-      const activeListings = sharedFood.filter(item => item.status === 'approved').length;
+      const activeListings = sharedFood.filter(item => item.status === 'approved' || item.status === 'active').length;
       const pendingListings = sharedFood.filter(item => item.status === 'pending').length;
       const donorsCount = new Set(sharedFood.map(item => item.user_id).filter(Boolean)).size;
       
@@ -232,7 +232,7 @@ class DataService {
 
       // Calculate metrics
       const totalListings = userListings.length;
-      const activeListings = userListings.filter(l => l.status === 'approved').length;
+      const activeListings = userListings.filter(l => l.status === 'approved' || l.status === 'active').length;
       const pendingListings = userListings.filter(l => l.status === 'pending').length;
       const claimedListings = claims.length;
 
