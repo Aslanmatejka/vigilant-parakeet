@@ -2423,8 +2423,10 @@ class DataService {
   }
 
   calculateNextDonationDate(startDate, frequency, currentDate = new Date()) {
-    const date = new Date(startDate)
-    const now = new Date(currentDate)
+    // Parse startDate as LOCAL midnight (appending T00:00:00 without TZ offset)
+    // to avoid the UTC-midnight shift that puts Pacific users a day behind.
+    const date = new Date(startDate + 'T00:00:00')
+    const now = currentDate instanceof Date ? currentDate : new Date(currentDate)
 
     while (date <= now) {
       switch (frequency) {
@@ -2445,7 +2447,8 @@ class DataService {
       }
     }
 
-    return date.toISOString().split('T')[0]
+    // Return using local date components to match the local-midnight parse above.
+    return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-')
   }
 
   // ──────────────────────────────────────────────
