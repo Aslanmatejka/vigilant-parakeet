@@ -30,7 +30,6 @@ export const FilterPanel = ({ onFilterChange }) => {
         'Dairy',
         'Beverages',
         'Packaged Foods',
-        'Beverages',
         'Other'
     ];
 
@@ -78,10 +77,15 @@ export const FilterPanel = ({ onFilterChange }) => {
             const newPreferences = prev.dietaryPreferences.includes(preference)
                 ? prev.dietaryPreferences.filter(p => p !== preference)
                 : [...prev.dietaryPreferences, preference];
-            
+
+            // Call onFilterChange with the new preferences immediately.
+            // Using newPreferences from the functional update avoids the
+            // stale-closure bug where filters.dietaryPreferences was the
+            // OLD value from the outer scope.
+            onFilterChange({ ...filters, dietaryPreferences: newPreferences });
+
             return { ...prev, dietaryPreferences: newPreferences };
         });
-        onFilterChange({ ...filters, dietaryPreferences: filters.dietaryPreferences });
     };
 
     const InfoIcon = ({ text }) => (

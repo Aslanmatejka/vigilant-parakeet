@@ -51,10 +51,10 @@ function FoodList({
                 matchesFilters = false;
             }
 
-            // Dietary preferences filter
+            // Dietary preferences filter — DB column is dietary_tags (lowercase strings).
             if (filters.dietaryPreferences.length > 0) {
                 const hasMatchingPreference = filters.dietaryPreferences.every(pref =>
-                    food.dietaryPreferences?.includes(pref)
+                    food.dietary_tags?.includes(pref.toLowerCase())
                 );
                 if (!hasMatchingPreference) matchesFilters = false;
             }
