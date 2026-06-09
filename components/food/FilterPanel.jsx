@@ -22,15 +22,18 @@ export const FilterPanel = ({ onFilterChange }) => {
         'Nut-Free'
     ];
 
+    // Each entry has a `value` (DB category column value) and a `label` (display text).
+    // Using DB values here means NearMePage / FoodList can do `food.category === foodType`
+    // without any extra mapping.
     const foodTypes = [
-        'Fresh Produce',
-        'Prepared Meals',
-        'Canned Goods',
-        'Baked Goods',
-        'Dairy',
-        'Beverages',
-        'Packaged Foods',
-        'Other'
+        { value: 'produce',   label: 'Fresh Produce' },
+        { value: 'prepared',  label: 'Prepared Meals' },
+        { value: 'pantry',    label: 'Canned / Pantry' },
+        { value: 'bakery',    label: 'Baked Goods' },
+        { value: 'dairy',     label: 'Dairy' },
+        { value: 'beverages', label: 'Beverages' },
+        { value: 'meat',      label: 'Meat' },
+        { value: 'other',     label: 'Other' },
     ];
 
     useEffect(() => {
@@ -67,9 +70,9 @@ export const FilterPanel = ({ onFilterChange }) => {
         onFilterChange({ ...filters, radius: newRadius });
     };
 
-    const handleFoodTypeChange = (type) => {
-        setFilters(prev => ({ ...prev, foodType: type }));
-        onFilterChange({ ...filters, foodType: type });
+    const handleFoodTypeChange = (value) => {
+        setFilters(prev => ({ ...prev, foodType: value }));
+        onFilterChange({ ...filters, foodType: value });
     };
 
     const handleDietaryChange = (preference) => {
@@ -141,14 +144,14 @@ export const FilterPanel = ({ onFilterChange }) => {
                 </h3>
                 <p className="text-xs text-gray-500 mb-2">Choose what kind of food you’re looking for.</p>
                 <div className="flex flex-wrap gap-2">
-                    {foodTypes.map(type => (
+                    {foodTypes.map(({ value, label }) => (
                         <Button
-                            key={type}
-                            onClick={() => handleFoodTypeChange(filters.foodType === type ? '' : type)}
-                            className={`${filters.foodType === type ? 'bg-blue-500' : 'bg-gray-200'}`}
-                            title={`Show only ${type}`}
+                            key={value}
+                            onClick={() => handleFoodTypeChange(filters.foodType === value ? '' : value)}
+                            className={`${filters.foodType === value ? 'bg-blue-500' : 'bg-gray-200'}`}
+                            title={`Show only ${label}`}
                         >
-                            {type}
+                            {label}
                         </Button>
                     ))}
                 </div>

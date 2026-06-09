@@ -37,12 +37,17 @@ function CommunityDetailPage() {
                 
                 setCommunity(mergedCommunity);
 
-                // Fetch food listings for this community (both approved and active)
+                // Fetch food donation listings for this community (both approved and active).
+                // Exclude expired items and food requests (listing_type='request') since those
+                // are not items members can claim.
+                const todayStr = new Date().toISOString().slice(0, 10);
                 const { data: listings, error: listingsError } = await supabase
                     .from('food_listings')
                     .select('*')
                     .eq('community_id', id)
+                    .eq('listing_type', 'donation')
                     .in('status', ['approved', 'active'])
+                    .or(`expiry_date.is.null,expiry_date.gte.${todayStr}`)
                     .order('created_at', { ascending: false });
 
                 if (listingsError) throw listingsError;

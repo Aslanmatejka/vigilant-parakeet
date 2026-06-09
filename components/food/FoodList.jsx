@@ -46,8 +46,10 @@ function FoodList({
                 if (!isNearby) matchesFilters = false;
             }
 
-            // Food type filter — DB column is listing_type; fall back to legacy type
-            if (filters.foodType && (food.listing_type || food.type) !== filters.foodType) {
+            // Food type filter — compare against food.category (the DB column).
+            // filters.foodType holds a DB category value ('produce', 'dairy', etc.)
+            // set by FilterPanel's foodTypes value map.
+            if (filters.foodType && food.category !== filters.foodType) {
                 matchesFilters = false;
             }
 
