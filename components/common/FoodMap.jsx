@@ -985,8 +985,8 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                     .setPopup(
                         new mapboxgl.Popup({ offset: 20 }).setHTML(
                             `<div style="padding:6px 4px;min-width:160px;">
-                                <div style="font-weight:600;color:#111827;">${(m.title || '').replace(/</g, '&lt;')}</div>
-                                ${m.subtitle ? `<div style="font-size:12px;color:#4b5563;margin-top:4px;">${String(m.subtitle).replace(/</g, '&lt;')}</div>` : ''}
+                                <div style="font-weight:600;color:#111827;">${escapeHtml(m.title || '')}</div>
+                                ${m.subtitle ? `<div style="font-size:12px;color:#4b5563;margin-top:4px;">${escapeHtml(String(m.subtitle))}</div>` : ''}
                             </div>`
                         )
                     )
