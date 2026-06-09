@@ -1294,7 +1294,10 @@ async def _get_recent_listings(
         "status": "in.(approved,active)",
         # Recipients see donations only; food REQUESTS are a separate feed.
         "listing_type": "eq.donation",
-        "expiry_date": f"gte.{today_str}",
+        # Include listings with no expiry_date (non-perishable/unlabeled) plus
+        # those whose expiry_date has not yet passed. Without the IS NULL branch,
+        # unlabeled items never appear in recent-listings results.
+        "or": f"(expiry_date.is.null,expiry_date.gte.{today_str})",
         "created_at": f"gte.{cutoff_iso}",
         "order": "created_at.desc",
         "limit": str(safe_limit),
@@ -1561,7 +1564,10 @@ async def _search_food_near_user(
         "status": "in.(approved,active)",
         # Search returns donations only; requests live in their own feed.
         "listing_type": "eq.donation",
-        "expiry_date": f"gte.{today_str}",
+        # Include listings with no expiry_date (non-perishable/unlabeled) plus
+        # those whose expiry_date has not yet passed. Without the IS NULL branch,
+        # unlabeled items never appear in search results.
+        "or": f"(expiry_date.is.null,expiry_date.gte.{today_str})",
         "order": "created_at.desc",
         "limit": "100",
     }
