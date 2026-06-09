@@ -2888,8 +2888,14 @@ def _normalize_listing_row(
     if item.description:
         row["description"] = item.description.strip()[:2000]
     if item.expiry_date:
-        # Accept ISO date strings; PostgREST will reject malformed values per-row.
-        row["expiry_date"] = item.expiry_date.strip()[:40]
+        # Normalize to YYYY-MM-DD before writing. The AI (enrich-listings or
+        # vision-listing) may supply a full ISO datetime ('2026-06-15T00:00:00')
+        # which PostgreSQL's date column would reject. Matches the normalization
+        # applied in _create_food_listing and _post_food_request (bugs AV, AX).
+        from backend.tools import _normalize_expiry_date as _ned
+        _exp = _ned(item.expiry_date.strip())
+        if _exp:
+            row["expiry_date"] = _exp
     if item.location:
         loc_s = item.location.strip()[:200]
         row["location"] = loc_s
@@ -3049,9 +3055,18 @@ async def ai_enrich_listings(body: EnrichListingsRequest, request: Request) -> d
             if not out.get(f) and ai_row.get(f):
                 val = str(ai_row[f]).strip()
                 if val:
-                    cap = 2000 if f == "description" else (40 if f == "expiry_date" else 200)
-                    out[f] = val[:cap]
-                    added_fields.append(f)
+                    if f == "expiry_date":
+                        # Normalize AI-supplied date to YYYY-MM-DD so the row
+                        # survives PostgreSQL's date column type check.
+                        from backend.tools import _normalize_expiry_date as _ned2
+                        norm_date = _ned2(val)
+                        if norm_date:
+                            out[f] = norm_date
+                            added_fields.append(f)
+                    else:
+                        cap = 2000 if f == "description" else 200
+                        out[f] = val[:cap]
+                        added_fields.append(f)
 
         # dietary_tags / allergens — only if absent or empty
         for f in ("dietary_tags", "allergens"):
