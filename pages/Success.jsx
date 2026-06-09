@@ -17,8 +17,8 @@ function SuccessContent() {
     }, []);
 
     const fetchActiveUsers = async () => {
-        const { data } = await supabase.from('users').select('id', { count: 'exact' });
-        setActiveUsers(data?.length || 0);
+        const { count } = await supabase.from('users').select('*', { count: 'exact', head: true });
+        setActiveUsers(count || 0);
     };
     const stories = [
         {
