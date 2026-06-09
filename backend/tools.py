@@ -2352,7 +2352,11 @@ async def _check_pickup_schedule(
     # --- Reminders from ai_reminders table ---
     reminder_params: dict = {
         "user_id": f"eq.{user_id}",
-        "trigger_time": f"lte.{future_iso}",
+        # Lower bound (gte now) keeps past-due unsent reminders out of the
+        # "upcoming" set. Without it, any reminder whose trigger_time already
+        # passed but was never sent (e.g. background worker lag) would be
+        # returned and the AI would describe it as an "upcoming" reminder.
+        "and": f"(trigger_time.gte.{now_iso},trigger_time.lte.{future_iso})",
         "select": "id,message,trigger_time,reminder_type,sent,sent_at,related_id,created_at",
         "order": "trigger_time.asc",
         "limit": "50",
