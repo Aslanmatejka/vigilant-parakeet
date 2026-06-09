@@ -319,7 +319,7 @@ function ImpactDataEntry() {
     const handleAddCommunityRow = async () => {
         try {
             const newRowData = {
-                date: communityRowRefs.current.date?.value || new Date().toISOString().split('T')[0],
+                date: communityRowRefs.current.date?.value || (() => { const _d = new Date(); return [_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-'); })(),
                 communities_served: communityRowRefs.current.communities_served?.value || '',
                 families_helped: parseInt(communityRowRefs.current.families_helped?.value) || 0,
                 school_staff_helped: parseInt(communityRowRefs.current.school_staff_helped?.value) || 0,
@@ -352,7 +352,7 @@ function ImpactDataEntry() {
 
             console.log('Successfully inserted:', data);
 
-            if (communityRowRefs.current.date) communityRowRefs.current.date.value = new Date().toISOString().split('T')[0];
+            if (communityRowRefs.current.date) communityRowRefs.current.date.value = (() => { const _d = new Date(); return [_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-'); })();
             if (communityRowRefs.current.communities_served) communityRowRefs.current.communities_served.value = '';
             if (communityRowRefs.current.families_helped) communityRowRefs.current.families_helped.value = '';
             if (communityRowRefs.current.school_staff_helped) communityRowRefs.current.school_staff_helped.value = '';
@@ -616,7 +616,7 @@ function ImpactDataEntry() {
                                         <td className="px-3 py-2">
                                             <UncontrolledCell
                                                 type="date"
-                                                defaultValue={new Date().toISOString().split('T')[0]}
+                                                defaultValue={(() => { const _d = new Date(); return [_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-'); })()}
                                                 inputRef={el => orgRowRefs.current.date = el}
                                                 onBlur={() => { }}
                                             />
@@ -769,7 +769,7 @@ function ImpactDataEntry() {
                                         <td className="px-3 py-2">
                                             <UncontrolledCell
                                                 type="date"
-                                                defaultValue={new Date().toISOString().split('T')[0]}
+                                                defaultValue={(() => { const _d = new Date(); return [_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-'); })()}
                                                 inputRef={el => communityRowRefs.current.date = el}
                                                 onBlur={() => { }}
                                             />
