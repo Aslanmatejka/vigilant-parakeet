@@ -196,8 +196,12 @@ export const FilterPanel = ({ onFilterChange }) => {
                     type="datetime-local"
                     value={filters.pickupTime}
                     onChange={(e) => {
-                        setFilters(prev => ({ ...prev, pickupTime: e.target.value }));
-                        onFilterChange({ ...filters, pickupTime: e.target.value });
+                        const val = e.target.value;
+                        setFilters(prev => {
+                            const updated = { ...prev, pickupTime: val };
+                            onFilterChange(updated);
+                            return updated;
+                        });
                     }}
                     className="w-full"
                     title="Pick the date and time you can collect the food"

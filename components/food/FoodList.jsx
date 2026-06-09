@@ -61,11 +61,11 @@ function FoodList({
                 if (!hasMatchingPreference) matchesFilters = false;
             }
 
-            // Pickup time filter
+            // Pickup time filter — DB column is pickup_by (not food.pickupTime).
             if (filters.pickupTime) {
                 const pickupTime = new Date(filters.pickupTime);
-                const foodTime = new Date(food.pickupTime);
-                if (foodTime < pickupTime) matchesFilters = false;
+                const foodTime = new Date(food.pickup_by || food.pickupTime);
+                if (!isNaN(foodTime) && foodTime < pickupTime) matchesFilters = false;
             }
 
             return matchesFilters;
