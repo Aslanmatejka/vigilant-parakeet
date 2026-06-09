@@ -798,6 +798,17 @@ class DataService {
       delete toUpdate.donor;
       delete toUpdate.users;
 
+      // Rebuild the location JSONB whenever the address or coordinates are
+      // being updated (mirrors the logic in createFoodListing). Without this
+      // the location column retains stale address/coordinates after an edit.
+      if (toUpdate.full_address && typeof toUpdate.full_address === 'string') {
+        toUpdate.location = {
+          address: toUpdate.full_address.trim(),
+          latitude: toUpdate.latitude ?? null,
+          longitude: toUpdate.longitude ?? null,
+        };
+      }
+
       const { data, error } = await supabase
         .from('food_listings')
         .update(toUpdate)

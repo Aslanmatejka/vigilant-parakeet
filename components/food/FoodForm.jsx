@@ -174,10 +174,18 @@ function FoodForm({
                 [name]: numValue
             }));
         } else {
-            setFormData(prev => ({
-                ...prev,
-                [name]: value
-            }));
+            setFormData(prev => {
+                const next = { ...prev, [name]: value };
+                // When the pickup address changes, clear stale geocoded coordinates
+                // so the debounce effect will trigger a fresh geocode for the new
+                // address. Without this, editing an existing listing and changing
+                // the address leaves the old lat/lng in formData forever.
+                if (name === 'full_address') {
+                    next.latitude = null;
+                    next.longitude = null;
+                }
+                return next;
+            });
         }
 
         // Clear error when field is modified
