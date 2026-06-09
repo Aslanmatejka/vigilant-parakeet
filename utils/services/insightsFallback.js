@@ -170,7 +170,7 @@ export async function computeLocalInsights(userId, roleHint = null) {
 
     const pendingClaims = claims.filter((c) => c.status === 'pending').length
     const approvedClaims = claims.filter((c) => c.status === 'approved').length
-    const activeListings = listings.filter((l) => l.status === 'approved').length
+    const activeListings = listings.filter((l) => l.status === 'approved' || l.status === 'active').length
     const pendingListings = listings.filter((l) => l.status === 'pending').length
 
     // Expiring within 24h — compare against local end-of-day so a listing
