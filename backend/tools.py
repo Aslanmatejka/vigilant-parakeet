@@ -3256,6 +3256,42 @@ async def _claim_food_listing(
             "error": f"Listing is not available to claim yet (status: {status}).",
         }
 
+    # Guard: reject claims on listings whose expiry_date or pickup_by has
+    # already passed. The DB-level query filters prevent expired listings
+    # from appearing in search, but a user can supply a listing_id directly
+    # (e.g. from a bookmarked link or a stale AI context message) and bypass
+    # that filter. Without this check they would claim food that may no
+    # longer be safe to eat.
+    _now = datetime.now(timezone.utc)
+    _expiry_raw = listing.get("expiry_date")
+    if _expiry_raw:
+        _expiry_dt = _parse_dt(str(_expiry_raw))
+        if _expiry_dt and _expiry_dt < _now:
+            return {
+                "success": False,
+                "error": "This listing has expired and is no longer available for claiming.",
+            }
+        # ISO-date-only fallback (no time component)
+        if not _expiry_dt:
+            try:
+                from datetime import date as _date
+                _expiry_date = _date.fromisoformat(str(_expiry_raw)[:10])
+                if _expiry_date < _now.date():
+                    return {
+                        "success": False,
+                        "error": "This listing has expired and is no longer available for claiming.",
+                    }
+            except (ValueError, TypeError):
+                pass
+    _pickup_raw = listing.get("pickup_by")
+    if _pickup_raw:
+        _pickup_dt = _parse_dt(str(_pickup_raw))
+        if _pickup_dt and _pickup_dt < _now:
+            return {
+                "success": False,
+                "error": "The pickup deadline for this listing has passed.",
+            }
+
     try:
         available_qty = float(listing.get("quantity") or 0)
     except (TypeError, ValueError):
