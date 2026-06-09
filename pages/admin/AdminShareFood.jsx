@@ -15,7 +15,8 @@ function getNextFriday() {
     const daysUntil = day === 5 ? 7 : ((5 - day + 7) % 7) || 7;
     const friday = new Date(today);
     friday.setDate(today.getDate() + daysUntil);
-    return friday.toISOString().split('T')[0];
+    // Use local date components — toISOString() rolls to next UTC day after ~5 PM Pacific
+    return [friday.getFullYear(), String(friday.getMonth() + 1).padStart(2, '0'), String(friday.getDate()).padStart(2, '0')].join('-');
 }
 
 // Geocode an address using Mapbox to get latitude/longitude
@@ -249,7 +250,7 @@ function AdminShareFood() {
     const handleAddRow = async () => {
         if (adding) return; // Prevent double-click submissions
         try {
-            const date = newRowRefs.current.date?.value || new Date().toISOString().split('T')[0];
+            const date = newRowRefs.current.date?.value || (() => { const _d = new Date(); return [_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-'); })();
             const communityId = newRowRefs.current.community_id?.value;
             const title = newRowRefs.current.title?.value?.trim();
             const quantity = parseFloat(newRowRefs.current.quantity?.value) || 0;
@@ -307,7 +308,7 @@ function AdminShareFood() {
             await supabaseRest('food_listings', 'POST', newListing, { 'Prefer': 'return=minimal' });
 
             // Reset inputs
-            if (newRowRefs.current.date) newRowRefs.current.date.value = new Date().toISOString().split('T')[0];
+            if (newRowRefs.current.date) newRowRefs.current.date.value = (() => { const _d = new Date(); return [_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-'); })();
             if (newRowRefs.current.community_id) newRowRefs.current.community_id.value = '';
             if (newRowRefs.current.title) newRowRefs.current.title.value = '';
             if (newRowRefs.current.quantity) newRowRefs.current.quantity.value = '';
@@ -540,7 +541,7 @@ function AdminShareFood() {
                                     <td className="px-3 py-2">
                                         <UncontrolledCell
                                             type="date"
-                                            defaultValue={new Date().toISOString().split('T')[0]}
+                                            defaultValue={(() => { const _d = new Date(); return [_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-'); })()}
                                             inputRef={el => newRowRefs.current.date = el}
                                             onBlur={() => {}}
                                         />

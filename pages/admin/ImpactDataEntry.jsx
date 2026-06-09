@@ -260,7 +260,7 @@ function ImpactDataEntry() {
     const handleAddOrgRow = async () => {
         try {
             const newRowData = {
-                date: orgRowRefs.current.date?.value || new Date().toISOString().split('T')[0],
+                date: orgRowRefs.current.date?.value || (() => { const _d = new Date(); return [_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-'); })(),
                 organization: orgRowRefs.current.organization?.value || '',
                 food_saved_from_waste_lb: parseFloat(orgRowRefs.current.food_saved_from_waste_lb?.value) || 0,
                 food_donated: parseFloat(orgRowRefs.current.food_donated?.value) || 0,
@@ -292,7 +292,7 @@ function ImpactDataEntry() {
 
             console.log('Successfully inserted:', data);
 
-            if (orgRowRefs.current.date) orgRowRefs.current.date.value = new Date().toISOString().split('T')[0];
+            if (orgRowRefs.current.date) orgRowRefs.current.date.value = (() => { const _d = new Date(); return [_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-'); })();
             if (orgRowRefs.current.organization) orgRowRefs.current.organization.value = '';
             if (orgRowRefs.current.food_saved_from_waste_lb) orgRowRefs.current.food_saved_from_waste_lb.value = '';
             if (orgRowRefs.current.food_donated) orgRowRefs.current.food_donated.value = '';
