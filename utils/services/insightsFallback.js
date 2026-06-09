@@ -180,7 +180,7 @@ export async function computeLocalInsights(userId, roleHint = null) {
     // ~7 hours early.
     const soonMs = 24 * 60 * 60 * 1000
     const expiringSoon = listings.filter((l) => {
-        if (!l.expiry_date || l.status !== 'approved') return false
+        if (!l.expiry_date || (l.status !== 'approved' && l.status !== 'active')) return false
         const expiryLocal = new Date(l.expiry_date + 'T00:00:00')
         expiryLocal.setHours(23, 59, 59, 999)
         const t = expiryLocal.getTime()
