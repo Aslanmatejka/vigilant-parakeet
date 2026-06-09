@@ -2732,6 +2732,7 @@ async def _run_query_agent(question: str, user_id: str, is_admin: bool, max_step
         "Content-Type": "application/json",
     }
 
+    import asyncio as _asyncio
     import json as _json
     ctx = {"user_id": user_id, "is_admin": is_admin}
 
@@ -2744,12 +2745,17 @@ async def _run_query_agent(question: str, user_id: str, is_admin: bool, max_step
             "temperature": 0.2,
             "max_tokens": 600,
         }
-        resp = await client.post(
-            f"{OPENAI_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-        resp.raise_for_status()
+        for attempt in range(3):
+            resp = await client.post(
+                f"{OPENAI_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            if (resp.status_code == 429 or resp.status_code >= 500) and attempt < 2:
+                await _asyncio.sleep(2 ** attempt)
+                continue
+            resp.raise_for_status()
+            break
         choice = resp.json()["choices"][0]
         msg = choice.get("message", {}) or {}
         tool_calls = msg.get("tool_calls") or []
@@ -2802,12 +2808,17 @@ async def _run_query_agent(question: str, user_id: str, is_admin: bool, max_step
         "temperature": 0.2,
         "max_tokens": 400,
     }
-    resp = await client.post(
-        f"{OPENAI_BASE_URL}/chat/completions",
-        headers=headers,
-        json=fallback_payload,
-    )
-    resp.raise_for_status()
+    for attempt in range(3):
+        resp = await client.post(
+            f"{OPENAI_BASE_URL}/chat/completions",
+            headers=headers,
+            json=fallback_payload,
+        )
+        if (resp.status_code == 429 or resp.status_code >= 500) and attempt < 2:
+            await _asyncio.sleep(2 ** attempt)
+            continue
+        resp.raise_for_status()
+        break
     answer = (resp.json()["choices"][0]["message"].get("content") or "").strip()
     return {"answer": answer, "tool_trace": trace, "steps": max_steps}
 
@@ -2986,14 +2997,23 @@ async def ai_enrich_listings(body: EnrichListingsRequest, request: Request) -> d
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
+    import asyncio as _asyncio
     try:
-        resp = await client.post(
-            f"{OPENAI_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        data = None
+        for attempt in range(3):
+            resp = await client.post(
+                f"{OPENAI_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            if (resp.status_code == 429 or resp.status_code >= 500) and attempt < 2:
+                await _asyncio.sleep(2 ** attempt)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        if data is None:
+            return fallback
     except Exception as exc:  # noqa: BLE001
         logger.exception("enrich-listings OpenAI call failed: %s", exc)
         return fallback
@@ -3192,13 +3212,19 @@ async def ai_vision_listing(
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
+    import asyncio as _asyncio
     try:
-        resp = await client.post(
-            f"{OPENAI_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-        resp.raise_for_status()
+        for attempt in range(3):
+            resp = await client.post(
+                f"{OPENAI_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            if (resp.status_code == 429 or resp.status_code >= 500) and attempt < 2:
+                await _asyncio.sleep(2 ** attempt)
+                continue
+            resp.raise_for_status()
+            break
     except Exception as exc:  # noqa: BLE001
         logger.exception("vision-listing OpenAI call failed")
         raise HTTPException(status_code=502, detail=f"Vision call failed: {exc}") from exc
