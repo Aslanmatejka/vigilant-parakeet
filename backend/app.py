@@ -2902,7 +2902,10 @@ def _normalize_listing_row(
     if item.allergens:
         row["allergens"] = [str(t).strip()[:40] for t in item.allergens if str(t).strip()][:20]
     if item.image_url:
-        row["image_url"] = item.image_url.strip()[:2000]
+        _url = item.image_url.strip()
+        # Only store http/https URLs — reject javascript:, data:, file:, etc.
+        if _url.startswith(("http://", "https://")):
+            row["image_url"] = _url[:2000]
     return apply_donor_defaults_to_listing(row, donor)
 
 
