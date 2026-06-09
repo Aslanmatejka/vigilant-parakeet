@@ -37,7 +37,6 @@ export const ADMIN_MENU_GROUPS = [
             { id: 'attendees', label: 'Distribution Attendees', icon: 'fa-users-rectangle', path: '/admin/attendees' },
             { id: 'share-food', label: 'Share Food', icon: 'fa-utensils', path: '/admin/share-food' },
             { id: 'communities', label: 'Communities', icon: 'fa-city', path: '/admin/communities' },
-            { id: 'safety', label: 'Safety & Trust', icon: 'fa-shield-halved', path: '/admin/safety' },
         ],
     },
     {
