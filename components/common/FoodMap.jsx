@@ -409,7 +409,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             // Fetch ALL approved/active listings — we'll handle missing coordinates when placing markers
             const fetchPromise = supabase
                 .from('food_listings')
-                .select('*')
+                .select('id,title,description,image_url,quantity,unit,category,status,expiry_date,full_address,location,latitude,longitude,community_id,listing_type')
                 .in('status', ['approved', 'active'])
                 .limit(100);
 
@@ -589,7 +589,25 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             console.warn('⚠️ Mapbox not ready for popup');
             return;
         }
-        
+
+        // Safely extract a plain-text address from the listing.
+        // food_listings.location is a JSONB column — direct string interpolation
+        // would render "[object Object]" in the popup.
+        const pickupAddress = (() => {
+            if (listing.full_address && typeof listing.full_address === 'string') return listing.full_address.trim();
+            const loc = listing.location;
+            if (!loc) return '';
+            if (typeof loc === 'string') {
+                const t = loc.trim();
+                if (t.startsWith('{')) {
+                    try { const p = JSON.parse(t); return (p.address || p.full_address || '').trim(); } catch { /* fall through */ }
+                }
+                return t;
+            }
+            if (typeof loc === 'object') return (loc.address || loc.full_address || '').trim();
+            return '';
+        })();
+
         // Remove existing popup if clicking on a different listing
         if (popupRef.current) {
             popupRef.current.remove();
@@ -617,6 +635,12 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 <i class="fas fa-weight" style="color: #16A34A;"></i>
                 <span>${escapeHtml(listing.quantity)} ${escapeHtml(listing.unit)}</span>
             </div>
+            ${pickupAddress ? `
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 13px; color: #6B7280;">
+                <i class="fas fa-map-marker-alt" style="color: #16A34A;"></i>
+                <span>${escapeHtml(pickupAddress)}</span>
+            </div>
+            ` : ''}
             
             ${showSignupPrompt ? `
                 <div style="background: #DBEAFE; border: 1px solid #93C5FD; border-radius: 8px; padding: 12px; margin-bottom: 12px;">

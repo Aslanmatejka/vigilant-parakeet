@@ -98,9 +98,10 @@ export default function ClaimFoodForm() {
         try {
             setClaiming(true);
 
-            // Check if user has a pending receipt for today at the SAME pickup location
-            const startOfDay = new Date();
-            startOfDay.setHours(0, 0, 0, 0);
+            // Check if user has a pending receipt for the SAME pickup location.
+            // We intentionally do NOT restrict by claimed_at date so that claims
+            // made across multiple days before the Friday deadline all aggregate
+            // into the same receipt.
 
             // food_listings.location is a JSONB column (dict from frontend writes);
             // always extract a plain-text address before using it as a string.
@@ -112,11 +113,10 @@ export default function ClaimFoodForm() {
 
             const { data: existingReceipts, error: receiptCheckError } = await supabase
                 .from('receipts')
-                .select('*')
+                .select('id')
                 .eq('user_id', user.id)
                 .eq('status', 'pending')
                 .eq('pickup_location', pickupLocationName)
-                .gte('claimed_at', startOfDay.toISOString())
                 .limit(1);
 
             if (receiptCheckError) throw receiptCheckError;
@@ -127,9 +127,6 @@ export default function ClaimFoodForm() {
             if (!existingReceipts || existingReceipts.length === 0) {
                 const pickupWindow = "Tuesday 2:00 PM - 3:30 PM, Thursday 2:00 PM - 3:30 PM, Friday 7:00 AM - 8:00 AM & 2:00 PM - 3:30 PM";
                 
-                // pickup_by is NOT NULL in the receipts table - set to end of pickup deadline day
-                const pickupByDate = new Date(pickupDeadline + 'T23:59:59');
-
                 const { data: newReceipt, error: receiptError } = await supabase
                     .from('receipts')
                     .insert({
@@ -138,7 +135,10 @@ export default function ClaimFoodForm() {
                         pickup_location: pickupLocationName,
                         pickup_address: pickupAddress,
                         pickup_window: pickupWindow,
-                        pickup_by: pickupByDate.toISOString()
+                        // pickup_by is intentionally omitted — the DB BEFORE INSERT trigger
+                        // (set_receipt_pickup_deadline) computes the correct Friday 11:59 PM
+                        // Pacific deadline. Setting it here with new Date() produces an
+                        // incorrect UTC time in all non-UTC timezones (off by 7-8 hours).
                     })
                     .select()
                     .single();
