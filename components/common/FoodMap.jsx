@@ -409,7 +409,14 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             // Fetch donation listings only — food requests should NOT appear as
             // map markers since they are requests for food, not offers.
             // Also exclude already-expired listings so the map never shows stale pins.
-            const todayStr = new Date().toISOString().slice(0, 10);
+            // Use local date (not UTC) so listings don't vanish from the map several
+            // hours before they expire in the user's timezone (e.g. UTC-8 after 4pm).
+            const _now = new Date();
+            const todayStr = [
+                _now.getFullYear(),
+                String(_now.getMonth() + 1).padStart(2, '0'),
+                String(_now.getDate()).padStart(2, '0'),
+            ].join('-');
             const fetchPromise = supabase
                 .from('food_listings')
                 .select('id,title,description,image_url,quantity,unit,category,status,expiry_date,full_address,location,latitude,longitude,community_id,listing_type')
