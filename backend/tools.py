@@ -1944,6 +1944,11 @@ async def _create_reminder(
     # Validate trigger_time is in the future
     try:
         trigger_dt = datetime.fromisoformat(trigger_time.replace("Z", "+00:00"))
+        # If the model sends a naive ISO string (no tz offset, no Z) assume UTC
+        # so the future-check below doesn't raise a TypeError that the except
+        # block misidentifies as "Invalid trigger_time format".
+        if trigger_dt.tzinfo is None:
+            trigger_dt = trigger_dt.replace(tzinfo=timezone.utc)
         if trigger_dt < datetime.now(timezone.utc):
             return {
                 "created": False,
