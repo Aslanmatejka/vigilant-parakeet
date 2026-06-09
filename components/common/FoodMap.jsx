@@ -406,11 +406,16 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 setTimeout(() => reject(new Error('Food listings fetch timeout')), 8000)
             );
             
-            // Fetch ALL approved/active listings — we'll handle missing coordinates when placing markers
+            // Fetch donation listings only — food requests should NOT appear as
+            // map markers since they are requests for food, not offers.
+            // Also exclude already-expired listings so the map never shows stale pins.
+            const todayStr = new Date().toISOString().slice(0, 10);
             const fetchPromise = supabase
                 .from('food_listings')
                 .select('id,title,description,image_url,quantity,unit,category,status,expiry_date,full_address,location,latitude,longitude,community_id,listing_type')
                 .in('status', ['approved', 'active'])
+                .eq('listing_type', 'donation')
+                .or(`expiry_date.is.null,expiry_date.gte.${todayStr}`)
                 .limit(100);
 
             const { data, error } = await Promise.race([fetchPromise, timeoutPromise]);

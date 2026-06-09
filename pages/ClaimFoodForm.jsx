@@ -331,7 +331,7 @@ export default function ClaimFoodForm() {
                                 <i className="fas fa-calendar-alt text-[#2CABE3] w-6"></i>
                                 <span className="text-gray-700 font-medium">Expiration Date:</span>
                                 <span className="ml-2 text-gray-900">
-                                    {food.expiry_date ? new Date(food.expiry_date).toLocaleDateString('en-US', { 
+                                    {food.expiry_date ? new Date(food.expiry_date + 'T00:00:00').toLocaleDateString('en-US', { 
                                         year: 'numeric', 
                                         month: 'long', 
                                         day: 'numeric' 
