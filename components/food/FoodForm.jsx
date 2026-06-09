@@ -631,7 +631,8 @@ function FoodForm({
                         { value: 'frozen', label: 'Frozen' },
                         { value: 'snacks', label: 'Snacks' },
                         { value: 'beverages', label: 'Beverages' },
-                        { value: 'prepared', label: 'Prepared Foods' }
+                        { value: 'prepared', label: 'Prepared Foods' },
+                        { value: 'other', label: 'Other' }
                     ]}
                     aria-describedby="category-error"
                     helperText="Select the type of food you are donating."

@@ -704,17 +704,9 @@ class DataService {
       const fullAddress = listingData.full_address?.trim?.() || listingData.full_address || null;
       if (fullAddress) {
         listing.full_address = fullAddress;
-        listing.location = {
-          address: fullAddress,
-          latitude: listingData.latitude || null,
-          longitude: listingData.longitude || null,
-        };
+        listing.location = fullAddress;
       } else if (listingData.donor_city || listingData.donor_state) {
-        listing.location = {
-          address: [listingData.donor_city, listingData.donor_state, listingData.donor_zip].filter(Boolean).join(', ').trim(),
-          latitude: listingData.latitude || null,
-          longitude: listingData.longitude || null,
-        };
+        listing.location = [listingData.donor_city, listingData.donor_state, listingData.donor_zip].filter(Boolean).join(', ').trim() || null;
       }
 
       // Use direct REST API to avoid Supabase JS client auth issues
@@ -798,15 +790,10 @@ class DataService {
       delete toUpdate.donor;
       delete toUpdate.users;
 
-      // Rebuild the location JSONB whenever the address or coordinates are
-      // being updated (mirrors the logic in createFoodListing). Without this
-      // the location column retains stale address/coordinates after an edit.
+      // Keep location (varchar) in sync with full_address on edit.
+      // Without this the location column retains the old address string.
       if (toUpdate.full_address && typeof toUpdate.full_address === 'string') {
-        toUpdate.location = {
-          address: toUpdate.full_address.trim(),
-          latitude: toUpdate.latitude ?? null,
-          longitude: toUpdate.longitude ?? null,
-        };
+        toUpdate.location = toUpdate.full_address.trim();
       }
 
       const { data, error } = await supabase
