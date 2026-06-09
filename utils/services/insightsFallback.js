@@ -173,11 +173,17 @@ export async function computeLocalInsights(userId, roleHint = null) {
     const activeListings = listings.filter((l) => l.status === 'approved').length
     const pendingListings = listings.filter((l) => l.status === 'pending').length
 
-    // Expiring within 24h
+    // Expiring within 24h — compare against local end-of-day so a listing
+    // expiring "today" stays visible all day in the user's timezone.
+    // new Date('YYYY-MM-DD') without 'T00:00:00' is UTC midnight, which in
+    // Pacific time is the previous afternoon — making listings appear expired
+    // ~7 hours early.
     const soonMs = 24 * 60 * 60 * 1000
     const expiringSoon = listings.filter((l) => {
         if (!l.expiry_date || l.status !== 'approved') return false
-        const t = new Date(l.expiry_date).getTime()
+        const expiryLocal = new Date(l.expiry_date + 'T00:00:00')
+        expiryLocal.setHours(23, 59, 59, 999)
+        const t = expiryLocal.getTime()
         return t > Date.now() && t - Date.now() < soonMs
     }).length
 

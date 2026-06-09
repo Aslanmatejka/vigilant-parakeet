@@ -100,8 +100,11 @@ class UrgencyService {
     if (foodListing.pickup_by) {
       return new Date(foodListing.pickup_by);
     } else if (foodListing.expiry_date) {
-      // Set expiry_date to end of day (23:59:59)
-      const expiryDate = new Date(foodListing.expiry_date);
+      // Parse as LOCAL midnight so that setHours(23,59,59,999) lands at
+      // end-of-day in the user's timezone. Without the 'T00:00:00' suffix,
+      // new Date('YYYY-MM-DD') is treated as UTC midnight, making setHours
+      // operate on the previous local day in Pacific time (off by 24 hours).
+      const expiryDate = new Date(foodListing.expiry_date + 'T00:00:00');
       expiryDate.setHours(23, 59, 59, 999);
       return expiryDate;
     }
