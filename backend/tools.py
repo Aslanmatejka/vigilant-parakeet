@@ -2979,6 +2979,7 @@ async def _resolve_community(community_name: Optional[str], community_id: Option
         try:
             rows = await supabase_get("communities", {
                 "id": f"eq.{community_id}",
+                "is_active": "eq.true",
                 "select": "id,name",
                 "limit": "1",
             })
@@ -2992,15 +2993,21 @@ async def _resolve_community(community_name: Optional[str], community_id: Option
         return None, None
     try:
         # Try exact match first (case-insensitive via ilike).
+        # Only match active communities so inactive ones can't be silently
+        # assigned to new listings (frontend RLS would hide them anyway).
         rows = await supabase_get("communities", {
             "name": f"ilike.{name}",
+            "is_active": "eq.true",
             "select": "id,name",
             "limit": "1",
         })
         if not rows:
-            # Fall back to fuzzy contains match.
+            # Fall back to fuzzy contains match using % as the ILIKE wildcard.
+            # httpx URL-encodes % → %25; PostgREST URL-decodes it back to %
+            # before passing to PostgreSQL, so ILIKE '%name%' works correctly.
             rows = await supabase_get("communities", {
-                "name": f"ilike.*{name}*",
+                "name": f"ilike.%{name}%",
+                "is_active": "eq.true",
                 "select": "id,name",
                 "limit": "1",
             })
