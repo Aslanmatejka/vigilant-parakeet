@@ -1896,6 +1896,10 @@ async def _get_pickup_schedule(
             future_str = future.strftime("%Y-%m-%d")
             event_rows = await supabase_get("distribution_events", {
                 "event_date": f"gte.{today_str}",
+                # Apply the upper-bound so days_ahead is actually respected.
+                # Previously future_str was computed but never used, causing
+                # all upcoming events to be returned regardless of the window.
+                "and": f"(event_date.lte.{future_str})",
                 "status": "eq.scheduled",
                 "select": (
                     "id,title,description,location,event_date,"
@@ -4143,8 +4147,12 @@ async def _post_food_request(
     if description:
         row["description"] = str(description)[:1000]
     if needed_by:
-        # food_listings.expiry_date doubles as 'needed_by' for requests
-        row["expiry_date"] = str(needed_by).strip()[:40]
+        # food_listings.expiry_date doubles as 'needed_by' for requests.
+        # Normalize to YYYY-MM-DD so PostgreSQL's date column and expiry
+        # filters (expiry_date gte today) work correctly. Previously the
+        # raw string was stored directly, which would fail for full ISO
+        # datetimes ('2026-06-20T12:00:00Z') on a date column.
+        row["expiry_date"] = _normalize_expiry_date(needed_by) or str(needed_by).strip()[:40]
     if location:
         loc_s = str(location)[:400]
         row["location"] = loc_s
