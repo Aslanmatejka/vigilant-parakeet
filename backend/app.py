@@ -2062,10 +2062,16 @@ async def _call_openai_freeform_json(
     max_tokens: int = 1100,
     temperature: float = 0.6,
 ) -> dict:
-    """Free-form JSON-mode chat call (not pinned to the insights schema)."""
+    """Free-form JSON-mode chat call (not pinned to the insights schema).
+
+    Retries on 429 / 5xx with exponential backoff so transient rate-limit
+    spikes don't surface as hard errors on the recipes endpoint.
+    """
     if not OPENAI_API_KEY:
         raise HTTPException(503, "AI service not configured")
 
+    import asyncio
+    import json as _json
     from backend.ai_engine import _get_http_client, OPENAI_BASE_URL, FOLLOWUP_MODEL
     client = _get_http_client(45)
     payload = {
@@ -2082,21 +2088,34 @@ async def _call_openai_freeform_json(
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
-    resp = await client.post(
-        f"{OPENAI_BASE_URL}/chat/completions",
-        headers=headers,
-        json=payload,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    content = data["choices"][0]["message"]["content"]
-    import json as _json
-    try:
-        parsed = _json.loads(content)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Free-form JSON parse failed: %s", exc)
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    for attempt in range(3):
+        try:
+            resp = await client.post(
+                f"{OPENAI_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                resp.raise_for_status()
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            try:
+                parsed = _json.loads(content)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Free-form JSON parse failed: %s", exc)
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception as exc:
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+            else:
+                logger.error("_call_openai_freeform_json failed after retries: %s", exc)
+                raise
+    return {}
 
 
 async def _gather_claimed_ingredients(user_id: str, limit: int = 12) -> list[dict]:
@@ -2507,10 +2526,14 @@ async def _tool_search_food_listings(args: dict, _ctx: dict) -> dict:
     category = (args.get("category") or "").strip().lower()
     dietary_tag = (args.get("dietary_tag") or "").strip().lower()
     max_results = max(1, min(25, int(args.get("max_results") or 10)))
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     params = {
         "select": "id,title,description,category,quantity,unit,status,location,full_address,pickup_by,expiry_date,dietary_tags",
         "status": "in.(approved,active)",
+        # Exclude listings whose expiry_date has passed; include unlabeled items
+        # (NULL expiry_date) which are non-perishable or pantry staples.
+        "or": f"(expiry_date.is.null,expiry_date.gte.{today_str})",
         "limit": str(max_results),
     }
     if category:
@@ -2518,7 +2541,9 @@ async def _tool_search_food_listings(args: dict, _ctx: dict) -> dict:
     if keywords:
         safe = keywords.replace(",", " ").replace("*", "").strip()
         if safe:
-            params["or"] = f"(title.ilike.*{safe}*,description.ilike.*{safe}*)"
+            # Can't add a second or= key (Python dict single-value constraint).
+            # Wrap keyword filter in and(or(...)) so the expiry or= is preserved.
+            params["and"] = f"(or(title.ilike.*{safe}*,description.ilike.*{safe}*))"
     if dietary_tag:
         params["dietary_tags"] = f"cs.{{{dietary_tag}}}"
 
