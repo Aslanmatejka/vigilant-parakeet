@@ -1190,8 +1190,12 @@ async def _gather_dispatcher_data(user_id: str) -> dict:
         "order": "created_at.desc",
         "limit": "30",
     })
+    today_iso = datetime.now(timezone.utc).date().isoformat()
     upcoming_events = await supabase_get("distribution_events", {
         "select": "id,title,event_date,start_time,location,status,capacity,registered_count",
+        # Only surface future/today events so the AI doesn't narrate past events
+        # as "upcoming" when building dispatcher insights.
+        "event_date": f"gte.{today_iso}",
         "order": "event_date.asc",
         "limit": "10",
     })
