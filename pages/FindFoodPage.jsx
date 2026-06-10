@@ -214,8 +214,12 @@ function FindFoodPage({ initialCategory }) {
             result = result.filter(food => food.listing_type === filters.type);
         }
 
-        // Location-based filtering
-        if (currentLocation && filters.radius) {
+        // Location-based filtering — ONLY apply when the user explicitly
+        // granted GPS permission. Profile-coordinate fallback must NOT silently
+        // filter listings, because users viewing from outside the Bay Area (or
+        // whose profile address hasn't been geocoded) would see an almost-empty
+        // list while the map still shows all 17+ pins.
+        if (currentLocation && filters.radius && locationSource === 'gps') {
             const maxDistance = parseInt(filters.radius);
             // Separate items with and without coordinates
             const withCoords = [];
