@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import authService from '../authService.js'
 import dataService from '../dataService.js'
+import { getRecipeSuggestions as _getRecipeSuggestions } from '../aiAgent.js'
 
 // Authentication hook
 export const useAuth = () => {
@@ -789,8 +790,7 @@ export const useAI = () => {
       setError(null)
 
       const userId = authService.getCurrentUser()?.id
-      const { getRecipeSuggestions: getRecipesFn } = await import('../aiAgent.js')
-      const result = await getRecipesFn(ingredients, { userId })
+      const result = await _getRecipeSuggestions(ingredients, { userId })
 
       return result
     } catch (error) {
