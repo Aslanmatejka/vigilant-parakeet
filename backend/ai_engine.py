@@ -3737,7 +3737,62 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
             add("Bread", "Fruit", "Vegetables", "Prepared meal")
         return out
 
-    # ---- Fallbacks --------------------------------------------------
+    # Claim confirmation — "claim it / reserve it / shall I claim"
+    claim_confirm_keys = (
+        "claim it", "claim that", "claim this", "shall i claim",
+        "want me to claim", "reserve it", "reserve that", "should i reserve",
+        "confirm the claim", "go ahead and claim",
+        "reclamarlo", "reservarlo", "lo reclamo", "lo reservo",
+        "confirmar el reclamo", "confirmo el reclamo", "lo reclamo?",
+        "¿lo reclamo", "¿lo reservo",
+    )
+    if any(k in t for k in claim_confirm_keys):
+        if es:
+            add("Sí, reclamarlo", "No, busca otro", "Cancelar")
+        else:
+            add("Yes, claim it", "Find me something else", "Cancel")
+        return out
+
+    # Pickup schedule (after claiming) — "when can you pick it up"
+    pickup_schedule_keys = (
+        "when can you pick", "when will you pick", "pickup time",
+        "what time will you", "schedule your pickup",
+        "cuándo puedes recoger", "cuando puedes recoger",
+        "a qué hora recoges", "horario de recogida",
+    )
+    if any(k in t for k in pickup_schedule_keys):
+        if es:
+            add("Hoy", "Mañana", "En las próximas 24h")
+        else:
+            add("Today", "Tomorrow", "Within 24h")
+        return out
+
+    # Quantity for claiming — "how many would you like" / "how much do you need"
+    claim_qty_keys = (
+        "how many would you like", "how many do you need", "how much do you need",
+        "how many would you want", "quantity would you like",
+        "cuántos quieres", "cuántas quieres", "cuánto necesitas",
+    )
+    if any(k in t for k in claim_qty_keys):
+        if es:
+            add("1", "2", "3")
+        else:
+            add("1", "2", "3")
+        return out
+
+    # Cancel / release claim — "cancel the claim" / "release it"
+    cancel_claim_keys = (
+        "cancel the claim", "release the claim", "release it",
+        "cancel your claim", "should i cancel",
+        "cancelar el reclamo", "liberar el reclamo",
+        "¿cancelo el reclamo", "cancelo el reclamo",
+    )
+    if any(k in t for k in cancel_claim_keys):
+        if es:
+            add("Sí, cancelar", "No, mantenlo")
+        else:
+            add("Yes, cancel it", "No, keep it")
+        return out
 
     # Open-ended wh-question with no specific branch above: don't guess.
     # Empty chips > wrong chips.
