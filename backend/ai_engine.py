@@ -917,7 +917,8 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "something the platform supports, you MUST call the corresponding tool "
         "and report the result. Do NOT respond with step-by-step instructions "
         "telling the user to do it themselves.\n"
-        "- 'claim X for me' / 'I want that one' / 'reserve it' -> call claim_listing\n"
+        "- 'claim X for me' / 'I want that one' / 'reserve it' -> FIRST ask "
+        "'Ready to claim it?', then call claim_listing only after explicit yes\n"
         "- 'I got the code 1234' / 'confirm 1234' -> call confirm_claim\n"
         "- 'cancel my claim' / 'release it' -> call cancel_claim\n"
         "- 'post a listing for X' / 'donate Y' -> call post_food_listing\n"
@@ -934,6 +935,21 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "Only ask a clarifying question if a REQUIRED parameter is genuinely "
         "missing (e.g. you don't know which listing they mean). Otherwise, "
         "call the tool first, then summarize what happened.\n"
+        "\n"
+        "### CLAIM VERIFICATION (ZERO-TOLERANCE POLICY)\n"
+        "NEVER claim food without explicit user authorization. Before calling "
+        "claim_listing, you MUST:\n"
+        "  1. Present the food options from search_food_near_user results\n"
+        "  2. Let the user pick one by name or number\n"
+        "  3. Ask how many (if quantity > 1)\n"
+        "  4. Ask 'Ready to claim it?' or 'Want me to lock it in?'\n"
+        "  5. Wait for explicit affirmative: 'yes', 'go ahead', 'claim it'\n"
+        "FORBIDDEN: Claiming when user says 'that one', 'sounds good', 'ok', "
+        "'nice', 'I like that', or any ambiguous response. These express "
+        "INTEREST, not authorization. Re-ask: 'Just to confirm — should I "
+        "claim the <title> for you now?'\n"
+        "If you claim food without following all 5 steps above in sequence, "
+        "that is a CRITICAL ERROR and violates user trust.\n"
         "\n"
         "### NO-STALL RULE (ZERO TOLERANCE)\n"
         "NEVER reply with placeholder/stall text like 'one moment please', "
@@ -1031,10 +1047,19 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "(no partial-claim API today). If the recipient wants fewer than "
         "are listed, just acknowledge that and proceed; the donor will "
         "hand them the right amount at pickup.\n"
-        "  4. CONFIRM BEFORE LOCKING — for non-trivial claims, ask 'Want "
-        "me to lock it in?' before calling claim_listing. Exception: if "
-        "the user said 'claim it' / 'reserve it' / 'I'll take it' "
-        "explicitly, skip the confirmation and claim immediately.\n"
+        "  4. ALWAYS CONFIRM BEFORE CLAIMING (CRITICAL) — You MUST ask an "
+        "explicit confirmation question before calling claim_listing. Use "
+        "clear language like 'Ready to claim it?' or 'Want me to lock it "
+        "in now?' or 'Shall I reserve this for you?'. ONLY proceed with "
+        "the claim when the user responds with an explicit affirmative: "
+        "'yes', 'yeah', 'yep', 'sure', 'go ahead', 'claim it', 'reserve "
+        "it', 'lock it in', 'I'll take it'. DO NOT claim if the user just "
+        "says 'that one', 'sounds good', 'nice', 'ok' (ambiguous — ask "
+        "confirmation), or any message that could be expressing interest "
+        "rather than authorizing action. If uncertain whether their reply "
+        "is a clear yes, ask again: 'Just to confirm — should I claim the "
+        "<title> for you now?'. Claiming food without explicit user "
+        "authorization is a serious error.\n"
         "  5. AFTER CLAIMING, follow the ANNOUNCE CLAIM SUCCESS rules "
         "below — lead with the confirmation, tell them where to pick up, "
         "then offer a helpful next step ('Want directions?', 'Need the "
@@ -1104,14 +1129,23 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "listing' without that listing_id.\n"
         "  - post_food_request: same rule. Only claim it was posted when "
         "you have a request_id from the tool.\n"
-        "  - claim_listing / confirm_claim / cancel_claim / "
-        "update_user_profile: identical — confirm only when the tool result "
-        "is success-shaped, otherwise relay the error.\n"
+        "  - claim_listing: ONLY say 'claimed' or 'reserved' when the tool "
+        "result contains `success: true` AND a `claim_id`. If the tool "
+        "returned an error (e.g. 'Listing not found', 'already claimed', "
+        "'no quantity left'), relay the error verbatim and offer to search "
+        "for alternatives. DO NOT say 'I claimed it' or 'Done!' if you "
+        "never called the tool or if the tool call failed. DO NOT call "
+        "claim_listing at all unless the user gave explicit authorization "
+        "('yes', 'go ahead', 'claim it').\n"
+        "  - confirm_claim / cancel_claim / update_user_profile: identical — "
+        "confirm only when the tool result is success-shaped, otherwise "
+        "relay the error.\n"
         "If you did not call the matching tool at all this turn, you have "
         "NOT done the action — do not pretend you did. Either call the tool "
-        "now, or ask one specific clarifying question. Hallucinating "
-        "success ('posted!', 'done!', 'all set!') without a verified tool "
-        "result is the worst possible failure mode and erodes user trust.\n"
+        "now (only after explicit authorization for claims), or ask one "
+        "specific clarifying question. Hallucinating success ('posted!', "
+        "'done!', 'all set!', 'claimed!') without a verified tool result is "
+        "the worst possible failure mode and erodes user trust.\n"
         "\n"
         "### ANNOUNCE LISTING POST SUCCESS\n"
         "After post_food_listing returns success, lead with 'Posted!' (or "
@@ -2317,6 +2351,20 @@ class ConversationEngine:
         from backend.tools import TOOL_DEFINITIONS, execute_tool
         self.tool_definitions = TOOL_DEFINITIONS
         self._execute_tool = execute_tool
+        # Derived at boot: every tool whose JSON schema declares a `user_id`
+        # property. The dispatch layer overwrites that argument with the
+        # authenticated user_id *unconditionally* (even if the model omitted
+        # it) so action tools like claim_listing / post_food_listing can never
+        # silently fail with "missing required positional argument: 'user_id'".
+        self._tools_taking_user_id: frozenset[str] = frozenset(
+            t["function"]["name"]
+            for t in self.tool_definitions
+            if isinstance(t, dict)
+            and isinstance(t.get("function"), dict)
+            and "user_id" in (
+                (t["function"].get("parameters") or {}).get("properties") or {}
+            )
+        )
         # Built once. The prompt body only depends on training_data, which
         # is loaded from disk at boot and never mutated per-turn. Rebuilding
         # it on every chat round wastes ~8KB of string work and 2–5k tokens
@@ -2908,7 +2956,13 @@ class ConversationEngine:
                     res = a.get("result") or {}
                     listings = res.get("listings") or res.get("results") or []
                     compact_listings = []
-                    for item in (listings[:5] if isinstance(listings, list) else []):
+                    # Persist the full visible search page (up to 12) — search
+                    # tools return up to max_results=10. Capping at 5 here meant
+                    # that after a page refresh the model only had IDs for the
+                    # first 5 listings, so "claim #7" silently picked one of
+                    # the first 5 instead — the user saw the wrong item
+                    # claimed.
+                    for item in (listings[:12] if isinstance(listings, list) else []):
                         if not isinstance(item, dict):
                             continue
                         compact_listings.append({
@@ -3078,19 +3132,6 @@ class ConversationEngine:
         }
         return any(kw in lower for kw in tool_keywords)
 
-    # Tools that write on behalf of the user — user_id MUST come from the
-    # authenticated session, never from the model's arguments.
-    _ACTION_TOOLS = {
-        "claim_listing",
-        "cancel_claim",
-        "update_user_profile",
-        "post_food_request",
-        "post_food_listing",
-        "attach_photos_to_listing",
-        "send_notification",
-        "create_reminder",
-    }
-
     async def _call_openai_chat(self, messages: list[dict[str, Any]], lang: str = "en", auth_user_id: Optional[str] = None, actions_out: Optional[list] = None) -> str:
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY not configured")
@@ -3174,9 +3215,18 @@ class ConversationEngine:
                 # (or a hallucinated id) cannot pivot to another account.
                 # This covers BOTH read tools (profile, dashboard, history,
                 # pickups) and write tools (claim, cancel, update, post).
+                #
+                # Inject UNCONDITIONALLY for any tool whose schema accepts
+                # user_id, not just when the model included it. The model
+                # often omits user_id (it has no reliable way to know its
+                # own UUID), and the bare `_claim_food_listing` /
+                # `_post_food_listing` handlers take user_id as a required
+                # positional argument — without injection they raise
+                # TypeError and the AI replies "I couldn't claim that"
+                # while no food_claims row is ever created.
                 if not isinstance(fn_args, dict):
                     fn_args = {}
-                if auth_user_id is not None and "user_id" in fn_args:
+                if auth_user_id is not None and fn_name in self._tools_taking_user_id:
                     fn_args["user_id"] = str(auth_user_id)
                 # run_safe_query: force a caller-scoped filter on any entity
                 # that has a user column, so the model can't enumerate other
