@@ -3630,6 +3630,32 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
 
     # ---- Specific intent branches (run before any generic fallback) -----
 
+    # Listing selection — "which one would you like" / "which one sounds good"
+    # when presenting food options. Check for numbered list indicators +
+    # selection prompt. Run BEFORE open-ended check since "which" triggers
+    # that but we want chips here.
+    has_numbered_list = any(
+        marker in full for marker in (
+            "1.", "1)", "2.", "2)", "3.", "3)", "• ", "- ",
+            # Look for patterns like "Here's what's close" / "Here are the"
+            "here's what", "here are the", "here's the", "closest options",
+            "available options", "nearby", "opciones", "las opciones",
+        )
+    )
+    selection_prompt = any(
+        k in t for k in (
+            "which one", "which one would you like", "which one sounds good",
+            "which would you like", "pick one", "choose one", "reply with the number",
+            "cuál", "cual", "elige uno", "escoge uno", "responde con el número",
+        )
+    )
+    if has_numbered_list and selection_prompt:
+        if es:
+            add("1", "2", "3", "Más detalles")
+        else:
+            add("1", "2", "3", "More details")
+        return out
+
     # Address confirmation — run BEFORE post-confirm so "does that look good?"
     # about a street address doesn't mis-fire as a publish prompt.
     address_cues = (
@@ -3701,13 +3727,14 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
         k in t for k in ("when can", "what time", "cuándo", "cuando", "qué horario", "que horario")
     )
     if (not is_when_question) and any(
-        k in t for k in ("pick this up", "pick it up", "drop it off", "drop-off", "drop off",
+        k in t for k in ("pick this up", "pick it up", "picking them up", "picking it up",
+                         "drop it off", "drop-off", "drop off",
                          "deliver", "pickup or", "recoger", "entregar", "entrega")
     ):
         if es:
-            add("Recogida en mi casa", "Yo lo entrego", "Cualquiera")
+            add("Recogida", "Yo lo entrego", "Cualquiera")
         else:
-            add("Pickup at my place", "I'll drop it off", "Either works")
+            add("Pickup", "I'll drop it off", "Either works")
         if any(k in t for k in ("radius", "how far", "miles", "millas", "qué tan lejos")):
             if es:
                 add("5 millas", "10 millas")
@@ -3818,10 +3845,10 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
     claim_confirm_keys = (
         "claim it", "claim that", "claim this", "shall i claim",
         "want me to claim", "reserve it", "reserve that", "should i reserve",
-        "confirm the claim", "go ahead and claim",
-        "reclamarlo", "reservarlo", "lo reclamo", "lo reservo",
+        "confirm the claim", "go ahead and claim", "lock it in", "ready to claim",
+        "reclamarlo", "reservarlo", "lo reclamo", "lo reservo", "asegurarlo",
         "confirmar el reclamo", "confirmo el reclamo", "lo reclamo?",
-        "¿lo reclamo", "¿lo reservo",
+        "¿lo reclamo", "¿lo reservo", "¿lo aseguro",
     )
     if any(k in t for k in claim_confirm_keys):
         if es:
@@ -3847,14 +3874,15 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
     # Quantity for claiming — "how many would you like" / "how much do you need"
     claim_qty_keys = (
         "how many would you like", "how many do you need", "how much do you need",
-        "how many would you want", "quantity would you like",
-        "cuántos quieres", "cuántas quieres", "cuánto necesitas",
+        "how many would you want", "how many do you want", "quantity would you like",
+        "how many", "cuántos quieres", "cuántas quieres", "cuánto necesitas",
+        "cuántos necesitas", "cuántas necesitas",
     )
     if any(k in t for k in claim_qty_keys):
         if es:
-            add("1", "2", "3")
+            add("1", "2", "3", "Todos")
         else:
-            add("1", "2", "3")
+            add("1", "2", "3", "All of them")
         return out
 
     # Cancel / release claim — "cancel the claim" / "release it"
@@ -3869,6 +3897,25 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
             add("Sí, cancelar", "No, mantenlo")
         else:
             add("Yes, cancel it", "No, keep it")
+        return out
+
+    # Post-claim assistance — "want directions?" / "need help?"
+    # Check for claim success indicators + help offer
+    claim_success_indicators = (
+        "claimed", "reserved", "locked in", "reclamado", "reservado",
+        "done!", "all set", "you're all set", "pick it up", "pickup at",
+    )
+    help_offers = (
+        "want directions", "need directions", "need the donor", "need help",
+        "anything else", "what else", "help with", "assistance",
+        "quieres direcciones", "necesitas direcciones", "necesitas el",
+        "algo más", "qué más", "ayuda con",
+    )
+    if any(ind in full for ind in claim_success_indicators) and any(offer in t for offer in help_offers):
+        if es:
+            add("Sí, direcciones", "No, estoy bien", "Recogí la comida")
+        else:
+            add("Yes, directions", "No, I'm good", "I picked it up")
         return out
 
     # Open-ended wh-question with no specific branch above: don't guess.
