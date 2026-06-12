@@ -244,12 +244,14 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
 
         // If parent provides filtered listings, use those instead of fetching
         if (listings !== null) {
+            console.log('📍 FoodMap received', listings.length, 'listings from parent');
             setFoodListings(listings);
             setLoading(false);
             return;
         }
 
         // Otherwise fetch listings independently
+        console.log('📍 FoodMap fetching listings independently');
         fetchFoodListings();
 
         // Re-fetch whenever a new listing is shared (e.g. via AI chat or form)
@@ -260,8 +262,14 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
     }, [listings]);
 
     useEffect(() => {
+        console.log('📍 Map effect:', { mapLoaded, foodListingsCount: foodListings.length, communitiesCount: communities.length });
         if (mapLoaded && (foodListings.length > 0 || communities.length > 0)) {
+            console.log('📍 Calling addMarkers()');
             addMarkers();
+        } else if (!mapLoaded) {
+            console.log('⏳ Map not yet loaded, waiting...');
+        } else if (foodListings.length === 0 && communities.length === 0) {
+            console.log('⚠️ No listings or communities to display');
         }
     }, [mapLoaded, foodListings, communities]);
 
@@ -324,6 +332,15 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             zIndex: '',
             boxShadow: '0 2px 4px rgba(0,0,0,0.3)',
         };
+        
+        if (highlightedFoodId != null) {
+            console.log('🎯 Highlighting food:', highlightedFoodId, 'Total markers:', foodMarkerElsRef.current.size);
+            const markerEl = foodMarkerElsRef.current.get(highlightedFoodId);
+            if (!markerEl) {
+                console.warn('⚠️ No marker element found for highlighted ID:', highlightedFoodId);
+            }
+        }
+        
         foodMarkerElsRef.current.forEach((el, id) => {
             const styles = id === highlightedFoodId ? HIGHLIGHTED : NORMAL;
             Object.assign(el.style, styles);
@@ -332,6 +349,9 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
         // Optional: pan to the highlighted marker if it's offscreen.
         if (highlightedFoodId != null && map.current) {
             const listing = foodListings.find(l => l.id === highlightedFoodId);
+            if (!listing) {
+                console.warn('⚠️ No listing found for highlighted ID:', highlightedFoodId);
+            }
             const lat = listing ? parseFloat(listing.latitude) : NaN;
             const lng = listing ? parseFloat(listing.longitude) : NaN;
             if (!isNaN(lat) && !isNaN(lng) && isBayAreaCoord(lat, lng)) {
@@ -341,6 +361,8 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                         map.current.easeTo({ center: [lng, lat], duration: 400 });
                     }
                 } catch (_) { /* ignore */ }
+            } else if (listing) {
+                console.warn('⚠️ Invalid coordinates for highlighted listing:', { lat, lng });
             }
         }
     }, [highlightedFoodId, foodListings]);
@@ -411,25 +433,42 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
     };
 
     const addMarkers = () => {
-        if (!map.current || !map.current.getContainer()) return;
+        if (!map.current || !map.current.getContainer()) {
+            console.log('❌ Map not initialized or container missing');
+            return;
+        }
 
         const mapboxgl = getMapboxgl();
-        if (!mapboxgl || !map.current) return;
+        if (!mapboxgl || !map.current) {
+            console.log('❌ Mapbox GL not loaded');
+            return;
+        }
         
         // Remove existing markers
         markersRef.current.forEach(marker => marker.remove());
         markersRef.current = [];
         foodMarkerElsRef.current.clear();
+        console.log('📍 Adding markers for', foodListings.length, 'listings');
 
         // Add food listing markers
+        let addedCount = 0;
+        let skippedCount = 0;
         foodListings.forEach((listing) => {
             // Parse and validate coordinates
             const lat = parseFloat(listing.latitude);
             const lng = parseFloat(listing.longitude);
             
             // Validate coordinates
-            if (isNaN(lat) || isNaN(lng)) return;
-            if (!isBayAreaCoord(lat, lng)) return;
+            if (isNaN(lat) || isNaN(lng)) {
+                console.log('⚠️ Skipping listing (missing coords):', listing.title, { lat: listing.latitude, lng: listing.longitude });
+                skippedCount++;
+                return;
+            }
+            if (!isBayAreaCoord(lat, lng)) {
+                console.log('⚠️ Skipping listing (outside Bay Area):', listing.title, { lat, lng });
+                skippedCount++;
+                return;
+            }
             
             // Create simple marker element for testing
             const el = document.createElement('div');
@@ -454,10 +493,13 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
 
                 markersRef.current.push(marker);
                 if (listing.id != null) foodMarkerElsRef.current.set(listing.id, el);
+                addedCount++;
             } catch (error) {
                 console.error('❌ Failed to add food marker for', listing.title, ':', error.message);
+                skippedCount++;
             }
         });
+        console.log(`✅ Markers added: ${addedCount}, skipped: ${skippedCount}`);
 
         // Pre-compute number of active food listings per community so we can
         // render the count inside each community marker.
