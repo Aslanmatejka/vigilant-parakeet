@@ -1660,10 +1660,36 @@ async def _search_food_near_user(
             + "\n\n(Quantities shown are current now but may change as others claim food.)"
         )
     else:
-        summary = (
-            "No available food listings found within your area right now. "
-            "Try expanding your search radius or check back later!"
-        )
+        # No donations found — check if there are matching requests
+        # to provide more helpful context to the user
+        request_count = 0
+        try:
+            request_params = {
+                "select": "id,title",
+                "status": "in.(approved,active)",
+                "listing_type": "eq.request",
+                "limit": "5",
+            }
+            if food_type:
+                request_params["category"] = f"eq.{food_type}"
+            request_listings = await supabase_get("food_listings", request_params)
+            request_count = len(request_listings) if request_listings else 0
+        except Exception:
+            pass  # Silently ignore request search failures
+        
+        if request_count > 0:
+            summary = (
+                "I don't see any donations of this food available right now, "
+                f"but I noticed {request_count} other "
+                f"{'person is' if request_count == 1 else 'people are'} also requesting similar items. "
+                "Would you like to add a request so donors know you're looking for it? "
+                "Or if you have food to share, I can help you create a donation!"
+            )
+        else:
+            summary = (
+                "No available food listings found within your area right now. "
+                "Try expanding your search radius or check back later!"
+            )
 
     return {
         # `listings` is the canonical key. The duplicate `results` field
