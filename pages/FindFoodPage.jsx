@@ -275,21 +275,6 @@ function FindFoodPage({ initialCategory }) {
         return result;
     }, [foods, searchResults, isSearchActive, searchTerm, filters, currentLocation]);
 
-    // Debug log to track filtered foods
-    useEffect(() => {
-        console.log('🔍 FindFoodPage filtered foods:', {
-            total: filteredFoods.length,
-            withCoords: filteredFoods.filter(f => f.latitude && f.longitude).length,
-            withoutCoords: filteredFoods.filter(f => !f.latitude || !f.longitude).length,
-            sample: filteredFoods.slice(0, 2).map(f => ({
-                id: f.id,
-                title: f.title,
-                lat: f.latitude,
-                lng: f.longitude
-            }))
-        });
-    }, [filteredFoods]);
-
     const LoadingSpinner = () => (
         <div className="text-center py-12" role="status">
             <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-[#2CABE3] mx-auto" aria-hidden="true"></div>
