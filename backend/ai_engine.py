@@ -975,7 +975,12 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "specific listing — e.g. 'I'm hungry', 'find me food', 'what's "
         "available?', 'I need produce', 'claim something for me', 'any "
         "bread nearby?', 'I want to eat' — you MUST:\n"
-        "  1. Call search_food_near_user FIRST (do not claim anything yet).\n"
+        "  1. Call search_food_near_user FIRST (do not claim anything yet). "
+        "ALWAYS search when the user asks 'what's available' or similar — "
+        "do NOT reuse cached search results because listings change as "
+        "others claim food. The memory snapshot listings are for resolving "
+        "'claim #3' or 'claim the bread' AFTER you already showed them "
+        "options THIS turn, not for answering 'what's available'.\n"
         "  2. In your reply, list the available options as a NUMBERED list. "
         "For each item include: the title, distance (if available), and a "
         "short detail (quantity, expiration, or category). Keep it to the "
@@ -2121,7 +2126,13 @@ def _build_memory_snapshot(history: list[dict[str, Any]]) -> Optional[str]:
     lines: list[str] = ["RECENT CONTEXT (use this to resolve references like 'claim it', '#3', 'that one', 'the bread'):"]
     if latest_listings:
         lines.append(
-            "Last search results (most recent first) — use these listing_ids directly, do NOT search again unless the user asks for fresh results:"
+            "Last search results — ONLY use these listing_ids when the user "
+            "picks one from the list you JUST showed them THIS turn (e.g. "
+            "'claim #3', 'I want the bread'). If the user asks 'what's "
+            "available' or 'show me food', call search_food_near_user again "
+            "because listings change as others claim food. These cached "
+            "results are for resolving picks within the same conversation "
+            "flow, NOT for answering availability questions:"
         )
         for i, item in enumerate(latest_listings, 1):
             parts = [f"#{i}"]
