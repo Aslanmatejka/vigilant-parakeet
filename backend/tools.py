@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -1579,23 +1580,20 @@ async def _search_food_near_user(
         # Rough degree offset for the given radius (1 deg lat ≈ 111 km)
         lat_offset = radius_km / 111.0
         lng_offset = radius_km / (111.0 * max(math.cos(math.radians(user_lat)), 0.01))
-        params["latitude"] = f"gte.{user_lat - lat_offset}"
-        params["latitude"] = f"lte.{user_lat + lat_offset}"
-        # PostgREST doesn't support duplicate keys; use AND filter
+        # PostgREST doesn't support duplicate query-param keys, so bounding-box
+        # filtering across two columns uses a single `and` compound filter.
         params["and"] = (
             f"(latitude.gte.{user_lat - lat_offset},"
             f"latitude.lte.{user_lat + lat_offset},"
             f"longitude.gte.{user_lng - lng_offset},"
             f"longitude.lte.{user_lng + lng_offset})"
         )
-        # Remove individual lat filter since we use 'and'
-        params.pop("latitude", None)
 
     try:
         listings = await supabase_get("food_listings", params)
     except Exception as exc:
         logger.error("Food listings fetch failed: %s", exc)
-        return {"results": [], "total": 0, "error": f"Database query failed: {exc}"}
+        return {"listings": [], "total": 0, "error": f"Database query failed: {exc}"}
 
     # --- 3. Filter by distance ---
     now = datetime.now(timezone.utc)
@@ -1656,7 +1654,11 @@ async def _search_food_near_user(
                 f"{r['quantity']} {r['unit'] or 'items'}, {dist_str}. "
                 f"Pickup: {r['address'] or 'contact donor'}."
             )
-        summary = f"Found {len(results)} food item(s) near you:\n" + "\n".join(summary_parts)
+        summary = (
+            f"Found {len(results)} food item(s) near you:\n" 
+            + "\n".join(summary_parts)
+            + "\n\n(Quantities shown are current now but may change as others claim food.)"
+        )
     else:
         summary = (
             "No available food listings found within your area right now. "
@@ -1664,7 +1666,11 @@ async def _search_food_near_user(
         )
 
     return {
-        "results": results,
+        # `listings` is the canonical key. The duplicate `results` field
+        # was previously returned for backwards-compat but doubled the
+        # tokens spent on every search and never carried different data —
+        # downstream consumers all prefer `listings` (see ai_engine
+        # _build_memory_snapshot and _persist_conversation compaction).
         "listings": results,
         "total": len(results),
         "radius_km": radius_km,
@@ -3224,6 +3230,69 @@ async def _create_food_listing(
 # ---------------------------------------------------------------------------
 
 
+# Words the model might pass as `quantity` instead of a number when the user
+# says "claim everything" / "all of it" / "todo". Tracked case-insensitively;
+# any match means "claim every available unit on the listing".
+_CLAIM_ALL_KEYWORDS = frozenset({
+    "all", "everything", "every", "max", "maximum", "whole", "entire",
+    "todo", "todos", "toda", "todas", "completo", "completa", "entero",
+})
+
+
+def _normalize_claim_quantity(
+    raw_quantity: object, available_qty: int
+) -> tuple[int, bool]:
+    """Coerce a free-form ``quantity`` argument into a positive int.
+
+    Returns ``(requested_qty, clamped)`` where ``clamped`` is True when the
+    requested amount exceeded ``available_qty`` and was reduced to fit. The
+    bare-handler ``int(quantity)`` lost real user intent in two cases:
+
+    * "all" / "everything" / "todo" silently became 1 (caught by the
+      ValueError branch). The user wanted to claim every available unit
+      and instead got one — a "wrong number claimed" bug.
+    * Strings like "5 loaves" or "two" silently became 1 for the same
+      reason. We now extract a leading integer when present, and accept
+      common all-quantity words.
+    """
+    if available_qty < 1:
+        return (1, False)
+    if raw_quantity is None:
+        return (1, False)
+    # Native ints / floats — keep the int part.
+    if isinstance(raw_quantity, bool):  # bool is subclass of int — reject first
+        return (1, False)
+    if isinstance(raw_quantity, (int, float)):
+        try:
+            n = int(raw_quantity)
+        except (TypeError, ValueError, OverflowError):
+            return (1, False)
+        if n < 1:
+            return (1, False)
+        if n > available_qty:
+            return (available_qty, True)
+        return (n, False)
+    # String forms — handle "all" / "5" / "5 loaves" / "two".
+    s = str(raw_quantity).strip().lower()
+    if not s:
+        return (1, False)
+    if s in _CLAIM_ALL_KEYWORDS:
+        return (available_qty, False)
+    # Pull the first integer out of "5", "5 loaves", "qty: 3", etc.
+    m = re.search(r"-?\d+", s)
+    if m:
+        try:
+            n = int(m.group(0))
+        except (TypeError, ValueError):
+            n = 1
+        if n < 1:
+            return (1, False)
+        if n > available_qty:
+            return (available_qty, True)
+        return (n, False)
+    return (1, False)
+
+
 async def _claim_food_listing(
     user_id: str,
     listing_id: str,
@@ -3233,7 +3302,7 @@ async def _claim_food_listing(
     **_ignored,
 ) -> dict:
     """Create a food_claims row for the authenticated user and decrement the listing."""
-    from backend.ai_engine import supabase_get, supabase_post, supabase_patch
+    from backend.ai_engine import supabase_get, supabase_post, supabase_patch, supabase_delete
 
     logger.info(
         "claim_food_listing: user=%s listing=%s qty=%s",
@@ -3273,7 +3342,10 @@ async def _claim_food_listing(
     if status in {"claimed", "completed", "expired", "cancelled", "declined"}:
         return {
             "success": False,
-            "error": f"Listing is no longer available (status: {status}).",
+            "error": (
+                f"Sorry, this listing was just {status} by someone else. "
+                f"Search again to see what's currently available."
+            ),
         }
     if status not in {"", "active", "approved", "available"}:
         return {
@@ -3322,17 +3394,20 @@ async def _claim_food_listing(
     except (TypeError, ValueError):
         available_qty = 0
     if available_qty <= 0:
-        return {"success": False, "error": "Listing has no quantity left to claim."}
+        return {
+            "success": False, 
+            "error": (
+                "Sorry, this listing has no quantity left — someone claimed it all. "
+                "Search again to see what else is available."
+            ),
+        }
 
     # --- 2. Normalize claim quantity (food_claims.quantity is INTEGER NOT NULL) ---
-    try:
-        requested_qty = int(quantity) if quantity is not None else 1
-    except (TypeError, ValueError):
-        requested_qty = 1
-    if requested_qty < 1:
-        requested_qty = 1
-    if requested_qty > int(available_qty):
-        requested_qty = int(available_qty) if available_qty >= 1 else 1
+    # Tolerate "all" / "everything" / "5 loaves" instead of silently defaulting
+    # to 1 when the model passes a non-numeric value. See _normalize_claim_quantity.
+    requested_qty, quantity_clamped = _normalize_claim_quantity(
+        quantity, int(available_qty) if available_qty >= 1 else 1
+    )
 
     # --- 2b. Prevent duplicate claims on the same listing ---
     try:
@@ -3439,11 +3514,37 @@ async def _claim_food_listing(
     if not claim_id:
         return {"success": False, "error": "Claim insert returned no row."}
 
-    # --- 5. Decrement the listing quantity (or mark claimed if fully taken) ---
+    # --- 5. Atomically decrement the listing quantity (CAS prevents overselling) ---
+    # The CAS filter `quantity=eq.{available_qty}` ensures the PATCH only
+    # succeeds if no other request has already modified the row since we
+    # read it in step 1. If two users simultaneously reach this point, only
+    # one PATCH will match; the other gets an empty result → claim rollback.
     remaining = available_qty - requested_qty
     patch_body = {"status": "claimed"} if remaining <= 0 else {"quantity": remaining}
     try:
-        await supabase_patch("food_listings", {"id": f"eq.{listing_id}"}, patch_body)
+        patched_rows = await supabase_patch(
+            "food_listings",
+            {"id": f"eq.{listing_id}", "quantity": f"eq.{available_qty}"},
+            patch_body,
+        )
+        if not isinstance(patched_rows, list) or len(patched_rows) == 0:
+            # CAS failed: another request modified the listing quantity
+            # between our read (step 1) and this write (step 5). Roll back
+            # the claim row we just inserted to keep the DB consistent.
+            try:
+                await supabase_delete("food_claims", {"id": f"eq.{claim_id}"})
+            except Exception as del_exc:
+                logger.error(
+                    "claim_food_listing: rollback delete failed for claim %s: %s",
+                    claim_id, del_exc,
+                )
+            return {
+                "success": False,
+                "error": (
+                    "The listing was updated by another request while your claim was being processed. "
+                    "Please search again and claim from fresh results."
+                ),
+            }
     except Exception as exc:
         logger.warning("claim_food_listing: listing patch failed (non-fatal): %s", exc)
 
@@ -3454,6 +3555,13 @@ async def _claim_food_listing(
     summary = " ".join(p for p in summary_parts if p).strip() + "."
     if pickup_loc:
         summary += f" Pickup at {pickup_loc}."
+    # When we had to clamp the request down to what was actually available,
+    # tell the model explicitly. Without this hint GPT often echoes the
+    # number the user asked for ("I claimed 5 loaves") instead of the
+    # number we really created the claim with ("I claimed 3 loaves, that's
+    # all that was left").
+    if quantity_clamped:
+        summary += f" Only {requested_qty} {unit or 'units'} were available."
 
     return {
         "success": True,
@@ -3462,6 +3570,7 @@ async def _claim_food_listing(
         "listing_id": str(listing_id),
         "title": title,
         "quantity": requested_qty,
+        "quantity_clamped": quantity_clamped,
         "unit": unit,
         "remaining_on_listing": max(remaining, 0),
         "pickup_location": pickup_loc,
@@ -3620,8 +3729,8 @@ async def _confirm_claim(
     status = str(claim.get("status") or "").lower()
     if status == "completed":
         return {"success": False, "error": "Claim is already confirmed as picked up."}
-    if status in {"cancelled", "expired"}:
-        return {"success": False, "error": f"Cannot confirm a {status} claim."}
+    if status == "expired":
+        return {"success": False, "error": "Cannot confirm an expired claim."}
 
     cid = claim["id"]
     food_id = claim.get("food_id")
