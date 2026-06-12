@@ -3679,6 +3679,7 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
         return out
 
     # Community confirmation — before final post confirm.
+    # Extract community names from the text for dynamic chips.
     community_cues = (
         "community", "school", "district", "neighborhood", "comunidad",
         "escuela", "distrito",
@@ -3692,6 +3693,43 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
             "para qué comunidad", "a qué comunidad", "tu comunidad",
             "comunidad de tu perfil", "bajo qué comunidad",
     )):
+        # Try to extract community names from the text.
+        # Pattern: capitalized words (2-4 words) near community keywords.
+        # Examples: "Alameda Unified", "Oakland Tech", "Lincoln Elementary"
+        import re as _re_comm
+        # Look for patterns like "post this to Oakland Tech" or
+        # "Alameda Unified, Oakland Tech, or another"
+        # Match 1-4 capitalized words in sequence
+        pattern = r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b'
+        matches = _re_comm.findall(full)
+        
+        # Filter matches: exclude common false positives
+        exclude = {
+            'Should', 'Which', 'What', 'Community', 'School', 'District',
+            'Post', 'Share', 'List', 'Under', 'Profile', 'Your',
+            'I', 'Oakland', 'Alameda', 'San', 'The', # Single city names
+            'Qué', 'Cuál', 'Para', 'Tu', 'Comunidad', 'Escuela',
+        }
+        community_names = []
+        for match in matches:
+            words = match.split()
+            # Keep if: 2+ words OR (1 word with 5+ chars AND not in exclude list)
+            if len(words) >= 2 or (len(words) == 1 and len(match) >= 5 and match not in exclude):
+                # Further filter: must not be a question word at start
+                if words[0] not in exclude and match not in community_names:
+                    community_names.append(match)
+        
+        # Use extracted names as chips, max 3 + "Other"
+        if community_names:
+            for name in community_names[:3]:
+                add(name)
+            if es:
+                add("Otra comunidad")
+            else:
+                add("Other")
+            return out
+        
+        # Fallback to generic chips if no names extracted
         if es:
             add("Sí, esa comunidad", "Es otra comunidad", "No estoy seguro")
         else:
