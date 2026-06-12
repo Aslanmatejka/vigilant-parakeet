@@ -20,6 +20,7 @@
     "supabase:studio": "npx supabase studio",
     "dev:local": "npm run supabase:start && npm run dev",
     "check:local": "node scripts/check-local.js",
+    "geocode:fix": "node scripts/fix-missing-coordinates.js",
     "mcp:setup": "cd mcp-server && npm install",
     "mcp:start": "dotenv -e .env.local -- node mcp-server/supabase-server.js",
     "mcp:dev": "dotenv -e .env.local -- node mcp-server/supabase-server.js"

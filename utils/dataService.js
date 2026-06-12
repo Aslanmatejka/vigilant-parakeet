@@ -2,6 +2,7 @@ import supabase, { SUPABASE_AUTH_KEY } from './supabaseClient.js'
 import { reportError } from './helpers.js'
 import communities from './communities.js'
 import { assignFoodImage } from './foodImages.js'
+import { geocodeAddress } from './geocoding.js'
 
 class DataService {
   // Get food claims by status (for admin dashboard)
@@ -709,6 +710,30 @@ class DataService {
         listing.location = [listingData.donor_city, listingData.donor_state, listingData.donor_zip].filter(Boolean).join(', ').trim() || null;
       }
 
+      // Auto-geocode address if coordinates are missing
+      // This prevents map marker issues when users don't provide lat/lng
+      if (!listing.latitude || !listing.longitude) {
+        const addressToGeocode = listing.full_address || listing.location;
+        if (addressToGeocode) {
+          try {
+            console.log(`[createFoodListing] Geocoding address: ${addressToGeocode}`);
+            const coords = await geocodeAddress(addressToGeocode);
+            if (coords) {
+              listing.latitude = coords.latitude;
+              listing.longitude = coords.longitude;
+              console.log(`[createFoodListing] Geocoded successfully: ${coords.latitude}, ${coords.longitude}`);
+            } else {
+              console.warn(`[createFoodListing] Failed to geocode address: ${addressToGeocode}`);
+            }
+          } catch (geocodeErr) {
+            // Log but don't fail the listing creation - geocoding can be retried later
+            console.error('[createFoodListing] Geocoding error:', geocodeErr);
+          }
+        } else {
+          console.warn('[createFoodListing] No address available for geocoding');
+        }
+      }
+
       // Use direct REST API to avoid Supabase JS client auth issues
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
       const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -794,6 +819,27 @@ class DataService {
       // Without this the location column retains the old address string.
       if (toUpdate.full_address && typeof toUpdate.full_address === 'string') {
         toUpdate.location = toUpdate.full_address.trim();
+      }
+
+      // Auto-geocode if address changed but coordinates are missing
+      // This ensures updated addresses get proper map markers
+      if ((toUpdate.full_address || toUpdate.location) && (!toUpdate.latitude || !toUpdate.longitude)) {
+        const addressToGeocode = toUpdate.full_address || toUpdate.location;
+        if (addressToGeocode && typeof addressToGeocode === 'string') {
+          try {
+            console.log(`[updateFoodListing] Geocoding updated address: ${addressToGeocode}`);
+            const coords = await geocodeAddress(addressToGeocode);
+            if (coords) {
+              toUpdate.latitude = coords.latitude;
+              toUpdate.longitude = coords.longitude;
+              console.log(`[updateFoodListing] Geocoded successfully: ${coords.latitude}, ${coords.longitude}`);
+            } else {
+              console.warn(`[updateFoodListing] Failed to geocode address: ${addressToGeocode}`);
+            }
+          } catch (geocodeErr) {
+            console.error('[updateFoodListing] Geocoding error:', geocodeErr);
+          }
+        }
       }
 
       const { data, error } = await supabase

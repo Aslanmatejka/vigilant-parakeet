@@ -67,6 +67,7 @@ async function fixMissingCoordinates() {
     .select(`
       id,
       title,
+      status,
       latitude,
       longitude,
       full_address,
@@ -77,8 +78,7 @@ async function fixMissingCoordinates() {
         name
       )
     `)
-    .in('status', ['approved', 'active'])
-    .eq('listing_type', 'donation')
+    // Fix ALL listings, not just active/approved
     .or('latitude.is.null,longitude.is.null');
 
   if (fetchError) {
