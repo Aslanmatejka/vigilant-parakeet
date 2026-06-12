@@ -58,7 +58,7 @@ function FindFoodPage({ initialCategory }) {
     const [communityNames, setCommunityNames] = useState({});
     const [filters, setFilters] = useState({
         category: initialCategory || '',
-        radius: '10',
+        radius: '100',
         sortBy: 'newest',
         community: ''
     });
@@ -246,7 +246,13 @@ function FindFoodPage({ initialCategory }) {
 
             // Sort nearby by distance, then append items without coordinates
             nearby.sort((a, b) => (a.distance || 0) - (b.distance || 0));
-            result = [...nearby, ...withoutCoords];
+            const filtered = [...nearby, ...withoutCoords];
+
+            // Safety fallback: if radius filtering removed ALL results but there
+            // are listings available, show everything so users never see a blank
+            // page due to being outside the default radius (e.g. testing from
+            // outside the Bay Area, or listings clustered in one area).
+            result = filtered.length > 0 ? filtered : result;
         }
 
         // Apply sorting based on selected option
@@ -438,7 +444,7 @@ function FindFoodPage({ initialCategory }) {
                                                 setIsSearchActive(false);
                                                 setFilters({
                                                     category: '',
-                                                    radius: '10',
+                                                    radius: '100',
                                                     sortBy: 'newest',
                                                     community: ''
                                                 });
