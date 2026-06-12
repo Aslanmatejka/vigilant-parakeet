@@ -140,7 +140,7 @@ function ensureMapboxControlStyles() {
     document.head.appendChild(style);
 }
 
-function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = null, className = '' }) {
+function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = null, className = '', listings = null }) {
     const navigate = useNavigate();
     const mapContainer = useRef(null);
     const map = useRef(null);
@@ -239,16 +239,25 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
     }, []);
 
     useEffect(() => {
-        // Fetch listings and communities immediately
-        fetchFoodListings();
+        // Always fetch communities for map display
         fetchCommunities();
+
+        // If parent provides filtered listings, use those instead of fetching
+        if (listings !== null) {
+            setFoodListings(listings);
+            setLoading(false);
+            return;
+        }
+
+        // Otherwise fetch listings independently
+        fetchFoodListings();
 
         // Re-fetch whenever a new listing is shared (e.g. via AI chat or form)
         // so the map pin appears without requiring a page reload.
         const onFoodShared = () => fetchFoodListings();
         window.addEventListener('foodShared', onFoodShared);
         return () => window.removeEventListener('foodShared', onFoodShared);
-    }, []);
+    }, [listings]);
 
     useEffect(() => {
         if (mapLoaded && (foodListings.length > 0 || communities.length > 0)) {

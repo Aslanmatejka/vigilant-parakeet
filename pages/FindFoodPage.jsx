@@ -405,6 +405,7 @@ function FindFoodPage({ initialCategory }) {
                                     <FoodMap
                                         showSignupPrompt={!isAuthenticated}
                                         highlightedFoodId={hoveredFoodId}
+                                        listings={filteredFoods}
                                     />
                                 </div>
                             </div>
