@@ -10,7 +10,7 @@ Provides all AI-related HTTP endpoints:
   POST /api/ai/feedback        – Submit feedback on AI message
   GET  /health                 – Health check
 
-Background jobs: checks ai_reminders every 15 min, missed pickup alerts.
+Background jobs (every 15 min): AI reminders, missed pickup alerts, expired listing cleanup.
 
 Run:
     uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
@@ -403,6 +403,95 @@ async def check_missed_pickups() -> int:
     return notified
 
 
+# ---------------------------------------------------------------------------
+# Background job: mark expired listings and delete old expired ones
+# ---------------------------------------------------------------------------
+
+async def delete_expired_listings() -> dict[str, int]:
+    """Mark listings with past expiry_date as expired, then hard-delete very old ones.
+
+    Returns dict with counts: {'marked': N, 'deleted': M}
+    
+    Two-phase cleanup:
+    1. Mark as 'expired' if expiry_date < today AND status is active/approved
+    2. Hard delete if status='expired' AND expiry_date was > 7 days ago
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return {"marked": 0, "deleted": 0}
+
+    from datetime import date, timedelta
+
+    today_iso = date.today().isoformat()
+    delete_cutoff = (date.today() - timedelta(days=7)).isoformat()
+    
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
+
+    marked = 0
+    deleted = 0
+
+    try:
+        # Phase 1: Mark as expired (active/approved listings with past expiry_date)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Find candidates to mark as expired
+            mark_url = (
+                f"{SUPABASE_URL}/rest/v1/food_listings?"
+                f"expiry_date=lt.{today_iso}&"
+                f"status=in.(active,approved)&"
+                f"select=id,title,expiry_date"
+            )
+            resp = await client.get(mark_url, headers=headers)
+            resp.raise_for_status()
+            to_mark = resp.json()
+
+            if to_mark:
+                # Batch update to 'expired' status
+                mark_ids = [item["id"] for item in to_mark]
+                update_url = f"{SUPABASE_URL}/rest/v1/food_listings?id=in.({','.join(mark_ids)})"
+                update_resp = await client.patch(
+                    update_url,
+                    json={"status": "expired"},
+                    headers=headers
+                )
+                update_resp.raise_for_status()
+                marked = len(to_mark)
+                logger.info(
+                    "Marked %d listing(s) as expired (expiry_date < %s)",
+                    marked, today_iso
+                )
+
+            # Phase 2: Hard delete old expired listings (expiry_date > 7 days ago)
+            delete_url = (
+                f"{SUPABASE_URL}/rest/v1/food_listings?"
+                f"status=eq.expired&"
+                f"expiry_date=lt.{delete_cutoff}&"
+                f"select=id,title"
+            )
+            delete_resp = await client.get(delete_url, headers=headers)
+            delete_resp.raise_for_status()
+            to_delete = delete_resp.json()
+
+            if to_delete:
+                delete_ids = [item["id"] for item in to_delete]
+                hard_delete_url = f"{SUPABASE_URL}/rest/v1/food_listings?id=in.({','.join(delete_ids)})"
+                final_resp = await client.delete(hard_delete_url, headers=headers)
+                final_resp.raise_for_status()
+                deleted = len(to_delete)
+                logger.info(
+                    "Hard-deleted %d listing(s) (expiry_date > 7 days ago)",
+                    deleted
+                )
+
+    except Exception as exc:
+        logger.error("Expired listing cleanup failed: %s", exc)
+
+    return {"marked": marked, "deleted": deleted}
+
+
 async def _reminder_loop() -> None:
     """Background loop: reminders + missed pickup checks with backoff on errors."""
     logger.info(
@@ -420,6 +509,10 @@ async def _reminder_loop() -> None:
             await check_missed_pickups()
         except Exception as exc:
             logger.error("Missed pickup check error: %s", exc)
+        try:
+            await delete_expired_listings()
+        except Exception as exc:
+            logger.error("Expired listing cleanup error: %s", exc)
 
         # Exponential backoff on repeated failures (up to 1 hour)
         if consecutive_failures > 0:
