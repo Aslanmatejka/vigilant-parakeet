@@ -1147,37 +1147,6 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "post_food_request",
-            "description": (
-                "Post a food REQUEST on behalf of the authenticated recipient "
-                "(opposite of a donation). Use when the user says things like "
-                "'I need X', 'looking for Y', 'request food'. Confirm key "
-                "fields (title, quantity, when needed) with the user before "
-                "calling."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "user_id": {"type": "string"},
-                    "title": {"type": "string", "description": "What's being requested (e.g. 'Baby formula', 'Rice')."},
-                    "quantity": {"type": "number"},
-                    "unit": {"type": "string"},
-                    "category": {
-                        "type": "string",
-                        "enum": ["produce", "bakery", "dairy", "pantry", "meat", "prepared", "other"],
-                    },
-                    "description": {"type": "string", "description": "Why it's needed / who it's for."},
-                    "needed_by": {"type": "string", "description": "ISO date (YYYY-MM-DD) — when the user needs it by."},
-                    "location": {"type": "string"},
-                    "people": {"type": "integer", "description": "Number of people this will feed."},
-                },
-                "required": ["user_id", "title", "quantity", "unit", "category"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "bulk_post_food_listings",
             "description": "Alias of bulk_import_listings.",
             "parameters": {
@@ -1247,7 +1216,6 @@ async def execute_tool(name: str, arguments: dict) -> dict:
         "attach_photos_to_listing": _attach_photos_to_listing,
         "navigate_ui": _navigate_ui,
         "meal_suggestions": _get_recipes,
-        "post_food_request": _post_food_request,
         "bulk_post_food_listings": _bulk_import_listings,
     }
 
@@ -1660,36 +1628,10 @@ async def _search_food_near_user(
             + "\n\n(Quantities shown are current now but may change as others claim food.)"
         )
     else:
-        # No donations found — check if there are matching requests
-        # to provide more helpful context to the user
-        request_count = 0
-        try:
-            request_params = {
-                "select": "id,title",
-                "status": "in.(approved,active)",
-                "listing_type": "eq.request",
-                "limit": "5",
-            }
-            if food_type:
-                request_params["category"] = f"eq.{food_type}"
-            request_listings = await supabase_get("food_listings", request_params)
-            request_count = len(request_listings) if request_listings else 0
-        except Exception:
-            pass  # Silently ignore request search failures
-        
-        if request_count > 0:
-            summary = (
-                "I don't see any donations of this food available right now, "
-                f"but I noticed {request_count} other "
-                f"{'person is' if request_count == 1 else 'people are'} also requesting similar items. "
-                "Would you like to add a request so donors know you're looking for it? "
-                "Or if you have food to share, I can help you create a donation!"
-            )
-        else:
-            summary = (
-                "No available food listings found within your area right now. "
-                "Try expanding your search radius or check back later!"
-            )
+        summary = (
+            "No available food listings found within your area right now. "
+            "Try expanding your search radius or check back later!"
+        )
 
     return {
         # `listings` is the canonical key. The duplicate `results` field
@@ -4248,100 +4190,6 @@ async def _navigate_ui(
         lang=lang,
         reason=reason,
     )
-
-
-# ---------------------------------------------------------------------------
-# post_food_request — recipient asks the community for food
-# ---------------------------------------------------------------------------
-
-
-async def _post_food_request(
-    user_id: str,
-    title: str,
-    quantity: float,
-    unit: str,
-    category: str,
-    description: Optional[str] = None,
-    needed_by: Optional[str] = None,
-    location: Optional[str] = None,
-    people: Optional[int] = None,
-    **_ignored,
-) -> dict:
-    from backend.ai_engine import supabase_post
-
-    logger.info("post_food_request: user=%s title=%s qty=%s", user_id, title, quantity)
-    if not user_id:
-        return {"success": False, "error": "missing user_id"}
-    title = (title or "").strip()
-    if not title:
-        return {"success": False, "error": "title is required"}
-    try:
-        qty = float(quantity)
-    except (TypeError, ValueError):
-        return {"success": False, "error": "quantity must be a number"}
-    if qty <= 0:
-        return {"success": False, "error": "quantity must be > 0"}
-
-    cat = (category or "other").lower()
-    if cat not in _LISTING_CATEGORIES:
-        cat = "other"
-
-    row: dict = {
-        "user_id": str(user_id),
-        "title": title[:200],
-        "quantity": qty,
-        "unit": (unit or "items")[:40],
-        "category": cat,
-        "listing_type": "request",
-        "status": "active",
-    }
-    if description:
-        row["description"] = str(description)[:1000]
-    if needed_by:
-        # food_listings.expiry_date doubles as 'needed_by' for requests.
-        # Normalize to YYYY-MM-DD so PostgreSQL's date column and expiry
-        # filters (expiry_date gte today) work correctly. Previously the
-        # raw string was stored directly, which would fail for full ISO
-        # datetimes ('2026-06-20T12:00:00Z') on a date column.
-        row["expiry_date"] = _normalize_expiry_date(needed_by) or str(needed_by).strip()[:40]
-    if location:
-        loc_s = str(location)[:400]
-        row["location"] = loc_s
-        row["full_address"] = loc_s
-        # Geocode so the request appears on the map with the correct pin.
-        try:
-            coords = await _forward_geocode(loc_s)
-            if coords:
-                row["latitude"], row["longitude"] = coords
-        except Exception as geo_exc:
-            logger.warning("post_food_request: geocode failed (non-fatal): %s", geo_exc)
-    if people is not None:
-        try:
-            # food_listings has no `people` column; fold into description.
-            note = f"For {max(1, int(people))} people."
-            row["description"] = (row.get("description", "") + " " + note).strip()[:1000]
-        except (TypeError, ValueError):
-            pass
-
-    try:
-        result = await supabase_post("food_listings", row)
-    except Exception as exc:
-        logger.error("post_food_request: insert failed: %s", exc)
-        return {"success": False, "error": f"Could not post request: {exc}"}
-
-    if not (isinstance(result, list) and result):
-        return {"success": False, "error": "Insert returned no row."}
-    request_id = result[0].get("id")
-    return {
-        "success": True,
-        "request_id": str(request_id),
-        "listing_id": str(request_id),
-        "title": title,
-        "quantity": qty,
-        "unit": row["unit"],
-        "category": cat,
-        "summary": f"Request posted: {qty} {row['unit']} of '{title}'. It's live for nearby donors.",
-    }
 
 
 # ---------------------------------------------------------------------------

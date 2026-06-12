@@ -38,8 +38,7 @@ function CommunityDetailPage() {
                 setCommunity(mergedCommunity);
 
                 // Fetch food donation listings for this community (both approved and active).
-                // Exclude expired items and food requests (listing_type='request') since those
-                // are not items members can claim.
+                // Exclude expired items. All listings are donations (food offers users can claim).
                 // Use local date to avoid dropping today's listings after 4 PM Pacific (UTC-8)
                 // when toISOString() rolls to the next UTC day.
                 const _t = new Date();

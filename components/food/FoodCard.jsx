@@ -86,7 +86,7 @@ function FoodCard({
         listing_type,
         type: legacyType,
     } = food;
-    // DB column is listing_type ('donation' | 'request').
+    // DB column is listing_type (always 'donation' now - requests were removed).
     // Fall back to legacy type field for any old in-memory objects.
     const type = listing_type || legacyType || 'donation';
 

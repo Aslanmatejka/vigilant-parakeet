@@ -721,6 +721,122 @@ class TestToolFormat:
             # Original list must be unchanged (no tool/assistant msgs appended)
             assert len(original_messages) == original_len
 
+    @pytest.mark.asyncio
+    async def test_user_id_injected_when_model_omits_it(self, engine):
+        """If the model emits a claim_listing call WITHOUT user_id, the
+        dispatch layer MUST still inject auth_user_id so the bare handler
+        signature (``_claim_food_listing(user_id, listing_id, ...)``) doesn't
+        TypeError. Without this, the user sees "I couldn't claim that"
+        and no food_claims row is ever created in the database."""
+        # Model "forgets" to include user_id — it only passes listing_id.
+        tool_call = {
+            "id": "call_no_uid",
+            "type": "function",
+            "function": {
+                "name": "claim_listing",
+                "arguments": json.dumps({"listing_id": "list-xyz"}),
+            },
+        }
+        first_resp = _mock_httpx_response(
+            _mock_openai_response(None, tool_calls=[tool_call])
+        )
+        followup_resp = _mock_httpx_response(
+            _mock_openai_response("Claimed!")
+        )
+        call_count = 0
+
+        async def mock_openai(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return first_resp if call_count == 1 else followup_resp
+
+        with patch("backend.ai_engine.OPENAI_API_KEY", "sk-test"), \
+             patch("backend.ai_engine._openai_with_retry", new_callable=AsyncMock, side_effect=mock_openai), \
+             patch.object(engine, "_execute_tool", new_callable=AsyncMock, return_value={"success": True, "claim_id": "C1"}):
+
+            messages = [
+                {"role": "system", "content": "Test"},
+                {"role": "user", "content": "Claim that bread for me"},
+            ]
+            await engine._call_openai_chat(messages, auth_user_id=TEST_USER_ID)
+            # The dispatch MUST have populated user_id from auth, even
+            # though the model omitted it.
+            engine._execute_tool.assert_called_once_with(
+                "claim_listing",
+                {"listing_id": "list-xyz", "user_id": TEST_USER_ID},
+            )
+
+    @pytest.mark.asyncio
+    async def test_user_id_overridden_against_prompt_injection(self, engine):
+        """If the model emits a user_id that differs from the authenticated
+        session (prompt injection, hallucination, or a stale id from
+        history), the dispatch layer MUST overwrite it with auth_user_id
+        so the AI can never claim/post/cancel on another user's behalf."""
+        attacker_uid = "11111111-1111-1111-1111-111111111111"
+        tool_call = {
+            "id": "call_inject",
+            "type": "function",
+            "function": {
+                "name": "claim_listing",
+                "arguments": json.dumps({
+                    "user_id": attacker_uid,
+                    "listing_id": "list-xyz",
+                }),
+            },
+        }
+        first_resp = _mock_httpx_response(
+            _mock_openai_response(None, tool_calls=[tool_call])
+        )
+        followup_resp = _mock_httpx_response(
+            _mock_openai_response("Claimed!")
+        )
+        call_count = 0
+
+        async def mock_openai(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return first_resp if call_count == 1 else followup_resp
+
+        with patch("backend.ai_engine.OPENAI_API_KEY", "sk-test"), \
+             patch("backend.ai_engine._openai_with_retry", new_callable=AsyncMock, side_effect=mock_openai), \
+             patch.object(engine, "_execute_tool", new_callable=AsyncMock, return_value={"success": True, "claim_id": "C1"}):
+
+            messages = [
+                {"role": "system", "content": "Test"},
+                {"role": "user", "content": "Claim that bread"},
+            ]
+            await engine._call_openai_chat(messages, auth_user_id=TEST_USER_ID)
+            # auth_user_id MUST win — never the attacker's id.
+            engine._execute_tool.assert_called_once_with(
+                "claim_listing",
+                {"user_id": TEST_USER_ID, "listing_id": "list-xyz"},
+            )
+
+    def test_tools_taking_user_id_includes_action_tools(self, engine):
+        """Every write-on-behalf-of-user tool MUST appear in
+        ``_tools_taking_user_id`` so the unconditional user_id injection
+        actually fires for them. Adding a new action tool without a
+        ``user_id`` schema property is a regression that would silently
+        re-introduce the "I couldn't claim that" bug."""
+        for required in {
+            "claim_listing",
+            "cancel_claim",
+            "confirm_claim",
+            "post_food_listing",
+            "create_food_listing",
+            "post_food_request",
+            "update_user_profile",
+            "create_reminder",
+            "attach_photos_to_listing",
+            "send_notification",
+            "search_food_near_user",
+            "get_user_dashboard",
+            "get_user_profile",
+        }:
+            assert required in engine._tools_taking_user_id, (
+                f"{required} must declare user_id in its tool schema"
+            )
+
 
 # ===================================================================
 # 9. History Saving
@@ -1412,6 +1528,47 @@ class TestCompactActionPersistence:
         compact = captured["metadata"]["actions"][0]
         assert compact["success"] is True
         assert compact["claim_id"] == "C1"
+
+    @pytest.mark.asyncio
+    async def test_compact_preserves_all_search_results_up_to_ten(self, engine):
+        """search_food_near_user returns up to max_results=10 listings.
+
+        The compact cap MUST keep all of them (or at least 10) so that on the
+        next turn the model can still resolve "claim #7" to a real listing_id.
+        The previous cap of 5 silently dropped listings 6-10 from memory, so
+        after a page refresh the model only saw the first half of the page
+        and either claimed the wrong item or hallucinated an id.
+        """
+        captured = {}
+
+        async def capture_store(user_id, role, message, metadata=None):
+            if role == "assistant":
+                captured["metadata"] = metadata or {}
+            return "row"
+
+        ten_listings = [
+            {"id": f"L{i}", "title": f"Item {i}", "quantity": 1, "unit": "ea"}
+            for i in range(1, 11)
+        ]
+        actions = [{
+            "tool": "search_food_near_user",
+            "ok": True,
+            "summary": "Found 10 nearby",
+            "result": {"success": True, "listings": ten_listings},
+        }]
+
+        with patch.object(engine, "store_message", new_callable=AsyncMock, side_effect=capture_store):
+            await engine._persist_conversation(
+                TEST_USER_ID, "find food", "here you go", "en",
+                actions=actions, silent=False,
+            )
+
+        compact = captured["metadata"]["actions"][0]
+        compact_ids = [item["id"] for item in compact["listings"]]
+        # All 10 IDs MUST survive — not just the first 5.
+        assert compact_ids == [f"L{i}" for i in range(1, 11)], (
+            f"compact storage dropped listings: got {compact_ids}"
+        )
 
 
 # ---------------------------------------------------------------------------

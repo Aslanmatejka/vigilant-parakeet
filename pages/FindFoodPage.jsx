@@ -58,7 +58,6 @@ function FindFoodPage({ initialCategory }) {
     const [communityNames, setCommunityNames] = useState({});
     const [filters, setFilters] = useState({
         category: initialCategory || '',
-        type: 'all',
         radius: '10',
         sortBy: 'newest',
         community: ''
@@ -210,9 +209,9 @@ function FindFoodPage({ initialCategory }) {
             );
         }
 
-        if (filters.type !== 'all') {
-            result = result.filter(food => food.listing_type === filters.type);
-        }
+        // Only show donations (food offers users can claim).
+        // Requests have been removed from the platform.
+        result = result.filter(food => food.listing_type === 'donation');
 
         // Location-based filtering — ONLY apply when the user explicitly
         // granted GPS permission. Profile-coordinate fallback must NOT silently
@@ -439,7 +438,6 @@ function FindFoodPage({ initialCategory }) {
                                                 setIsSearchActive(false);
                                                 setFilters({
                                                     category: '',
-                                                    type: 'all',
                                                     radius: '10',
                                                     sortBy: 'newest',
                                                     community: ''
