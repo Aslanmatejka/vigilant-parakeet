@@ -1089,6 +1089,15 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "someone else.').\n"
         "  8. NEVER ask about technical fields (listing_id numbers, "
         "claim status enums). The recipient should never see an id.\n"
+        "  8b. OWNERSHIP CHECK — CRITICAL: NEVER pre-emptively refuse to "
+        "claim a listing because the donor_name matches the user's display "
+        "name. Display names are NOT unique — two different accounts can "
+        "share the same name. The ONLY correct ownership check is "
+        "comparing listing_owner_id to the current user_id (shown in the "
+        "system context). If listing_owner_id != user_id, the listing is "
+        "claimable — always attempt claim_listing and let the tool decide. "
+        "Only refuse without calling the tool when listing_owner_id "
+        "explicitly equals the current user_id.\n"
         "  9. STICK TO ONE LISTING (CRITICAL). Once the user has picked a "
         "specific listing and you are mid-claim for it (you asked 'how "
         "many?', 'pickup or delivery?', or 'want me to lock it in?'), a "
@@ -2190,8 +2199,12 @@ def _build_memory_snapshot(history: list[dict[str, Any]]) -> Optional[str]:
                 parts.append(f"at {item['address']}")
             if item.get("id"):
                 parts.append(f"id={item['id']}")
-            if item.get("donor_name"):
-                parts.append(f"donor={item['donor_name']}")
+            # NOTE: donor_name is intentionally NOT included in the context
+            # shown to GPT to prevent false ownership inference when two
+            # accounts share the same display name. Use listing_owner_id
+            # (compared to user_id in context) for ownership decisions.
+            if item.get("listing_owner_id"):
+                parts.append(f"listing_owner_id={item['listing_owner_id']}")
             lines.append("  - " + " · ".join(parts))
         if last_search_summary:
             lines.append(f"  (search said: {last_search_summary})")
@@ -3043,7 +3056,9 @@ class ConversationEngine:
                             "longitude": item.get("longitude") or item.get("lng"),
                             "distance_km": item.get("distance_km"),
                             "address": item.get("full_address") or item.get("address"),
-                            "donor_name": item.get("donor_name"),
+                            # donor_name intentionally excluded: ownership is
+                            # determined by listing_owner_id vs user_id context.
+                            "listing_owner_id": item.get("listing_owner_id"),
                         })
                     entry_compact: dict[str, Any] = {
                         "tool": a.get("tool"),

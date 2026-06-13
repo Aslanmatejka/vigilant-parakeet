@@ -176,8 +176,12 @@ TOOL_DEFINITIONS = [
                     "food_type": {
                         "type": "string",
                         "description": (
-                            "Optional food category filter: "
-                            "proteins, grains, vegetables, fruits, dairy, prepared, bakery, other"
+                            "Optional food category filter using DB enum values: "
+                            "produce (vegetables, fruits, carrots, apples, etc.), "
+                            "dairy (milk, cheese, eggs, etc.), "
+                            "bakery (bread, pastries, etc.), "
+                            "pantry (canned goods, grains, dry goods, etc.). "
+                            "Pass the DB enum value exactly: produce, dairy, bakery, or pantry."
                         ),
                     },
                     "max_results": {
@@ -1304,7 +1308,7 @@ async def _get_recent_listings(
             "address": row.get("full_address") or _extract_location_text(row.get("location")),
             "pickup_by": row.get("pickup_by"),
             "expiry_date": row.get("expiry_date"),
-            "donor_name": row.get("donor_name"),
+            # donor_name excluded — see search_food_near_user for rationale.
             "created_at": created_at,
             "hours_ago": hours_ago,
             "community_name": (
@@ -1463,6 +1467,21 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 # Tool implementations
 # ---------------------------------------------------------------------------
 
+# Map common synonyms / GPT guesses → actual DB enum values for category.
+_FOOD_TYPE_SYNONYMS: dict[str, str] = {
+    "vegetable": "produce", "vegetables": "produce",
+    "fruit": "produce", "fruits": "produce",
+    "produce": "produce",
+    "protein": "pantry", "proteins": "pantry",
+    "grain": "pantry", "grains": "pantry",
+    "canned": "pantry", "pantry": "pantry", "dry": "pantry", "dry goods": "pantry",
+    "bread": "bakery", "bakery": "bakery", "pastry": "bakery", "pastries": "bakery",
+    "dairy": "dairy", "milk": "dairy", "cheese": "dairy", "eggs": "dairy",
+    "prepared": "pantry",
+    "other": None,
+}
+
+
 async def _search_food_near_user(
     user_id: str,
     radius_km: float = 10,
@@ -1477,6 +1496,11 @@ async def _search_food_near_user(
     4. Format natural-language-friendly results
     """
     from backend.ai_engine import supabase_get
+
+    # Normalize GPT-supplied food_type synonyms to actual DB enum values.
+    if food_type:
+        normalized = _FOOD_TYPE_SYNONYMS.get(food_type.strip().lower())
+        food_type = normalized  # May become None for "other" / unmapped values
 
     logger.info(
         "search_food_near_user: user=%s radius=%skm type=%s",
@@ -1525,7 +1549,7 @@ async def _search_food_near_user(
     params: dict = {
         "select": (
             "id,title,description,category,quantity,unit,"
-            "latitude,longitude,full_address,location,donor_name,"
+            "latitude,longitude,full_address,location,donor_name,user_id,"
             "community_id,communities(id,name),"
             "expiry_date,pickup_by,status,"
             "dietary_tags,allergens,created_at"
@@ -1569,6 +1593,11 @@ async def _search_food_near_user(
     for listing in listings:
         if not _listing_is_fresh_enough(listing, now=now):
             continue
+        # Exclude the current user's own listings from search results.
+        # The claim tool enforces this at DB level, but filtering here prevents
+        # GPT from seeing and mis-handling listings with a matching donor_name.
+        if str(listing.get("user_id") or "") == str(user_id):
+            continue
         lat = listing.get("latitude")
         lng = listing.get("longitude")
 
@@ -1592,7 +1621,10 @@ async def _search_food_near_user(
             "quantity": listing.get("quantity"),
             "unit": listing.get("unit"),
             "address": listing.get("full_address") or _extract_location_text(listing.get("location")),
-            "donor_name": listing.get("donor_name"),
+            # donor_name intentionally excluded: GPT must NOT use display names
+            # to infer ownership — two accounts can share the same name. Use
+            # listing_owner_id vs the current user_id context for that check.
+            "listing_owner_id": listing.get("user_id"),
             "expiry_date": listing.get("expiry_date"),
             "pickup_by": listing.get("pickup_by"),
             "dietary_tags": listing.get("dietary_tags", []),
