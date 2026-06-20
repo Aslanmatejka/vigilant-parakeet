@@ -14,11 +14,17 @@ const SUPPORT_DROPDOWN = {
         { label: 'Volunteer', path: 'https://allgoodlivingfoundation.org/volunteer-form', external: true }
     ]
 };
-const COMMON_TAIL = [
+// Visitor nav keeps the marketing pages prominent.
+const VISITOR_TAIL = [
     SUPPORT_DROPDOWN,
     { label: 'Impact Story', path: '/impact-story' },
     { label: 'Recipes', path: '/recipes' },
-    { label: 'Sponsors', path: '/sponsors' },
+    { label: 'Partners', path: '/sponsors' },
+    { label: 'Contact', path: '/contact' }
+];
+// Authenticated roles get a slimmer tail — marketing pages live in the footer.
+const AUTH_TAIL = [
+    SUPPORT_DROPDOWN,
     { label: 'Contact', path: '/contact' }
 ];
 
@@ -32,14 +38,14 @@ function Header({ menuItems: menuItemsProp }) {
     const menuItems = React.useMemo(() => {
         if (menuItemsProp) return menuItemsProp;
         if (!isAuthenticated) {
-            return [{ label: 'Find Food', path: '/find' }, ...COMMON_TAIL];
+            return [{ label: 'Find Food', path: '/find' }, ...VISITOR_TAIL];
         }
         if (isDonor) {
             return [
                 { label: 'Share Food', path: '/share' },
                 { label: 'My Listings', path: '/listings' },
                 { label: 'Donation Schedules', path: '/donations' },
-                ...COMMON_TAIL,
+                ...AUTH_TAIL,
             ];
         }
         if (isRecipient) {
@@ -47,18 +53,17 @@ function Header({ menuItems: menuItemsProp }) {
                 { label: 'Find Food', path: '/find' },
                 { label: 'Near Me', path: '/near-me' },
                 { label: 'My Receipts', path: '/receipts' },
-                ...COMMON_TAIL,
+                ...AUTH_TAIL,
             ];
         }
         if (isVolunteer) {
             return [
-                { label: 'Find Food', path: '/find' },
                 { label: 'Pickup Routes', path: '/donations' },
                 { label: 'Near Me', path: '/near-me' },
-                ...COMMON_TAIL,
+                ...AUTH_TAIL,
             ];
         }
-        return [{ label: 'Find Food', path: '/find' }, ...COMMON_TAIL];
+        return [{ label: 'Find Food', path: '/find' }, ...AUTH_TAIL];
     }, [menuItemsProp, isAuthenticated, isDonor, isRecipient, isVolunteer]);
 
     const navigate = useNavigate();

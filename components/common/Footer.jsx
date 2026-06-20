@@ -109,6 +109,33 @@ function Footer({
                                         <span>FAQs</span>
                                     </a>
                                 </li>
+                                <li>
+                                    <a
+                                        href="/impact-story"
+                                        className="text-gray-700 hover:text-gray-900 transition-colors duration-200 flex items-center group"
+                                    >
+                                        <i className="fas fa-seedling text-gray-600 group-hover:text-gray-900 mr-3" aria-hidden="true"></i>
+                                        <span>Impact Story</span>
+                                    </a>
+                                </li>
+                                <li>
+                                    <a
+                                        href="/recipes"
+                                        className="text-gray-700 hover:text-gray-900 transition-colors duration-200 flex items-center group"
+                                    >
+                                        <i className="fas fa-utensils text-gray-600 group-hover:text-gray-900 mr-3" aria-hidden="true"></i>
+                                        <span>Recipes</span>
+                                    </a>
+                                </li>
+                                <li>
+                                    <a
+                                        href="/sponsors"
+                                        className="text-gray-700 hover:text-gray-900 transition-colors duration-200 flex items-center group"
+                                    >
+                                        <i className="fas fa-handshake text-gray-600 group-hover:text-gray-900 mr-3" aria-hidden="true"></i>
+                                        <span>Partners</span>
+                                    </a>
+                                </li>
                             </ul>
                         </nav>
                     </div>

@@ -227,11 +227,10 @@ function StatCard({ icon, iconColor, iconBg, value, label, equivalent }) {
   );
 }
 
-function SponsorCard({ sponsor, totalSaved, isFeatured = false }) {
+function SponsorCard({ sponsor, isFeatured = false }) {
   const foodSavedValue = Math.round(sponsor.food_saved_from_waste_lb || 0);
   const foodDonatedValue = Math.round(sponsor.food_donated_lb || 0);
   const hasMetrics = foodSavedValue > 0 || foodDonatedValue > 0;
-  const sharePct = totalSaved > 0 ? Math.min(100, (foodSavedValue / totalSaved) * 100) : 0;
   const category = inferCategory(sponsor);
   const tokens = CATEGORY_TOKENS[category] || CATEGORY_TOKENS.Partner;
   const initials = (sponsor.name || "?")
@@ -309,29 +308,6 @@ function SponsorCard({ sponsor, totalSaved, isFeatured = false }) {
                 </p>
               </div>
             </div>
-
-            {/* Share-of-impact bar — visually compares this sponsor to the rest */}
-            {sharePct > 0 && (
-              <div className="mb-4">
-                <div className="flex items-center justify-between text-[10px] text-gray-500 mb-1">
-                  <span className="uppercase tracking-wide font-medium">Share of impact</span>
-                  <span className="tabular-nums font-semibold text-gray-700">{sharePct.toFixed(1)}%</span>
-                </div>
-                <div
-                  className="h-1.5 w-full rounded-full bg-gray-100 overflow-hidden"
-                  role="progressbar"
-                  aria-valuenow={Math.round(sharePct)}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-label={`${sponsor.name} contributes ${sharePct.toFixed(1)} percent of total saved food`}
-                >
-                  <div
-                    className="h-full bg-gradient-to-r from-emerald-400 to-[#2CABE3] rounded-full transition-all duration-700"
-                    style={{ width: `${sharePct}%` }}
-                  />
-                </div>
-              </div>
-            )}
           </>
         ) : (
           <div className="mb-4 px-3 py-2.5 rounded-lg bg-amber-50 ring-1 ring-amber-100 flex items-center gap-2 text-[11px] text-amber-800">
@@ -684,7 +660,6 @@ function SponsorsPage() {
                 <SponsorCard
                   key={sponsor.id || sponsor.name}
                   sponsor={sponsor}
-                  totalSaved={totals.saved}
                   isFeatured={topIds.has(sponsor.id || sponsor.name)}
                 />
               ))}
