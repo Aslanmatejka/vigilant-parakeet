@@ -67,8 +67,11 @@ class TestNormalizeClaimQuantity:
     string (including "all" / "everything") as 1, so users asking to claim
     every available loaf silently got a single-loaf claim."""
 
-    def test_none_defaults_to_one(self):
-        assert _normalize_claim_quantity(None, 10) == (1, False)
+    def test_none_defaults_to_full_quantity(self):
+        # Mutual-aid default: when the AI omits quantity (e.g. user said
+        # "yes please" without a number), claim the whole listing instead
+        # of silently grabbing 1 unit out of N.
+        assert _normalize_claim_quantity(None, 10) == (10, False)
 
     def test_native_int_within_range(self):
         assert _normalize_claim_quantity(3, 10) == (3, False)

@@ -2952,6 +2952,7 @@ class BulkListingItem(BaseModel):
     description: Optional[str] = Field(default=None, max_length=2000)
     expiry_date: Optional[str] = Field(default=None, max_length=40)
     location: Optional[str] = Field(default=None, max_length=200)
+    community_id: Optional[str] = Field(default=None, max_length=64)
     dietary_tags: Optional[List[str]] = None
     allergens: Optional[List[str]] = None
     image_url: Optional[str] = Field(default=None, max_length=2000)
@@ -3009,6 +3010,12 @@ def _normalize_listing_row(
         # Only store http/https URLs — reject javascript:, data:, file:, etc.
         if _url.startswith(("http://", "https://")):
             row["image_url"] = _url[:2000]
+    if item.community_id:
+        # Trust the explicit override (e.g. from the photo preview UI) over
+        # the donor's saved community_id default.
+        cid = str(item.community_id).strip()
+        if cid:
+            row["community_id"] = cid[:64]
     return apply_donor_defaults_to_listing(row, donor)
 
 
@@ -3390,6 +3397,31 @@ async def ai_vision_listing(
         "dietary_tags": _str_list(parsed.get("dietary_tags")),
         "allergens": _str_list(parsed.get("allergens")),
     }
+
+    # Pre-fill address / community / expiry so the photo flow lands a
+    # complete listing instead of one missing pickup + freshness fields.
+    # The Vision call itself only inspects the photo; these defaults come
+    # from the donor's profile + a category-based expiry heuristic so the
+    # user just confirms instead of typing them all in.
+    try:
+        donor = await fetch_donor_listing_defaults(user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("vision-listing: donor lookup failed for %s: %s", user_id, exc)
+        donor = {}
+    if donor:
+        donor_addr = str(donor.get("address") or "").strip()
+        if donor_addr:
+            draft["location"] = donor_addr[:200]
+        if donor.get("community_id"):
+            draft["community_id"] = str(donor["community_id"])
+
+    # Suggest a sensible expiry the user can override before confirming.
+    try:
+        from backend.tools import _suggested_expiry_for_category
+        draft["expiry_date"] = _suggested_expiry_for_category(category)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("vision-listing: expiry suggestion failed: %s", exc)
+
     return {
         "draft": draft,
         "confidence": confidence_val,

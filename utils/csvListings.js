@@ -269,6 +269,13 @@ export function visionDraftToRow(draft) {
     dietary_tags: Array.isArray(draft.dietary_tags) ? draft.dietary_tags : undefined,
     allergens: Array.isArray(draft.allergens) ? draft.allergens : undefined,
     image_url: draft.image_url ? String(draft.image_url).slice(0, 2000) : undefined,
+    // Photo flow defaults — pickup address (from profile), suggested expiry
+    // (category-based, user can override in preview), community membership.
+    // Without these the listing publishes with no map pin, no freshness
+    // hint, and no community attribution.
+    location: draft.location ? String(draft.location).slice(0, 200) : undefined,
+    expiry_date: draft.expiry_date ? String(draft.expiry_date).slice(0, 40) : undefined,
+    community_id: draft.community_id ? String(draft.community_id).slice(0, 64) : undefined,
   }
 }
 

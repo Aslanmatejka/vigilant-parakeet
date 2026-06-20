@@ -1,0 +1,87 @@
+[
+  {
+    "label": "01-hello",
+    "user": "hi there sweetie",
+    "nouri": "Hi there! How can I help you today? Are you looking to share some food, find available food nearby, or manage your listings?",
+    "tools": [],
+    "elapsed_s": 6.61
+  },
+  {
+    "label": "02-need-food",
+    "user": "my grandson is hungry and we got nothing in the fridge. can you help me find some food",
+    "nouri": "Here's what's available near you right now:\n\n1. Eggs \u2014 6 eggs, pickup at 1423 Park St, Alameda, CA\n2. Watermelon \u2014 1 piece, pickup at 1423 Park St, Alameda, CA\n3. Bag of apples \u2014 12 apples, pickup at 2100 Central Ave, Alameda, CA\n4. Whole wheat bread loaves \u2014 4 loaves, pickup at 1800 Park St, Alameda, CA\n5. Fresh sandwiches \u2014 8 sandwiches, pickup at 1500 Webster St, Alameda, CA\n\nWhich one would you like to claim for your grandson? Reply with the number or the name.",
+    "tools": [
+      {
+        "tool": "search_food_near_user",
+        "ok": true
+      }
+    ],
+    "elapsed_s": 8.66
+  },
+  {
+    "label": "03-clarify",
+    "user": "i'm in alameda. don't have a car so close by please",
+    "nouri": "No problem! Here are the closest options within walking distance in Alameda:\n\n1. Eggs \u2014 6 eggs, pickup at 1423 Park St (right at your address)\n2. Watermelon \u2014 1 piece, pickup at 1423 Park St (same location)\n3. Bag of apples \u2014 12 apples, pickup at 2100 Central Ave (about 2 blocks away)\n\nWhich one would you like to claim? Just reply with the number or the name.",
+    "tools": [],
+    "elapsed_s": 6.02
+  },
+  {
+    "label": "04-pick-first",
+    "user": "the first one sounds good for him, he loves a turkey sandwich",
+    "nouri": "Great choice! Just to clarify, the first one on the list is Eggs, but the turkey sandwiches are item #5. Did you want to claim the Eggs (right at your address) or the Fresh sandwiches (about 0.9 km away at 1500 Webster St)? Let me know which one you\u2019d like for your grandson.",
+    "tools": [],
+    "elapsed_s": 6.02
+  },
+  {
+    "label": "05-confirm",
+    "user": "yes please go ahead",
+    "nouri": "Done! I claimed the 8 Fresh sandwiches for you. You can pick them up at 1500 Webster St, Alameda, CA 94501. Just let me know once you've got them!",
+    "tools": [
+      {
+        "tool": "claim_listing",
+        "ok": true
+      }
+    ],
+    "elapsed_s": 9.68
+  },
+  {
+    "label": "06-followup",
+    "user": "how do i pick it up? i'm not good with this phone stuff",
+    "nouri": "No problem at all! Here\u2019s what to do:\n\n- Go to 1500 Webster St, Alameda, CA 94501.\n- Let the person there know you claimed the \u201cFresh sandwiches\u201d on DoGoods for your grandson.\n- They\u2019ll have your name and will give you the food.\n\nIf you want, I can give you step-by-step walking directions or help set a reminder so you don\u2019t forget. Would you like directions?",
+    "tools": [],
+    "elapsed_s": 6.01
+  },
+  {
+    "label": "07-share",
+    "user": "actually wait, i got some extra soup at home, can someone come get it?",
+    "nouri": "Absolutely! I can help you share your extra soup. \n\nLet\u2019s get a few quick details:\n- How much soup do you have to give away? (For example: \u201c2 quarts,\u201d \u201c1 big pot,\u201d or \u201c4 servings\u201d)",
+    "tools": [],
+    "elapsed_s": 5.78
+  },
+  {
+    "label": "08-pivot",
+    "user": "nevermind the soup, can i get those apples too for my grandson's lunch tomorrow",
+    "nouri": "Nice choice \u2014 the Bag of apples at 2100 Central Ave is available. There are 12 apples listed. How many would you like to claim for your grandson?",
+    "tools": [],
+    "elapsed_s": 5.66
+  },
+  {
+    "label": "09-cancel",
+    "user": "actually i changed my mind on the sandwich, my daughter is bringing dinner",
+    "nouri": "No problem, I released your claim on the Fresh sandwiches. They\u2019re back up for others to claim. If you want to claim something else or need any other help, just let me know!",
+    "tools": [
+      {
+        "tool": "cancel_claim",
+        "ok": true
+      }
+    ],
+    "elapsed_s": 9.25
+  },
+  {
+    "label": "10-thanks",
+    "user": "ok thank you dear, you've been very kind",
+    "nouri": "You\u2019re very welcome! If you ever need help finding food, sharing extra, or just have questions, I\u2019m here for you. Take care \u2014 and I hope your grandson enjoys his lunch!",
+    "tools": [],
+    "elapsed_s": 5.6
+  }
+]

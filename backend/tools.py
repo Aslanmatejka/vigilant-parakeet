@@ -3357,7 +3357,11 @@ def _normalize_claim_quantity(
     if available_qty < 1:
         return (1, False)
     if raw_quantity is None:
-        return (1, False)
+        # Mutual-aid default: take the whole listing. Donors post surplus they
+        # want gone, and claimers (a hungry family, a shelter) typically want
+        # all of it. Defaulting to 1 produced the "claimed 1 egg of 6" bug
+        # when the AI omitted quantity for vague affirmations like "yes please".
+        return (available_qty, False)
     # Native ints / floats — keep the int part.
     if isinstance(raw_quantity, bool):  # bool is subclass of int — reject first
         return (1, False)

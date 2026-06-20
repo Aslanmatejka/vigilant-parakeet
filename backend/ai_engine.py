@@ -1913,30 +1913,27 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
 
 _ROLE_BEHAVIOR_EN: dict[str, str] = {
     "recipient": (
-        "The user is a RECIPIENT. Proactively suggest food items they can claim — "
+        "The user is flagged as a RECIPIENT. Default to helping them FIND food — "
         "use search_food_near_user and get_user_dashboard. Respect their allergies "
         "and dietary_restrictions. Nudge them to set reminders for pickup windows.\n"
         "\n"
-        "POSTING / DONATING IS NOT ALLOWED FOR RECIPIENT ACCOUNTS. If the recipient "
-        "asks to donate, share, give away, or post food, DO NOT call "
-        "post_food_listing. Politely explain in one short sentence that this account "
-        "is a recipient account and can only claim food, then tell them to sign in "
-        "as a donor (or switch their account role) to share food. Example: 'Heads "
-        "up — this is a recipient account, so it can't donate. Sign in as a donor "
-        "and I'll post it for you.'"
+        "BUT: this is a mutual-aid platform. Recipients CAN also share food when "
+        "they have extra. If the user asks to donate, share, give away, or post "
+        "food, HELP THEM — call post_food_listing normally. Do NOT refuse, do NOT "
+        "tell them to switch accounts."
     ),
     "donor": (
-        "The user is a DONOR. Focus on their posted listings. If any are close to "
-        "expiring, warn them (call get_donor_expiring_listings) and suggest lowering "
-        "price, highlighting, or re-sharing. Celebrate completed donations.\n"
+        "The user is flagged as a DONOR. Default to helping them MANAGE their "
+        "listings — if any are close to expiring, warn them (call "
+        "get_donor_expiring_listings) and suggest re-sharing. Celebrate completed "
+        "donations.\n"
         "\n"
-        "CLAIMING IS NOT ALLOWED FOR DONOR ACCOUNTS. If the donor asks to claim, "
-        "reserve, take, or pick up a listing, DO NOT call claim_listing / "
-        "confirm_claim / cancel_claim. Politely explain in one short sentence that "
-        "this account is a donor account and can only post listings, then tell them "
-        "to sign in as a recipient (or switch their account role) to claim food. "
-        "Example: 'Heads up — this is a donor account, so it can't claim food. "
-        "Sign in as a recipient and I'll grab it for you.'"
+        "BUT: this is a mutual-aid platform. Donors CAN also claim food when they "
+        "need it (e.g. 'my grandson is hungry', 'I'm out of groceries'). If the "
+        "user asks to claim, reserve, take, or pick up a listing, HELP THEM — call "
+        "search_food_near_user / claim_listing normally. Do NOT refuse, do NOT "
+        "tell them to switch accounts, do NOT mention 'donor account' as a "
+        "limitation. Anyone in need can claim, anyone with extra can share."
     ),
     "volunteer": (
         "The user is a VOLUNTEER. Help with pickup logistics — call "
@@ -1961,28 +1958,28 @@ _ROLE_BEHAVIOR_EN: dict[str, str] = {
 
 _ROLE_BEHAVIOR_ES: dict[str, str] = {
     "recipient": (
-        "El usuario es RECIPIENTE. Sugiere alimentos que pueda reclamar (usa "
-        "search_food_near_user y get_user_dashboard). Respeta alergias y "
+        "El usuario está marcado como RECIPIENTE. Por defecto ayúdale a ENCONTRAR "
+        "comida (usa search_food_near_user y get_user_dashboard). Respeta alergias y "
         "restricciones dietéticas. Recuérdale configurar alertas de recogida.\n"
         "\n"
-        "LAS CUENTAS DE RECIPIENTE NO PUEDEN DONAR NI PUBLICAR. Si pide donar, "
-        "compartir o publicar comida, NO llames a post_food_listing. Explícale en "
-        "una oración que esta cuenta es de recipiente y solo puede reclamar; debe "
-        "iniciar sesión como donante para compartir comida. Ejemplo: 'Aviso — esta "
-        "cuenta es de recipiente, no puede donar. Inicia sesión como donante y lo "
-        "publico por ti.'"
+        "PERO: esta es una plataforma de ayuda mutua. Los recipientes también PUEDEN "
+        "compartir comida cuando tienen de más. Si el usuario pide donar, compartir "
+        "o publicar comida, AYÚDALO — llama a post_food_listing normalmente. NO te "
+        "niegues, NO le digas que cambie de cuenta."
     ),
     "donor": (
-        "El usuario es DONANTE. Enfócate en sus publicaciones activas. Si alguna está "
-        "por vencer, avísale (get_donor_expiring_listings) y sugiere acciones. "
-        "Felicítalo por donaciones completadas.\n"
+        "El usuario está marcado como DONANTE. Por defecto ayúdale a GESTIONAR sus "
+        "publicaciones. Si alguna está por vencer, avísale "
+        "(get_donor_expiring_listings) y sugiere acciones. Felicítalo por donaciones "
+        "completadas.\n"
         "\n"
-        "LAS CUENTAS DE DONANTE NO PUEDEN RECLAMAR. Si el donante pide reclamar, "
-        "reservar o recoger un listado, NO llames a claim_listing / confirm_claim / "
-        "cancel_claim. Explícale en una oración que esta cuenta es de donante y "
-        "solo puede publicar; debe iniciar sesión como recipiente para reclamar. "
-        "Ejemplo: 'Aviso — esta cuenta es de donante, no puede reclamar. Inicia "
-        "sesión como recipiente y lo reservo por ti.'"
+        "PERO: esta es una plataforma de ayuda mutua. Los donantes también PUEDEN "
+        "reclamar comida cuando la necesitan (ej. 'mi nieto tiene hambre', 'me "
+        "quedé sin comida'). Si el usuario pide reclamar, reservar o recoger un "
+        "listado, AYÚDALO — llama a search_food_near_user / claim_listing "
+        "normalmente. NO te niegues, NO le digas que cambie de cuenta, NO menciones "
+        "'cuenta de donante' como una limitación. Cualquiera que tenga necesidad "
+        "puede reclamar, cualquiera que tenga de más puede compartir."
     ),
     "volunteer": (
         "El usuario es VOLUNTARIO. Ayúdalo con la logística de recogidas: "
@@ -2120,6 +2117,151 @@ def _scope_safe_query(fn_args: dict[str, Any], auth_user_id: str) -> dict[str, A
 # ---------------------------------------------------------------------------
 
 
+def _extract_latest_listings(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the most recent set of listings the assistant showed the user.
+
+    Walks history newest-first and returns the listings payload from the most
+    recent search/recent-listings/distribution-centers tool result. Used by
+    both _build_memory_snapshot (to render context) and the coreference
+    resolver (to map '#2' / 'the bread' to a concrete listing_id).
+    """
+    if not isinstance(history, list) or not history:
+        return []
+    SEARCH_TOOLS = {
+        "search_food_near_user",
+        "get_recent_listings",
+        "query_distribution_centers",
+    }
+    for msg in reversed(history):
+        if msg.get("role") != "assistant":
+            continue
+        meta = msg.get("metadata") or {}
+        if meta.get("silent_trigger"):
+            continue
+        actions = meta.get("actions") or []
+        if not isinstance(actions, list):
+            continue
+        for a in actions:
+            if isinstance(a, dict) and a.get("tool") in SEARCH_TOOLS and a.get("listings"):
+                listings = a.get("listings") or []
+                if isinstance(listings, list):
+                    return listings
+    return []
+
+
+_ORDINAL_TO_INDEX: dict[str, int] = {
+    "first": 1, "1st": 1, "one": 1,
+    "second": 2, "2nd": 2, "two": 2,
+    "third": 3, "3rd": 3, "three": 3,
+    "fourth": 4, "4th": 4, "four": 4,
+    "fifth": 5, "5th": 5, "five": 5,
+    "sixth": 6, "6th": 6, "six": 6,
+    "seventh": 7, "7th": 7, "seven": 7,
+    "eighth": 8, "8th": 8, "eight": 8,
+    "ninth": 9, "9th": 9, "nine": 9,
+    "tenth": 10, "10th": 10, "ten": 10,
+    # Spanish
+    "primero": 1, "primer": 1, "primera": 1, "uno": 1,
+    "segundo": 2, "segunda": 2, "dos": 2,
+    "tercero": 3, "tercer": 3, "tercera": 3, "tres": 3,
+    "cuarto": 4, "cuarta": 4, "cuatro": 4,
+    "quinto": 5, "quinta": 5, "cinco": 5,
+}
+
+
+def _resolve_listing_reference(
+    message: str,
+    history: list[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Deterministically resolve user references to a listing from the last search.
+
+    Handles:
+    - '#3', 'number 3', 'option 3', 'item 3', '3' (bare digit, short message)
+    - 'the first', 'second one', 'third option' (ordinal words)
+    - 'the bread', 'I'll take the apples' (title substring match)
+
+    Returns the matching listing dict (with id, title, ...) or None when:
+    - there are no recent listings to resolve against
+    - the reference is ambiguous (matches multiple titles)
+    - no pattern matches
+
+    The model still does the final tool call; this just injects a strong
+    reference-resolved hint so the model uses the right listing_id.
+    """
+    if not message:
+        return None
+    listings = _extract_latest_listings(history)
+    if not listings:
+        return None
+
+    lower = message.lower().strip()
+    if not lower:
+        return None
+
+    # 1) Numeric / ordinal references
+    idx: Optional[int] = None
+
+    # "#3", "number 3", "option 3", "item 3", "claim 3", "take 3", "pick 3"
+    m = re.search(
+        r"(?:^|\s)(?:#|number|option|item|pick|claim|take|grab|reserve|want|"
+        r"opci[oó]n|n[uú]mero|item|reclamar|tomar)\s*#?\s*(\d{1,2})\b",
+        lower,
+    )
+    if m:
+        try:
+            idx = int(m.group(1))
+        except ValueError:
+            idx = None
+
+    # Bare digit only when the whole message is short and digit-led:
+    # '2', '#2', 'the 2', '2 please' — avoid matching '2 cups of rice'
+    if idx is None:
+        bare = re.fullmatch(r"#?\s*(\d{1,2})\s*(please|por favor)?", lower)
+        if bare:
+            try:
+                idx = int(bare.group(1))
+            except ValueError:
+                idx = None
+
+    # Ordinal words: 'the first', 'second one', 'third option'
+    if idx is None:
+        words = re.findall(r"[a-záéíóúñ]+", lower)
+        for w in words:
+            if w in _ORDINAL_TO_INDEX:
+                idx = _ORDINAL_TO_INDEX[w]
+                break
+
+    if idx is not None and 1 <= idx <= len(listings):
+        return listings[idx - 1]
+
+    # 2) Title substring match — "the bread", "I'll take the apples"
+    # Only fire when the message is short-ish to avoid false positives
+    # like "I'm thinking of making apple pie" matching an Apples listing.
+    if len(lower) > 80:
+        return None
+
+    title_matches: list[dict[str, Any]] = []
+    for item in listings:
+        title = str(item.get("title") or "").lower().strip()
+        if not title:
+            continue
+        # Split title into significant tokens (drop common stopwords)
+        tokens = [t for t in re.findall(r"[a-záéíóúñ]+", title) if len(t) >= 3]
+        if not tokens:
+            continue
+        # Match if ANY significant title token appears as a whole word in
+        # the user message. e.g. "the bread" matches "Sourdough Bread Loaf".
+        for tok in tokens:
+            if re.search(rf"\b{re.escape(tok)}\b", lower):
+                title_matches.append(item)
+                break
+
+    # Only return a single, unambiguous title match
+    if len(title_matches) == 1:
+        return title_matches[0]
+    return None
+
+
 def _build_memory_snapshot(history: list[dict[str, Any]]) -> Optional[str]:
     """Distill recent tool calls into a compact context block.
 
@@ -2133,7 +2275,7 @@ def _build_memory_snapshot(history: list[dict[str, Any]]) -> Optional[str]:
     if not isinstance(history, list) or not history:
         return None
 
-    latest_listings: list[dict[str, Any]] = []
+    latest_listings: list[dict[str, Any]] = _extract_latest_listings(history)
     recent_claims: list[dict[str, Any]] = []
     recent_posts: list[dict[str, Any]] = []
     recent_cancels: list[dict[str, Any]] = []
@@ -2171,8 +2313,7 @@ def _build_memory_snapshot(history: list[dict[str, Any]]) -> Optional[str]:
             if not isinstance(a, dict):
                 continue
             tool = a.get("tool")
-            if tool in SEARCH_TOOLS and a.get("listings") and not latest_listings:
-                latest_listings = a.get("listings") or []
+            if tool in SEARCH_TOOLS and a.get("listings") and not last_search_summary:
                 last_search_summary = a.get("summary")
             elif tool in CLAIM_TOOLS and a.get("ok"):
                 cid = a.get("claim_id")
@@ -2365,6 +2506,72 @@ def _apply_sliding_window(
         used += length
     kept.reverse()
     return kept
+
+
+def _summarize_dropped_history(
+    history: list[dict[str, Any]],
+    kept: list[dict[str, Any]],
+) -> Optional[str]:
+    """Produce a one-block recap of the conversation turns the sliding
+    window dropped, so the model retains overall shape (topics, actions)
+    without re-reading verbatim text.
+
+    Deterministic (no LLM call) so it's cheap, predictable, and safe to
+    run every turn.
+    """
+    if not history or not kept:
+        return None
+    kept_count = len(kept)
+    total = len(history)
+    if kept_count >= total:
+        return None
+    dropped = history[: total - kept_count]
+    if not dropped:
+        return None
+
+    # Tally tool actions in dropped turns
+    action_counts: dict[str, int] = {}
+    user_topics: list[str] = []
+    for msg in dropped:
+        role = str(msg.get("role") or "")
+        if role == "assistant":
+            for a in (msg.get("metadata") or {}).get("actions") or []:
+                if isinstance(a, dict):
+                    tool = str(a.get("tool") or "")
+                    if tool:
+                        action_counts[tool] = action_counts.get(tool, 0) + 1
+        elif role == "user":
+            text = str(msg.get("message") or "").strip()
+            if 0 < len(text) <= 80:
+                user_topics.append(text)
+
+    lines = [
+        f"EARLIER CONVERSATION SUMMARY: {len(dropped)} older turn(s) were "
+        f"trimmed from history to keep context focused. The recent "
+        f"{kept_count} turn(s) below are verbatim."
+    ]
+    if action_counts:
+        action_summary = ", ".join(
+            f"{k}×{v}" for k, v in sorted(action_counts.items(), key=lambda kv: -kv[1])[:6]
+        )
+        lines.append(f"Actions taken earlier: {action_summary}")
+    if user_topics:
+        # Show first + last short user message so model knows where the
+        # conversation started and where it was heading just before the
+        # window.
+        first = user_topics[0]
+        last = user_topics[-1] if len(user_topics) > 1 else None
+        if last and last != first:
+            lines.append(f"User first asked: \"{first}\"")
+            lines.append(f"User most recently asked (before trim): \"{last}\"")
+        else:
+            lines.append(f"User asked: \"{first}\"")
+    lines.append(
+        "Use this only for high-level orientation. For specific facts "
+        "(listing ids, claim ids, address) rely on RECENT CONTEXT and the "
+        "verbatim turns below — not this summary."
+    )
+    return "\n".join(lines)
 
 
 _INTAKE_ASSISTANT_CUES = (
@@ -3073,7 +3280,15 @@ class ConversationEngine:
             # Build a rich, conversational context block so the model has
             # the same situational awareness a human assistant would. Skip
             # null/blank fields so we don't pollute the prompt.
-            facts = [f"Current user: {profile.get('name') or 'Community Member'} (ID: {user_id})"]
+            facts = [
+                "## KNOWN USER FACTS (DO NOT RE-ASK)",
+                "These fields are already on file. Treat them as the default "
+                "for any tool call or intake question. Only ask for a value "
+                "when (a) it's not in this block, or (b) the user explicitly "
+                "said 'use a different one this time'. Never echo a question "
+                "the user has already answered earlier in the conversation.",
+                f"Current user: {profile.get('name') or 'Community Member'} (ID: {user_id})",
+            ]
             role = profile.get("role") or "member"
             facts.append(f"role: {role}")
             community_role = profile.get("community_role")
@@ -3144,6 +3359,20 @@ class ConversationEngine:
                 "— NEVER ask the user for their id or any other field listed above. "
                 "You already know it."
             )
+            facts.append(
+                "## SLOT-FILLING POLICY (CRITICAL)"
+            )
+            facts.append(
+                "When the user starts an intake flow (post a listing, post a "
+                "request, claim with delivery, schedule pickup), DO NOT ask "
+                "for fields that appear in KNOWN USER FACTS above. Pre-fill "
+                "them silently and ONLY ask for genuinely missing fields "
+                "(e.g. item title, quantity, expiry). For 'use my address' "
+                "type fields, you may briefly confirm ('Using your saved "
+                "address — sound good?') but do not re-ask the address "
+                "itself. If the user volunteers a new value mid-flow, "
+                "use the new value and continue without re-asking."
+            )
             context = "\n".join(facts)
         else:
             context = (
@@ -3181,6 +3410,19 @@ class ConversationEngine:
                 "number is the ANSWER to that question (the quantity / a "
                 "yes-style confirmation) — NOT a new selection. Stay on the "
                 "same listing; never silently switch items mid-claim.\n"
+                "• Bare affirmations ('yes', 'sure', 'ok', 'go ahead', "
+                "'please', 'do it') while you are waiting for a quantity: "
+                "treat as 'use the full available quantity' and proceed to "
+                "claim. Confirm in ONE short sentence ('Claiming all 6 eggs "
+                "for you now.') and call the tool — do NOT loop asking the "
+                "same question. Most people in need (a hungry grandparent, "
+                "a parent for the school lunchbox) want the whole listing.\n"
+                "• Ambiguous reference ('first one' + a food name that does "
+                "NOT match item #1, or '#3' + a name that does not match): "
+                "do NOT silently pick one. Quote both candidates briefly and "
+                "ask which they meant ('Did you mean the eggs (item 1) or "
+                "the turkey sandwiches (item 5)?'). Only auto-resolve when "
+                "the ordinal and the name agree, or only one is given.\n"
                 "• If a tool returned an error, acknowledge what went "
                 "wrong and ask only for the MISSING piece, not the full "
                 "form again.\n"
@@ -3214,6 +3456,14 @@ class ConversationEngine:
                 "(4) When the user says things like 'I'll take it', 'reserve that', 'grab #42', "
                 "call claim_listing. Then tell them where to pick up and to let you know once "
                 "they've got it so you can confirm the pickup. "
+                "(4a) CLAIMS ARE REVERSIBLE — DO NOT DOUBLE-CONFIRM. claim_listing is in the "
+                "REVERSIBLE bucket (the user can release it any time with cancel_claim). As soon "
+                "as the user expresses claim intent, even with vague phrasing ('yes please', 'go "
+                "ahead', 'sounds good', 'sure', 'do it', 'ok', 'please', 'that one'), CALL "
+                "claim_listing IMMEDIATELY. Do not ask 'should I claim it now?' or 'just to "
+                "confirm…' — that loop is exactly what frustrates older / non-technical users. "
+                "Only stop to ask when the listing is genuinely ambiguous (two items both match) "
+                "or quantity is unclear AND there is no sensible default. "
                 "(5) If a tool returns an error, explain it plainly and suggest the next step. "
                 "(6) ALWAYS CONFIRM COMPLETION: after a tool returns success, lead your reply "
                 "with an explicit completion phrase ('Done!', 'Posted!', 'Sent!', 'Updated.', "
@@ -3309,6 +3559,14 @@ class ConversationEngine:
         # system prompt, profile facts, and memory snapshot are re-injected
         # separately below and are never trimmed.
         windowed_history = _apply_sliding_window(history)
+
+        # When history was trimmed, inject a deterministic summary of the
+        # dropped turns so the model retains overall shape (topics, actions)
+        # without re-reading verbatim text.
+        dropped_summary = _summarize_dropped_history(history, windowed_history)
+        if dropped_summary:
+            messages.append({"role": "system", "content": dropped_summary})
+
         for msg in windowed_history:
             role = msg.get("role", "user")
             content = msg.get("message", "")
@@ -3397,6 +3655,29 @@ class ConversationEngine:
         pivot_hint = _detect_conversational_pivot_hint(message, history)
         if pivot_hint:
             messages.append({"role": "system", "content": pivot_hint})
+
+        # Deterministically resolve coreferences like '#3', 'the bread',
+        # 'the first one' to a concrete listing from the most recent
+        # search. Injecting the resolved id removes a major source of
+        # "Nouri claimed the wrong thing" errors.
+        resolved_ref = _resolve_listing_reference(message, history)
+        if resolved_ref:
+            ref_title = resolved_ref.get("title") or "(item)"
+            ref_id = resolved_ref.get("id") or "?"
+            ref_owner = resolved_ref.get("listing_owner_id") or "?"
+            messages.append({
+                "role": "system",
+                "content": (
+                    f"REFERENCE RESOLVED: The user's message refers to "
+                    f"listing_id={ref_id} (title='{ref_title}', "
+                    f"listing_owner_id={ref_owner}) from the most recent "
+                    f"search results. Use THIS listing_id for any tool call "
+                    f"(claim_listing, cancel_claim, get_mapbox_route) "
+                    f"unless the user clearly meant a different item. Do "
+                    f"NOT ask the user to repeat which one — you already "
+                    f"resolved it deterministically."
+                ),
+            })
 
         messages.append({"role": "user", "content": message})
 

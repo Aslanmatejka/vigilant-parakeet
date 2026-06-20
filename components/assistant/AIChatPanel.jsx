@@ -10,6 +10,7 @@ import aiChatService from '../../utils/services/aiChatService.js'
 import { parseListingsCsv, downloadCsvTemplate } from '../../utils/csvListings.js'
 import { assignImagestoRows, assignFoodImage } from '../../utils/foodImages.js'
 import dataService from '../../utils/dataService.js'
+import supabase from '../../utils/supabaseClient.js'
 import { toast } from 'react-toastify'
 
 // ─── Welcome hero categories (richer onboarding surface) ───────────
@@ -1030,6 +1031,39 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
     : 'border-emerald-500/40 shadow-emerald-500/10'
   const headerClass = pending.kind === 'photo' ? 'text-fuchsia-300' : 'text-emerald-300'
 
+  // Lazy-load active communities once so the preview can offer a selector.
+  // Cheap query (id+name only); silently degrades to "no community" if it fails.
+  const [communities, setCommunities] = useState([])
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { data, error } = await supabase
+          .from('communities')
+          .select('id, name')
+          .eq('is_active', true)
+          .order('name', { ascending: true })
+        if (cancelled || error) return
+        setCommunities(data || [])
+      } catch {
+        /* ignore — selector just stays empty */
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  // ALL hooks must be declared before any early return (Rules of Hooks).
+  // filledLog drives a Map used in the success render path; computing it
+  // up-front keeps the hook count stable across error/analyzing/empty branches.
+  const filledLog = Array.isArray(pending.filledLog) ? pending.filledLog : []
+  const filledByIndex = useMemo(() => {
+    const m = new Map()
+    for (const f of filledLog) {
+      if (f && typeof f.index === 'number') m.set(f.index, f.fields || [])
+    }
+    return m
+  }, [filledLog])
+
   if (pending.error) {
     const allErrors = [pending.error, ...(pending.parseErrors || []).slice(1)].filter(Boolean)
     return (
@@ -1087,14 +1121,6 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
   if (rows.length === 0) return null
   const previewRows = rows.slice(0, 5)
   const extra = rows.length - previewRows.length
-  const filledLog = Array.isArray(pending.filledLog) ? pending.filledLog : []
-  const filledByIndex = useMemo(() => {
-    const m = new Map()
-    for (const f of filledLog) {
-      if (f && typeof f.index === 'number') m.set(f.index, f.fields || [])
-    }
-    return m
-  }, [filledLog])
   const totalFilled = filledLog.length
 
   return (
@@ -1191,6 +1217,50 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
                     <option key={c} value={c}>{c}</option>
                   ))}
                 </select>
+              </div>
+              {/* Pickup address / expiry / community — without these the
+                  listing publishes without a map pin, freshness hint, or
+                  community attribution. Pre-filled from the donor profile
+                  and a category-based expiry suggestion by the backend. */}
+              <div className="mt-1 grid grid-cols-1 sm:grid-cols-3 gap-1 text-[11px]">
+                <label className="flex items-center gap-1 min-w-0">
+                  <i className="fas fa-location-dot text-slate-500 flex-shrink-0" aria-hidden="true" />
+                  <input
+                    type="text"
+                    value={row.location || ''}
+                    onChange={(e) => onUpdateRow(idx, { location: e.target.value })}
+                    disabled={busy}
+                    placeholder={isEs ? 'Dirección de recogida' : 'Pickup address'}
+                    className="flex-1 min-w-0 bg-transparent outline-none focus:bg-slate-900/60 px-1 py-0.5 rounded text-slate-200 placeholder:text-slate-500"
+                    aria-label={isEs ? 'Dirección de recogida' : 'Pickup address'}
+                  />
+                </label>
+                <label className="flex items-center gap-1 min-w-0">
+                  <i className="fas fa-calendar-day text-slate-500 flex-shrink-0" aria-hidden="true" />
+                  <input
+                    type="date"
+                    value={row.expiry_date || ''}
+                    onChange={(e) => onUpdateRow(idx, { expiry_date: e.target.value })}
+                    disabled={busy}
+                    className="flex-1 min-w-0 bg-transparent outline-none focus:bg-slate-900/60 px-1 py-0.5 rounded text-slate-200"
+                    aria-label={isEs ? 'Fecha de caducidad' : 'Expiry date'}
+                  />
+                </label>
+                <label className="flex items-center gap-1 min-w-0">
+                  <i className="fas fa-people-group text-slate-500 flex-shrink-0" aria-hidden="true" />
+                  <select
+                    value={row.community_id || ''}
+                    onChange={(e) => onUpdateRow(idx, { community_id: e.target.value || undefined })}
+                    disabled={busy || communities.length === 0}
+                    className="flex-1 min-w-0 bg-slate-900/60 border border-slate-700/60 rounded px-1 py-0.5 text-slate-200"
+                    aria-label={isEs ? 'Comunidad' : 'Community'}
+                  >
+                    <option value="">{isEs ? 'Sin comunidad' : 'No community'}</option>
+                    {communities.map(c => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </label>
               </div>
             </div>
             <button
