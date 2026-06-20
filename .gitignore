@@ -9,6 +9,9 @@ yarn-error.log*
 __pycache__/
 *.pyc
 
+# Live voice test artifacts (regenerated each run)
+backend/tests/voice_artifacts/*.mp3
+
 # Production builds
 dist/
 build/

@@ -957,6 +957,7 @@ async def ai_voice(
     user_id: str = Form(..., min_length=1, max_length=128),
     include_audio: bool = Form(default=True),
     silent: bool = Form(default=False),
+    language: str | None = Form(default=None, max_length=5),
 ) -> dict:
     """
     Transcribe uploaded audio via OpenAI Whisper, then process as a chat message.
@@ -965,6 +966,8 @@ async def ai_voice(
       - audio: audio file
       - user_id: user UUID
       - include_audio: whether to return TTS audio in response (default true)
+      - language: optional ISO-639-1 hint ("en" or "es") passed to Whisper to
+        improve accuracy on short/accented clips
     """
     _enforce_rate_limit(request)
     _validate_uuid(user_id)
@@ -997,6 +1000,7 @@ async def ai_voice(
         transcript = await conversation_engine.transcribe_audio(
             audio_bytes=audio_bytes,
             filename=audio.filename or "audio.webm",
+            language=language if language in ("en", "es") else None,
         )
         logger.info("Transcribed audio for user %s: %s", user_id, transcript[:100])
 
@@ -1132,12 +1136,14 @@ def _is_whisper_noise(text: str) -> bool:
 async def ai_transcribe(
     request: Request,
     audio: UploadFile = File(..., description="Audio file (webm, wav, mp3, m4a)"),
+    language: str | None = Form(default=None, max_length=5),
 ) -> dict:
     """
     Transcription-only endpoint — Whisper STT without chat processing.
 
     Use this when you only need the transcript text and will send it to
-    /api/ai/chat separately.
+    /api/ai/chat separately. ``language`` is an optional ISO-639-1 hint
+    ("en" or "es") that the frontend should send based on the UI language.
     """
     _enforce_rate_limit(request)
 
@@ -1164,6 +1170,7 @@ async def ai_transcribe(
         transcript = await conversation_engine.transcribe_audio(
             audio_bytes=audio_bytes,
             filename=audio.filename or "audio.webm",
+            language=language if language in ("en", "es") else None,
         )
         logger.info("Transcribed (transcribe-only): %s", transcript[:100])
 

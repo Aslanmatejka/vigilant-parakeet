@@ -320,6 +320,17 @@ _SPANISH_MARKERS = {
     "muéstrame", "muestrame", "muestra", "mostrar", "dame",
     "panel", "mi", "tu", "para", "con", "sin", "una", "uno",
     "soy", "eres", "estoy", "está", "ser", "hacer", "tiene",
+    # Conjugated verb forms (claim/share/want/have)
+    "quisiera", "quería", "quieres", "quieren",
+    "tienes", "tienen", "tener",
+    "puedes", "puede", "podría", "podrías",
+    "reclamar", "reclamo", "agregar", "añadir",
+    # Plural / extra articles + determiners
+    "las", "los", "unas", "unos", "del",
+    # Common food noun plurals that show up in claim / share
+    "manzanas", "huevos", "frutas", "verduras", "leches", "panes",
+    "naranjas", "sandías", "sandwiches", "ensaladas",
+    "disponibles",
 }
 
 # English-only markers used to flip sticky language back to English
@@ -4419,16 +4430,30 @@ class ConversationEngine:
 
     # ---- Whisper + TTS ---------------------------------------------------
 
-    async def transcribe_audio(self, audio_bytes: bytes, filename: str = "audio.webm") -> str:
+    async def transcribe_audio(
+        self,
+        audio_bytes: bytes,
+        filename: str = "audio.webm",
+        language: str | None = None,
+    ) -> str:
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY not configured")
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+        data: dict[str, str] = {
+            "model": WHISPER_MODEL,
+            "response_format": "json",
+        }
+        # ISO-639-1 hint dramatically improves accuracy on short clips
+        # (Whisper otherwise auto-detects and can mis-identify Spanish
+        # as English garbage).
+        if language in ("en", "es"):
+            data["language"] = language
         resp = await _openai_with_retry(
             "POST",
             f"{OPENAI_BASE_URL}/audio/transcriptions",
             headers=headers,
             files={"file": (filename, audio_bytes)},
-            data={"model": WHISPER_MODEL, "response_format": "json"},
+            data=data,
             timeout=60,
         )
         return resp.json()["text"]

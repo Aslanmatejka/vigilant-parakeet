@@ -1,0 +1,81 @@
+[
+  {
+    "scenario": "V1-english-find-food",
+    "spoken": "Find food near me please.",
+    "transcript": "Find food near me, please.",
+    "overlap": 1.0,
+    "reply": "Here's what's available near you right now:\n\n1. Watermelon — 1 piece, pickup at 1423 Park St, Alameda, CA\n2. Bag of apples — 12 apples, pickup at 2100 Central Ave, Alameda, CA\n3. Whole wheat bread loaves — 4 loaves, pickup at 1800 Park St, Alameda, CA\n4. Fresh sandwiches — 16 sandwiches, pickup at 1500 Webster St, Alameda, CA\n5. Hot lasagna tray — 1 tray, pickup at 900 Lincoln Ave, Alameda, CA\n\nWhich one would you like to claim? Reply with the number or the name.",
+    "reply_lang": "en",
+    "voice_transcript": "Find food near me, please.",
+    "passes": [
+      "tts produced audio",
+      "round-trip word overlap 1.00 >= 0.60",
+      "voice endpoint returned reply text",
+      "reply language matches input (en)",
+      "voice transcript matches standalone (1.00)"
+    ],
+    "failures": []
+  },
+  {
+    "scenario": "V2-english-share-intent",
+    "spoken": "I want to share twelve apples with my community.",
+    "transcript": "I want to share 12 apples with my community.",
+    "overlap": 0.8888888888888888,
+    "reply": "Great! Will people pick up the apples from your place, or are you willing to deliver/drop them off?",
+    "reply_lang": "en",
+    "voice_transcript": "I want to share 12 apples with my community.",
+    "passes": [
+      "tts produced audio",
+      "round-trip word overlap 0.89 >= 0.50",
+      "voice endpoint returned reply text",
+      "reply language matches input (en)",
+      "voice transcript matches standalone (1.00)"
+    ],
+    "failures": []
+  },
+  {
+    "scenario": "V3-spanish-share-intent",
+    "spoken": "Quiero compartir seis huevos con mi comunidad.",
+    "transcript": "Quiere compartir sus huevos con mi comadí.",
+    "overlap": 0.5714285714285714,
+    "reply": "¡Qué bonito gesto! Para ayudarte a compartir los huevos con tu comadre, solo necesito algunos detalles:\n\n¿Cuántos huevos quieres donar?",
+    "reply_lang": "es",
+    "voice_transcript": "Quiere compartir sus huevos con mi comadí.",
+    "passes": [
+      "tts produced audio",
+      "round-trip word overlap 0.57 >= 0.50",
+      "voice endpoint returned reply text",
+      "reply language matches input (es)",
+      "voice transcript matches standalone (1.00)"
+    ],
+    "failures": []
+  },
+  {
+    "scenario": "V4-spanish-claim",
+    "spoken": "Quisiera reclamar las manzanas que tienes disponibles.",
+    "transcript": "Quisiera reclamar las manzanas que tienes disponibles.",
+    "overlap": 1.0,
+    "reply": "Aquí tienes las opciones cerca de ti:\n1. Sandía — 1 pieza, en 1423 Park St, Alameda, CA.\n2. Bolsa de manzanas — 12 manzanas, en 2100 Central Ave, Alameda, CA 94501.\n\n¿Cuántas manzanas te gustaría reclamar?",
+    "reply_lang": "es",
+    "voice_transcript": "Quisiera reclamar las manzanas que tienes disponibles.",
+    "passes": [
+      "tts produced audio",
+      "round-trip word overlap 1.00 >= 0.50",
+      "voice endpoint returned reply text",
+      "reply language matches input (es)",
+      "voice transcript matches standalone (1.00)"
+    ],
+    "failures": []
+  },
+  {
+    "scenario": "V5-tts-only-shortform",
+    "spoken": "Got it, claiming six eggs for you now.",
+    "transcript": "Got it. Claiming six eggs for you now.",
+    "overlap": 1.0,
+    "passes": [
+      "tts produced audio",
+      "round-trip word overlap 1.00 >= 0.60"
+    ],
+    "failures": []
+  }
+]
