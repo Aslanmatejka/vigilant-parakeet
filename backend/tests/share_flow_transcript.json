@@ -1,0 +1,329 @@
+[
+  {
+    "scenario": "S1-subject-correction",
+    "turns": [
+      {
+        "user": "i want to share 6 watermelon",
+        "nouri": "Great! Will the recipient pick up the watermelons from your place, or are you willing to deliver/drop them off?",
+        "tools": [],
+        "elapsed_s": 6.16
+      },
+      {
+        "user": "i meant apples",
+        "nouri": "Got it \u2014 apples instead. How many apples would you like to share?",
+        "tools": [],
+        "elapsed_s": 7.66
+      },
+      {
+        "user": "i have 12",
+        "nouri": "Thanks! Will the recipient pick up the apples from your place at 1423 Park St, Alameda, CA, or are you able to deliver/drop them off?",
+        "tools": [],
+        "elapsed_s": 7.62
+      },
+      {
+        "user": "tomorrow is fine for expiry",
+        "error": {
+          "_error": true,
+          "status": 500,
+          "body": "{\"error_code\":\"internal\",\"message\":\"An unexpected AI error occurred.\",\"retryable\":false,\"request_id\":\"21b9b7864fb9498290d35c688b656a8d\",\"detail\":\"An unexpected AI error occurred.\"}"
+        }
+      },
+      {
+        "user": "use my saved address",
+        "nouri": "Posted! Your 12 apples are live at 1423 Park St, Alameda, CA, listed under Alameda Unified School District. Recipients can pick them up there. Want to add a photo or any allergen info next?",
+        "tools": [
+          {
+            "tool": "post_food_listing",
+            "ok": true
+          }
+        ],
+        "elapsed_s": 9.53
+      },
+      {
+        "user": "alameda unified is fine",
+        "nouri": "Thanks for confirming the community! When can people pick up the apples? (For example: \u201ctomorrow 10am\u20132pm\u201d or \u201canytime tomorrow.\u201d)",
+        "tools": [],
+        "elapsed_s": 5.62
+      }
+    ],
+    "grade": {
+      "failures": [],
+      "passes": [
+        "posted listing",
+        "final turn avoided 'watermelon'",
+        "final turn avoided 'claim'",
+        "final turn avoided 'available listings'",
+        "final turn avoided 'grandson'",
+        "mentioned 'apples'"
+      ]
+    }
+  },
+  {
+    "scenario": "S2-quantity-correction",
+    "turns": [
+      {
+        "user": "share 5 loaves of bread",
+        "nouri": "Great! Will the recipient pick up the bread from you, or are you willing to deliver/drop it off?",
+        "tools": [],
+        "elapsed_s": 5.47
+      },
+      {
+        "user": "wait make it 10",
+        "nouri": "Got it \u2014 updating to 10 loaves of bread.\n\nWhen is the bread best by, or how long will it stay fresh?",
+        "tools": [],
+        "elapsed_s": 5.45
+      },
+      {
+        "user": "expires tomorrow",
+        "nouri": "Which community should I list the 10 loaves of bread under? Your profile is set to Alameda Unified\u2014should I post it there, or would you like a different community?",
+        "tools": [],
+        "elapsed_s": 5.51
+      },
+      {
+        "user": "yes, use my saved address",
+        "nouri": "Posted! Your 10 loaves of bread are live at 1423 Park St, Alameda, CA, listed under Alameda Unified School District. Let me know if you want to add a photo or any other details.",
+        "tools": [
+          {
+            "tool": "post_food_listing",
+            "ok": true
+          }
+        ],
+        "elapsed_s": 8.92
+      },
+      {
+        "user": "post it to alameda unified",
+        "nouri": "Posted! Listing #ead643c5-5d47-423b-ae9b-6ec1df4b598f \u2014 10 loaves of bread \u2014 is live at 1423 Park St, Alameda, CA, under Alameda Unified. It expires tomorrow.\n\nWould you like to add a photo to help it get picked up faster?",
+        "tools": [],
+        "elapsed_s": 5.83
+      }
+    ],
+    "grade": {
+      "failures": [],
+      "passes": [
+        "posted listing",
+        "mentioned '10'",
+        "mentioned 'bread'"
+      ]
+    }
+  },
+  {
+    "scenario": "S3-add-second-item",
+    "turns": [
+      {
+        "user": "i want to share a dozen eggs",
+        "nouri": "Great! Will the recipient pick up the eggs from you, or are you willing to deliver/drop them off?",
+        "tools": [],
+        "elapsed_s": 5.53
+      },
+      {
+        "user": "also some apples",
+        "nouri": "Would you like to add the apples as a second listing after we finish the eggs, or switch and list the apples instead?",
+        "tools": [],
+        "elapsed_s": 5.58
+      }
+    ],
+    "grade": {
+      "failures": [],
+      "passes": [
+        "mentioned one of ['second listing', 'another listing', 'separate listing', 'add', 'replace']"
+      ]
+    }
+  },
+  {
+    "scenario": "S4-share-to-search-switch",
+    "turns": [
+      {
+        "user": "share 4 oranges",
+        "nouri": "Great! Will the recipient pick up the 4 oranges from your place, or are you willing to deliver/drop them off?",
+        "tools": [],
+        "elapsed_s": 5.48
+      },
+      {
+        "user": "actually find food near me instead",
+        "nouri": "Here's what's available near you right now:\n\n1. Eggs \u2014 6 eggs, pickup at 1423 Park St, Alameda, CA\n2. Watermelon \u2014 1 piece, pickup at 1423 Park St, Alameda, CA\n3. Bag of apples \u2014 12 apples, pickup at 2100 Central Ave, Alameda, CA\n4. Whole wheat bread loaves \u2014 4 loaves, pickup at 1800 Park St, Alameda, CA\n5. Fresh sandwiches \u2014 16 sandwiches, pickup at 1500 Webster St, Alameda, CA\n6. Hot lasagna tray \u2014 1 tray, pickup at 900 Lincoln Ave, Alameda, CA\n\nWhich one would you like to claim? Reply with the number or the name.",
+        "tools": [
+          {
+            "tool": "search_food_near_user",
+            "ok": true
+          }
+        ],
+        "elapsed_s": 8.26
+      }
+    ],
+    "grade": {
+      "failures": [],
+      "passes": [
+        "called search_food_near_user",
+        "did not call post_food_listing",
+        "stopped asking intake questions"
+      ]
+    }
+  },
+  {
+    "scenario": "S5-vague-input",
+    "turns": [
+      {
+        "user": "i got some food i want to give away",
+        "nouri": "That\u2019s great! What kind of food would you like to share?",
+        "tools": [],
+        "elapsed_s": 5.55
+      }
+    ],
+    "grade": {
+      "failures": [],
+      "passes": [
+        "did not call post_food_listing",
+        "mentioned one of ['what', 'which', 'kind', 'type']"
+      ]
+    }
+  },
+  {
+    "scenario": "S6-non-food-refuse",
+    "turns": [
+      {
+        "user": "i want to share my old shoes",
+        "nouri": "DoGoods is set up just for food and meals, so I can\u2019t list shoes here. If you\u2019d like to give away your old shoes, local Buy Nothing groups or Freecycle are great options.\n\nGot any extra food you\u2019d like to share instead? I\u2019m happy to help you post it!",
+        "tools": [],
+        "elapsed_s": 5.61
+      }
+    ],
+    "grade": {
+      "failures": [],
+      "passes": [
+        "did not call post_food_listing",
+        "mentioned one of ['food', 'buy nothing', 'freecycle']"
+      ]
+    }
+  },
+  {
+    "scenario": "S7-borderline-pet-food",
+    "turns": [
+      {
+        "user": "i have an unopened bag of dog food, can i share it?",
+        "nouri": "Yes, you can share unopened pet food on DoGoods! Pet food is considered a food item, so as long as the bag is sealed, not expired, and you can provide the expiration or best-by date, you\u2019re good to go.\n\nWould you like to post your unopened bag of dog food now? If so, could you tell me:\n- The brand/type of dog food\n- The bag size (e.g., 10 lbs)\n- The expiration or best-by date\n\nI\u2019ll help you get it listed!",
+        "tools": [],
+        "elapsed_s": 6.45
+      },
+      {
+        "user": "yes a 5 lb bag, expires in 6 months",
+        "nouri": "Great! Will the recipient pick up the dog food from your address at 1423 Park St, Alameda, CA, or are you willing to deliver it?",
+        "tools": [],
+        "elapsed_s": 5.47
+      }
+    ],
+    "grade": {
+      "failures": [],
+      "passes": [
+        "final turn avoided \"can't list\"",
+        "final turn avoided 'cannot list'",
+        "final turn avoided 'not food'"
+      ]
+    }
+  },
+  {
+    "scenario": "S8-all-in-one",
+    "turns": [
+      {
+        "user": "i want to share 3 loaves of sourdough bread, expires friday",
+        "nouri": "Great! Will the recipient pick up the bread from your place, or are you willing to deliver/drop it off?",
+        "tools": [],
+        "elapsed_s": 5.59
+      }
+    ],
+    "grade": {
+      "failures": [],
+      "passes": [
+        "mentioned 'bread'"
+      ]
+    }
+  },
+  {
+    "scenario": "S9-abandon",
+    "turns": [
+      {
+        "user": "i want to share some pasta",
+        "nouri": "Great! How much pasta do you have to share, and what kind (e.g., spaghetti, penne, cooked or uncooked)?",
+        "tools": [],
+        "elapsed_s": 5.74
+      },
+      {
+        "user": "nevermind, forget it",
+        "nouri": "No problem \u2014 I\u2019ve dropped that. If you want to share or claim food later, just let me know!",
+        "tools": [],
+        "elapsed_s": 6.03
+      }
+    ],
+    "grade": {
+      "failures": [],
+      "passes": [
+        "did not call post_food_listing",
+        "stopped asking intake questions"
+      ]
+    }
+  },
+  {
+    "scenario": "S10-double-correction",
+    "turns": [
+      {
+        "user": "i want to share 6 watermelon",
+        "nouri": "Great! Will people pick up the 6 watermelons from your address at 1423 Park St, or are you willing to deliver/drop them off?",
+        "tools": [],
+        "elapsed_s": 5.51
+      },
+      {
+        "user": "i meant apples",
+        "nouri": "Got it \u2014 apples instead. How many apples would you like to share?",
+        "tools": [],
+        "elapsed_s": 5.48
+      },
+      {
+        "user": "wait, oranges",
+        "nouri": "Switching to oranges! How many oranges would you like to share?",
+        "tools": [],
+        "elapsed_s": 5.49
+      },
+      {
+        "user": "8 of them, expires next week",
+        "nouri": "Thanks! I\u2019ll use your saved address at 1423 Park St, Alameda, CA for pickup.\n\nWhich community should I post these 8 oranges under? Your profile is set to \u201cAlameda Unified.\u201d Should I use that, or a different community?",
+        "tools": [],
+        "elapsed_s": 5.51
+      }
+    ],
+    "grade": {
+      "failures": [],
+      "passes": [
+        "final turn avoided 'watermelon'",
+        "final turn avoided 'apples'",
+        "final turn avoided 'grandson'",
+        "mentioned 'oranges'"
+      ]
+    }
+  },
+  {
+    "scenario": "S11-no-fabrication",
+    "turns": [
+      {
+        "user": "i want to share 4 oranges",
+        "nouri": "Great! Will the recipient pick up the oranges from your place, or are you willing to deliver/drop them off?",
+        "tools": [],
+        "elapsed_s": 5.36
+      },
+      {
+        "user": "tomorrow for expiry",
+        "nouri": "Thanks! Should I list the pickup location as your saved address \u2014 1423 Park St, Alameda, CA?",
+        "tools": [],
+        "elapsed_s": 5.4
+      }
+    ],
+    "grade": {
+      "failures": [],
+      "passes": [
+        "final turn avoided 'grandson'",
+        "final turn avoided 'your kids'",
+        "final turn avoided 'your son'",
+        "final turn avoided 'your daughter'",
+        "final turn avoided 'your lunch'"
+      ]
+    }
+  }
+]

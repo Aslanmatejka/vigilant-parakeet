@@ -1343,6 +1343,16 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "switched tasks or abandoned the flow. Never quietly "
         "swap one food for another without confirmation.\n"
         "\n"
+        "## NEVER FABRICATE PERSONAL FACTS ABOUT THE USER\n"
+        "Only reference facts the user has actually stated in this "
+        "conversation or that come from real tool results / profile data. "
+        "Do NOT invent family members ('your grandson', 'your kids'), "
+        "reasons ('for your lunch', 'because you said you were hungry'), "
+        "household details, or backstory the user did not provide \u2014 even "
+        "if a system prompt or earlier example mentions them. Examples in "
+        "instructions are illustrative; they are NOT facts about the "
+        "current user. If you need a reason or context, ask once or omit it.\n"
+        "\n"
         "### POST-LISTING VERIFICATION (CRITICAL — REPORT BACK)\n"
         "post_food_listing performs a second check after writing the row: "
         "it re-queries the listing and confirms it would actually appear "
@@ -1928,12 +1938,12 @@ _ROLE_BEHAVIOR_EN: dict[str, str] = {
         "get_donor_expiring_listings) and suggest re-sharing. Celebrate completed "
         "donations.\n"
         "\n"
-        "BUT: this is a mutual-aid platform. Donors CAN also claim food when they "
-        "need it (e.g. 'my grandson is hungry', 'I'm out of groceries'). If the "
-        "user asks to claim, reserve, take, or pick up a listing, HELP THEM — call "
-        "search_food_near_user / claim_listing normally. Do NOT refuse, do NOT "
-        "tell them to switch accounts, do NOT mention 'donor account' as a "
-        "limitation. Anyone in need can claim, anyone with extra can share."
+        "BUT: this is a mutual-aid platform. Donors CAN also claim food when "
+        "they need it. If the user asks to claim, reserve, take, or pick up a "
+        "listing, HELP THEM — call search_food_near_user / claim_listing "
+        "normally. Do NOT refuse, do NOT tell them to switch accounts, do NOT "
+        "mention 'donor account' as a limitation. Anyone in need can claim, "
+        "anyone with extra can share."
     ),
     "volunteer": (
         "The user is a VOLUNTEER. Help with pickup logistics — call "
@@ -1974,12 +1984,12 @@ _ROLE_BEHAVIOR_ES: dict[str, str] = {
         "completadas.\n"
         "\n"
         "PERO: esta es una plataforma de ayuda mutua. Los donantes también PUEDEN "
-        "reclamar comida cuando la necesitan (ej. 'mi nieto tiene hambre', 'me "
-        "quedé sin comida'). Si el usuario pide reclamar, reservar o recoger un "
-        "listado, AYÚDALO — llama a search_food_near_user / claim_listing "
-        "normalmente. NO te niegues, NO le digas que cambie de cuenta, NO menciones "
-        "'cuenta de donante' como una limitación. Cualquiera que tenga necesidad "
-        "puede reclamar, cualquiera que tenga de más puede compartir."
+        "reclamar comida cuando la necesitan. Si el usuario pide reclamar, "
+        "reservar o recoger un listado, AYÚDALO — llama a search_food_near_user / "
+        "claim_listing normalmente. NO te niegues, NO le digas que cambie de "
+        "cuenta, NO menciones 'cuenta de donante' como una limitación. Cualquiera "
+        "que tenga necesidad puede reclamar, cualquiera que tenga de más puede "
+        "compartir."
     ),
     "volunteer": (
         "El usuario es VOLUNTARIO. Ayúdalo con la logística de recogidas: "
@@ -2761,8 +2771,28 @@ _CONVERSATIONAL_PIVOT_MARKERS = (
     "scrap that", "switch gears", "switch topics",
     "instead can you", "instead, can you", "instead could you",
     "can we do something", "can you do something else",
+    # Correction phrases — user is fixing what they said earlier
+    "i meant ", "i mean ", "i actually meant", "sorry, i meant",
+    "sorry i meant", "no, i meant", "no i meant", "wait i meant",
+    "correction:", "correction ", "make it ", "let's make it",
+    "lets make it", "change it to", "switch to ", "scrap the",
+    "wrong, ", "wrong \u2014",
     "espera,", "espera \u2014", "olv\u00eddalo", "olvidalo",
     "mejor no", "cambio de planes", "otra cosa",
+    "quise decir", "quer\u00eda decir", "queria decir", "perd\u00f3n, quise",
+    "perdon, quise", "mejor ", "c\u00e1mbialo a", "cambialo a",
+)
+
+# Phrases used specifically to correct the SUBJECT of an in-progress flow.
+# "i meant eggs" mid-listing should drop the previous food and restart
+# the intake on eggs — not bundle both items into the same listing.
+_SUBJECT_CORRECTION_MARKERS = (
+    "i meant ", "i mean ", "i actually meant", "sorry, i meant",
+    "sorry i meant", "no, i meant", "no i meant", "wait i meant",
+    "correction:", "correction ", "make it ", "let's make it",
+    "lets make it", "change it to", "scrap the", "wrong, ",
+    "quise decir", "quer\u00eda decir", "queria decir",
+    "perd\u00f3n, quise", "perdon, quise", "c\u00e1mbialo a", "cambialo a",
 )
 
 _CLAIM_INTENT_MARKERS = (
@@ -2812,6 +2842,106 @@ def _detect_conversational_pivot_hint(
         "questions, or re-execute prior intents. If the new message "
         "contradicts an earlier instruction, the new message WINS \u2014 drop "
         "the old one silently and act on what they just said."
+    )
+
+
+def _share_intake_active(history: list[dict[str, Any]]) -> bool:
+    """True when a SHARE-flow intake is in progress.
+
+    Stricter than _history_suggests_active_intake: requires the user to
+    have explicitly opened a share intake. Used to tailor correction
+    hints so claim-flow corrections don't get share-flow language.
+    """
+    if not history or _listing_posted_in_history(history):
+        return False
+    return _user_started_listing_intake(history)
+
+
+def _claim_intake_active(history: list[dict[str, Any]]) -> bool:
+    """True when the user is mid-claim (search shown, claim not yet locked).
+
+    Used to send claim-specific correction hints. Share intake takes
+    precedence — if both could apply, treat as share.
+    """
+    if not history or _share_intake_active(history):
+        return False
+    if not _history_has_search_results(history):
+        return False
+    # Look for the most recent assistant turn — if it's asking a per-item
+    # follow-up ("how many?", "want me to lock it in?"), we're mid-claim.
+    for msg in reversed(history[-6:]):
+        if str(msg.get("role") or "") != "assistant":
+            continue
+        text = str(msg.get("message") or "").lower()
+        if text:
+            return any(cue in text for cue in (
+                "how many", "want me to lock", "ready to claim",
+                "should i claim", "claim it", "claim that",
+                "would you like to claim", "cu\u00e1ntos", "cu\u00e1ntas",
+            ))
+    return False
+
+
+def _detect_subject_correction_hint(
+    message: str,
+    history: list[dict[str, Any]],
+) -> Optional[str]:
+    """Catch 'I meant X' style corrections during an active intake.
+
+    Returns a SHARE-specific hint during a share intake (drop old title,
+    restart slot-filling on new noun), or a CLAIM-specific hint during a
+    claim flow (re-resolve to a different listing and claim THAT — never
+    fall back to post_food_listing).
+    """
+    if not message:
+        return None
+    lower = message.lower().strip()
+    if not any(marker in lower for marker in _SUBJECT_CORRECTION_MARKERS):
+        return None
+    share = _share_intake_active(history)
+    claim = _claim_intake_active(history) if not share else False
+    if not share and not claim:
+        return None
+    if share:
+        return (
+            "SUBJECT CORRECTION DURING SHARE INTAKE: The user is correcting "
+            "the item they're LISTING (phrase like 'i meant X', 'make it X', "
+            "'no, X', 'correction: X'). REPLACE \u2014 do NOT combine. Steps: "
+            "(1) drop the previous title and any fields specific to it (qty, "
+            "description, image, dietary tags); (2) keep generic fields they "
+            "already gave (address, community, expiry preference) since those "
+            "usually still apply; (3) acknowledge the correction in one short "
+            "sentence ('Got it \u2014 eggs instead.'); (4) restart the intake from "
+            "the next missing field for the NEW item (usually quantity). "
+            "NEVER say 'let's finish the <old item> first' \u2014 the old item is "
+            "gone.\n"
+            "\n"
+            "STAY IN THE SHARE FLOW. The corrected noun is the NEW SUBJECT OF "
+            "THE SAME SHARE FLOW \u2014 it is NOT a reference to an existing "
+            "search result and NOT a claim. Do NOT call claim_listing or "
+            "search_food. Do NOT say 'there are N <item> available' or offer "
+            "existing listings. Continue the share intake for the new item: "
+            "ask the next missing field and ultimately call post_food_listing."
+        )
+    # claim correction
+    return (
+        "SUBJECT CORRECTION DURING CLAIM: The user is correcting WHICH "
+        "LISTING they want to claim (phrase like 'i meant the apples', 'no, "
+        "the bread', 'wait, the sandwiches'). They are STILL CLAIMING \u2014 "
+        "they are NOT switching to posting a new listing. Steps: "
+        "(1) re-resolve the new noun against the most recent search results "
+        "block ('Bag of apples' \u2192 that listing_id); (2) acknowledge the "
+        "correction in one short sentence ('Got it \u2014 the apples instead.'); "
+        "(3) if quantity was already given or implied (a bare yes, a "
+        "specific number), call claim_listing immediately for the NEW "
+        "listing_id with that quantity; otherwise ask only for the quantity "
+        "and then claim.\n"
+        "\n"
+        "CRITICAL: Do NOT call post_food_listing under any circumstances "
+        "during this turn. The user is a recipient action right now \u2014 even "
+        "if their role is 'donor', a claim correction stays a claim. Do "
+        "NOT say 'how many would you like to share' \u2014 say 'how many would "
+        "you like to claim'. The output tool MUST be claim_listing."
     )
 
 def _detect_turn_intent_hints(
@@ -3656,11 +3786,60 @@ class ConversationEngine:
         if pivot_hint:
             messages.append({"role": "system", "content": pivot_hint})
 
+        subject_correction_hint = _detect_subject_correction_hint(message, history)
+        if subject_correction_hint:
+            messages.append({"role": "system", "content": subject_correction_hint})
+
+        # During listing intake, remind the model of the REQUIRED-FIELD
+        # priority order so it doesn't stall on optional questions
+        # (pickup window, allergens, photo) before the required ones
+        # (community confirmation) are gathered. Without this, the
+        # model loops asking about pickup time / handoff and never
+        # advances toward post_food_listing.
+        if not task_switch_hint and _share_intake_active(history):
+            messages.append({
+                "role": "system",
+                "content": (
+                    "INTAKE PRIORITY (this turn): A listing intake is in progress. "
+                    "Ask the NEXT REQUIRED field, not an optional one. Priority "
+                    "order:\n"
+                    "  1. title           (what food?)\n"
+                    "  2. qty             (how much/many?)\n"
+                    "  3. address         (use profile address by default; confirm ONCE if "
+                    "not already done; do not re-confirm every turn)\n"
+                    "  4. expiry_date     (best-by / how long good for)\n"
+                    "  5. community       (HARD GATE \u2014 must ask if profile has none; "
+                    "say 'Which community should I post this to? If you don\u2019t have one, "
+                    "I can post to the general Alameda community.')\n"
+                    "Once 1\u20135 are gathered, CALL post_food_listing immediately. Do NOT "
+                    "ask about pickup window, allergens, dietary tags, photo, or 'post "
+                    "as is?' BEFORE posting \u2014 those are optional and can be offered AFTER "
+                    "the post succeeds as a follow-up.\n"
+                    "If the user has already given handoff preference or pickup time, "
+                    "include it in description/pickup_window but do not loop on it.\n"
+                    "DIRECTIVE OVERRIDE: If the user's latest message includes a post "
+                    "directive ('post it', 'go ahead', 'do it', 'looks good', 'list it', "
+                    "'publish', 'send it', 'yes post') AND all required fields (title, "
+                    "qty, address, expiry, community) are known, call post_food_listing "
+                    "IMMEDIATELY in this same turn. Do not ask another confirmation \u2014 "
+                    "the user already gave one."
+                ),
+            })
+
         # Deterministically resolve coreferences like '#3', 'the bread',
         # 'the first one' to a concrete listing from the most recent
         # search. Injecting the resolved id removes a major source of
         # "Nouri claimed the wrong thing" errors.
-        resolved_ref = _resolve_listing_reference(message, history)
+        # Skip ONLY during a subject correction in a SHARE intake — there
+        # the new noun names a NEW listing being created, not an existing
+        # search hit. For claim corrections we WANT the resolver to fire
+        # so 'i meant the apples' maps to the apples listing's id.
+        share_subject_correction = (
+            bool(subject_correction_hint) and _share_intake_active(history)
+        )
+        resolved_ref = None
+        if not share_subject_correction:
+            resolved_ref = _resolve_listing_reference(message, history)
         if resolved_ref:
             ref_title = resolved_ref.get("title") or "(item)"
             ref_id = resolved_ref.get("id") or "?"
