@@ -22,22 +22,29 @@ logger = logging.getLogger("ai_tools")
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN") or os.getenv("VITE_MAPBOX_TOKEN", "")
 MAPBOX_DIRECTIONS_URL = "https://api.mapbox.com/directions/v5/mapbox"
 
+# Max age (hours) applied ONLY when a listing has no expiry_date and no pickup_by.
+# These are intentionally generous — the listing's active/approved status is the
+# primary signal of availability. Only cooked/prepared/perishable-meat listings
+# get a strict cutoff to avoid surfacing genuinely dangerous old food.
+# Everything else uses 30 days (720h) — if it's still active in the DB and the
+# donor hasn't removed it, we trust it's still available.
 _PERISHABLE_CATEGORY_MAX_AGE_HOURS = {
-    "prepared": 24,
-    "prepared food": 24,
-    "prepared foods": 24,
-    "dairy": 24,
-    "meat": 24,
-    "seafood": 24,
-    "bakery": 48,
-    "produce": 48,
-    "vegetables": 48,
-    "fruits": 48,
-    "beverages": 72,
-    "other": 72,
-    "pantry": 168,
-    "canned": 168,
-    "grains": 168,
+    "prepared": 48,
+    "prepared food": 48,
+    "prepared foods": 48,
+    "meat": 48,
+    "seafood": 48,
+    # All other categories: 30-day fallback
+    "dairy": 720,
+    "bakery": 720,
+    "produce": 720,
+    "vegetables": 720,
+    "fruits": 720,
+    "beverages": 720,
+    "other": 720,
+    "pantry": 720,
+    "canned": 720,
+    "grains": 720,
 }
 
 
@@ -98,10 +105,30 @@ def _normalize_expiry_date(*candidates: Optional[str]) -> Optional[str]:
     return None
 
 
+# Realistic shelf-life estimates used when SUGGESTING an expiry date on a new
+# listing (separate from the search freshness filter above).
+_SUGGESTED_EXPIRY_DAYS: dict = {
+    "prepared": 2,
+    "prepared food": 2,
+    "prepared foods": 2,
+    "meat": 2,
+    "seafood": 2,
+    "dairy": 5,
+    "bakery": 5,
+    "produce": 7,
+    "vegetables": 7,
+    "fruits": 7,
+    "beverages": 14,
+    "other": 7,
+    "pantry": 30,
+    "canned": 30,
+    "grains": 30,
+}
+
+
 def _suggested_expiry_for_category(category: str) -> str:
     cat = str(category or "other").strip().lower()
-    hours = _PERISHABLE_CATEGORY_MAX_AGE_HOURS.get(cat, 72)
-    days = max(1, int(math.ceil(hours / 24)))
+    days = _SUGGESTED_EXPIRY_DAYS.get(cat, 7)
     return (datetime.now(timezone.utc).date() + timedelta(days=days)).isoformat()
 
 
@@ -139,11 +166,12 @@ def _listing_is_fresh_enough(listing: dict, now: Optional[datetime] = None) -> b
 
     created_dt = _parse_dt(listing.get("created_at"))
     if not created_dt:
-        # If we cannot determine freshness at all, fail closed.
-        return False
+        # No created_at — if listing is active/approved, trust the status.
+        return True
 
     category = str(listing.get("category") or "other").strip().lower()
-    max_age_hours = _PERISHABLE_CATEGORY_MAX_AGE_HOURS.get(category, 72)
+    # Default fallback: 30 days (720h) for uncategorised items
+    max_age_hours = _PERISHABLE_CATEGORY_MAX_AGE_HOURS.get(category, 720)
     age_hours = (now - created_dt).total_seconds() / 3600
     return age_hours <= max_age_hours
 
@@ -1151,6 +1179,74 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "deactivate_listing",
+            "description": (
+                "Soft-remove one of the authenticated user's own food listings by "
+                "setting its status to 'expired'. The row stays in the database. "
+                "Use when the donor says 'mark as unavailable', 'it's all gone now', "
+                "'hide my listing', or 'take it down'. "
+                "Provide listing_id (preferred) OR the listing title to look it up."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "UUID of the authenticated user (the donor)."},
+                    "listing_id": {"type": "string", "description": "UUID of the food_listings row to deactivate."},
+                    "title": {"type": "string", "description": "Listing title to look up if listing_id is not known."},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_listing",
+            "description": (
+                "Permanently delete one of the authenticated user's own food listings "
+                "from the database. Use ONLY when the user explicitly says 'delete', "
+                "'permanently delete', 'remove from database', or 'erase my listing'. "
+                "This is irreversible — confirm with the user before calling. "
+                "Provide listing_id (preferred) OR the listing title to look it up."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "UUID of the authenticated user (the donor)."},
+                    "listing_id": {"type": "string", "description": "UUID of the food_listings row to delete."},
+                    "title": {"type": "string", "description": "Listing title to look up if listing_id is not known."},
+                    "confirmed": {"type": "boolean", "description": "Must be true — set only after the user has explicitly confirmed the deletion."},
+                },
+                "required": ["user_id", "confirmed"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_user_listings",
+            "description": (
+                "Fetch the authenticated user's own food listings (as a donor). "
+                "Use when the user asks 'show my listings', 'what have I posted', "
+                "'my active donations', 'my food shares'. Optionally filter by status."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "UUID of the authenticated user."},
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "approved", "expired", "claimed", "all"],
+                        "description": "Filter by status. Default: active+approved.",
+                    },
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "bulk_post_food_listings",
             "description": "Alias of bulk_import_listings.",
             "parameters": {
@@ -1221,6 +1317,9 @@ async def execute_tool(name: str, arguments: dict) -> dict:
         "navigate_ui": _navigate_ui,
         "meal_suggestions": _get_recipes,
         "bulk_post_food_listings": _bulk_import_listings,
+        "deactivate_listing": _deactivate_listing,
+        "delete_listing": _delete_listing,
+        "get_user_listings": _get_user_listings,
     }
 
     handler = handlers.get(name)
@@ -1486,7 +1585,7 @@ async def _search_food_near_user(
     user_id: str,
     radius_km: float = 10,
     food_type: Optional[str] = None,
-    max_results: int = 10,
+    max_results: int = 20,
 ) -> dict:
     """Search available food listings near the user's location.
 
@@ -3650,7 +3749,23 @@ async def _cancel_claim(
 
     status = str(claim.get("status") or "").lower()
     if status in {"completed", "expired", "declined"}:
-        return {"success": False, "error": f"Claim is already {status}, nothing to cancel."}
+        # The claim_id from conversation history is stale. Try to find a live
+        # active claim — first on the same food item, then any of this user's
+        # active claims — rather than surfacing a confusing error to the user.
+        stale_food_id = claim.get("food_id")
+        try:
+            fresh = await _find_user_claim(user_id, None, stale_food_id)
+            if fresh and str(fresh.get("status") or "").lower() not in {"completed", "expired", "declined"}:
+                claim = fresh
+            else:
+                fresh = await _find_user_claim(user_id, None, None)
+                if fresh:
+                    claim = fresh
+                else:
+                    return {"success": False, "error": f"Claim is already {status}, nothing to cancel."}
+        except Exception as exc:
+            logger.warning("cancel_claim: fallback lookup failed: %s", exc)
+            return {"success": False, "error": f"Claim is already {status}, nothing to cancel."}
 
     cid = claim["id"]
     food_id = claim.get("food_id")
@@ -3765,6 +3880,212 @@ async def _confirm_claim(
         "listing_id": str(food_id) if food_id else None,
         "title": title,
         "summary": f"Pickup confirmed for '{title}'. You're all set — thanks for keeping food out of the landfill!",
+    }
+
+
+# ---------------------------------------------------------------------------
+# delete_listing — permanently delete a donor's own listing from the DB
+# ---------------------------------------------------------------------------
+
+
+async def _delete_listing(
+    user_id: str,
+    listing_id: Optional[str] = None,
+    title: Optional[str] = None,
+    confirmed: bool = False,
+    **_ignored,
+) -> dict:
+    from backend.ai_engine import supabase_get, supabase_delete
+
+    logger.info("delete_listing: user=%s listing=%s title=%s confirmed=%s", user_id, listing_id, title, confirmed)
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+    if not confirmed:
+        return {
+            "success": False,
+            "needs_confirmation": True,
+            "message": "Deletion is permanent and cannot be undone. Please confirm you want to permanently delete this listing.",
+        }
+
+    # Resolve listing_id from title if not provided
+    if not listing_id and title:
+        rows = await supabase_get("food_listings", {
+            "user_id": f"eq.{user_id}",
+            "title": f"ilike.{title.strip()}",
+            "select": "id,title,status",
+            "order": "created_at.desc",
+            "limit": "1",
+        })
+        if rows:
+            listing_id = rows[0]["id"]
+            title = rows[0].get("title") or title
+
+    if not listing_id:
+        return {"success": False, "error": "Could not find a listing to delete. Please provide the listing title or ID."}
+
+    # Verify ownership before deleting
+    check = await supabase_get("food_listings", {
+        "id": f"eq.{listing_id}",
+        "user_id": f"eq.{user_id}",
+        "select": "id,title",
+        "limit": "1",
+    })
+    if not check:
+        return {"success": False, "error": "Listing not found or you don't own it."}
+    title = check[0].get("title") or title or "the listing"
+
+    try:
+        count = await supabase_delete("food_listings", {
+            "id": f"eq.{listing_id}",
+            "user_id": f"eq.{user_id}",
+        })
+    except Exception as exc:
+        logger.error("delete_listing: delete failed: %s", exc)
+        return {"success": False, "error": f"Could not delete listing: {exc}"}
+
+    if count == 0:
+        return {"success": False, "error": "Listing not found or already deleted."}
+
+    return {
+        "success": True,
+        "ok": True,
+        "listing_id": str(listing_id),
+        "title": title,
+        "summary": f"'{title}' has been permanently deleted from the database.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# deactivate_listing — donor removes their own listing
+# ---------------------------------------------------------------------------
+
+
+async def _deactivate_listing(
+    user_id: str,
+    listing_id: Optional[str] = None,
+    title: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    from backend.ai_engine import supabase_get, supabase_patch
+
+    logger.info("deactivate_listing: user=%s listing=%s title=%s", user_id, listing_id, title)
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    # Resolve listing_id from title if not provided
+    if not listing_id and title:
+        rows = await supabase_get("food_listings", {
+            "user_id": f"eq.{user_id}",
+            "title": f"ilike.{title.strip()}",
+            "status": "in.(active,approved,pending)",
+            "select": "id,title,status",
+            "order": "created_at.desc",
+            "limit": "1",
+        })
+        if rows:
+            listing_id = rows[0]["id"]
+            title = rows[0].get("title") or title
+
+    if not listing_id:
+        # Fall back: user's most recently posted active listing
+        rows = await supabase_get("food_listings", {
+            "user_id": f"eq.{user_id}",
+            "status": "in.(active,approved,pending)",
+            "select": "id,title,status",
+            "order": "created_at.desc",
+            "limit": "1",
+        })
+        if not rows:
+            return {"success": False, "error": "No active listing found to deactivate."}
+        listing_id = rows[0]["id"]
+        title = rows[0].get("title") or title
+
+    # Verify ownership
+    check = await supabase_get("food_listings", {
+        "id": f"eq.{listing_id}",
+        "user_id": f"eq.{user_id}",
+        "select": "id,title,status",
+        "limit": "1",
+    })
+    if not check:
+        return {"success": False, "error": "Listing not found or you don't own it."}
+    title = check[0].get("title") or title or "the listing"
+    current_status = str(check[0].get("status") or "").lower()
+    if current_status in {"expired", "completed", "cancelled", "deleted"}:
+        return {"success": False, "error": f"Listing is already {current_status}."}
+
+    try:
+        await supabase_patch(
+            "food_listings",
+            {"id": f"eq.{listing_id}", "user_id": f"eq.{user_id}"},
+            {"status": "expired"},
+        )
+    except Exception as exc:
+        logger.error("deactivate_listing: patch failed: %s", exc)
+        return {"success": False, "error": f"Could not deactivate listing: {exc}"}
+
+    return {
+        "success": True,
+        "ok": True,
+        "listing_id": str(listing_id),
+        "title": title,
+        "summary": f"'{title}' has been taken down and is no longer visible to the community.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# get_user_listings — fetch the donor's own listings
+# ---------------------------------------------------------------------------
+
+
+async def _get_user_listings(
+    user_id: str,
+    status: str = "active",
+    **_ignored,
+) -> dict:
+    from backend.ai_engine import supabase_get
+
+    logger.info("get_user_listings: user=%s status=%s", user_id, status)
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    params: dict = {
+        "user_id": f"eq.{user_id}",
+        "select": "id,title,quantity,unit,category,status,expiry_date,created_at",
+        "order": "created_at.desc",
+        "limit": "20",
+    }
+    if status == "all":
+        pass  # no status filter
+    elif status in {"active", "approved"}:
+        params["status"] = "in.(active,approved,pending)"
+    else:
+        params["status"] = f"eq.{status}"
+
+    try:
+        rows = await supabase_get("food_listings", params)
+    except Exception as exc:
+        return {"success": False, "error": f"Could not fetch listings: {exc}"}
+
+    listings = [
+        {
+            "id": r.get("id"),
+            "title": r.get("title"),
+            "quantity": r.get("quantity"),
+            "unit": r.get("unit"),
+            "category": r.get("category"),
+            "status": r.get("status"),
+            "expiry_date": r.get("expiry_date"),
+        }
+        for r in (rows or [])
+    ]
+
+    return {
+        "success": True,
+        "ok": True,
+        "count": len(listings),
+        "listings": listings,
+        "summary": f"You have {len(listings)} {status if status != 'active' else 'active'} listing(s).",
     }
 
 

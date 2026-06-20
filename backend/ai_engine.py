@@ -74,6 +74,8 @@ FOLLOWUP_MODEL_FALLBACKS: list[str] = [
 
 MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "3"))
 TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT", "60"))
+CHAT_TEMPERATURE = float(os.getenv("AI_CHAT_TEMPERATURE", "0.35"))
+FOLLOWUP_TEMPERATURE = float(os.getenv("AI_FOLLOWUP_TEMPERATURE", "0.35"))
 
 RATE_LIMIT_DEFAULT = int(os.getenv("AI_RATE_LIMIT", "50"))
 RATE_LIMIT_WINDOW = 60
@@ -912,6 +914,17 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
     # model replying with instructions ("go to the listing and tap Claim")
     # instead of calling claim_listing / post_food_listing / cancel_claim.
     action_policy = (
+        "## User-Intent Priority (READ EVERY TURN)\n"
+        "Your top priority on every turn is the user's MOST RECENT message. "
+        "Earlier turns supply context, NOT obligations. If the new message "
+        "shifts topic, contradicts an earlier request, asks a different "
+        "question, or uses pivot phrases ('wait', 'actually', 'nevermind', "
+        "'instead', 'hmm', 'on second thought', 'different question'), DROP "
+        "the prior trajectory immediately and answer the new request. Never "
+        "keep asking the next intake question from an old flow when the user "
+        "has clearly moved on. Re-read the user's last message verbatim "
+        "before deciding what to do.\n"
+        "\n"
         "## Action-Taking Policy (CRITICAL)\n"
         "You are an AGENT, not a help article. When the user asks you to do "
         "something the platform supports, you MUST call the corresponding tool "
@@ -1240,7 +1253,11 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "as the ACTIVE TASK. Hold the partial info you've gathered "
         "(title, qty, address, etc.) in working memory across turns. Do "
         "NOT silently overwrite captured fields when the user mentions a "
-        "different food in a tangent.\n"
+        "different food in a tangent. EXCEPTION: if the user switches to a "
+        "completely different command (find food, claim, dashboard, recipe, "
+        "navigate) or abandons the flow ('never mind', 'forget that'), "
+        "CLEAR the ACTIVE TASK immediately — drop all partial intake fields "
+        "and do not resume unless they explicitly ask to go back.\n"
         "\n"
         "## When the user introduces a NEW food / NEW topic mid-flow\n"
         "Disambiguate explicitly — never guess. Three patterns to watch:\n"
@@ -1249,17 +1266,22 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "     finish the apples, or replace the apples?' Default to "
         "     additional, not replacement. If the donor confirms 'add', "
         "     finish the current item first, then start a new intake for "
-        "     the new item — don't try to bundle both into one listing.\n"
+        "     the new item — don't bundle both into one listing.\n"
         "  2) REPLACEMENT ('actually, ice cream instead', 'never mind "
         "     the apples — ice cream'): confirm once ('Switching to ice "
         "     cream — drop the apples?'), then reset the intake fields "
         "     and restart from title for the new item.\n"
-        "  3) AMBIGUOUS ('ice cream' said with no clear add/replace "
+        "  3) DIFFERENT TASK ('actually find food near me', 'forget the "
+        "     listing — show my impact', 'let's claim that bread instead'): "
+        "     ABANDON the listing intake immediately. Do NOT keep asking "
+        "     intake questions. Execute the new request with the right tool.\n"
+        "  4) AMBIGUOUS ('ice cream' said with no clear add/replace "
         "     verb): ask the one-question disambiguator above. Don't "
         "     post anything until it's clear.\n"
         "After resolving the pivot, ACKNOWLEDGE briefly ('Got it — "
         "adding ice cream after the apples.') and resume the flow at "
-        "the right field.\n"
+        "the right field — UNLESS the pivot was a DIFFERENT TASK (pattern "
+        "3) or abandon phrase; then do NOT resume the old intake.\n"
         "\n"
         "## When the user goes OFF-TOPIC during a flow\n"
         "Examples: 'what's the weather?', 'tell me a joke', 'how's the "
@@ -1312,10 +1334,13 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "## Working-memory checklist for every turn (silent rule)\n"
         "Before responding, internally answer:\n"
         "  • Is there an ACTIVE TASK from earlier turns?\n"
-        "  • Did the user just pivot, add, replace, or go off-topic?\n"
+        "  • Did the user just pivot, add, replace, switch tasks, or go off-topic?\n"
+        "  • If they gave a NEW command (find/claim/dashboard/recipe), abandon "
+        "    any incomplete intake and do the new thing.\n"
         "  • Which captured fields (title, qty, address, ...) are still "
         "    valid? Which need to be re-asked?\n"
-        "Then respond. Never quietly drop a captured field. Never quietly "
+        "Then respond. Never quietly drop a captured field UNLESS the user "
+        "switched tasks or abandoned the flow. Never quietly "
         "swap one food for another without confirmation.\n"
         "\n"
         "### POST-LISTING VERIFICATION (CRITICAL — REPORT BACK)\n"
@@ -2342,6 +2367,363 @@ def _apply_sliding_window(
     return kept
 
 
+_INTAKE_ASSISTANT_CUES = (
+    "how many", "what address", "which community", "when was it made",
+    "best by", "pickup window", "allergens", "post it", "ready to post",
+    "want to share", "what food", "pickup at", "how long is it good",
+    "should i list this under", "does that look good", "want me to add",
+    "which community should", "quick check", "handoff method", "pickup or delivery",
+    "when does it expire", "expiration", "expiry", "list this under",
+    "would you like to share", "share with the community", "loaves do you",
+    "pounds do you", "confirm the", "before i post", "before posting",
+    "cuántos", "qué dirección", "qué comunidad", "cuándo vence",
+    "publicarlo", "compartir", "cuántas", "dirección de recogida",
+    "pick up", "pickup from", "deliver", "drop off", "drop them", "drop-off",
+    "handoff", "recipient pick", "willing to deliver", "where should",
+    "what time", "when can", "when do you", "add a photo", "photo for",
+    "list this", "post this", "ready to list", "does that work",
+    "recoger", "entregar", "recogida",
+)
+
+_USER_INTAKE_MARKERS = (
+    "want to share", "share some", "share my", "to share", "i have ",
+    "post ", "posting", "donate", "donating", "list this", "listing",
+    "give away", "leftover", "extra food", "compartir", "publicar",
+    "donar", "anunciar",
+)
+
+
+def _listing_posted_in_history(history: list[dict[str, Any]]) -> bool:
+    """True when a recent turn already succeeded at post_food_listing."""
+    for msg in reversed(history[-12:]):
+        if str(msg.get("role") or "") != "assistant":
+            continue
+        for action in (msg.get("metadata") or {}).get("actions") or []:
+            if not isinstance(action, dict):
+                continue
+            if action.get("tool") == "post_food_listing" and action.get("ok"):
+                return True
+    return False
+
+
+def _user_started_listing_intake(history: list[dict[str, Any]]) -> bool:
+    for msg in reversed(history[-8:]):
+        if str(msg.get("role") or "") != "user":
+            continue
+        text = str(msg.get("message") or "").lower()
+        if any(marker in text for marker in _USER_INTAKE_MARKERS):
+            return True
+    return False
+
+
+def _assistant_in_listing_intake(history: list[dict[str, Any]]) -> bool:
+    for msg in reversed(history[-8:]):
+        if str(msg.get("role") or "") != "assistant":
+            continue
+        text = str(msg.get("message") or "").lower()
+        if any(cue in text for cue in _INTAKE_ASSISTANT_CUES):
+            return True
+    return False
+
+
+def _history_suggests_active_intake(history: list[dict[str, Any]]) -> bool:
+    """True when a listing intake is in progress and not yet posted."""
+    if not history or _listing_posted_in_history(history):
+        return False
+    user_intake = _user_started_listing_intake(history)
+    assistant_intake = _assistant_in_listing_intake(history)
+    if user_intake and assistant_intake:
+        return True
+    if user_intake and len(history) >= 2:
+        for msg in reversed(history[-8:]):
+            if str(msg.get("role") or "") == "assistant" and str(msg.get("message") or "").strip():
+                return True
+        return False
+    return assistant_intake
+
+
+_TASK_ABANDON_PHRASES = (
+    "never mind", "nevermind", "forget it", "forget that", "scratch that",
+    "stop posting", "cancel that", "don't post", "dont post", "skip that",
+    "leave it", "drop it", "not anymore", "changed my mind", "ignore that",
+    "don't bother", "dont bother", "skip the listing", "stop the listing",
+    "olvídalo", "olvidalo", "déjalo", "dejalo", "no importa", "cancela eso",
+    "ya no", "mejor no",
+)
+
+_TASK_SWITCH_MARKERS = (
+    "find food", "search for food", "what food is available", "what's available",
+    "whats available", "show me food", "food near me", "nearby food",
+    "look for food", "search for", "what is available", "show available",
+    "claim ", "i'll take", "ill take", "reserve that", "grab #", "help me claim",
+    "show my impact", "my impact", "my pickups", "pickup schedule",
+    "my dashboard", "show my listings", "expiring soon", "get directions",
+    "find a recipe", "recipe for", "navigate to", "open the map",
+    "buscar comida", "comida cerca", "reclamar", "mi impacto",
+    "actually find", "instead find", "let's find", "lets find", "now find",
+    "can you find", "help me find", "switch to", "do something else",
+    "something else instead", "different thing", "other thing",
+    "instead of posting", "instead of sharing", "stop sharing", "stop posting",
+    "rather find", "i want to find", "show me what's", "show me whats",
+)
+
+
+def _detect_task_switch_hint(message: str, history: list[dict[str, Any]]) -> Optional[str]:
+    """Inject guidance when the user pivots away from an in-progress intake flow."""
+    lower = (message or "").lower().strip()
+    active_intake = _history_suggests_active_intake(history)
+    # #region agent log
+    _debug_log_bf1680(
+        "ai_engine.py:_detect_task_switch_hint",
+        "task_switch_eval",
+        {
+            "messagePreview": lower[:120],
+            "historyLen": len(history or []),
+            "activeIntake": active_intake,
+            "userIntake": _user_started_listing_intake(history),
+            "assistantIntake": _assistant_in_listing_intake(history),
+            "postedAlready": _listing_posted_in_history(history),
+        },
+        hypothesis_id="A",
+        run_id="post-fix-v2",
+    )
+    # #endregion
+    if not lower or not active_intake:
+        return None
+
+    if any(phrase in lower for phrase in _TASK_ABANDON_PHRASES):
+        # #region agent log
+        _debug_log_bf1680(
+            "ai_engine.py:_detect_task_switch_hint",
+            "task_switch_abandon",
+            {"messagePreview": lower[:120]},
+            hypothesis_id="B",
+        )
+        # #endregion
+        return (
+            "TASK SWITCH (abandon): The user cancelled or abandoned the previous "
+            "listing intake. DROP all partial fields from that intake (title, qty, "
+            "address, community, expiry). Do NOT ask more intake questions for the "
+            "old item. Acknowledge briefly ('Got it — parked that.') and respond to "
+            "their latest message only."
+        )
+
+    if any(marker in lower for marker in _TASK_SWITCH_MARKERS):
+        # #region agent log
+        _debug_log_bf1680(
+            "ai_engine.py:_detect_task_switch_hint",
+            "task_switch_new_command",
+            {"messagePreview": lower[:120]},
+            hypothesis_id="C",
+        )
+        # #endregion
+        return (
+            "TASK SWITCH (new command): The user changed direction while a listing "
+            "intake was in progress. ABANDON the incomplete listing immediately — "
+            "do NOT finish posting the previous item. Execute their NEW request with "
+            "the appropriate tool (search, claim, dashboard, recipe, navigate, etc.). "
+            "Only resume the old listing if they explicitly say they want to go back "
+            "to it."
+        )
+
+    return None
+
+
+_SEARCH_INTENT_MARKERS = (
+    "find food", "food near me", "nearby food", "near me", "search food",
+    "look for food", "what's available", "whats available", "what is available",
+    "show me food", "available food", "food around", "anything available",
+    "buscar comida", "comida cerca", "comida disponible",
+)
+
+# Universal conversational-pivot signals. These fire in ANY context (search,
+# claim, recipe, intake, idle chat) — not just listing intake — so that a user
+# saying "wait, actually..." or "nevermind, can you..." forces the model to
+# treat the new message as the live directive instead of finishing the
+# previous trajectory.
+_CONVERSATIONAL_PIVOT_MARKERS = (
+    "wait, ", "wait,", "wait \u2014", "hold on", "hold up",
+    "actually, ", "actually,", "actually \u2014", "actually i",
+    "hmm, ", "hmm,", "hmm \u2014",
+    "nevermind", "never mind", "scratch that", "forget that",
+    "forget what i", "ignore what i", "ignore that",
+    "no wait", "no, wait", "no \u2014 ", "no \u2014",
+    "on second thought", "changed my mind", "change of plans",
+    "different question", "different topic", "different thing",
+    "let me ask something", "let me ask a different",
+    "scrap that", "switch gears", "switch topics",
+    "instead can you", "instead, can you", "instead could you",
+    "can we do something", "can you do something else",
+    "espera,", "espera \u2014", "olv\u00eddalo", "olvidalo",
+    "mejor no", "cambio de planes", "otra cosa",
+)
+
+_CLAIM_INTENT_MARKERS = (
+    "claim ", "claim#", "claim #", "i'll take", "ill take", "i will take",
+    "reserve that", "reserve it", "grab #", "grab the", "take #", "take the",
+    "i want #", "give me #", "reclamar", "lo tomo", "me lo quedo",
+)
+
+_DASHBOARD_INTENT_MARKERS = (
+    "my impact", "show my impact", "my dashboard", "my pickups",
+    "pickup schedule", "my listings", "show my listings", "expiring soon",
+    "what did i claim", "what have i posted", "mi impacto", "mis recogidas",
+)
+
+_ROUTE_INTENT_MARKERS = (
+    "directions", "get directions", "route to", "navigate to", "how do i get",
+    "show me the way", "drive to", "map route", "cómo llego", "como llego",
+)
+
+
+def _history_has_search_results(history: list[dict[str, Any]]) -> bool:
+    snapshot = _build_memory_snapshot(history)
+    return bool(snapshot and "Last search results" in snapshot)
+
+
+def _detect_conversational_pivot_hint(
+    message: str,
+    history: list[dict[str, Any]],
+) -> Optional[str]:
+    """Catch natural-language topic pivots in ANY flow (search, claim, recipe, intake).
+
+    The marker-based task-switch detector only fires during listing intake.
+    This helper layers on top to catch phrases like 'wait, actually...',
+    'nevermind, can you...', 'hmm, let me ask something different' that signal
+    the user is correcting course, regardless of which flow is active.
+    """
+    if not message or not history or len(history) < 2:
+        return None
+    lower = message.lower().strip()
+    if not any(marker in lower for marker in _CONVERSATIONAL_PIVOT_MARKERS):
+        return None
+    return (
+        "USER PIVOT DETECTED: The user used a course-correction phrase "
+        "(wait / actually / nevermind / instead / hmm / on second thought). "
+        "Treat their CURRENT message as the ONLY live directive. Do NOT "
+        "continue the previous trajectory, finish unanswered follow-up "
+        "questions, or re-execute prior intents. If the new message "
+        "contradicts an earlier instruction, the new message WINS \u2014 drop "
+        "the old one silently and act on what they just said."
+    )
+
+def _detect_turn_intent_hints(
+    message: str,
+    history: list[dict[str, Any]],
+    *,
+    task_switch_active: bool = False,
+) -> list[str]:
+    """Inject per-turn tool mandates so the model acts instead of guessing."""
+    lower = (message or "").lower().strip()
+    if not lower:
+        return []
+
+    hints: list[str] = [
+        "TURN PRIORITY (CRITICAL): The user's latest message is the ONLY "
+        "active instruction for this turn. Answer or act on it directly. Do "
+        "NOT pursue older threads, finish unsent intake questions, or "
+        "re-execute earlier intents unless the current message explicitly "
+        "asks for them. If the current message contradicts an earlier "
+        "instruction, the current message WINS \u2014 drop the old one without "
+        "explanation and act on what they just said."
+    ]
+
+    if task_switch_active:
+        return hints
+
+    if _detect_task_switch_hint(message, history):
+        return hints
+
+    active_intake = _history_suggests_active_intake(history)
+    words = lower.split()
+
+    if active_intake and len(words) <= 10:
+        hints.append(
+            "INTAKE ANSWER: The user is replying to your listing intake "
+            "question. Treat their message as the answer to the field you "
+            "asked for. Do not change topic or repeat questions they already "
+            "answered."
+        )
+
+    if any(marker in lower for marker in _SEARCH_INTENT_MARKERS) and not active_intake:
+        hints.append(
+            "SEARCH INTENT: Call search_food_near_user now. Do not invent "
+            "listings or reply from memory — availability changes as others claim."
+        )
+
+    claim_number = re.search(r"(?:claim|take|grab|#)\s*#?\s*(\d+)", lower)
+    if (
+        any(marker in lower for marker in _CLAIM_INTENT_MARKERS)
+        or claim_number
+        or (
+            _history_has_search_results(history)
+            and len(words) <= 4
+            and re.fullmatch(r"#?\s*\d+|number\s*\d+|\d+", lower.replace(" ", ""))
+        )
+    ):
+        hints.append(
+            "CLAIM INTENT: Call claim_listing using the listing_id from the "
+            "RECENT CONTEXT block or the numbered list you showed. If the "
+            "pick is ambiguous, ask one clarifying question — do not guess."
+        )
+
+    if any(marker in lower for marker in _DASHBOARD_INTENT_MARKERS):
+        hints.append(
+            "DASHBOARD INTENT: Call get_user_dashboard or get_pickup_schedule "
+            "as appropriate. Report live data — do not summarize from chat memory."
+        )
+
+    if any(marker in lower for marker in _ROUTE_INTENT_MARKERS):
+        hints.append(
+            "ROUTE INTENT: Call get_mapbox_route with the destination from the "
+            "user's claim or the listing they selected."
+        )
+
+    # #region agent log
+    if len(hints) > 1:
+        _debug_log_bf1680(
+            "ai_engine.py:_detect_turn_intent_hints",
+            "turn_intent_injected",
+            {
+                "messagePreview": lower[:120],
+                "hintCount": len(hints),
+                "activeIntake": active_intake,
+            },
+            hypothesis_id="accuracy",
+            run_id="accuracy-v1",
+        )
+    # #endregion
+
+    return hints
+
+
+def _debug_log_bf1680(
+    location: str,
+    message: str,
+    data: dict[str, Any],
+    *,
+    hypothesis_id: str = "",
+    run_id: str = "pre-fix",
+) -> None:
+    # #region agent log
+    try:
+        log_path = os.path.join(_PROJECT_ROOT, "debug-bf1680.log")
+        entry = {
+            "sessionId": "bf1680",
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+            "hypothesisId": hypothesis_id,
+            "runId": run_id,
+        }
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+
 def _annotate_no_results(fn_name: str, result: dict[str, Any]) -> dict[str, Any]:
     """Tag empty list-style tool results with status='no_results'.
 
@@ -2838,12 +3220,14 @@ class ConversationEngine:
                 "'Released.', 'Confirmed!', 'Saved.', 'Reminder set.') so the user clearly hears "
                 "the action FINISHED. Never leave the turn open-ended after a write tool — the "
                 "user must know the work is complete before any follow-up question or next step. "
-                "(7) STAY FOCUSED: if a multi-step flow is in progress (e.g. listing apples) and "
-                "the user mentions a different food (e.g. 'ice cream'), DO NOT silently swap "
-                "items. Ask one disambiguator: 'Add ice cream as a second listing after the "
-                "apples, or switch to ice cream instead?' Default assumption is ADD, not "
-                "replace. Carry captured fields (title, qty, address, etc.) across turns; never "
-                "quietly drop them. "
+                "(7) STAY FOCUSED + TASK SWITCHES: if a multi-step flow is in "
+                "progress (e.g. listing apples) and the user mentions a different "
+                "food, ask once: 'Add as a second listing after the apples, or "
+                "switch instead?' If they give a completely different command "
+                "(find food, claim something, show dashboard, recipe, navigate), "
+                "ABANDON the incomplete intake immediately and execute the new "
+                "request. Phrases like 'never mind', 'forget that', 'actually let's "
+                "find food' always cancel the open intake. "
                 "(8) IGNORE-AND-STEER: if the user asks something off-topic mid-flow (weather, "
                 "trivia, jokes, unrelated chat), briefly decline and steer back to the open "
                 "task. If they persist, ask once whether to pause the flow. "
@@ -2866,11 +3250,12 @@ class ConversationEngine:
                 "'¡Enviado!', 'Actualizado.', 'Liberado.', '¡Confirmado!', 'Guardado.', "
                 "'Recordatorio creado.') para que el usuario sepa que la acción YA TERMINÓ antes "
                 "de cualquier siguiente paso. "
-                "(7) MANTÉN EL FOCO: si hay un flujo en curso (p.ej. publicando manzanas) y el "
-                "usuario menciona otra comida (p.ej. 'helado'), NO cambies en silencio. Pregunta "
-                "una sola vez: '¿Agrego el helado como un SEGUNDO anuncio después de las "
-                "manzanas, o cambias a helado?' Por defecto: AGREGAR, no reemplazar. Conserva "
-                "los campos ya capturados (título, cantidad, dirección) entre turnos. "
+                "(7) MANTÉN EL FOCO + CAMBIOS DE TAREA: si hay un flujo en curso "
+                "(p.ej. publicando manzanas) y el usuario menciona otra comida, "
+                "pregunta una vez si agregar o cambiar. Si da un comando distinto "
+                "(buscar comida, reclamar, panel, receta, navegar), ABANDONA de "
+                "inmediato la publicación incompleta y ejecuta lo nuevo. Frases "
+                "como 'olvídalo', 'mejor busca comida' cancelan el flujo abierto. "
                 "(8) IGNORAR Y REDIRIGIR: si en medio del flujo el usuario pregunta algo fuera "
                 "de tema (clima, chistes, trivia), declina brevemente y vuelve a la tarea. Si "
                 "insiste, pregunta una vez si pausamos el flujo. "
@@ -2975,6 +3360,43 @@ class ConversationEngine:
                     "user explicitly asked for nearby distance-based results."
                 ),
             })
+
+        task_switch_hint = _detect_task_switch_hint(message, history)
+        if task_switch_hint:
+            messages.append({"role": "system", "content": task_switch_hint})
+            messages.append({
+                "role": "system",
+                "content": (
+                    "ACTIVE TASK OVERRIDE: There is NO open listing intake for "
+                    "this turn. Ignore any partial title/qty/address/community/"
+                    "expiry gathered earlier. Do not ask intake follow-ups unless "
+                    "the user explicitly starts a new listing in this same message."
+                ),
+            })
+            # #region agent log
+            _debug_log_bf1680(
+                "ai_engine.py:chat",
+                "task_switch_injected",
+                {
+                    "hintPreview": task_switch_hint[:160],
+                    "messagePreview": (message or "")[:120],
+                    "activeTaskCleared": True,
+                },
+                hypothesis_id="D",
+                run_id="post-fix",
+            )
+            # #endregion
+
+        for intent_hint in _detect_turn_intent_hints(
+            message,
+            history,
+            task_switch_active=bool(task_switch_hint),
+        ):
+            messages.append({"role": "system", "content": intent_hint})
+
+        pivot_hint = _detect_conversational_pivot_hint(message, history)
+        if pivot_hint:
+            messages.append({"role": "system", "content": pivot_hint})
 
         messages.append({"role": "user", "content": message})
 
@@ -3153,7 +3575,7 @@ class ConversationEngine:
         payload = {
             "model": CHAT_MODEL,
             "messages": messages,
-            "temperature": 0.7,
+            "temperature": CHAT_TEMPERATURE,
             "max_tokens": 600,
         }
         headers = {
@@ -3239,7 +3661,7 @@ class ConversationEngine:
         payload = {
             "model": CHAT_MODEL,
             "messages": messages,
-            "temperature": 0.7,
+            "temperature": CHAT_TEMPERATURE,
             "max_tokens": 1024,
         }
         if use_tools:
@@ -3496,7 +3918,7 @@ class ConversationEngine:
             followup_payload = {
                 "model": FOLLOWUP_MODEL,
                 "messages": tool_messages,
-                "temperature": 0.7,
+                "temperature": FOLLOWUP_TEMPERATURE,
                 "max_tokens": 1024,
                 # Keep tools attached so the model can retry after a tool
                 # error (e.g. correct an address, switch category) instead

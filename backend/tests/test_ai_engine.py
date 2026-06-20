@@ -38,6 +38,9 @@ with patch.dict("os.environ", _ENV, clear=False):
         _build_memory_snapshot,
         _build_system_prompt,
         _chip_language,
+        _detect_task_switch_hint,
+        _detect_turn_intent_hints,
+        _history_suggests_active_intake,
         _load_training_data,
         check_rate_limit,
         detect_spanish,
@@ -190,6 +193,135 @@ class TestQuickReplyChips:
         # Engine must ignore _chip_language and pass conv lang directly:
         chips = generate_quick_replies(reply, "en")
         assert "Yes, post it" in chips
+
+
+# ===================================================================
+# 1c. Task-switch detection (mid-intake pivots)
+# ===================================================================
+
+class TestTaskSwitchDetection:
+    _INTAKE_HISTORY = [
+        {"role": "user", "message": "I want to share some apples"},
+        {
+            "role": "assistant",
+            "message": "Great! How many pounds of apples do you have?",
+        },
+    ]
+
+    def test_history_detects_active_intake(self):
+        assert _history_suggests_active_intake(self._INTAKE_HISTORY) is True
+
+    def test_history_ignores_unrelated_chat(self):
+        history = [
+            {"role": "user", "message": "hello"},
+            {"role": "assistant", "message": "Hi! How can I help you today?"},
+        ]
+        assert _history_suggests_active_intake(history) is False
+
+    def test_find_food_mid_intake_injects_switch_hint(self):
+        hint = _detect_task_switch_hint(
+            "actually find food near me instead",
+            self._INTAKE_HISTORY,
+        )
+        assert hint is not None
+        assert "ABANDON" in hint
+        assert "find" in hint.lower() or "search" in hint.lower()
+
+    def test_never_mind_mid_intake_injects_abandon_hint(self):
+        hint = _detect_task_switch_hint("never mind", self._INTAKE_HISTORY)
+        assert hint is not None
+        assert "abandon" in hint.lower() or "cancelled" in hint.lower()
+
+    def test_no_hint_without_active_intake(self):
+        hint = _detect_task_switch_hint(
+            "find food near me",
+            [{"role": "assistant", "message": "Hi! How can I help?"}],
+        )
+        assert hint is None
+
+    def test_no_hint_when_still_answering_intake(self):
+        hint = _detect_task_switch_hint("5 pounds", self._INTAKE_HISTORY)
+        assert hint is None
+
+    def test_pickup_delivery_question_counts_as_active_intake(self):
+        history = [
+            {"role": "user", "message": "I want to share 10 lbs of apples"},
+            {
+                "role": "assistant",
+                "message": (
+                    "Great! Will the recipient pick up the apples from you, "
+                    "or are you willing to deliver/drop them off?"
+                ),
+            },
+        ]
+        assert _history_suggests_active_intake(history) is True
+        hint = _detect_task_switch_hint("actually find food near me instead", history)
+        assert hint is not None
+        assert "ABANDON" in hint
+
+    def test_no_intake_after_successful_post(self):
+        history = [
+            {"role": "user", "message": "I want to share apples"},
+            {
+                "role": "assistant",
+                "message": "Posted! Your apples are live.",
+                "metadata": {
+                    "actions": [{"tool": "post_food_listing", "ok": True}],
+                },
+            },
+        ]
+        assert _history_suggests_active_intake(history) is False
+
+
+# ===================================================================
+# 1d. Turn-intent routing (accuracy)
+# ===================================================================
+
+class TestTurnIntentHints:
+    def test_search_intent_mandates_tool(self):
+        hints = _detect_turn_intent_hints("find food near me", [])
+        joined = "\n".join(hints)
+        assert "TURN PRIORITY" in joined
+        assert "search_food_near_user" in joined
+
+    def test_claim_intent_mandates_tool(self):
+        history = [
+            {
+                "role": "assistant",
+                "message": "Here are 3 options near you.",
+                "metadata": {
+                    "actions": [{
+                        "tool": "search_food_near_user",
+                        "ok": True,
+                        "listings": [{"id": "abc", "title": "Bread"}],
+                    }],
+                },
+            },
+        ]
+        hints = _detect_turn_intent_hints("claim #1", history)
+        assert any("claim_listing" in h for h in hints)
+
+    def test_intake_answer_hint_on_short_reply(self):
+        history = [
+            {"role": "user", "message": "I want to share apples"},
+            {"role": "assistant", "message": "How many pounds do you have?"},
+        ]
+        hints = _detect_turn_intent_hints("5 pounds", history)
+        assert any("INTAKE ANSWER" in h for h in hints)
+
+    def test_task_switch_skips_search_intent(self):
+        history = [
+            {"role": "user", "message": "I want to share apples"},
+            {"role": "assistant", "message": "How many pounds do you have?"},
+        ]
+        hints = _detect_turn_intent_hints(
+            "actually find food near me instead",
+            history,
+            task_switch_active=True,
+        )
+        joined = "\n".join(hints)
+        assert "search_food_near_user" not in joined
+        assert "TURN PRIORITY" in joined
 
 
 # ===================================================================
