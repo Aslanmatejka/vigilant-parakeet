@@ -19,7 +19,7 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       port: env.PORT || 3001,
-      open: true,
+      open: false,
       historyApiFallback: true,
       proxy: {
         '/api/ai': {

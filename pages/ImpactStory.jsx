@@ -211,7 +211,7 @@ function ImpactStory() {
 
     // ── Main Page ──
     return (
-        <div className="bg-gray-50 -mx-6 md:-mx-10 -my-6 md:-my-10">
+        <div className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40 -mx-6 md:-mx-10 -my-6 md:-my-10">
             <style>{`
                 @keyframes fadeIn {
                     from { opacity: 0; transform: translateY(20px); }
@@ -236,27 +236,54 @@ function ImpactStory() {
             )}
 
             {/* Hero Section */}
-            <section className="bg-[#D9E1F1] py-20">
-                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-                    <h1 className="text-5xl md:text-6xl font-bold text-gray-900 mb-6 fade-in">
-                        Our Impact Story
-                    </h1>
-                    <p className="text-xl text-gray-700 max-w-3xl mx-auto fade-in mb-8">
-                        Connecting good food to families in need through smart technology and community care
-                    </p>
-                    <div className="flex justify-center gap-4 md:gap-8 mt-8 flex-wrap">
-                        <button onClick={() => document.getElementById('blog-section')?.scrollIntoView({ behavior: 'smooth' })} className="bg-gray-200 text-gray-700 px-6 py-3 rounded-xl font-semibold hover:bg-[#2CABE3] hover:text-white transition-all">
-                            Blog
-                        </button>
-                        <Link to="/news" className="bg-gray-200 text-gray-700 px-6 py-3 rounded-xl font-semibold hover:bg-[#2CABE3] hover:text-white transition-all">
-                            News
-                        </Link>
-                        <Link to="/testimonials" className="bg-gray-200 text-gray-700 px-6 py-3 rounded-xl font-semibold hover:bg-[#2CABE3] hover:text-white transition-all">
-                            Testimonials
-                        </Link>
+            <header className="relative overflow-hidden">
+                {/* Decorative gradient blobs */}
+                <div className="absolute inset-0 -z-10" aria-hidden="true">
+                    <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#2CABE3]/15 blur-3xl" />
+                    <div className="absolute top-10 -right-24 w-96 h-96 rounded-full bg-emerald-300/20 blur-3xl" />
+                </div>
+
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-16 pb-12 sm:pt-20 sm:pb-16">
+                    <div className="text-center">
+                        <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#2CABE3]/10 text-[#2CABE3] text-xs font-semibold mb-5 ring-1 ring-[#2CABE3]/20">
+                            <i className="fas fa-seedling mr-2" aria-hidden="true"></i>
+                            Real Stories, Real Impact
+                        </span>
+                        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 mb-5 tracking-tight">
+                            Our Impact{" "}
+                            <span className="bg-gradient-to-r from-[#2CABE3] to-emerald-500 bg-clip-text text-transparent">
+                                Story
+                            </span>
+                        </h1>
+                        <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
+                            Connecting good food to families in need through smart technology and community care
+                        </p>
+                        <div className="mt-7 flex flex-wrap items-center justify-center gap-2 text-sm">
+                            <button
+                                onClick={() => document.getElementById('blog-section')?.scrollIntoView({ behavior: 'smooth' })}
+                                className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white shadow-sm ring-1 ring-gray-200 text-gray-700 font-medium hover:text-[#2CABE3] transition"
+                            >
+                                <i className="fas fa-pen-nib text-[10px]" aria-hidden="true" />
+                                Blog
+                            </button>
+                            <Link
+                                to="/news"
+                                className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white shadow-sm ring-1 ring-gray-200 text-gray-700 font-medium hover:text-[#2CABE3] transition"
+                            >
+                                <i className="fas fa-newspaper text-[10px]" aria-hidden="true" />
+                                News
+                            </Link>
+                            <Link
+                                to="/testimonials"
+                                className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white shadow-sm ring-1 ring-gray-200 text-gray-700 font-medium hover:text-[#2CABE3] transition"
+                            >
+                                <i className="fas fa-quote-left text-[10px]" aria-hidden="true" />
+                                Testimonials
+                            </Link>
+                        </div>
                     </div>
                 </div>
-            </section>
+            </header>
 
             {/* ── Blog / Featured Cards (Default Section) ── */}
             <section id="blog-section" className="py-16 bg-white">

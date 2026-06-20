@@ -69,7 +69,7 @@ function RecipesPage() {
     }
 
     return (
-        <div className="min-h-screen bg-gray-50">
+        <div className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40">
             <style>{`
                 @keyframes riseUp {
                     from { opacity: 0; transform: translateY(40px); }
@@ -122,18 +122,31 @@ function RecipesPage() {
             )}
 
             {/* Hero */}
-            <section className="bg-gradient-to-br from-red-50 to-orange-100 py-20">
-                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <header className="relative overflow-hidden">
+                {/* Decorative gradient blobs */}
+                <div className="absolute inset-0 -z-10" aria-hidden="true">
+                    <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#2CABE3]/15 blur-3xl" />
+                    <div className="absolute top-10 -right-24 w-96 h-96 rounded-full bg-emerald-300/20 blur-3xl" />
+                </div>
+
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-16 pb-12 sm:pt-20 sm:pb-16">
                     <div className="text-center">
-                        <h1 className="text-5xl md:text-6xl font-bold text-gray-900 mb-6">
-                            🍳 Community Recipes
+                        <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#2CABE3]/10 text-[#2CABE3] text-xs font-semibold mb-5 ring-1 ring-[#2CABE3]/20">
+                            <i className="fas fa-utensils mr-2" aria-hidden="true"></i>
+                            Community Kitchen
+                        </span>
+                        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 mb-5 tracking-tight">
+                            Cook more,{" "}
+                            <span className="bg-gradient-to-r from-[#2CABE3] to-emerald-500 bg-clip-text text-transparent">
+                                waste less
+                            </span>
                         </h1>
-                        <p className="text-xl text-gray-700 max-w-3xl mx-auto">
+                        <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
                             Delicious recipes from our community — learn to cook with rescued food and reduce waste in your kitchen.
                         </p>
                     </div>
                 </div>
-            </section>
+            </header>
 
             {/* Recipes Grid */}
             <section className="py-16">
