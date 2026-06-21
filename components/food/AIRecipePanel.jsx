@@ -52,8 +52,11 @@ export default function AIRecipePanel({ className = '' }) {
                 ingredients: explicit.length ? explicit : null,
                 useClaimed: explicit.length ? false : useClaimed,
                 lowResource,
-                householdSize: Number(householdSize) || 2,
-                maxRecipes: Number(maxRecipes) || 3,
+                // The number input's min/max are browser hints only — a user
+                // can paste arbitrary values. Clamp here so we don't ask the
+                // LLM to plan meals for 999 people.
+                householdSize: Math.min(20, Math.max(1, Number(householdSize) || 2)),
+                maxRecipes: Math.min(5, Math.max(1, Number(maxRecipes) || 3)),
                 dietaryOverrides: dietary.length ? dietary : null,
                 notes: notes.trim() || null,
             });

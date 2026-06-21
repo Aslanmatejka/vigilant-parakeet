@@ -1639,20 +1639,39 @@ function AIChatPanel() {
   }, [isLoading, sendMessage])
 
   // ─── File uploads (photo + CSV → bulk-listings) ───────
+  // All three uploads require an authenticated user: the vision/enrichment
+  // backend rejects anonymous calls, and the storage bucket policy needs a
+  // user id. Gate the trigger so guests get a clear "sign in" message
+  // instead of a generic "Failed to analyze image" downstream.
+  const requireAuthForUpload = useCallback(() => {
+    if (authUser?.id) return true
+    appendLocalMessage({
+      role: 'assistant',
+      message: language === 'es'
+        ? 'Inicia sesión para subir fotos o CSV — necesito identificarte para crear publicaciones a tu nombre.'
+        : 'Sign in to upload photos or CSVs — I need to identify you to post listings on your behalf.',
+      isError: true,
+    })
+    return false
+  }, [appendLocalMessage, authUser?.id, language])
+
   const triggerPhotoUpload = useCallback(() => {
     if (uploadBusy || isLoading) return
+    if (!requireAuthForUpload()) return
     photoInputRef.current?.click()
-  }, [uploadBusy, isLoading])
+  }, [uploadBusy, isLoading, requireAuthForUpload])
 
   const triggerCsvUpload = useCallback(() => {
     if (uploadBusy || isLoading) return
+    if (!requireAuthForUpload()) return
     csvInputRef.current?.click()
-  }, [uploadBusy, isLoading])
+  }, [uploadBusy, isLoading, requireAuthForUpload])
 
   const triggerInlinePhotoUpload = useCallback(() => {
     if (uploadBusy || isLoading) return
+    if (!requireAuthForUpload()) return
     inlinePhotoInputRef.current?.click()
-  }, [uploadBusy, isLoading])
+  }, [uploadBusy, isLoading, requireAuthForUpload])
 
   // Inline photo upload: upload to storage and inject "image: <url>" as a
   // regular chat message so the AI handles it per CASE A (include in the
@@ -1661,8 +1680,17 @@ function AIChatPanel() {
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
-    if (!file.type.startsWith('image/')) {
-      appendLocalMessage({ role: 'assistant', message: language === 'es' ? 'Selecciona una imagen.' : 'Please select an image.', isError: true })
+    // Same raster-only whitelist as the vision upload — SVG/etc. are rejected
+    // here too because the URL ends up in food_listings.image_url.
+    const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      appendLocalMessage({
+        role: 'assistant',
+        message: language === 'es'
+          ? 'Solo se admiten imágenes JPG, PNG, WEBP o GIF.'
+          : 'Only JPG, PNG, WEBP, or GIF images are supported.',
+        isError: true,
+      })
       return
     }
     if (file.size > 8 * 1024 * 1024) {
@@ -1711,8 +1739,15 @@ function AIChatPanel() {
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
-    if (!file.type.startsWith('image/')) {
-      const msg = language === 'es' ? 'Selecciona una imagen.' : 'Please select an image.'
+    // Whitelist concrete raster MIME types only. `image/*` would let SVGs
+    // through, which can carry inline scripts — even if the chat UI only
+    // ever renders the result via <img src>, the URL also ends up in
+    // food_listings.image_url and could be embedded as <object> elsewhere.
+    const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      const msg = language === 'es'
+        ? 'Solo se admiten imágenes JPG, PNG, WEBP o GIF.'
+        : 'Only JPG, PNG, WEBP, or GIF images are supported.'
       setPendingUpload({ kind: 'photo', error: msg, filename: file.name })
       appendLocalMessage({ role: 'assistant', message: msg, isError: true })
       return
@@ -2434,6 +2469,10 @@ function AIChatPanel() {
         setIsVoiceSpeaking(true)
         try {
           const audioBlob = await textToSpeech(cleanText, { lang: language === 'es' ? 'es' : 'en' })
+          // The TTS request can take hundreds of ms; if the user exited voice
+          // mode in the meantime, abandon the audio rather than play it with
+          // no visible indicator (and skip the fallback path too).
+          if (!voiceModeRef.current) { setIsVoiceSpeaking(false); return }
           const { play, stop } = playAudioBlob(
             audioBlob,
             () => { setTapToHear(null); setIsVoiceSpeaking(true) },
@@ -2457,8 +2496,9 @@ function AIChatPanel() {
           console.warn('OpenAI TTS failed, falling back to browser speech:', ttsErr)
         }
 
-        // Fallback: browser SpeechSynthesis
-        if (typeof window !== 'undefined' && window.speechSynthesis) {
+        // Fallback: browser SpeechSynthesis — also gated on voice mode so an
+        // exit during the failed TTS request doesn't trigger background audio.
+        if (voiceModeRef.current && typeof window !== 'undefined' && window.speechSynthesis) {
           await new Promise((resolve) => {
             const utterance = new SpeechSynthesisUtterance(cleanText.slice(0, 500))
             utterance.lang = language === 'es' ? 'es-ES' : 'en-US'
@@ -2473,9 +2513,11 @@ function AIChatPanel() {
         console.error('Voice output failed:', err)
         setIsVoiceSpeaking(false)
       } finally {
-        // Re-enable mic tracks after TTS finishes (with delay to avoid echo)
+        // Re-enable mic tracks after TTS finishes (with delay to avoid echo).
+        // Only re-enable if voice mode is still active — exitVoiceMode already
+        // stopped the stream and we don't want to re-arm a freshly muted one.
         setTimeout(() => {
-          if (mediaStreamRef.current) {
+          if (voiceModeRef.current && mediaStreamRef.current) {
             mediaStreamRef.current.getAudioTracks().forEach(t => { t.enabled = true })
           }
         }, 500)

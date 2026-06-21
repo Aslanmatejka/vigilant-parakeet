@@ -31,10 +31,30 @@ function VoiceOutput({ text, language = 'en', autoSpeak = false, onSpeakingChang
   const [supported, setSupported] = useState(false)
   const utteranceRef = useRef(null)
   const prevTextRef = useRef('')
+  // Chromium fires `voiceschanged` once voices are ready; the first
+  // synchronous `getVoices()` after page load often returns []. Cache the
+  // latest list so `speak()` can pick the right voice immediately.
+  const voicesRef = useRef([])
 
   useEffect(() => {
     setSupported(!!synth)
-    return () => { if (synth) synth.cancel() }
+    if (!synth) return undefined
+
+    const refreshVoices = () => { voicesRef.current = synth.getVoices() || [] }
+    refreshVoices()
+    synth.addEventListener?.('voiceschanged', refreshVoices)
+
+    return () => {
+      synth.removeEventListener?.('voiceschanged', refreshVoices)
+      // Null out callbacks before cancel so a queued onend/onerror from this
+      // utterance doesn't fire setState on an unmounted component.
+      if (utteranceRef.current) {
+        utteranceRef.current.onstart = null
+        utteranceRef.current.onend = null
+        utteranceRef.current.onerror = null
+      }
+      synth.cancel()
+    }
   }, [])
 
   // Auto-speak when new text arrives
@@ -64,8 +84,9 @@ function VoiceOutput({ text, language = 'en', autoSpeak = false, onSpeakingChang
     utterance.rate = 0.95
     utterance.pitch = 1.0
 
-    // Try to pick a natural voice for the language
-    const voices = synth.getVoices()
+    // Prefer the cached voice list; fall back to a fresh getVoices() in case
+    // voices loaded between renders without firing `voiceschanged`.
+    const voices = voicesRef.current.length ? voicesRef.current : (synth.getVoices() || [])
     const langCode = language === 'es' ? 'es' : 'en'
     const preferredVoice = voices.find(v =>
       v.lang.startsWith(langCode) && (v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Microsoft'))

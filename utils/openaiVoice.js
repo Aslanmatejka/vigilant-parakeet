@@ -67,6 +67,11 @@ export async function textToSpeech(text, options = {}) {
  *   that can be called from inside a click/tap handler to start playback.
  * @returns {{ play: Promise<void>, stop: Function, audio: HTMLAudioElement }}
  */
+// Autoplay-blocked audio held alive for replay. If the user never taps the
+// "Tap to hear" button, the blob would otherwise leak indefinitely. 30s is
+// long enough for a real human tap, short enough to keep memory bounded.
+const AUTOPLAY_REPLAY_TTL_MS = 30_000
+
 export function playAudioBlob(audioBlob, onStart, onEnd, onBlocked) {
   const url = URL.createObjectURL(audioBlob)
   const audio = new Audio(url)
@@ -81,43 +86,58 @@ export function playAudioBlob(audioBlob, onStart, onEnd, onBlocked) {
     try { URL.revokeObjectURL(url) } catch { /* noop */ }
   }
 
-  const stop = () => {
-    audio.pause()
-    audio.currentTime = 0
-    revoke()
-    onEnd?.()
+  // Capture the play-promise resolver so stop() and the autoplay-block TTL
+  // can settle the promise — pause() alone never fires `ended` and would
+  // leave `await play` hanging forever.
+  let resolvePlay
+  const play = new Promise((resolve) => { resolvePlay = resolve })
+  const settle = () => { if (resolvePlay) { const r = resolvePlay; resolvePlay = null; r() } }
+  let autoplayTtlTimer = null
+  const clearAutoplayTtl = () => {
+    if (autoplayTtlTimer) { clearTimeout(autoplayTtlTimer); autoplayTtlTimer = null }
   }
 
-  const play = new Promise((resolve) => {
-    audio.onplay = () => onStart?.()
-    audio.onended = () => {
-      revoke()
-      onEnd?.()
-      resolve()
-    }
-    audio.onerror = () => {
-      revoke()
-      onEnd?.()
-      resolve()
-    }
-    audio.play().catch((err) => {
-      // iOS Safari (and some mobile browsers) reject autoplay that isn't
-      // tied to a user gesture with a NotAllowedError. Surface a `replay`
-      // handler so the UI can show a "Tap to hear" button; tapping it calls
-      // replay() from within a real gesture, which is allowed. Other errors
-      // (decode, network) just resolve so the caller continues.
-      const isAutoplayBlock = err && (err.name === 'NotAllowedError' || err.name === 'AbortError')
-      if (isAutoplayBlock && typeof onBlocked === 'function') {
-        const replay = () => audio.play().catch(() => { revoke(); onEnd?.() })
-        onBlocked(replay)
-        // Do NOT revoke yet — the blob must stay alive for the replay.
-        resolve()
-        return
+  const stop = () => {
+    clearAutoplayTtl()
+    try { audio.pause() } catch { /* noop */ }
+    try { audio.currentTime = 0 } catch { /* noop */ }
+    // Null out handlers so a late `ended`/`error` from the paused stream
+    // doesn't double-fire onEnd or resolve a promise that's already settled.
+    audio.onplay = audio.onended = audio.onerror = null
+    revoke()
+    onEnd?.()
+    settle()
+  }
+
+  audio.onplay = () => { clearAutoplayTtl(); onStart?.() }
+  audio.onended = () => { revoke(); onEnd?.(); settle() }
+  audio.onerror = () => { revoke(); onEnd?.(); settle() }
+  audio.play().catch((err) => {
+    // iOS Safari (and some mobile browsers) reject autoplay that isn't
+    // tied to a user gesture with a NotAllowedError. Surface a `replay`
+    // handler so the UI can show a "Tap to hear" button; tapping it calls
+    // replay() from within a real gesture, which is allowed. Other errors
+    // (decode, network) just resolve so the caller continues.
+    const isAutoplayBlock = err && (err.name === 'NotAllowedError' || err.name === 'AbortError')
+    if (isAutoplayBlock && typeof onBlocked === 'function' && !revoked) {
+      const replay = () => {
+        if (revoked) return Promise.resolve()
+        clearAutoplayTtl()
+        return audio.play().catch(() => { revoke(); onEnd?.(); settle() })
       }
-      revoke()
-      onEnd?.()
-      resolve()
-    })
+      onBlocked(replay)
+      // Cap how long the blob stays alive waiting for a replay tap so we
+      // don't leak memory if the user dismisses the UI or navigates away.
+      autoplayTtlTimer = setTimeout(() => {
+        autoplayTtlTimer = null
+        if (!revoked) { revoke(); onEnd?.(); settle() }
+      }, AUTOPLAY_REPLAY_TTL_MS)
+      settle()
+      return
+    }
+    revoke()
+    onEnd?.()
+    settle()
   })
 
   return { play, stop, audio }
