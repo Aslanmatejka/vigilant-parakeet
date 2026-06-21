@@ -176,18 +176,25 @@ export const useFoodListings = (filters = {}, limit = null) => {
         if (matchesFilter) {
           // Re-fetch to get joined community name and other enriched fields.
           scheduleRefetch();
-        } else {
+        } else if (payload.new?.id) {
           // Status no longer matches — remove from list immediately.
+          // Guard against payload.new being null (Supabase can deliver
+          // UPDATEs with RLS-stripped rows).
           setListings(prev => prev.filter(l => l.id !== payload.new.id))
         }
       } else if (payload.eventType === 'DELETE') {
-        setListings(prev => prev.filter(listing => listing.id !== payload.old.id))
+        if (payload.old?.id) {
+          setListings(prev => prev.filter(listing => listing.id !== payload.old.id))
+        }
       }
     })
 
     return () => {
       clearTimeout(refetchTimer);
-      dataService.unsubscribe('food_listings');
+      // Unsubscribe by handle so a second mount of this hook can't take
+      // over the 'food_listings' Map slot and leave our channel orphaned
+      // on the realtime connection.
+      dataService.unsubscribeChannel(subscription);
     }
   }, [JSON.stringify(filters.status)])
 
@@ -320,35 +327,37 @@ export const useTrades = (userId) => {
 
   // Real-time subscriptions for both trade types
   useEffect(() => {
+    // Debounce so a burst of trade events (e.g. server-side bulk update)
+    // only triggers one refetch.
+    let refetchTimer = null;
+    const scheduleRefetch = () => {
+      clearTimeout(refetchTimer);
+      refetchTimer = setTimeout(() => { fetchTrades(); }, 400);
+    };
+
+    // INSERT/UPDATE refetch (instead of appending payload.new directly) so
+    // the normalized shape — offeredItem, requestedItem, requestedItems,
+    // createdAt — stays consistent. Appending the raw DB row used to
+    // crash UI that read `trade.offeredItem.title` on a freshly-inserted
+    // realtime row.
     const tradesSubscription = dataService.subscribeToTrades(userId, (payload) => {
-      if (payload.eventType === 'INSERT') {
-        setTrades(prev => [{ ...payload.new, type: 'regular' }, ...prev])
-      } else if (payload.eventType === 'UPDATE') {
-        setTrades(prev => prev.map(trade =>
-          trade.id === payload.new.id && trade.type === 'regular' 
-            ? { ...payload.new, type: 'regular' } 
-            : trade
-        ))
+      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+        scheduleRefetch();
       }
     })
 
     const barterTradesSubscription = dataService.subscribeToBarterTrades(userId, (payload) => {
-      if (payload.eventType === 'INSERT') {
-        setTrades(prev => [{ ...payload.new, type: 'barter' }, ...prev])
-      } else if (payload.eventType === 'UPDATE') {
-        setTrades(prev => prev.map(trade =>
-          trade.id === payload.new.id && trade.type === 'barter' 
-            ? { ...payload.new, type: 'barter' } 
-            : trade
-        ))
+      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+        scheduleRefetch();
       }
     })
 
     return () => {
-      dataService.unsubscribe('trades')
-      dataService.unsubscribe('barter_trades')
+      clearTimeout(refetchTimer);
+      dataService.unsubscribeChannel(tradesSubscription);
+      dataService.unsubscribeChannel(barterTradesSubscription);
     }
-  }, [userId])
+  }, [userId, fetchTrades])
 
   const createTrade = useCallback(async (tradeData) => {
     try {
@@ -439,22 +448,31 @@ export const useNotifications = (userId) => {
   useEffect(() => {
     if (!userId) return
 
+    // Debounce bursts (e.g. system broadcast to all users) into one refetch
+    // so the UI doesn't re-render once per notification row.
+    let refetchTimer = null;
+    const scheduleRefetch = () => {
+      clearTimeout(refetchTimer);
+      refetchTimer = setTimeout(() => { fetchNotifications(); }, 400);
+    };
+
     const subscription = dataService.subscribeToNotifications(userId, (payload) => {
-      if (payload.eventType === 'INSERT') {
-        setNotifications(prev => [payload.new, ...prev])
-      } else if (payload.eventType === 'UPDATE') {
-        setNotifications(prev => prev.map(notification => 
-          notification.id === payload.new.id ? payload.new : notification
-        ))
+      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+        // Refetch instead of appending payload.new so any joined
+        // sender/sender_name columns stay consistent with fetched rows.
+        scheduleRefetch();
       } else if (payload.eventType === 'DELETE') {
-        setNotifications(prev => prev.filter(notification => notification.id !== payload.old.id))
+        if (payload.old?.id) {
+          setNotifications(prev => prev.filter(notification => notification.id !== payload.old.id))
+        }
       }
     })
 
     return () => {
-      dataService.unsubscribe('notifications')
+      clearTimeout(refetchTimer);
+      dataService.unsubscribeChannel(subscription);
     }
-  }, [userId])
+  }, [userId, fetchNotifications])
 
   const markAsRead = useCallback(async (notificationId) => {
     try {
@@ -550,12 +568,15 @@ export const useDistributionEvents = () => {
   const registerForEvent = useCallback(async (eventId, userId) => {
     try {
       const result = await dataService.registerForEvent(eventId, userId)
+      // Refresh so attendee count / "you're attending" badge reflect the
+      // registration immediately instead of waiting for a manual reload.
+      await fetchEvents()
       return result
     } catch (error) {
       setError(error.message)
       throw error
     }
-  }, [])
+  }, [fetchEvents])
 
   return {
     events,

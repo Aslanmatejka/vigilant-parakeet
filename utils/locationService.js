@@ -4,6 +4,12 @@ class LocationService {
     constructor() {
         this.currentPosition = null;
         this.watchId = null;
+        // Fan-out set: every consumer that called startWatchingPosition gets
+        // its callback invoked on each browser position event. Without this,
+        // the second simultaneous consumer of useGeoLocation was silently
+        // dropped because the singleton watchId early-returned and never
+        // registered the new callback.
+        this.watchCallbacks = new Set();
     }
 
     async requestLocationPermission() {
@@ -44,7 +50,14 @@ class LocationService {
     }
 
     startWatchingPosition(callback) {
-        if (this.watchId) return;
+        if (typeof callback !== 'function') return;
+        this.watchCallbacks.add(callback);
+        // Replay the last known position so a freshly-mounted consumer
+        // doesn't have to wait for the next GPS update before rendering.
+        if (this.currentPosition) {
+            try { callback(this.currentPosition); } catch (_) { /* swallow */ }
+        }
+        if (this.watchId !== null) return; // Already watching; new callback joins fan-out.
 
         this.watchId = navigator.geolocation.watchPosition(
             (position) => {
@@ -52,7 +65,11 @@ class LocationService {
                     latitude: position.coords.latitude,
                     longitude: position.coords.longitude
                 };
-                callback(this.currentPosition);
+                // Snapshot the Set so a callback that unsubscribes itself
+                // mid-iteration doesn't mutate what we're iterating over.
+                for (const cb of [...this.watchCallbacks]) {
+                    try { cb(this.currentPosition); } catch (_) { /* one bad consumer shouldn't break others */ }
+                }
             },
             (error) => {
                 console.error('Error watching location:', error);
@@ -65,8 +82,19 @@ class LocationService {
         );
     }
 
-    stopWatchingPosition() {
-        if (this.watchId) {
+    stopWatchingPosition(callback) {
+        if (callback) {
+            this.watchCallbacks.delete(callback);
+        } else {
+            // Legacy no-arg form: clear everything. Keeps the previous
+            // behavior of stop-meaning-stop-all so any caller that hasn't
+            // been migrated yet still works.
+            this.watchCallbacks.clear();
+        }
+        // Only release the underlying browser watch when no consumer is
+        // still listening \u2014 otherwise a component unmount used to clear
+        // the watch out from under the other consumers still on screen.
+        if (this.watchCallbacks.size === 0 && this.watchId !== null) {
             navigator.geolocation.clearWatch(this.watchId);
             this.watchId = null;
         }

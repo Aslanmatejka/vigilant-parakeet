@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import impactService from '../impactService';
 
 export function useImpact() {
@@ -15,37 +15,45 @@ export function useImpact() {
     });
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    // Don't flip `loading` back on for background realtime refreshes \u2014 the
+    // home/Success page would otherwise flash a spinner every time an
+    // admin edits an impact row.
+    const hasLoadedRef = useRef(false);
+    const refetchTimerRef = useRef(null);
 
-    useEffect(() => {
-        console.log('[useImpact] Hook initialized, fetching initial data...');
-        fetchImpact();
-
-        const channel = impactService.subscribeToImpactUpdates((payload) => {
-            console.log('[useImpact] 🔄 Real-time update triggered, refetching...', payload);
-            fetchImpact();
-        });
-
-        return () => {
-            console.log('[useImpact] Cleaning up subscription...');
-            impactService.unsubscribeFromImpactUpdates(channel);
-        };
-    }, []);
-
-    const fetchImpact = async () => {
+    const fetchImpact = useCallback(async () => {
         try {
-            console.log('[useImpact] Fetching impact data...');
-            setLoading(true);
+            if (!hasLoadedRef.current) setLoading(true);
             const data = await impactService.getAggregatedImpact();
-            console.log('[useImpact] ✅ Impact data updated:', data);
             setImpact(data);
             setError(null);
+            hasLoadedRef.current = true;
         } catch (err) {
-            console.error('[useImpact] ❌ Error fetching impact data:', err);
+            console.error('[useImpact] Error fetching impact data:', err);
             setError(err.message);
         } finally {
             setLoading(false);
         }
-    };
+    }, []);
+
+    useEffect(() => {
+        fetchImpact();
+
+        // Debounce realtime refetches so a bulk-import burst (e.g. 100 rows
+        // changing in 200ms) collapses into a single round-trip instead of
+        // 100 parallel fetches that all overwrite each other.
+        const scheduleRefetch = () => {
+            clearTimeout(refetchTimerRef.current);
+            refetchTimerRef.current = setTimeout(() => { fetchImpact(); }, 400);
+        };
+
+        const channel = impactService.subscribeToImpactUpdates(scheduleRefetch);
+
+        return () => {
+            clearTimeout(refetchTimerRef.current);
+            impactService.unsubscribeFromImpactUpdates(channel);
+        };
+    }, [fetchImpact]);
 
     return { impact, loading, error, refetch: fetchImpact };
 }

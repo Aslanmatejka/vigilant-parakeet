@@ -195,6 +195,23 @@ export function useAIChat() {
     }
   }, [language, user?.language])
 
+  // Render a localized 'please sign in' assistant bubble and return true if
+  // the user isn't authenticated. The backend rejects unauthenticated AI
+  // calls with 401, which used to surface as a confusing 'authentication
+  // issue — contact support' error bubble. Catching it client-side avoids
+  // the wasted round-trip AND the wasted per-IP rate-limit bucket.
+  const renderSignInRequired = useCallback(() => {
+    setMessages(prev => [...prev, {
+      id: `assistant-signin-${Date.now()}`,
+      role: 'assistant',
+      message: language === 'es'
+        ? 'Necesitas iniciar sesión para hablar conmigo. Crea una cuenta o inicia sesión y vuelve a intentarlo.'
+        : "You need to sign in to chat with me. Please log in or create an account and try again.",
+      isError: false,
+      timestamp: new Date().toISOString(),
+    }])
+  }, [language])
+
   /**
    * Core send-and-render pipeline shared by `sendMessage`, `retryMessage`,
    * and `regenerateLast`. Centralized so all three pathways apply the same
@@ -229,7 +246,7 @@ export function useAIChat() {
 
     try {
       const result = await aiChatService.sendMessage(text.trim(), {
-        userId: user?.id || '00000000-0000-0000-0000-000000000000',
+        userId: user.id,
       })
 
       // Drop the response if a newer request was started while this one
@@ -306,8 +323,21 @@ export function useAIChat() {
 
   const sendMessage = useCallback(async (text) => {
     if (!text?.trim() || isLoadingRef.current) return
+    if (!isAuthenticated || !user?.id) {
+      // Add the user bubble so the conversation reads naturally, then the
+      // assistant explains why we can't respond. Avoids hitting /api/ai/chat
+      // with a nil UUID that the backend will 401.
+      setMessages(prev => [...prev, {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        message: text.trim(),
+        timestamp: new Date().toISOString(),
+      }])
+      renderSignInRequired()
+      return
+    }
     await runChatTurn(text)
-  }, [runChatTurn])
+  }, [runChatTurn, isAuthenticated, user?.id, renderSignInRequired])
 
   /**
    * Retry a failed assistant turn. Resends the original user text (stashed
@@ -343,6 +373,10 @@ export function useAIChat() {
 
   const sendVoice = useCallback(async (audioBlob) => {
     if (isLoadingRef.current || !audioBlob) return
+    if (!isAuthenticated || !user?.id) {
+      renderSignInRequired()
+      return
+    }
 
     const seq = ++reqSeqRef.current
     isLoadingRef.current = true
@@ -351,7 +385,7 @@ export function useAIChat() {
 
     try {
       const result = await aiChatService.sendVoice(audioBlob, {
-        userId: user?.id || '00000000-0000-0000-0000-000000000000',
+        userId: user.id,
         includeAudio: true,
       })
 
@@ -426,7 +460,7 @@ export function useAIChat() {
         setIsLoading(false)
       }
     }
-  }, [language, user?.id, friendlyErrorMessage])
+  }, [language, user?.id, friendlyErrorMessage, isAuthenticated, renderSignInRequired])
 
   const clearHistory = useCallback(async () => {
     try {
@@ -479,12 +513,16 @@ export function useAIChat() {
    */
   const sendSilentMessage = useCallback(async (text) => {
     if (!text?.trim()) return
+    // Silent prompts are a no-op for guests — there's no user bubble to
+    // explain why, and showing a sign-in nudge in response to a backend
+    // event would be confusing. Just bail.
+    if (!isAuthenticated || !user?.id) return
     // Intentionally NOT setting isLoading — silent prompts run in the
     // background and must not block the user from typing/sending real
     // messages. The assistant reply still appears as a normal bubble.
     try {
       const result = await aiChatService.sendMessage(text.trim(), {
-        userId: user?.id || '00000000-0000-0000-0000-000000000000',
+        userId: user.id,
         silent: true,
       })
       if (result.lang && result.lang !== language) setLanguage(result.lang)
@@ -509,7 +547,7 @@ export function useAIChat() {
       // failed bulk-upload reactions don't disappear silently in dev.
       console.warn('sendSilentMessage failed:', err)
     }
-  }, [language, user?.id])
+  }, [language, user?.id, isAuthenticated])
 
   return {
     messages,

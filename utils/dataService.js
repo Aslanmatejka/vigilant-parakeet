@@ -1601,6 +1601,28 @@ class DataService {
     }
   }
 
+  // Unsubscribe by channel reference instead of by table-name key. The
+  // name-keyed Map stores only ONE channel per table, so two hooks that
+  // both subscribe to e.g. food_listings would have the first channel
+  // orphaned on the Supabase realtime connection. Callers that hold the
+  // returned subscription handle should prefer this method so their own
+  // channel is torn down even if a second consumer has overwritten the
+  // Map slot since.
+  unsubscribeChannel(subscription) {
+    if (!subscription) return
+    try {
+      supabase.removeChannel(subscription)
+    } catch (error) {
+      console.error('Error unsubscribing channel:', error)
+    }
+    // Sweep any Map slot that points at this same channel so we don't
+    // leak a stale entry that future unsubscribe(name) calls would try
+    // to remove again.
+    for (const [name, sub] of this.subscriptions.entries()) {
+      if (sub === subscription) this.subscriptions.delete(name)
+    }
+  }
+
   unsubscribeAll() {
     this.subscriptions.forEach((subscription, channelName) => {
       try {

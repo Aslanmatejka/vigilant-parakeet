@@ -24,9 +24,12 @@ export function useCommunityRole() {
             } catch (_) { /* keep cached */ }
         })()
         const onChanged = (e) => {
-            if (!e?.detail || e.detail.userId === user.id) {
-                setRole(e.detail?.role ?? null)
-            }
+            // Ignore malformed events with no detail \u2014 the old code would
+            // setRole(null) on any stray dispatch, briefly wiping the user's
+            // role until the next page reload re-fetched it.
+            if (!e?.detail || typeof e.detail !== 'object') return
+            if (e.detail.userId && e.detail.userId !== user.id) return
+            setRole(e.detail.role ?? null)
         }
         window.addEventListener('dogoods:community-role-changed', onChanged)
         return () => {

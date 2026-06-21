@@ -8,6 +8,10 @@ export function useGeoLocation() {
     const [error, setError] = useState(null);
     const [watching, setWatching] = useState(false);
     const watchingRef = useRef(false);
+    // Stable per-instance callback reference so we can unsubscribe THIS
+    // consumer on unmount without tearing down the shared watch out from
+    // under other components still using useGeoLocation.
+    const watchCallbackRef = useRef(null);
 
     useEffect(() => {
         // Check if we have permission when the hook is first used
@@ -15,8 +19,10 @@ export function useGeoLocation() {
         
         // Cleanup any watching when component unmounts
         return () => {
-            if (watchingRef.current) {
-                locationService.stopWatchingPosition();
+            if (watchingRef.current && watchCallbackRef.current) {
+                locationService.stopWatchingPosition(watchCallbackRef.current);
+                watchingRef.current = false;
+                watchCallbackRef.current = null;
             }
         };
     }, []);
@@ -63,9 +69,9 @@ export function useGeoLocation() {
 
     const startWatching = () => {
         if (!watchingRef.current) {
-            locationService.startWatchingPosition((position) => {
-                setLocation(position);
-            });
+            const cb = (position) => { setLocation(position); };
+            watchCallbackRef.current = cb;
+            locationService.startWatchingPosition(cb);
             setWatching(true);
             watchingRef.current = true;
         }
