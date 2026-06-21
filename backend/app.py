@@ -794,6 +794,7 @@ class AIChatResponse(BaseModel):
     transcript: str | None = None
     tool_results: list[dict] = []
     suggestions: list[str | dict[str, Any]] = []
+    next_step: dict[str, str] | None = None
     timestamp: str
 
 

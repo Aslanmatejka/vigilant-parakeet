@@ -4235,6 +4235,16 @@ class ConversationEngine:
         # (`lang`) from the user's own messages — never re-detect from the
         # assistant reply. Mixed-language replies (e.g. English prose ending
         # in "¿Quieres que lo publique?") must not flip chips to Spanish.
+        suggestions: list[Any] = list(generate_quick_replies(response_text, lang))
+        next_step = compute_next_step(actions, lang)
+        if next_step:
+            # Prepend as the first chip so it renders above the generic
+            # quick-replies without any frontend changes. The leading 👉
+            # gives it visual weight.
+            suggestions = [
+                {**next_step, "kind": "next_step"},
+                *(s for s in suggestions if s != next_step["label"]),
+            ]
         return {
             "text": response_text,
             "audio_url": audio_b64,  # data URL, or None
@@ -4244,7 +4254,8 @@ class ConversationEngine:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "tool_results": actions,
             "actions": actions,
-            "suggestions": generate_quick_replies(response_text, lang),
+            "suggestions": suggestions,
+            "next_step": next_step,
         }
 
     async def _persist_conversation(
@@ -4883,6 +4894,96 @@ def _chip_language(reply_text: str, conv_lang: str) -> str:
     if strong_es_punct or (es_hits >= 3 and es_hits > en_hits):
         return "es"
     return "en"
+
+
+# Tools whose successful completion warrants a "next step" suggestion.
+_NEXT_STEP_CLAIM_TOOLS = {"claim_food_listing", "claim_listing", "claim_food"}
+_NEXT_STEP_POST_TOOLS = {
+    "post_food_listing", "create_food_listing",
+    "bulk_post_food_listings", "bulk_import_listings",
+}
+_NEXT_STEP_SEARCH_TOOLS = {
+    "search_food_listings", "search_food_near_user",
+    "find_food", "get_recent_listings",
+}
+_NEXT_STEP_SEARCH_THRESHOLD = 10
+
+
+def compute_next_step(
+    actions: Optional[list[dict[str, Any]]],
+    lang: str = "en",
+) -> Optional[dict[str, str]]:
+    """Deterministic "What should I do next?" recommendation.
+
+    Inspects the tool trace from the just-finished turn and returns a small
+    {label, prompt} dict the UI surfaces as the first chip below the AI
+    reply. Pure rule-based, no extra LLM call. Returns None for pure
+    conversational turns — a chip that doesn't lead somewhere is worse
+    than no chip at all.
+    """
+    if not actions:
+        return None
+
+    es = (lang or "en").lower().startswith("es")
+
+    # Walk the trace in reverse — the LAST successful tool wins, so a
+    # follow-up tool (e.g. get_user_listings after a post) doesn't bury
+    # the more recent action.
+    for entry in reversed(actions):
+        if not isinstance(entry, dict) or not entry.get("ok"):
+            continue
+        tool = entry.get("tool") or ""
+        raw_result = entry.get("result")
+        result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
+
+        # 1) After a claim → review pickup details
+        if tool in _NEXT_STEP_CLAIM_TOOLS:
+            return {
+                "label": "\U0001f449 Revisar detalles de recogida" if es
+                         else "\U0001f449 Review pickup details",
+                "prompt": "Mu\u00e9strame los detalles de recogida" if es
+                          else "Show me the pickup details",
+            }
+
+        # 2) After a successful post with no photo → add one
+        if tool in _NEXT_STEP_POST_TOOLS:
+            raw_listing = result.get("listing")
+            listing: dict[str, Any] = raw_listing if isinstance(raw_listing, dict) else {}
+            has_photo = bool(
+                result.get("image_url")
+                or result.get("photo_url")
+                or result.get("has_photo")
+                or listing.get("image_url")
+                or listing.get("has_photo")
+            )
+            if not has_photo:
+                return {
+                    "label": "\U0001f449 Agregar una foto para m\u00e1s visibilidad" if es
+                             else "\U0001f449 Add a photo to increase visibility",
+                    "prompt": "Agregar una foto a mi publicaci\u00f3n" if es
+                              else "Add a photo to my listing",
+                }
+
+        # 3) After a broad search → narrow it
+        if tool in _NEXT_STEP_SEARCH_TOOLS:
+            results = result.get("results") or result.get("listings") or []
+            if isinstance(results, list):
+                count = len(results)
+            elif isinstance(result.get("total"), int):
+                count = result["total"]
+            elif isinstance(result.get("count"), int):
+                count = result["count"]
+            else:
+                count = 0
+            if count > _NEXT_STEP_SEARCH_THRESHOLD:
+                return {
+                    "label": "\U0001f449 Filtrar por distancia o preferencia diet\u00e9tica" if es
+                             else "\U0001f449 Narrow by distance or dietary preference",
+                    "prompt": "Filtrar por distancia o preferencia diet\u00e9tica" if es
+                              else "Narrow by distance or dietary preference",
+                }
+
+    return None
 
 
 def generate_quick_replies(text: str, lang: str = "en") -> list[str]:

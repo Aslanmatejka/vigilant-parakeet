@@ -41,6 +41,7 @@ function mapChatSuccess(data, requestId = null) {
     conversationId: data.conversation_id || null,
     toolResults,
     suggestions: data.suggestions || [],
+    nextStep: data.next_step || null,
     action: extractActionFromToolResults(toolResults),
     requestId,
     error: null,

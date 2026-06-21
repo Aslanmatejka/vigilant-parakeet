@@ -553,3 +553,111 @@ def test_safety_expiry_warning():
     assert any(s in lo for s in ("expir", "today", "tomorrow", "days")), (
         f"No freshness/expiry framing in reply: {reply[:400]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# "What should I do next?" engine — deterministic next_step suggestions
+# ---------------------------------------------------------------------------
+
+from backend.ai_engine import compute_next_step  # noqa: E402
+
+
+def test_next_step_after_claim_unit():
+    actions = [{
+        "tool": "claim_food_listing", "ok": True,
+        "result": {"success": True, "claim_id": "x", "listing_id": "y"},
+    }]
+    step = compute_next_step(actions, lang="en")
+    assert step is not None
+    assert "pickup details" in step["label"].lower()
+
+
+def test_next_step_after_post_without_photo_unit():
+    actions = [{
+        "tool": "post_food_listing", "ok": True,
+        "result": {"success": True, "listing_id": "abc", "title": "Bread"},
+    }]
+    step = compute_next_step(actions, lang="en")
+    assert step is not None
+    assert "photo" in step["label"].lower()
+
+
+def test_next_step_after_post_with_photo_returns_none_unit():
+    actions = [{
+        "tool": "post_food_listing", "ok": True,
+        "result": {
+            "success": True, "listing_id": "abc", "title": "Bread",
+            "image_url": "https://cdn.example.com/x.jpg",
+        },
+    }]
+    step = compute_next_step(actions, lang="en")
+    assert step is None, f"expected None when photo already attached, got {step!r}"
+
+
+def test_next_step_after_broad_search_unit():
+    actions = [{
+        "tool": "search_food_near_user", "ok": True,
+        "result": {"listings": [{"id": i} for i in range(15)]},
+    }]
+    step = compute_next_step(actions, lang="en")
+    assert step is not None
+    assert "narrow" in step["label"].lower()
+
+
+def test_next_step_after_small_search_returns_none_unit():
+    actions = [{
+        "tool": "search_food_near_user", "ok": True,
+        "result": {"listings": [{"id": i} for i in range(3)]},
+    }]
+    step = compute_next_step(actions, lang="en")
+    assert step is None, f"small result set should not trigger narrow chip, got {step!r}"
+
+
+def test_next_step_spanish_localization_unit():
+    actions = [{
+        "tool": "claim_food_listing", "ok": True,
+        "result": {"success": True, "claim_id": "x"},
+    }]
+    step = compute_next_step(actions, lang="es")
+    assert step is not None
+    assert "recogida" in step["label"].lower() or "detalles" in step["label"].lower()
+
+
+def test_next_step_no_actions_returns_none_unit():
+    assert compute_next_step([], lang="en") is None
+    assert compute_next_step(None, lang="en") is None
+
+
+def test_next_step_failed_tool_ignored_unit():
+    actions = [{
+        "tool": "claim_food_listing", "ok": False,
+        "result": {"success": False, "error": "not_found"},
+    }]
+    assert compute_next_step(actions, lang="en") is None
+
+
+def test_next_step_surfaces_in_chat_response_for_broad_search():
+    """Integration: a broad search should surface a narrow-down chip."""
+    time.sleep(0.4)
+    convo = f"nextstep-search-{int(time.time())}"
+    resp = _chat("show me food near me", conversation_id=convo)
+    print(f"\n[next_step:search] tools={[t.get('tool') for t in resp.get('tool_results') or []]}")
+    print(f"[next_step:search] next_step={resp.get('next_step')!r}")
+    next_step = resp.get("next_step")
+    # Pass if either next_step surfaced OR the search returned <=10 results
+    # (in which case no narrow chip is the correct behaviour).
+    if next_step is None:
+        results_count = 0
+        for tr in resp.get("tool_results") or []:
+            res = tr.get("result") or {}
+            listings = res.get("listings") or res.get("results") or []
+            if isinstance(listings, list):
+                results_count = max(results_count, len(listings))
+        assert results_count <= 10, (
+            f"broad search returned {results_count} results but no next_step chip surfaced"
+        )
+    else:
+        assert "narrow" in next_step["label"].lower(), (
+            f"unexpected next_step label for search: {next_step}"
+        )
+
