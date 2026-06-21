@@ -5,8 +5,7 @@ import Input from "../components/common/Input";
 import FoodCard from "../components/food/FoodCard";
 import FoodMap from "../components/common/FoodMap";
 import VoiceLocationSearch from "../components/food/VoiceLocationSearch";
-import { toast } from "react-toastify";
-import { useFoodListings, useSearch } from "../utils/hooks/useSupabase";
+import { useFoodListings } from "../utils/hooks/useSupabase";
 import { useEffectiveLocation } from "../utils/hooks/useLocation";
 import { useAuthContext } from "../utils/AuthContext";
 import UrgencyService from "../utils/urgencyService";
@@ -20,6 +19,60 @@ const CATEGORY_MAPPING = {
     fruits: 'produce',
     vegetables: 'produce'
 };
+
+// Human labels used by the active-filter chip row.
+const CATEGORY_LABELS = {
+    produce: 'Produce',
+    dairy: 'Dairy',
+    bakery: 'Bakery',
+    pantry: 'Pantry',
+    meat: 'Meat',
+    seafood: 'Seafood',
+    frozen: 'Frozen',
+    snacks: 'Snacks',
+    beverages: 'Beverages',
+    prepared: 'Prepared',
+    other: 'Other',
+};
+
+const RADIUS_OPTIONS = [
+    { value: '5', label: '5 km' },
+    { value: '10', label: '10 km' },
+    { value: '25', label: '25 km' },
+    { value: '50', label: '50 km' },
+    { value: '100', label: '100 km' },
+];
+
+const SORT_OPTIONS = [
+    { value: 'urgency', label: 'Expiring soon' },
+    { value: 'distance', label: 'Nearest', requiresGps: true },
+    { value: 'newest', label: 'Newest' },
+];
+
+// Small debounce hook so typing into the search input filters the list
+// locally without firing on every keystroke.
+function useDebouncedValue(value, delay = 250) {
+    const [debounced, setDebounced] = useState(value);
+    useEffect(() => {
+        const t = setTimeout(() => setDebounced(value), delay);
+        return () => clearTimeout(t);
+    }, [value, delay]);
+    return debounced;
+}
+
+// Shimmer placeholder shown while the initial fetch is in flight so the
+// grid and map don't both hide behind a single spinner.
+const FoodCardSkeleton = () => (
+    <div className="rounded-xl bg-white border border-gray-100 shadow-sm overflow-hidden animate-pulse">
+        <div className="h-28 sm:h-32 bg-gray-200" />
+        <div className="p-2.5 sm:p-4 space-y-2">
+            <div className="h-4 bg-gray-200 rounded w-3/4" />
+            <div className="h-3 bg-gray-100 rounded w-1/2" />
+            <div className="h-3 bg-gray-100 rounded w-2/3" />
+            <div className="h-9 bg-gray-100 rounded-full mt-2" />
+        </div>
+    </div>
+);
 
 // Calculate distance between two points using Haversine formula
 const calculateDistance = (lat1, lon1, lat2, lon2) => {
@@ -40,7 +93,6 @@ function FindFoodPage({ initialCategory }) {
     const { isAuthenticated, user } = useAuthContext();
     
     const { listings: foods, loading: foodsLoading, error: foodsError, fetchListings } = useFoodListings({ status: ['approved', 'active'] });
-    const { search, results: searchResults, loading: searchLoading } = useSearch();
     const { 
         location: currentLocation, 
         loading: geoLoading, 
@@ -51,15 +103,15 @@ function FindFoodPage({ initialCategory }) {
     const { setAIRoute, clearAIOverlays, centerOn } = useMapContext();
     
     const [searchTerm, setSearchTerm] = useState('');
-    const [isSearchActive, setIsSearchActive] = useState(false);
+    const debouncedSearch = useDebouncedValue(searchTerm, 250);
     const [visibleCount, setVisibleCount] = useState(12);
     const [hoveredFoodId, setHoveredFoodId] = useState(null);
     const [voiceModalOpen, setVoiceModalOpen] = useState(false);
     const [communityNames, setCommunityNames] = useState({});
     const [filters, setFilters] = useState({
         category: initialCategory || '',
-        radius: '100',
-        sortBy: 'newest',
+        radius: '25',
+        sortBy: 'urgency',
         community: ''
     });
     // Initial data load and category/community from URL
@@ -114,26 +166,6 @@ function FindFoodPage({ initialCategory }) {
     }, [fetchListings]);
 
     // Event handlers
-    const handleSearch = async () => {
-        if (!searchTerm.trim()) {
-            setIsSearchActive(false);
-            return;
-        }
-        
-        setIsSearchActive(true);
-        try {
-            await search(searchTerm, filters);
-        } catch (error) {
-            toast.error('Search failed. Please try again.');
-            setIsSearchActive(false);
-        }
-    };
-
-    const handleClearSearch = () => {
-        setSearchTerm('');
-        setIsSearchActive(false);
-    };
-
     const handleClaim = (food) => {
         // Ensure food object has both id and objectId for compatibility
         const claimFood = {
@@ -161,9 +193,31 @@ function FindFoodPage({ initialCategory }) {
         }
     };
 
+    const clearFilter = (name) => {
+        if (name === 'search') {
+            setSearchTerm('');
+            return;
+        }
+        handleFilterChange({ target: { name, value: '' } });
+    };
+
+    const resetAllFilters = () => {
+        setSearchTerm('');
+        setFilters({
+            category: '',
+            radius: '25',
+            sortBy: 'urgency',
+            community: ''
+        });
+        navigate(routerLocation.pathname, { replace: true });
+    };
+
     const filteredFoods = useMemo(() => {
-        // Use search results if search is active, otherwise use all foods
-        let result = isSearchActive ? [...searchResults] : [...foods];
+        // Local-only filtering keeps the UX simple: one source of truth
+        // (foods from useFoodListings), one debounced text filter, one
+        // memo. No server search round-trip, no two-mode (active/idle)
+        // state machine.
+        let result = [...foods];
 
         // Client-side safety: hide any listing whose expiry_date is in the past
         // or whose status is 'expired'. This ensures stale cache never shows expired items.
@@ -185,12 +239,12 @@ function FindFoodPage({ initialCategory }) {
             return String(food.expiry_date).slice(0, 10) >= todayStr;
         });
 
-        if (!isSearchActive && searchTerm) {
-            const searchTermLower = searchTerm.toLowerCase();
-            result = result.filter(food => 
-                (food.title || '').toLowerCase().includes(searchTermLower) ||
-                (food.description || '').toLowerCase().includes(searchTermLower) ||
-                (typeof food.location === 'string' ? food.location : (food.location?.address || food.full_address || '')).toLowerCase().includes(searchTermLower)
+        const term = debouncedSearch.trim().toLowerCase();
+        if (term) {
+            result = result.filter(food =>
+                (food.title || '').toLowerCase().includes(term) ||
+                (food.description || '').toLowerCase().includes(term) ||
+                (typeof food.location === 'string' ? food.location : (food.location?.address || food.full_address || '')).toLowerCase().includes(term)
             );
         }
 
@@ -265,28 +319,36 @@ function FindFoodPage({ initialCategory }) {
             result.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
         }
 
-        // If we have search results with scores, sort by them
-        if (isSearchActive && searchResults.length > 0) {
-            // Check if search results have scores
-            const hasScores = searchResults.some(r => r.matchScore !== undefined);
-            if (hasScores) {
-                result.sort((a, b) => {
-                    const resultA = searchResults.find(r => r.id === a.id);
-                    const resultB = searchResults.find(r => r.id === b.id);
-                    return (resultB?.matchScore || 0) - (resultA?.matchScore || 0);
-                });
-            }
-        }
-
         return result;
-    }, [foods, searchResults, isSearchActive, searchTerm, filters, currentLocation]);
+    }, [foods, debouncedSearch, filters, currentLocation, locationSource]);
 
-    const LoadingSpinner = () => (
-        <div className="text-center py-12" role="status">
-            <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-[#2CABE3] mx-auto" aria-hidden="true"></div>
-            <p className="mt-4 text-gray-600">Loading food listings...</p>
-            <span className="sr-only">Loading food listings</span>
-        </div>
+    // Count of listings whose urgency is critical or high — surfaced in the
+    // listings header so the user sees "3 expiring soon" at a glance.
+    const urgencyCount = useMemo(() => {
+        return filteredFoods.reduce((acc, food) => {
+            const level = UrgencyService.calculateUrgencyLevel(food);
+            return level === 'critical' || level === 'high' ? acc + 1 : acc;
+        }, 0);
+    }, [filteredFoods]);
+
+    const activeFilterCount = (
+        (filters.category ? 1 : 0)
+        + (filters.community ? 1 : 0)
+        + (debouncedSearch.trim() ? 1 : 0)
+    );
+
+    const emptyReason = [
+        filters.category && (CATEGORY_LABELS[filters.category] || filters.category),
+        debouncedSearch.trim() && `matching "${debouncedSearch.trim()}"`,
+        locationSource === 'gps' && currentLocation && `within ${filters.radius} km`,
+    ].filter(Boolean).join(' · ');
+
+    const skeletonGrid = (
+        <>
+            {Array.from({ length: 6 }).map((_, i) => (
+                <FoodCardSkeleton key={`sk-${i}`} />
+            ))}
+        </>
     );
 
     const ErrorDisplay = () => (
@@ -301,6 +363,20 @@ function FindFoodPage({ initialCategory }) {
                 Try Again
             </Button>
         </div>
+    );
+
+    const FilterChip = ({ children, onRemove, ariaLabel }) => (
+        <span className="inline-flex items-center gap-1 rounded-full bg-cyan-50 text-cyan-800 border border-cyan-100 pl-3 pr-1 py-1 text-xs font-medium">
+            {children}
+            <button
+                type="button"
+                onClick={onRemove}
+                aria-label={ariaLabel}
+                className="inline-flex h-6 w-6 items-center justify-center rounded-full hover:bg-cyan-100 text-cyan-700"
+            >
+                <i className="fas fa-times text-[10px]" aria-hidden="true" />
+            </button>
+        </span>
     );
 
     return (
@@ -350,49 +426,150 @@ function FindFoodPage({ initialCategory }) {
                         <div className="relative flex-1">
                             <i className="fas fa-search absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none" aria-hidden="true"></i>
                             <input
-                                type="text"
+                                type="search"
                                 name="search"
                                 value={searchTerm}
                                 onChange={e => setSearchTerm(e.target.value)}
-                                onKeyDown={e => { if (e.key === 'Enter') handleSearch(); }}
                                 placeholder="Search food..."
-                                className="w-full min-h-[44px] pl-10 pr-3 py-2.5 rounded-full bg-white border border-gray-200 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3]"
+                                aria-label="Search food listings"
+                                className="w-full min-h-[44px] pl-10 pr-10 py-2.5 rounded-full bg-white border border-gray-200 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3]"
                             />
+                            {searchTerm && (
+                                <button
+                                    type="button"
+                                    onClick={() => setSearchTerm('')}
+                                    aria-label="Clear search"
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 h-7 w-7 inline-flex items-center justify-center rounded-full text-gray-400 hover:bg-gray-100"
+                                >
+                                    <i className="fas fa-times text-xs" aria-hidden="true" />
+                                </button>
+                            )}
                         </div>
                         <select
                             name="category"
                             value={filters.category}
                             onChange={handleFilterChange}
+                            aria-label="Filter by category"
                             className="w-full sm:w-48 min-h-[44px] rounded-full bg-white border border-gray-200 px-4 py-2.5 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3]"
                         >
                             <option value="">All categories</option>
-                            <option value="produce">Produce</option>
-                            <option value="dairy">Dairy</option>
-                            <option value="bakery">Bakery</option>
-                            <option value="pantry">Pantry</option>
-                            <option value="meat">Meat</option>
-                            <option value="seafood">Seafood</option>
-                            <option value="frozen">Frozen</option>
-                            <option value="snacks">Snacks</option>
-                            <option value="beverages">Beverages</option>
-                            <option value="prepared">Prepared</option>
-                            <option value="other">Other</option>
+                            {Object.entries(CATEGORY_LABELS).map(([value, label]) => (
+                                <option key={value} value={value}>{label}</option>
+                            ))}
                         </select>
-                        {isSearchActive && (
-                            <Button variant="secondary" className="min-h-[44px] w-full sm:w-auto" onClick={handleClearSearch}>Clear</Button>
+                    </div>
+
+                    {/* Sort + radius pill row — surfaces controls that were
+                        previously locked into state with no UI. */}
+                    <div className="flex flex-wrap items-center gap-2">
+                        <label className="inline-flex items-center gap-1.5 text-xs text-gray-500 bg-white border border-gray-200 rounded-full pl-3 pr-1 py-1">
+                            <i className="fas fa-sort-amount-down text-gray-400" aria-hidden="true" />
+                            <span className="sr-only">Sort by</span>
+                            <select
+                                name="sortBy"
+                                value={filters.sortBy}
+                                onChange={handleFilterChange}
+                                aria-label="Sort listings"
+                                className="bg-transparent text-sm text-gray-700 focus:outline-none pr-1 py-1 cursor-pointer"
+                            >
+                                {SORT_OPTIONS.map(opt => (
+                                    <option
+                                        key={opt.value}
+                                        value={opt.value}
+                                        disabled={opt.requiresGps && locationSource !== 'gps'}
+                                    >
+                                        {opt.label}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                        <label className={`inline-flex items-center gap-1.5 text-xs text-gray-500 bg-white border border-gray-200 rounded-full pl-3 pr-1 py-1 ${locationSource !== 'gps' ? 'opacity-60' : ''}`}>
+                            <i className="fas fa-location-crosshairs text-gray-400" aria-hidden="true" />
+                            <span>Within</span>
+                            <select
+                                name="radius"
+                                value={filters.radius}
+                                onChange={handleFilterChange}
+                                disabled={locationSource !== 'gps'}
+                                aria-label="Distance radius"
+                                className="bg-transparent text-sm text-gray-700 focus:outline-none pr-1 py-1 cursor-pointer disabled:cursor-not-allowed"
+                            >
+                                {RADIUS_OPTIONS.map(opt => (
+                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                ))}
+                            </select>
+                        </label>
+                        <button
+                            type="button"
+                            onClick={() => setVoiceModalOpen(true)}
+                            className="inline-flex items-center justify-center gap-2 min-h-[36px] rounded-full bg-gradient-to-r from-[#2CABE3] to-[#1d8fbf] px-4 py-1.5 text-sm font-semibold text-white shadow-md shadow-[#2CABE3]/25 hover:shadow-lg hover:shadow-[#2CABE3]/30 transition touch-manipulation"
+                        >
+                            <i className="fas fa-microphone text-xs" aria-hidden="true" />
+                            Voice + GPS
+                        </button>
+                        {activeFilterCount > 0 && (
+                            <button
+                                type="button"
+                                onClick={resetAllFilters}
+                                className="text-xs text-gray-500 hover:text-gray-700 underline ml-auto"
+                            >
+                                Reset all
+                            </button>
                         )}
                     </div>
 
-                    <button
-                        type="button"
-                        onClick={() => setVoiceModalOpen(true)}
-                        className="w-full sm:w-auto sm:self-end inline-flex items-center justify-center gap-2 min-h-[44px] rounded-full bg-gradient-to-r from-[#2CABE3] to-[#1d8fbf] px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-[#2CABE3]/25 hover:shadow-lg hover:shadow-[#2CABE3]/30 transition touch-manipulation"
-                    >
-                        <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/20">
-                            <i className="fas fa-microphone text-xs" aria-hidden="true" />
-                        </span>
-                        Voice + GPS finder
-                    </button>
+                    {/* Active filter chips so the user can see and one-tap-
+                        clear each filter individually. */}
+                    {activeFilterCount > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5" aria-label="Active filters">
+                            {debouncedSearch.trim() && (
+                                <FilterChip
+                                    onRemove={() => clearFilter('search')}
+                                    ariaLabel={`Remove search filter "${debouncedSearch.trim()}"`}
+                                >
+                                    <i className="fas fa-search text-[10px] opacity-70" aria-hidden="true" />
+                                    &ldquo;{debouncedSearch.trim()}&rdquo;
+                                </FilterChip>
+                            )}
+                            {filters.category && (
+                                <FilterChip
+                                    onRemove={() => clearFilter('category')}
+                                    ariaLabel={`Remove ${CATEGORY_LABELS[filters.category] || filters.category} filter`}
+                                >
+                                    {CATEGORY_LABELS[filters.category] || filters.category}
+                                </FilterChip>
+                            )}
+                            {filters.community && (
+                                <FilterChip
+                                    onRemove={() => clearFilter('community')}
+                                    ariaLabel="Remove community filter"
+                                >
+                                    {communityNames[String(filters.community)] || 'Community'}
+                                </FilterChip>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Soft prompt to enable GPS — only shown when the user
+                        is not already on GPS. Keeps distance/radius controls
+                        meaningful without nagging granted users. */}
+                    {locationSource !== 'gps' && (
+                        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs sm:text-sm text-amber-900 flex items-start gap-2">
+                            <i className="fas fa-location-arrow text-amber-500 mt-0.5" aria-hidden="true" />
+                            <span className="flex-1">
+                                {geoError ? 'Location access blocked. ' : ''}
+                                Enable location to sort by nearest and filter by radius.
+                                <button
+                                    type="button"
+                                    onClick={enableGeolocation}
+                                    disabled={geoLoading}
+                                    className="ml-1 font-semibold underline hover:no-underline disabled:opacity-50"
+                                >
+                                    {geoLoading ? 'Locating…' : 'Enable location'}
+                                </button>
+                            </span>
+                        </div>
+                    )}
                 </div>
                 <div className="mt-4 sm:mt-12">
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
@@ -423,35 +600,77 @@ function FindFoodPage({ initialCategory }) {
                             >
                                 Available Food Listings
                                 {filteredFoods.length > 0 && (
-                                    <span className="ml-2 text-sm font-normal text-gray-500">({filteredFoods.length})</span>
+                                    <span className="ml-2 text-sm font-normal text-gray-500">
+                                        · {filteredFoods.length}
+                                        {urgencyCount > 0 && (
+                                            <span className="ml-1.5 text-rose-600 font-semibold">
+                                                · {urgencyCount} expiring soon
+                                            </span>
+                                        )}
+                                    </span>
                                 )}
                             </h2>
                             <div className="grid grid-cols-2 gap-2 sm:gap-4 text-xs sm:text-sm [&_.h-48]:h-28 sm:[&_.h-48]:h-32 [&_#card-title]:text-sm [&_#card-title]:leading-snug [&_#card-title]:line-clamp-2 sm:[&_#card-title]:text-lg sm:[&_#card-title]:line-clamp-none [&_.p-4]:p-2.5 sm:[&_.p-4]:p-4">
                                 {foodsLoading && foods.length === 0 ? (
-                                    <div className="col-span-2"><LoadingSpinner /></div>
+                                    skeletonGrid
                                 ) : foodsError ? (
                                     <div className="col-span-2"><ErrorDisplay /></div>
                                 ) : filteredFoods.length === 0 ? (
                                     <div className="col-span-2 text-center py-12" role="status">
-                                        <i className="fas fa-search text-gray-400 text-4xl mb-4" aria-hidden="true"></i>
-                                        <p className="text-gray-600 mb-4">No food listings found</p>
-                                        <Button
-                                            variant="secondary"
-                                            onClick={() => {
-                                                setSearchTerm('');
-                                                // Also exit search mode so the full
-                                                // listings replace the search results.
-                                                setIsSearchActive(false);
-                                                setFilters({
-                                                    category: '',
-                                                    radius: '100',
-                                                    sortBy: 'newest',
-                                                    community: ''
-                                                });
-                                            }}
-                                        >
-                                            Clear Filters
-                                        </Button>
+                                        <i className="fas fa-utensils text-gray-300 text-4xl mb-3" aria-hidden="true"></i>
+                                        <p className="text-gray-700 font-medium">
+                                            No food listings{emptyReason ? <span className="text-gray-500 font-normal"> ({emptyReason})</span> : null}
+                                        </p>
+                                        <p className="text-sm text-gray-500 mt-1">
+                                            {activeFilterCount > 0 ? 'Try widening your filters.' : 'Check back soon — new listings appear every minute.'}
+                                        </p>
+                                        <div className="flex flex-wrap justify-center gap-2 mt-4">
+                                            {filters.category && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => clearFilter('category')}
+                                                    className="inline-flex items-center gap-1.5 rounded-full bg-white border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                                                >
+                                                    Show all categories
+                                                </button>
+                                            )}
+                                            {locationSource === 'gps' && Number(filters.radius) < 100 && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setFilters(prev => ({ ...prev, radius: '100' }))}
+                                                    className="inline-flex items-center gap-1.5 rounded-full bg-white border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                                                >
+                                                    Widen to 100 km
+                                                </button>
+                                            )}
+                                            {debouncedSearch.trim() && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => clearFilter('search')}
+                                                    className="inline-flex items-center gap-1.5 rounded-full bg-white border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                                                >
+                                                    Clear search
+                                                </button>
+                                            )}
+                                            {activeFilterCount === 0 && (
+                                                <Link
+                                                    to="/share"
+                                                    className="inline-flex items-center gap-1.5 rounded-full bg-cyan-600 text-white px-3 py-1.5 text-xs font-semibold hover:bg-cyan-700"
+                                                >
+                                                    <i className="fas fa-heart text-[10px]" aria-hidden="true" />
+                                                    Share food yourself
+                                                </Link>
+                                            )}
+                                            {activeFilterCount > 1 && (
+                                                <button
+                                                    type="button"
+                                                    onClick={resetAllFilters}
+                                                    className="inline-flex items-center gap-1.5 rounded-full bg-gray-900 text-white px-3 py-1.5 text-xs font-semibold hover:bg-gray-800"
+                                                >
+                                                    Reset all filters
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
                                 ) : (
                                     filteredFoods.slice(0, visibleCount).map((food) => (
@@ -475,18 +694,25 @@ function FindFoodPage({ initialCategory }) {
                                     ))
                                 )}
                             </div>
-                            {filteredFoods.length > visibleCount && (
-                                <div className="flex justify-center mt-6">
-                                    <button
-                                        type="button"
-                                        onClick={() => setVisibleCount(c => c + 4)}
-                                        className="inline-flex items-center justify-center gap-2 min-h-[44px] w-full sm:w-auto px-5 py-2.5 rounded-full bg-white border border-gray-200 shadow-sm text-sm font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition touch-manipulation"
-                                    >
-                                        <i className="fas fa-ellipsis-h text-gray-400" aria-hidden="true"></i>
-                                        {filteredFoods.length - visibleCount} More
-                                    </button>
-                                </div>
-                            )}
+                            {filteredFoods.length > visibleCount && (() => {
+                                const remaining = filteredFoods.length - visibleCount;
+                                const showAll = remaining <= 12;
+                                const increment = showAll ? remaining : 12;
+                                return (
+                                    <div className="flex justify-center mt-6">
+                                        <button
+                                            type="button"
+                                            onClick={() => setVisibleCount(c => c + increment)}
+                                            className="inline-flex items-center justify-center gap-2 min-h-[44px] w-full sm:w-auto px-5 py-2.5 rounded-full bg-white border border-gray-200 shadow-sm text-sm font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition touch-manipulation"
+                                        >
+                                            <i className="fas fa-plus text-gray-400 text-xs" aria-hidden="true"></i>
+                                            {showAll
+                                                ? `Show all ${remaining} more`
+                                                : `Show 12 more · ${remaining} left`}
+                                        </button>
+                                    </div>
+                                );
+                            })()}
                         </div>
                     </div>
                 </div>
