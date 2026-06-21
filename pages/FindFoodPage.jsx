@@ -4,14 +4,10 @@ import Button from "../components/common/Button";
 import Input from "../components/common/Input";
 import FoodCard from "../components/food/FoodCard";
 import FoodMap from "../components/common/FoodMap";
-import VoiceLocationSearch from "../components/food/VoiceLocationSearch";
 import { useFoodListings } from "../utils/hooks/useSupabase";
 import { useEffectiveLocation } from "../utils/hooks/useLocation";
 import { useAuthContext } from "../utils/AuthContext";
 import UrgencyService from "../utils/urgencyService";
-import { useMapContext } from "../utils/MapContext.jsx";
-import aiChatService from "../utils/services/aiChatService";
-import { isBayAreaCoord } from "../utils/mapBounds";
 import supabase from "../utils/supabaseClient";
 
 // Category mapping for URL parameters
@@ -100,13 +96,11 @@ function FindFoodPage({ initialCategory }) {
         enableLocation: enableGeolocation,
         source: locationSource,
     } = useEffectiveLocation();
-    const { setAIRoute, clearAIOverlays, centerOn } = useMapContext();
     
     const [searchTerm, setSearchTerm] = useState('');
     const debouncedSearch = useDebouncedValue(searchTerm, 250);
     const [visibleCount, setVisibleCount] = useState(12);
     const [hoveredFoodId, setHoveredFoodId] = useState(null);
-    const [voiceModalOpen, setVoiceModalOpen] = useState(false);
     const [communityNames, setCommunityNames] = useState({});
     const [filters, setFilters] = useState({
         category: initialCategory || '',
@@ -164,19 +158,6 @@ function FindFoodPage({ initialCategory }) {
             window.removeEventListener('foodShared', onFoodShared);
         };
     }, [fetchListings]);
-
-    // Voice modal: Esc-to-close + body scroll lock while open.
-    useEffect(() => {
-        if (!voiceModalOpen) return undefined;
-        const onKey = (e) => { if (e.key === 'Escape') setVoiceModalOpen(false); };
-        const prevOverflow = document.body.style.overflow;
-        document.body.style.overflow = 'hidden';
-        window.addEventListener('keydown', onKey);
-        return () => {
-            window.removeEventListener('keydown', onKey);
-            document.body.style.overflow = prevOverflow;
-        };
-    }, [voiceModalOpen]);
 
     // Event handlers
     const handleClaim = (food) => {
@@ -443,11 +424,11 @@ function FindFoodPage({ initialCategory }) {
                                 name="search"
                                 value={searchTerm}
                                 onChange={e => setSearchTerm(e.target.value)}
-                                placeholder="Search food, or tap the mic to speak"
+                                placeholder="Search food..."
                                 aria-label="Search food listings"
-                                className="w-full min-h-[44px] pl-10 pr-12 py-2.5 rounded-full bg-white border border-gray-200 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3]"
+                                className="w-full min-h-[44px] pl-10 pr-10 py-2.5 rounded-full bg-white border border-gray-200 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3]"
                             />
-                            {searchTerm ? (
+                            {searchTerm && (
                                 <button
                                     type="button"
                                     onClick={() => setSearchTerm('')}
@@ -456,20 +437,6 @@ function FindFoodPage({ initialCategory }) {
                                     className="absolute right-2 top-1/2 -translate-y-1/2 h-9 w-9 inline-flex items-center justify-center rounded-full text-gray-400 hover:bg-gray-100"
                                 >
                                     <i className="fas fa-times text-sm" aria-hidden="true" />
-                                </button>
-                            ) : (
-                                <button
-                                    type="button"
-                                    onClick={() => setVoiceModalOpen(true)}
-                                    aria-label="Search by voice"
-                                    title="Search by voice"
-                                    className={`absolute right-2 top-1/2 -translate-y-1/2 h-9 w-9 inline-flex items-center justify-center rounded-full transition touch-manipulation ${
-                                        voiceModalOpen
-                                            ? 'bg-[#2CABE3] text-white shadow-sm ring-2 ring-[#2CABE3]/30'
-                                            : 'text-gray-500 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3]'
-                                    }`}
-                                >
-                                    <i className="fas fa-microphone text-sm" aria-hidden="true" />
                                 </button>
                             )}
                         </div>
@@ -753,104 +720,6 @@ function FindFoodPage({ initialCategory }) {
                     </div>
                 </div>
             </div>
-
-            {voiceModalOpen && (
-                <div
-                    className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/45 backdrop-blur-sm px-0 sm:px-4 py-0 sm:py-8"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby="voice-modal-title"
-                    onClick={() => setVoiceModalOpen(false)}
-                >
-                    <div
-                        className="relative w-full sm:max-w-2xl max-h-[92vh] sm:max-h-[90vh] flex flex-col rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl ring-1 ring-black/5"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        {/* Sticky in-modal header so the title and close button
-                            stay visible no matter how far the user scrolls. */}
-                        <div className="flex items-start justify-between gap-3 px-4 sm:px-6 pt-4 pb-3 border-b border-gray-100 bg-white rounded-t-2xl">
-                            <div className="min-w-0 flex items-center gap-3">
-                                <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#2CABE3]/10 text-[#2CABE3]" aria-hidden="true">
-                                    <i className="fas fa-microphone" />
-                                </span>
-                                <div className="min-w-0">
-                                    <h2 id="voice-modal-title" className="text-base sm:text-lg font-semibold text-gray-900 leading-tight">
-                                        Search with your voice
-                                    </h2>
-                                    <p className="mt-0.5 text-xs sm:text-[13px] text-gray-500 leading-snug">
-                                        Speak naturally — we&rsquo;ll rank by urgency and distance.
-                                    </p>
-                                </div>
-                            </div>
-                            <button
-                                type="button"
-                                onClick={() => setVoiceModalOpen(false)}
-                                aria-label="Close voice search"
-                                title="Close (Esc)"
-                                className="shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100 hover:text-gray-700"
-                            >
-                                <i className="fas fa-times text-lg" aria-hidden="true" />
-                            </button>
-                        </div>
-                        <div className="flex-1 overflow-y-auto overscroll-contain">
-                            <div className="p-4 sm:p-6">
-                                <VoiceLocationSearch
-                                    embedded
-                                    onResultSelect={(id, result) => {
-                                    setHoveredFoodId(id);
-                                    setVoiceModalOpen(false);
-
-                                    // Resolve destination coords from voice result or local foods list
-                                    const fallback = Array.isArray(foods) ? foods.find(f => f.id === id) : null;
-                                    const destLat = Number(result?.latitude ?? fallback?.latitude);
-                                    const destLng = Number(result?.longitude ?? fallback?.longitude);
-                                    const originLat = Number(currentLocation?.latitude);
-                                    const originLng = Number(currentLocation?.longitude);
-                                    const haveCoords =
-                                        Number.isFinite(destLat) && Number.isFinite(destLng) &&
-                                        Number.isFinite(originLat) && Number.isFinite(originLng) &&
-                                        isBayAreaCoord(destLat, destLng) &&
-                                        isBayAreaCoord(originLat, originLng);
-
-                                    if (haveCoords) {
-                                        clearAIOverlays();
-                                        aiChatService
-                                            .getRoute({ originLat, originLng, destLat, destLng, profile: 'driving' })
-                                            .then((route) => {
-                                                if (!route || !route.geometry) return;
-                                                setAIRoute({
-                                                    geometry: route.geometry,
-                                                    origin: { lat: originLat, lng: originLng },
-                                                    destination: { lat: destLat, lng: destLng },
-                                                    distance_km: route.distance_km,
-                                                    duration_text: route.duration_text,
-                                                    profile: route.profile || 'driving',
-                                                });
-                                            })
-                                            .catch((err) => {
-                                                console.warn('Could not draw route on map:', err);
-                                                // Still center on the destination so user sees the marker.
-                                                centerOn({ lat: destLat, lng: destLng, zoom: 14 });
-                                            });
-                                    } else if (Number.isFinite(destLat) && Number.isFinite(destLng) && isBayAreaCoord(destLat, destLng)) {
-                                        // No user location available — at least center on the listing.
-                                        centerOn({ lat: destLat, lng: destLng, zoom: 14 });
-                                    }
-
-                                    if (typeof window !== 'undefined') {
-                                        // Scroll to the map so the user sees the highlighted marker and route
-                                        setTimeout(() => {
-                                            const el = document.getElementById('food-map-heading');
-                                            el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                                        }, 50);
-                                    }
-                                }}
-                                />
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
         </div>
     );
 }
