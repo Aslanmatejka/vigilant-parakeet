@@ -57,6 +57,35 @@ export function clearCachedInsights(userId) {
     }
 }
 
+/**
+ * Wipe every cached insights payload across all users on this device.
+ * Called from the SIGNED_OUT auth listener below so a previous user's
+ * profile-completion / activity counts don't briefly flash for the next
+ * person to sign in on the same browser.
+ */
+function clearAllCachedInsights() {
+    if (typeof window === 'undefined') return
+    try {
+        const keys = []
+        for (let i = 0; i < window.localStorage.length; i++) {
+            const k = window.localStorage.key(i)
+            if (k && k.startsWith(CACHE_PREFIX)) keys.push(k)
+        }
+        for (const k of keys) window.localStorage.removeItem(k)
+    } catch (_) {
+        /* quota / private mode — ignore */
+    }
+}
+
+// Evict cached insights when the user signs out so the next session on this
+// device starts clean. Guarded so test mocks (which only stub a subset of
+// supabase.auth) don't blow up at import time.
+if (typeof supabase?.auth?.onAuthStateChange === 'function') {
+    supabase.auth.onAuthStateChange((event) => {
+        if (event === 'SIGNED_OUT') clearAllCachedInsights()
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Local insight computation — queries Supabase directly
 // ---------------------------------------------------------------------------
@@ -173,18 +202,22 @@ export async function computeLocalInsights(userId, roleHint = null) {
     const activeListings = listings.filter((l) => l.status === 'approved' || l.status === 'active').length
     const pendingListings = listings.filter((l) => l.status === 'pending').length
 
-    // Expiring within 24h — compare against local end-of-day so a listing
-    // expiring "today" stays visible all day in the user's timezone.
+    // Flag listings expiring within ~36 h so donors see "expiring soon"
+    // alerts for items expiring TOMORROW (not just today). Using end-of-day
+    // local time as the cutoff with a 24h window meant a listing expiring
+    // tomorrow (delta ≈ 30h) was silently excluded right when the donor
+    // needed the nudge most.
+    //
     // new Date('YYYY-MM-DD') without 'T00:00:00' is UTC midnight, which in
     // Pacific time is the previous afternoon — making listings appear expired
     // ~7 hours early.
-    const soonMs = 24 * 60 * 60 * 1000
+    const soonMs = 36 * 60 * 60 * 1000
     const expiringSoon = listings.filter((l) => {
         if (!l.expiry_date || (l.status !== 'approved' && l.status !== 'active')) return false
         const expiryLocal = new Date(l.expiry_date + 'T00:00:00')
         expiryLocal.setHours(23, 59, 59, 999)
-        const t = expiryLocal.getTime()
-        return t > Date.now() && t - Date.now() < soonMs
+        const delta = expiryLocal.getTime() - Date.now()
+        return delta > 0 && delta < soonMs
     }).length
 
     // 4. Build activity insights per role
@@ -216,7 +249,7 @@ export async function computeLocalInsights(userId, roleHint = null) {
         if (expiringSoon > 0) {
             activityInsights.push({
                 id: 'donor_expiring',
-                title: `${expiringSoon} listing${expiringSoon === 1 ? '' : 's'} expiring within 24 h`,
+                title: `${expiringSoon} listing${expiringSoon === 1 ? '' : 's'} expiring soon`,
                 message: 'Promote pickup or extend the window so this food still reaches someone.',
                 priority: 'high',
                 icon: 'clock',

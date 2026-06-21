@@ -599,8 +599,11 @@ class AIChatService {
    */
   async visionListing(file, { userId } = {}) {
     if (!file) throw new Error('No image file provided')
+    // Backend rejects nil-UUID with 401 — fail fast instead of burning the
+    // per-IP rate-limit bucket on a guaranteed-failed upload.
+    if (!userId) throw new Error('userId is required for vision listing')
     const formData = new FormData()
-    formData.append('user_id', userId || '00000000-0000-0000-0000-000000000000')
+    formData.append('user_id', userId)
     formData.append('image', file, file.name || 'photo.jpg')
 
     try {
@@ -637,6 +640,9 @@ class AIChatService {
     if (!Array.isArray(rows) || rows.length === 0) {
       throw new Error('No rows to enrich')
     }
+    // Backend rejects nil-UUID with 401 — fail fast instead of burning the
+    // per-IP rate-limit bucket on a guaranteed-failed call.
+    if (!userId) throw new Error('userId is required for listing enrichment')
     try {
       const response = await resilientFetch(
         `${API_BASE}/enrich-listings`,
@@ -644,7 +650,7 @@ class AIChatService {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            user_id: userId || '00000000-0000-0000-0000-000000000000',
+            user_id: userId,
             rows,
             language,
           }),

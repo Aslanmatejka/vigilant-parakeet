@@ -29,7 +29,10 @@ export async function getAiAuthHeaders(extra = {}) {
         expiresAt: now + 30_000,
       }
     } catch {
-      _tokenCache = { value: null, expiresAt: now + 5_000 }
+      // Fail-open: keep the previous token rather than poisoning the cache
+      // with `null` for 5s, which would force every concurrent AI call to
+      // go out without an Authorization header and 401-storm the user.
+      _tokenCache = { value: _tokenCache.value, expiresAt: now + 5_000 }
     }
   }
   if (_tokenCache.value) {
@@ -56,13 +59,20 @@ if (typeof supabase?.auth?.onAuthStateChange === 'function') {
 /**
  * Parse a failed Response into our structured error object, or null if the
  * body isn't the typed AIError shape.
+ *
+ * NOTE: a Response body is one-shot. We `.clone()` before reading so that
+ * callers (e.g. `sendVoice` falling back to `response.text()`) can still
+ * inspect the raw body when the structured parse fails.
  */
 export async function parseAiErrorResponse(response) {
   if (!response || response.ok) return null
   let payload = null
   try {
-    payload = await response.json()
-  } catch {
+    payload = await response.clone().json()
+  } catch (err) {
+    // Backend returned non-JSON (HTML 502, truncated body, etc.) — surface
+    // it in dev tools rather than silently misclassifying as "unstructured".
+    console.warn('[aiRequest] response body was not JSON:', err?.message)
     return null
   }
   if (!payload || typeof payload !== 'object' || !payload.error_code) return null
