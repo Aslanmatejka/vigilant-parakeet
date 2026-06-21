@@ -1301,7 +1301,8 @@ TOOL_DEFINITIONS = [
             "description": (
                 "Edit one of the authenticated donor's own listings. Use for "
                 "natural-language edits the donor speaks in chat: 'change pickup "
-                "time to 7pm', 'increase servings to 10', 'update the description', "
+                "time to 7pm' (put free-text pickup info in description), "
+                "'increase servings to 10', 'update the description', "
                 "'mark it as unavailable' / 'all gone' (sets status=expired), "
                 "'rename to ...', 'change category to bakery', 'add allergen: eggs'. "
                 "Identify the listing by listing_id when known, or pass title_lookup "
@@ -1321,10 +1322,9 @@ TOOL_DEFINITIONS = [
                     "quantity": {"type": "number", "description": "New quantity (must be > 0)."},
                     "unit": {"type": "string", "description": "New unit (loaves, lbs, trays, etc.)."},
                     "description": {"type": "string", "description": "New description text."},
-                    "category": {"type": "string", "description": "produce / bakery / dairy / pantry / meat / prepared / other."},
+                    "category": {"type": "string", "description": "produce / bakery / dairy / pantry / meat / seafood / frozen / snacks / beverages / prepared / other."},
                     "expiry_date": {"type": "string", "description": "YYYY-MM-DD."},
-                    "pickup_by": {"type": "string", "description": "ISO timestamp (when pickup must happen by)."},
-                    "pickup_window": {"type": "string", "description": "Free-text pickup window (e.g. 'tonight 6–8pm')."},
+                    "pickup_by": {"type": "string", "description": "ISO-8601 timestamp (YYYY-MM-DDTHH:MM[:SS][±HH:MM]). For free-text like 'tonight 7pm', put it in description instead."},
                     "location": {"type": "string", "description": "New pickup address."},
                     "dietary_tags": {"type": "array", "items": {"type": "string"}},
                     "allergens": {"type": "array", "items": {"type": "string"}},
@@ -3284,7 +3284,10 @@ async def _mark_notifications_read(
 # create_food_listing — conversational donation post
 # ---------------------------------------------------------------------------
 
-_LISTING_CATEGORIES = {"produce", "bakery", "dairy", "pantry", "meat", "prepared", "other"}
+_LISTING_CATEGORIES = {
+    "produce", "bakery", "dairy", "pantry", "meat",
+    "seafood", "frozen", "snacks", "beverages", "prepared", "other",
+}
 
 
 MAPBOX_GEOCODE_URL = "https://api.mapbox.com/geocoding/v5/mapbox.places"
@@ -4367,7 +4370,7 @@ async def _get_user_listings(
 
 _UPDATABLE_LISTING_FIELDS = {
     "title", "description", "quantity", "unit",
-    "expiry_date", "pickup_by", "pickup_window",
+    "expiry_date", "pickup_by",
     "dietary_tags", "allergens", "image_url",
     "category", "location", "full_address",
 }
@@ -4392,7 +4395,6 @@ async def _update_food_listing(
     category: Optional[str] = None,
     expiry_date: Optional[str] = None,
     pickup_by: Optional[str] = None,
-    pickup_window: Optional[str] = None,
     location: Optional[str] = None,
     dietary_tags: Optional[list] = None,
     allergens: Optional[list] = None,
@@ -4479,9 +4481,15 @@ async def _update_food_listing(
         if resolved:
             patch["expiry_date"] = resolved
     if pickup_by is not None:
-        patch["pickup_by"] = str(pickup_by).strip()
-    if pickup_window is not None:
-        patch["pickup_window"] = str(pickup_window).strip()[:200]
+        # food_listings.pickup_by is TIMESTAMPTZ — only write if it parses as a
+        # real datetime so we never ship raw natural-language to the DB.
+        from datetime import datetime as _dt
+        raw = str(pickup_by).strip()
+        try:
+            _dt.fromisoformat(raw.replace("Z", "+00:00"))
+            patch["pickup_by"] = raw
+        except (TypeError, ValueError):
+            pass
     if location is not None:
         loc_s = str(location).strip()[:200]
         if loc_s:
@@ -4506,7 +4514,7 @@ async def _update_food_listing(
             "message": (
                 "No updatable fields were supplied. Pass at least one of "
                 "title, description, quantity, unit, category, expiry_date, "
-                "pickup_by, pickup_window, location, dietary_tags, allergens, "
+                "pickup_by, location, dietary_tags, allergens, "
                 "image_url, status."
             ),
         }
