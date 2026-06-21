@@ -494,6 +494,7 @@ class AIChatService {
     maxRecipes = 3,
     dietaryOverrides = null,
     notes = null,
+    signal = null,
   } = {}) {
     try {
       const response = await resilientFetch(
@@ -517,6 +518,7 @@ class AIChatService {
           timeout: 30000,
           backoff: [500, 1500],
           label: 'ai/recipes',
+          signal,
         }
       )
       if (!response.ok) {

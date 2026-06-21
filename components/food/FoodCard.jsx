@@ -133,6 +133,9 @@ function FoodCard({
             const recipes = await getRecipeSuggestions(ingredients);
             setAISuggestions(recipes);
         } catch (error) {
+            // AbortError = the user closed the panel or unmounted before we
+            // got a response. Don't render an error for that.
+            if (error?.name === 'AbortError') return;
             setAISuggestions({ error: error.message || 'Failed to get recipe suggestions.' });
         }
     };
@@ -328,7 +331,9 @@ function FoodCard({
                                 ]}
                             />
                         ) : (
-                            <p className="text-sm text-blue-600">No recipes found.</p>
+                            <p className="text-sm text-blue-600">
+                                {aiSuggestions.headline || 'No recipes found.'}
+                            </p>
                         )}
                     </div>
                 )}

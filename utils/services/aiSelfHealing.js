@@ -207,7 +207,15 @@ export async function resilientFetch(url, init = {}, opts = {}) {
     backoff = [200, 800, 1600],
     fallback = null,
     label = url,
+    signal: callerSignal = null,
   } = opts
+
+  // Caller already cancelled before we started.
+  if (callerSignal?.aborted) {
+    const err = new Error(`Aborted by caller: ${label}`)
+    err.name = 'AbortError'
+    throw err
+  }
 
   // Circuit open — fail fast and use fallback if available
   if (!breaker.canRequest()) {
@@ -225,11 +233,17 @@ export async function resilientFetch(url, init = {}, opts = {}) {
   for (let attempt = 0; attempt < retries; attempt++) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeout)
+    // Bridge the caller's signal into the per-attempt controller so that
+    // caller abort cancels the in-flight fetch immediately. The listener
+    // is per-attempt to avoid leaking across retries.
+    const onCallerAbort = () => controller.abort()
+    if (callerSignal) callerSignal.addEventListener('abort', onCallerAbort, { once: true })
 
     try {
       const authedInit = await withAiAuth({ ...init, signal: controller.signal })
       const response = await fetch(url, authedInit)
       clearTimeout(timer)
+      if (callerSignal) callerSignal.removeEventListener('abort', onCallerAbort)
 
       if (response.ok) {
         aiHealth.recordSuccess()
@@ -248,7 +262,10 @@ export async function resilientFetch(url, init = {}, opts = {}) {
       console.warn(`[self-heal] ${label} attempt ${attempt + 1}/${retries} → ${response.status}`)
     } catch (err) {
       clearTimeout(timer)
+      if (callerSignal) callerSignal.removeEventListener('abort', onCallerAbort)
       lastError = err
+      // Caller cancelled — stop retrying and propagate the AbortError.
+      if (callerSignal?.aborted) throw err
       const reason = err.name === 'AbortError' ? 'timeout' : err.message
       console.warn(`[self-heal] ${label} attempt ${attempt + 1}/${retries} failed: ${reason}`)
     }
@@ -256,6 +273,11 @@ export async function resilientFetch(url, init = {}, opts = {}) {
     if (attempt < retries - 1) {
       const delay = backoff[attempt] ?? backoff[backoff.length - 1] ?? 1000
       await sleep(delay)
+      if (callerSignal?.aborted) {
+        const err = new Error(`Aborted by caller: ${label}`)
+        err.name = 'AbortError'
+        throw err
+      }
     }
   }
 

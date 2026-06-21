@@ -783,22 +783,47 @@ export const useCommunityPosts = (filters = {}) => {
 export const useAI = () => {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
+  // Track the in-flight request so a newer call (or unmount) can cancel
+  // an older one — otherwise a stale fetch can resolve after the user
+  // closed the panel and overwrite fresh UI state.
+  const abortRef = useRef(null)
 
   const getRecipeSuggestions = useCallback(async (ingredients) => {
+    // Cancel any prior in-flight request
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
     try {
       setIsLoading(true)
       setError(null)
 
       const userId = authService.getCurrentUser()?.id
-      const result = await _getRecipeSuggestions(ingredients, { userId })
+      const result = await _getRecipeSuggestions(ingredients, {
+        userId,
+        signal: controller.signal,
+      })
 
       return result
     } catch (error) {
+      if (error?.name === 'AbortError') throw error
       setError(error.message)
       throw error
     } finally {
-      setIsLoading(false)
+      // Only clear loading if THIS call is still the active one; otherwise
+      // a newer call has already taken over the flag.
+      if (abortRef.current === controller) {
+        setIsLoading(false)
+        abortRef.current = null
+      }
     }
+  }, [])
+
+  // Abort any in-flight request on unmount so React doesn't try to set
+  // state on an unmounted component.
+  useEffect(() => () => {
+    abortRef.current?.abort()
+    abortRef.current = null
   }, [])
 
   return {
