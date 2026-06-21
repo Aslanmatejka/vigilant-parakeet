@@ -1629,7 +1629,8 @@ _FOOD_TYPE_SYNONYMS: dict[str, Optional[str]] = {
     # Dairy
     "dairy": "dairy", "milk": "dairy", "cheese": "dairy", "yogurt": "dairy",
     "yoghurt": "dairy", "butter": "dairy", "cream": "dairy", "eggs": "dairy",
-    "egg": "dairy",
+    "egg": "dairy", "milk product": "dairy", "milk products": "dairy",
+    "dairy product": "dairy", "dairy products": "dairy",
     # Meat
     "meat": "meat", "meats": "meat", "beef": "meat", "pork": "meat",
     "chicken": "meat", "poultry": "meat", "turkey": "meat", "lamb": "meat",
@@ -1655,7 +1656,10 @@ _FOOD_TYPE_SYNONYMS: dict[str, Optional[str]] = {
     "prepared foods": "prepared", "cooked": "prepared",
     "cooked meal": "prepared", "cooked meals": "prepared", "meal": "prepared",
     "meals": "prepared", "hot meal": "prepared", "hot meals": "prepared",
+    "hot food": "prepared", "hot foods": "prepared",
     "ready meal": "prepared", "ready meals": "prepared", "takeout": "prepared",
+    "ready to eat": "prepared", "ready-to-eat": "prepared",
+    "ready to eat food": "prepared", "ready-to-eat food": "prepared",
     "sandwich": "prepared", "sandwiches": "prepared", "leftover": "prepared",
     "leftovers": "prepared",
     # Pantry / dry / canned / grains / staples
@@ -1669,6 +1673,18 @@ _FOOD_TYPE_SYNONYMS: dict[str, Optional[str]] = {
     "dry": "pantry", "dry goods": "pantry", "nonperishable": "pantry",
     "non-perishable": "pantry", "shelf stable": "pantry",
     "shelf-stable": "pantry", "staple": "pantry", "staples": "pantry",
+    "long shelf life": "pantry", "long-lasting": "pantry",
+    "longest lasting": "pantry", "lasts long": "pantry",
+    # Conditions / adjectives — not categories. Let the model decide whether
+    # to filter; pass-through (None) so search returns everything available
+    # and the AI describes what's there in natural language.
+    "fresh": None, "fresh food": None, "fresh foods": None,
+    "chilled": None, "cold": None, "cold food": None,
+    "raw": None, "raw ingredients": None, "raw food": None,
+    "ingredients": None, "ingredient": None,
+    "healthy": None, "healthy food": None, "healthy meal": None,
+    "healthy meals": None, "quick": None, "quick meal": None,
+    "quick meals": None, "easy": None,
     # Ambiguous / unmapped: let model decide (no category filter).
     "protein": None, "proteins": None, "other": None,
 }

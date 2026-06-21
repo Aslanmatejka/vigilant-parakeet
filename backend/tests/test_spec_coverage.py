@@ -325,6 +325,45 @@ SCENARIOS = [
     ("a11y:translate_es",
      "translate to Spanish",
      ["español", "spanish", "qué", "¿"], [], None, []),
+
+    # --- 26. SPEC FUZZY-INPUT NORMALISATION (newdoc.doc gaps) -------------
+    # Imperial radius units
+    ("imperial:one_mile", "show me food within 1 mile",
+     [], [], lambda t: None if _has_listing_signal(t) or "?" in t or len(t) > 40 else "empty reply",
+     []),
+    ("imperial:five_miles", "any food within 5 miles?",
+     [], [], lambda t: None if _has_listing_signal(t) or "?" in t or len(t) > 40 else "empty reply",
+     []),
+    # Condition adjectives that aren't categories
+    ("cond:fresh", "show me fresh food", [], [], None, []),
+    ("cond:chilled", "any chilled food available?", [], [], None, []),
+    ("cond:hot_food", "I want hot food", [], [], None, []),
+    ("cond:ready_to_eat", "ready to eat food please", [], [], None, []),
+    ("cond:long_shelf", "what food has a long shelf life?",
+     ["pantry", "can", "dry", "rice", "pasta", "shelf"], [], None, []),
+    # Healthy / low-salt / quick
+    ("health:general", "what's healthy?",
+     ["produce", "protein", "vegetable", "fruit", "healthy"], [], None, []),
+    ("health:low_salt", "show me low salt food",
+     ["sodium", "salt"], [], None, []),
+    ("health:quick", "I need something quick",
+     ["prepared", "ready", "sandwich", "quick"], [], None, []),
+    # Available today / not yet claimed
+    ("avail:today", "what food is available today?", [], [],
+     lambda t: None if _has_listing_signal(t) or len(t) > 40 else "empty reply",
+     []),
+    ("avail:not_claimed", "what food hasn't been claimed?", [], [],
+     lambda t: None if _has_listing_signal(t) or len(t) > 40 else "empty reply",
+     []),
+    # Recipes from ingredients
+    ("recipe:from_ingredients",
+     "what can I cook with chicken and rice?",
+     ["recipe", "cook", "chicken", "rice", "suggestion"], [], None, []),
+    # Vague group size — must ask, not guess
+    ("vague:party_no_count", "I need food for a party",
+     [], ["i don't understand"],
+     lambda t: None if "?" in t else "did not ask for headcount",
+     []),
 ]
 
 
