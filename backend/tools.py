@@ -4153,18 +4153,47 @@ async def _delete_listing(
             "message": "Deletion is permanent and cannot be undone. Please confirm you want to permanently delete this listing.",
         }
 
-    # Resolve listing_id from title if not provided
+    # Resolve listing_id from title if not provided. Use substring match
+    # (ilike %lookup%) and refuse to silently pick when more than one row
+    # matches — delete is permanent, ambiguity must be resolved by the donor.
     if not listing_id and title:
+        lookup = title.strip()
         rows = await supabase_get("food_listings", {
             "user_id": f"eq.{user_id}",
-            "title": f"ilike.{title.strip()}",
+            "title": f"ilike.%{lookup}%",
             "select": "id,title,status",
             "order": "created_at.desc",
-            "limit": "1",
+            "limit": "5",
         })
-        if rows:
-            listing_id = rows[0]["id"]
-            title = rows[0].get("title") or title
+        if not rows:
+            return {
+                "success": False,
+                "error": f"No listing matching '{lookup}'.",
+                "lookup": lookup,
+                "message": (
+                    f"Couldn't find a listing whose title contains '{lookup}'. "
+                    "Ask the donor which listing they mean — call "
+                    "get_user_listings to show them their listings, then "
+                    "retry with the specific listing_id."
+                ),
+            }
+        if len(rows) > 1:
+            return {
+                "success": False,
+                "error": "multiple_matches",
+                "lookup": lookup,
+                "matches": [
+                    {"listing_id": str(r["id"]), "title": r.get("title"), "status": r.get("status")}
+                    for r in rows
+                ],
+                "message": (
+                    f"Multiple listings match '{lookup}'. Read the titles "
+                    "back to the donor, let them pick one, then retry "
+                    "delete_listing with the specific listing_id."
+                ),
+            }
+        listing_id = rows[0]["id"]
+        title = rows[0].get("title") or title
 
     if not listing_id:
         return {"success": False, "error": "Could not find a listing to delete. Please provide the listing title or ID."}
@@ -4218,19 +4247,47 @@ async def _deactivate_listing(
     if not user_id:
         return {"success": False, "error": "missing user_id"}
 
-    # Resolve listing_id from title if not provided
+    # Resolve listing_id from title if not provided. Honor the title the
+    # caller gave us: a miss must NOT silently take down the wrong listing.
     if not listing_id and title:
+        lookup = title.strip()
         rows = await supabase_get("food_listings", {
             "user_id": f"eq.{user_id}",
-            "title": f"ilike.{title.strip()}",
+            "title": f"ilike.%{lookup}%",
             "status": "in.(active,approved,pending)",
             "select": "id,title,status",
             "order": "created_at.desc",
-            "limit": "1",
+            "limit": "5",
         })
-        if rows:
-            listing_id = rows[0]["id"]
-            title = rows[0].get("title") or title
+        if not rows:
+            return {
+                "success": False,
+                "error": f"No active listing matching '{lookup}'.",
+                "lookup": lookup,
+                "message": (
+                    f"Couldn't find an active listing whose title contains "
+                    f"'{lookup}'. Ask the donor which listing they mean — "
+                    "call get_user_listings to show them their current "
+                    "listings, then retry with the specific listing_id."
+                ),
+            }
+        if len(rows) > 1:
+            return {
+                "success": False,
+                "error": "multiple_matches",
+                "lookup": lookup,
+                "matches": [
+                    {"listing_id": str(r["id"]), "title": r.get("title")}
+                    for r in rows
+                ],
+                "message": (
+                    f"Multiple listings match '{lookup}'. Read the titles "
+                    "back to the donor, let them pick one, then retry "
+                    "deactivate_listing with the specific listing_id."
+                ),
+            }
+        listing_id = rows[0]["id"]
+        title = rows[0].get("title") or title
 
     if not listing_id:
         # Fall back: user's most recently posted active listing
@@ -4418,18 +4475,48 @@ async def _update_food_listing(
     if not user_id:
         return {"success": False, "error": "missing user_id"}
 
-    # 1) Resolve listing_id — direct, by title, or most-recent fallback
+    # 1) Resolve listing_id — direct, by title, or most-recent fallback.
+    #    If the caller passed title_lookup we MUST honor it: do NOT silently
+    #    fall back to "the most recent active listing" on a miss. That bug
+    #    caused the AI to patch the wrong row and then report success.
     if not listing_id and title_lookup:
+        lookup = title_lookup.strip()
         rows = await supabase_get("food_listings", {
             "user_id": f"eq.{user_id}",
-            "title": f"ilike.%{title_lookup.strip()}%",
+            "title": f"ilike.%{lookup}%",
             "status": "in.(active,approved,pending)",
             "select": "id,title",
             "order": "created_at.desc",
-            "limit": "1",
+            "limit": "5",
         })
-        if rows:
-            listing_id = rows[0]["id"]
+        if not rows:
+            return {
+                "success": False,
+                "error": f"No active listing matching '{lookup}'.",
+                "lookup": lookup,
+                "message": (
+                    f"Couldn't find an active listing whose title contains "
+                    f"'{lookup}'. Ask the donor which listing they mean — "
+                    "call get_user_listings to show them their current "
+                    "listings, then retry with the specific listing_id."
+                ),
+            }
+        if len(rows) > 1:
+            return {
+                "success": False,
+                "error": "multiple_matches",
+                "lookup": lookup,
+                "matches": [
+                    {"listing_id": str(r["id"]), "title": r.get("title")}
+                    for r in rows
+                ],
+                "message": (
+                    f"Multiple listings match '{lookup}'. Read the titles "
+                    "back to the donor, let them pick one, then retry "
+                    "update_food_listing with the specific listing_id."
+                ),
+            }
+        listing_id = rows[0]["id"]
     if not listing_id:
         rows = await supabase_get("food_listings", {
             "user_id": f"eq.{user_id}",
