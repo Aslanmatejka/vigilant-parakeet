@@ -1273,7 +1273,12 @@ TOOL_DEFINITIONS = [
             "description": (
                 "Fetch the authenticated user's own food listings (as a donor). "
                 "Use when the user asks 'show my listings', 'what have I posted', "
-                "'my active donations', 'my food shares'. Optionally filter by status."
+                "'my active donations', 'my food shares', 'has anyone claimed my food', "
+                "'how many claims do my listings have'. Each listing comes back with "
+                "a `claims_count` (active claims on it), `has_photo`, and an overall "
+                "`views_tracking` field. View tracking is NOT live yet — when the "
+                "user asks 'how many views', honestly answer that we don't track "
+                "views and pivot to claims/photo/description coaching."
             ),
             "parameters": {
                 "type": "object",
@@ -1283,6 +1288,54 @@ TOOL_DEFINITIONS = [
                         "type": "string",
                         "enum": ["active", "approved", "expired", "claimed", "all"],
                         "description": "Filter by status. Default: active+approved.",
+                    },
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_food_listing",
+            "description": (
+                "Edit one of the authenticated donor's own listings. Use for "
+                "natural-language edits the donor speaks in chat: 'change pickup "
+                "time to 7pm', 'increase servings to 10', 'update the description', "
+                "'mark it as unavailable' / 'all gone' (sets status=expired), "
+                "'rename to ...', 'change category to bakery', 'add allergen: eggs'. "
+                "Identify the listing by listing_id when known, or pass title_lookup "
+                "(matches the most recent active listing whose title ILIKEs the "
+                "value). If neither is supplied, the most recently posted active "
+                "listing is targeted. Only fields you actually pass are written — "
+                "everything else is left alone. For photos, prefer attach_photos_to_"
+                "listing; image_url here REPLACES the cover photo."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "UUID of the authenticated donor."},
+                    "listing_id": {"type": "string", "description": "UUID of the listing. Preferred."},
+                    "title_lookup": {"type": "string", "description": "Substring of the listing title — used when listing_id is unknown."},
+                    "title": {"type": "string", "description": "New title."},
+                    "quantity": {"type": "number", "description": "New quantity (must be > 0)."},
+                    "unit": {"type": "string", "description": "New unit (loaves, lbs, trays, etc.)."},
+                    "description": {"type": "string", "description": "New description text."},
+                    "category": {"type": "string", "description": "produce / bakery / dairy / pantry / meat / prepared / other."},
+                    "expiry_date": {"type": "string", "description": "YYYY-MM-DD."},
+                    "pickup_by": {"type": "string", "description": "ISO timestamp (when pickup must happen by)."},
+                    "pickup_window": {"type": "string", "description": "Free-text pickup window (e.g. 'tonight 6–8pm')."},
+                    "location": {"type": "string", "description": "New pickup address."},
+                    "dietary_tags": {"type": "array", "items": {"type": "string"}},
+                    "allergens": {"type": "array", "items": {"type": "string"}},
+                    "image_url": {"type": "string", "description": "Public URL replacing the cover photo."},
+                    "status": {
+                        "type": "string",
+                        "description": (
+                            "Lifecycle. Accepts 'available' / 'live' / 'active' → approved, "
+                            "'unavailable' / 'hidden' / 'taken down' / 'gone' / 'all gone' → expired, "
+                            "or the literal DB enum values approved / expired / completed / claimed / cancelled."
+                        ),
                     },
                 },
                 "required": ["user_id"],
@@ -1365,6 +1418,9 @@ async def execute_tool(name: str, arguments: dict) -> dict:
         "deactivate_listing": _deactivate_listing,
         "delete_listing": _delete_listing,
         "get_user_listings": _get_user_listings,
+        "update_food_listing": _update_food_listing,
+        "update_listing": _update_food_listing,
+        "edit_listing": _update_food_listing,
     }
 
     handler = handlers.get(name)
@@ -4238,7 +4294,7 @@ async def _get_user_listings(
 
     params: dict = {
         "user_id": f"eq.{user_id}",
-        "select": "id,title,quantity,unit,category,status,expiry_date,created_at",
+        "select": "id,title,quantity,unit,category,status,expiry_date,created_at,image_url",
         "order": "created_at.desc",
         "limit": "20",
     }
@@ -4254,6 +4310,24 @@ async def _get_user_listings(
     except Exception as exc:
         return {"success": False, "error": f"Could not fetch listings: {exc}"}
 
+    # Enrich each listing with a claim count so the donor can answer
+    # "has anyone claimed my food?" / "how many claims does X have?"
+    # without a second tool round-trip.
+    listing_ids = [str(r.get("id")) for r in (rows or []) if r.get("id")]
+    claims_by_listing: dict[str, int] = {}
+    if listing_ids:
+        try:
+            claims = await supabase_get("food_claims", {
+                "food_id": f"in.({','.join(listing_ids)})",
+                "status": "in.(pending,approved,confirmed,completed)",
+                "select": "food_id,status",
+            })
+            for c in claims or []:
+                fid = str(c.get("food_id"))
+                claims_by_listing[fid] = claims_by_listing.get(fid, 0) + 1
+        except Exception as exc:
+            logger.warning("get_user_listings: claim-count enrichment failed: %s", exc)
+
     listings = [
         {
             "id": r.get("id"),
@@ -4263,16 +4337,197 @@ async def _get_user_listings(
             "category": r.get("category"),
             "status": r.get("status"),
             "expiry_date": r.get("expiry_date"),
+            "has_photo": bool(r.get("image_url")),
+            "claims_count": claims_by_listing.get(str(r.get("id")), 0),
         }
         for r in (rows or [])
     ]
 
+    total_claims = sum(l["claims_count"] for l in listings)
     return {
         "success": True,
         "ok": True,
         "count": len(listings),
+        "total_claims": total_claims,
         "listings": listings,
-        "summary": f"You have {len(listings)} {status if status != 'active' else 'active'} listing(s).",
+        "summary": (
+            f"You have {len(listings)} {status if status != 'active' else 'active'} "
+            f"listing(s) with {total_claims} active claim(s) across them."
+        ),
+        # Views are NOT tracked yet — surface this so the AI can honestly
+        # answer "how many views does my listing have?".
+        "views_tracking": "not_available",
+    }
+
+
+# ---------------------------------------------------------------------------
+# update_food_listing — donor edits one of their own listings in natural language
+# ---------------------------------------------------------------------------
+
+
+_UPDATABLE_LISTING_FIELDS = {
+    "title", "description", "quantity", "unit",
+    "expiry_date", "pickup_by", "pickup_window",
+    "dietary_tags", "allergens", "image_url",
+    "category", "location", "full_address",
+}
+
+_STATUS_ALIASES = {
+    "available": "approved", "live": "approved", "active": "approved",
+    "approved": "approved",
+    "unavailable": "expired", "hidden": "expired", "taken down": "expired",
+    "expired": "expired", "gone": "expired", "all gone": "expired",
+    "completed": "completed", "claimed": "claimed", "cancelled": "cancelled",
+}
+
+
+async def _update_food_listing(
+    user_id: str,
+    listing_id: Optional[str] = None,
+    title_lookup: Optional[str] = None,
+    title: Optional[str] = None,
+    quantity: Optional[float] = None,
+    unit: Optional[str] = None,
+    description: Optional[str] = None,
+    category: Optional[str] = None,
+    expiry_date: Optional[str] = None,
+    pickup_by: Optional[str] = None,
+    pickup_window: Optional[str] = None,
+    location: Optional[str] = None,
+    dietary_tags: Optional[list] = None,
+    allergens: Optional[list] = None,
+    image_url: Optional[str] = None,
+    status: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    """Patch one of the authenticated donor's own listings.
+
+    Handles natural-language edits like 'change my pickup time to 7pm',
+    'increase servings to 10', 'update description', 'mark as unavailable',
+    'add another photo'. Ownership is enforced via the user_id filter (and
+    RLS on top). Only fields the caller actually supplies are written.
+    """
+    from backend.ai_engine import supabase_get, supabase_patch
+
+    logger.info(
+        "update_food_listing: user=%s listing=%s title_lookup=%s",
+        user_id, listing_id, title_lookup,
+    )
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    # 1) Resolve listing_id — direct, by title, or most-recent fallback
+    if not listing_id and title_lookup:
+        rows = await supabase_get("food_listings", {
+            "user_id": f"eq.{user_id}",
+            "title": f"ilike.%{title_lookup.strip()}%",
+            "status": "in.(active,approved,pending)",
+            "select": "id,title",
+            "order": "created_at.desc",
+            "limit": "1",
+        })
+        if rows:
+            listing_id = rows[0]["id"]
+    if not listing_id:
+        rows = await supabase_get("food_listings", {
+            "user_id": f"eq.{user_id}",
+            "status": "in.(active,approved,pending)",
+            "select": "id,title",
+            "order": "created_at.desc",
+            "limit": "1",
+        })
+        if not rows:
+            return {"success": False, "error": "No active listing found to update."}
+        listing_id = rows[0]["id"]
+
+    # 2) Ownership check
+    check = await supabase_get("food_listings", {
+        "id": f"eq.{listing_id}",
+        "user_id": f"eq.{user_id}",
+        "select": "id,title,status",
+        "limit": "1",
+    })
+    if not check:
+        return {"success": False, "error": "Listing not found or you don't own it."}
+    current_title = check[0].get("title") or "the listing"
+
+    # 3) Build the patch
+    patch: dict = {}
+    if title is not None:
+        t = str(title).strip()
+        if t:
+            patch["title"] = t[:200]
+    if description is not None:
+        patch["description"] = str(description).strip()[:2000]
+    if quantity is not None:
+        try:
+            q = float(quantity)
+            if q > 0:
+                patch["quantity"] = q
+        except (TypeError, ValueError):
+            return {"success": False, "error": "quantity must be a number"}
+    if unit is not None:
+        u = str(unit).strip()[:40]
+        if u:
+            patch["unit"] = u
+    if category is not None:
+        c = str(category).strip().lower()
+        if c in _LISTING_CATEGORIES:
+            patch["category"] = c
+    if expiry_date is not None:
+        resolved = _normalize_expiry_date(expiry_date)
+        if resolved:
+            patch["expiry_date"] = resolved
+    if pickup_by is not None:
+        patch["pickup_by"] = str(pickup_by).strip()
+    if pickup_window is not None:
+        patch["pickup_window"] = str(pickup_window).strip()[:200]
+    if location is not None:
+        loc_s = str(location).strip()[:200]
+        if loc_s:
+            patch["location"] = loc_s
+            patch["full_address"] = loc_s
+    if isinstance(dietary_tags, list):
+        patch["dietary_tags"] = [str(t).strip()[:40] for t in dietary_tags if str(t).strip()][:20]
+    if isinstance(allergens, list):
+        patch["allergens"] = [str(t).strip()[:40] for t in allergens if str(t).strip()][:20]
+    if image_url and isinstance(image_url, str) and image_url.strip().startswith(("http://", "https://")):
+        patch["image_url"] = image_url.strip()[:2000]
+    if status is not None:
+        s = str(status).strip().lower()
+        mapped = _STATUS_ALIASES.get(s, s if s in _STATUS_ALIASES.values() else None)
+        if mapped:
+            patch["status"] = mapped
+
+    if not patch:
+        return {
+            "success": False,
+            "error": "no_fields_to_update",
+            "message": (
+                "No updatable fields were supplied. Pass at least one of "
+                "title, description, quantity, unit, category, expiry_date, "
+                "pickup_by, pickup_window, location, dietary_tags, allergens, "
+                "image_url, status."
+            ),
+        }
+
+    try:
+        await supabase_patch(
+            "food_listings",
+            {"id": f"eq.{listing_id}", "user_id": f"eq.{user_id}"},
+            patch,
+        )
+    except Exception as exc:
+        logger.error("update_food_listing: patch failed: %s", exc)
+        return {"success": False, "error": f"Could not update listing: {exc}"}
+
+    return {
+        "success": True,
+        "ok": True,
+        "listing_id": str(listing_id),
+        "title": current_title,
+        "updated_fields": sorted(patch.keys()),
+        "summary": f"Updated '{current_title}' ({', '.join(sorted(patch.keys()))}).",
     }
 
 

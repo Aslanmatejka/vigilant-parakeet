@@ -364,6 +364,86 @@ SCENARIOS = [
      [], ["i don't understand"],
      lambda t: None if "?" in t else "did not ask for headcount",
      []),
+
+    # --- 27. LISTING SHARING ASSISTANT (16 donor playbooks) --------------
+    # Triggers — natural-language intent to share. Must open intake, not refuse.
+    ("share:rice_intent", "I have extra rice to share",
+     [], ["i can't", "i cannot help"],
+     lambda t: None if "?" in t or any(k in t.lower() for k in ("how much", "how many", "what", "share")) else "did not open intake",
+     []),
+    ("share:cooked_too_much", "I cooked too much food today",
+     [], [],
+     lambda t: None if "?" in t else "did not ask follow-up", []),
+    # NL extraction — front-loaded sentence should be parsed, not interrogated.
+    ("share:nl_extract",
+     "I made too much chicken and rice tonight. It's enough for about 6 people. Pickup is tomorrow morning.",
+     ["chicken", "6", "tomorrow"], [],
+     lambda t: None if "?" in t else "did not move toward confirmation",
+     ["post_food_listing", "create_food_listing"]),
+    # Auto description — donor asks for one, must produce text.
+    ("share:auto_desc",
+     "I have cooked rice and beans for about 8 people. Can you write the description?",
+     ["rice", "beans", "8"], [],
+     lambda t: None if len(t) > 60 else "description too short",
+     ["post_food_listing", "create_food_listing"]),
+    # Allergen auto-detection from title.
+    ("share:auto_allergens",
+     "I'm about to post homemade peanut cookies. What allergens?",
+     ["peanut", "wheat", "egg"], [], None,
+     ["post_food_listing", "create_food_listing"]),
+    # Auto category + dietary tags.
+    ("share:auto_category",
+     "I have bananas to share — what category and tags should it have?",
+     ["produce", "vegan", "plant"], [], None,
+     ["post_food_listing", "create_food_listing"]),
+    # Food safety gate.
+    ("share:food_safety_unsafe",
+     "I cooked some chicken yesterday and left it on the counter overnight. Can I share it?",
+     ["refrig", "no", "skip", "throw", "not", "safe"], [],
+     lambda t: None if any(k in t.lower() for k in ("don't", "do not", "skip", "not safe", "throw", "discard", "shouldn't")) else "did not warn about safety",
+     ["post_food_listing", "create_food_listing"]),
+    # Expiry guidance — same-day should be flagged as Soon Expiring.
+    ("share:soon_expiring",
+     "I have milk that expires tomorrow. How should I list it?",
+     ["soon", "expir", "tomorrow"], [], None,
+     ["post_food_listing", "create_food_listing"]),
+    # Editing existing listing — must NOT refuse, should treat as edit intent.
+    # If the test user doesn't own a matching listing, the AI is allowed to
+    # report that honestly — what we forbid is failing to recognize the EDIT
+    # intent. The tool dispatch alone proves intent recognition worked.
+    ("share:edit_pickup",
+     "Change my pickup time for the bread to 7pm",
+     [], [],
+     lambda t: None if any(k in t.lower() for k in ("update", "change", "set", "7", "pickup", "listing")) else "did not handle edit intent",
+     []),
+    ("share:mark_unavailable",
+     "Mark my last listing as unavailable, it's all gone",
+     [], [],
+     lambda t: None if any(k in t.lower() for k in ("take", "remove", "unavailable", "expired", "down", "hidden", "update", "listing")) else "did not handle mark-unavailable",
+     []),
+    # Listing status — view tracking disclosure.
+    ("share:views_disclaim",
+     "How many views does my listing have?",
+     [], [],
+     lambda t: None if any(k in t.lower() for k in ("don't track", "not track", "no view", "can't", "currently")) else "did not disclose missing view tracking",
+     []),
+    ("share:any_claims",
+     "Has anyone claimed my food?",
+     ["claim"], [], None, []),
+    # Donation optimization coach.
+    ("share:why_no_claims",
+     "no one is claiming my food, what can I improve?",
+     ["photo", "title", "description", "category", "pickup"], [], None, []),
+    # Donor coach — packaging.
+    ("share:how_package",
+     "how should I package the soup I'm sharing?",
+     ["container", "lid", "label"], [], None, []),
+    # Smart proactive question for vague "soup".
+    ("share:soup_followup",
+     "I want to share soup",
+     [], [],
+     lambda t: None if "?" in t else "did not ask any follow-up",
+     []),
 ]
 
 
