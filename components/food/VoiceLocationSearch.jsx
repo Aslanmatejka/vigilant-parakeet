@@ -327,28 +327,35 @@ export default function VoiceLocationSearch({
                 {!isAuthenticated && (
                     <div className="flex items-start gap-3 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3.5 py-3 text-sm text-amber-900">
                         <i className="fas fa-user-lock mt-0.5 text-amber-600" aria-hidden="true" />
-                        <div>
+                        <div className="flex-1 min-w-0">
                             <p className="font-medium">Sign in to search with your voice</p>
-                            <p className="text-xs text-amber-800/80 mt-0.5">Voice + GPS search uses your account to find listings near you.</p>
+                            <p className="text-xs text-amber-800/80 mt-0.5">We use your account to rank listings near you.</p>
                         </div>
+                        <button
+                            type="button"
+                            onClick={() => navigate('/login')}
+                            className="shrink-0 inline-flex items-center gap-1.5 rounded-full bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
+                        >
+                            Log in
+                        </button>
                     </div>
                 )}
 
                 {embedded && (
                     <div className="flex flex-wrap items-center justify-center gap-2">
                         {hasLocation ? (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-200/80">
-                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
-                                Location active — results ranked by distance
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200/80">
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" aria-hidden="true" />
+                                Using your location
                             </span>
                         ) : (
                             <button
                                 type="button"
                                 onClick={enableLocation}
-                                className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 ring-1 ring-amber-200"
+                                className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800 ring-1 ring-amber-200 hover:bg-amber-100"
                             >
                                 <i className="fas fa-location-crosshairs" aria-hidden="true" />
-                                Turn on GPS for nearby results
+                                Use my location for nearby results
                             </button>
                         )}
                     </div>
@@ -383,17 +390,22 @@ export default function VoiceLocationSearch({
 
                     <WaveformBars level={audioLevel} active={isRecording} />
 
-                    <p className="text-sm font-medium text-gray-800 text-center">{statusLine}</p>
-                    <p className="text-[11px] text-gray-500 text-center max-w-xs">
-                        {isRecording
-                            ? 'Pause briefly when finished — we\'ll stop automatically.'
-                            : 'Try: “vegan meals expiring soon within 10 km”'}
-                    </p>
+                    <p className="text-base font-semibold text-gray-900 text-center">{statusLine}</p>
+                    {!isRecording && !isSearching && (
+                        <p className="text-xs text-gray-500 text-center max-w-xs">
+                            Try a Quick Search below, or speak naturally — e.g. &ldquo;vegan meals expiring soon&rdquo;.
+                        </p>
+                    )}
+                    {isRecording && (
+                        <p className="text-xs text-gray-500 text-center max-w-xs">
+                            Pause briefly when finished — we&rsquo;ll stop automatically.
+                        </p>
+                    )}
                 </div>
 
                 {/* Radius */}
-                <div className="space-y-2">
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 px-0.5">Search radius</p>
+                <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-gray-600 px-0.5">Search within</p>
                     <div className="flex flex-wrap gap-1.5" role="group" aria-label="Search radius">
                         {RADIUS_OPTIONS.map((km) => (
                             <button
@@ -411,8 +423,8 @@ export default function VoiceLocationSearch({
                 </div>
 
                 {/* Quick searches */}
-                <div className="space-y-2">
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 px-0.5">Quick searches</p>
+                <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-gray-600 px-0.5">Quick searches</p>
                     <div className="flex flex-wrap gap-1.5">
                         {QUICK_SEARCHES.map(({ label, query }) => (
                             <button
@@ -430,8 +442,8 @@ export default function VoiceLocationSearch({
                 </div>
 
                 {/* Typed fallback */}
-                <form onSubmit={onSubmit} className="space-y-2">
-                    <label htmlFor="vls-query" className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 px-0.5">
+                <form onSubmit={onSubmit} className="space-y-1.5">
+                    <label htmlFor="vls-query" className="text-xs font-medium text-gray-600 px-0.5 block">
                         Or type your search
                     </label>
                     <div className="flex flex-col sm:flex-row gap-2">
@@ -496,7 +508,7 @@ export default function VoiceLocationSearch({
 
                 {isSearching && (
                     <AIThinkingPanel
-                        title="Voice + GPS search"
+                        title="Voice search"
                         stages={[
                             { icon: 'microphone-lines', label: 'Transcribing your voice' },
                             { icon: 'brain', label: 'Understanding your request' },

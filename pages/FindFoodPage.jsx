@@ -165,6 +165,19 @@ function FindFoodPage({ initialCategory }) {
         };
     }, [fetchListings]);
 
+    // Voice modal: Esc-to-close + body scroll lock while open.
+    useEffect(() => {
+        if (!voiceModalOpen) return undefined;
+        const onKey = (e) => { if (e.key === 'Escape') setVoiceModalOpen(false); };
+        const prevOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        window.addEventListener('keydown', onKey);
+        return () => {
+            window.removeEventListener('keydown', onKey);
+            document.body.style.overflow = prevOverflow;
+        };
+    }, [voiceModalOpen]);
+
     // Event handlers
     const handleClaim = (food) => {
         // Ensure food object has both id and objectId for compatibility
@@ -746,25 +759,44 @@ function FindFoodPage({ initialCategory }) {
                     className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/45 backdrop-blur-sm px-0 sm:px-4 py-0 sm:py-8"
                     role="dialog"
                     aria-modal="true"
-                    aria-label="Search with your voice"
+                    aria-labelledby="voice-modal-title"
                     onClick={() => setVoiceModalOpen(false)}
                 >
                     <div
-                        className="relative w-full sm:max-w-2xl max-h-[92vh] sm:max-h-[90vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl ring-1 ring-black/5"
+                        className="relative w-full sm:max-w-2xl max-h-[92vh] sm:max-h-[90vh] flex flex-col rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl ring-1 ring-black/5"
                         onClick={(e) => e.stopPropagation()}
                     >
-                        <button
-                            type="button"
-                            onClick={() => setVoiceModalOpen(false)}
-                            aria-label="Close voice search"
-                            className="absolute top-3 right-3 z-20 inline-flex h-9 w-9 items-center justify-center rounded-full bg-white/90 text-gray-600 shadow-sm ring-1 ring-gray-200 hover:bg-gray-50"
-                        >
-                            <i className="fas fa-times" aria-hidden="true" />
-                        </button>
-                        <div className="p-4 sm:p-6">
-                            <VoiceLocationSearch
-                                embedded
-                                onResultSelect={(id, result) => {
+                        {/* Sticky in-modal header so the title and close button
+                            stay visible no matter how far the user scrolls. */}
+                        <div className="flex items-start justify-between gap-3 px-4 sm:px-6 pt-4 pb-3 border-b border-gray-100 bg-white rounded-t-2xl">
+                            <div className="min-w-0 flex items-center gap-3">
+                                <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#2CABE3]/10 text-[#2CABE3]" aria-hidden="true">
+                                    <i className="fas fa-microphone" />
+                                </span>
+                                <div className="min-w-0">
+                                    <h2 id="voice-modal-title" className="text-base sm:text-lg font-semibold text-gray-900 leading-tight">
+                                        Search with your voice
+                                    </h2>
+                                    <p className="mt-0.5 text-xs sm:text-[13px] text-gray-500 leading-snug">
+                                        Speak naturally — we&rsquo;ll rank by urgency and distance.
+                                    </p>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setVoiceModalOpen(false)}
+                                aria-label="Close voice search"
+                                title="Close (Esc)"
+                                className="shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                            >
+                                <i className="fas fa-times text-lg" aria-hidden="true" />
+                            </button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto overscroll-contain">
+                            <div className="p-4 sm:p-6">
+                                <VoiceLocationSearch
+                                    embedded
+                                    onResultSelect={(id, result) => {
                                     setHoveredFoodId(id);
                                     setVoiceModalOpen(false);
 
@@ -813,7 +845,8 @@ function FindFoodPage({ initialCategory }) {
                                         }, 50);
                                     }
                                 }}
-                            />
+                                />
+                            </div>
                         </div>
                     </div>
                 </div>
