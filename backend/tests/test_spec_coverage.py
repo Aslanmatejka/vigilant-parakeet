@@ -178,6 +178,153 @@ SCENARIOS = [
     ("err:school_event", "I need food for a school event",
      [], ["i don't understand", "i cannot help"],
      lambda t: None if "?" in t else "no clarifying question asked", []),
+
+    # --- 12. CAPABILITY DISCOVERY (cat 17) --------------------------------
+    # Must offer a numbered/bulleted menu of things the AI can do.
+    ("cap:what_can_you_do", "what can you do?",
+     ["find", "claim", "help"], [],
+     lambda t: None if any(c in t for c in ("1.", "•", "- ")) else "no menu in reply",
+     []),
+    ("cap:help_alone", "help",
+     [], [],
+     lambda t: None if any(c in t for c in ("1.", "•", "- ")) else "no menu in reply",
+     []),
+    ("cap:show_examples", "show me examples",
+     ["find", "claim", "share"], [], None, []),
+
+    # --- 13. ELDERLY / NON-TECHNICAL (cat 13) -----------------------------
+    ("guided:confused", "I'm confused, I don't know how this works",
+     [], [],
+     lambda t: None if any(c in t for c in ("1.", "•", "- ")) else "no guided menu",
+     []),
+    ("guided:where_start", "where do I start?",
+     [], [],
+     lambda t: None if any(c in t for c in ("1.", "•", "- ")) else "no guided menu",
+     []),
+
+    # --- 14. CONVERSATIONAL CUES (cat 12) ---------------------------------
+    ("convo:hungry", "I'm hungry", [], [], None, []),
+    ("convo:kids_lunch", "my kids need lunch", [], [], None, []),
+    ("convo:guests_coming", "I have guests coming over", [], [], None, []),
+    ("convo:tight_budget", "I'm on a tight budget", [], [], None, []),
+
+    # --- 15. MEAL-TIME FRAMING (cat 1) ------------------------------------
+    ("meal:breakfast", "show me breakfast foods", [], [], None, []),
+    ("meal:lunch", "show me lunch foods", [], [], None, []),
+    ("meal:dinner", "what can I get for dinner?", [], [], None, []),
+
+    # --- 16. QUANTITY ESTIMATION (cat 3) ----------------------------------
+    # Must contain a yes/no-style estimate or a number of servings, NOT
+    # just "here are options".
+    ("qty_est:will_feed_family", "will this feed my family of 4?",
+     ["serv", "people", "yes", "no", "enough"], [], None, []),
+    ("qty_est:how_many_serve", "how many people can a loaf of bread serve?",
+     ["serv", "slice", "people"], [], None, []),
+    ("qty_est:enough_for_8", "I have 8 guests, what should I claim?",
+     ["8", "serv", "people", "guest"], [], None, []),
+
+    # --- 17. POSTING ASSISTANCE (cat 6) -----------------------------------
+    # Asking for description help should produce description text, not a tool call.
+    ("post:improve_desc",
+     "I'm posting 'Bread - few loaves left'. Can you improve the description?",
+     ["loaves", "fresh", "bread"], [],
+     lambda t: None if len(t) > 40 else "rewrite too short",
+     ["post_food_listing", "create_food_listing"]),
+    ("post:which_category",
+     "which category should I use for sourdough bread?",
+     ["bakery"], [], None, []),
+    ("post:how_many_serve",
+     "I have 3 loaves of bread to share — how many people will this serve?",
+     ["serv", "people", "slice"], [], None, []),
+
+    # --- 18. FOOD SAFETY (cat 7) ------------------------------------------
+    ("safety:expires_tomorrow",
+     "the bread I'm getting expires tomorrow, is that okay?",
+     ["safe", "okay", "fine", "freeze", "fresh"], [], None, []),
+    ("safety:freeze_rice",
+     "can I freeze cooked rice?",
+     ["freez", "yes"], [], None, []),
+    ("safety:cooked_rice",
+     "how long does cooked rice last in the fridge?",
+     ["day", "fridge", "refriger"], [], None, []),
+
+    # --- 19. SUITABILITY REASONING (cat 2) --------------------------------
+    ("suit:diabetic", "I'm diabetic, what should I look for?",
+     ["sugar", "protein", "diabet"], [], None, []),
+    ("suit:pregnant",
+     "I'm pregnant, what food should I avoid?",
+     ["raw", "unpasteur", "deli", "seafood", "soft cheese", "avoid"], [], None, []),
+    ("suit:lasts_longest", "what food lasts the longest?",
+     ["pantry", "can", "dry", "shelf"], [], None, []),
+
+    # --- 20. PICKUP ASSISTANCE (cat 4) ------------------------------------
+    ("pickup:what_next", "I claimed something — what do I do next?",
+     ["pickup", "donor", "address", "time"], [], None, []),
+    ("pickup:someone_else",
+     "can my friend pick up the food instead of me?",
+     ["yes", "friend", "code", "title"], [],
+     lambda t: None if any(s in t.lower() for s in ("yes", "friend", "can", "send")) else "did not affirm",
+     []),
+    ("pickup:running_late",
+     "I'm going to be late for pickup, what do I do?",
+     ["donor", "message", "chat", "contact", "extend"], [], None, []),
+
+    # --- 21. CLAIM STATUS (cat 5) ------------------------------------------
+    ("claim:status_check", "did my claim go through?",
+     ["claim"], [], None, []),
+    ("claim:how_many_claims", "how many claims do I have?",
+     ["claim"], [], None, []),
+    ("claim:who_claimed_before",
+     "who claimed the bread before me?",
+     [], [],
+     lambda t: None if any(s in t.lower() for s in ("can't share", "cannot share", "won't share", "private", "don't share")) else "did not protect other claimers' privacy",
+     []),
+
+    # --- 22. ACCOUNT SUPPORT (cat 9) --------------------------------------
+    ("account:forgot_password", "I forgot my password",
+     ["password", "reset", "forgot"], [], None, []),
+    ("account:delete_account", "how do I delete my account?",
+     ["contact", "support", "delete"], [],
+     lambda t: None if any(s in t.lower() for s in ("contact", "support", "/contact")) else "no support route given",
+     []),
+    ("account:change_phone", "how do I change my phone number?",
+     ["settings", "profile", "phone"], [], None, []),
+    ("account:why_blocked", "why am I blocked?",
+     ["contact", "support"], [], None, []),
+
+    # --- 23. REPORTING (cat 10) -------------------------------------------
+    ("report:no_show",
+     "the donor didn't show up for the pickup",
+     ["sorry", "contact", "report"], [], None, []),
+    ("report:unsafe", "I feel unsafe",
+     ["sorry", "safe", "emergency", "contact", "support"], [], None, []),
+    ("report:spoiled_food",
+     "the food I picked up was spoiled, what do I do?",
+     ["sorry", "report", "contact"], [], None, []),
+
+    # --- 24. RECOMMENDATION MODE (cat 11) ---------------------------------
+    ("recommend:what_should_i_claim",
+     "what should I claim?",
+     [], [], None, []),
+    ("recommend:expire_today",
+     "what's likely to expire today?",
+     ["expir", "today", "soon"], [], None, []),
+
+    # --- 25. ACCESSIBILITY (cat 15) ---------------------------------------
+    ("a11y:read_to_me",
+     "read this to me",
+     ["speaker", "tap", "voice", "listen", "audio"], [], None, []),
+    ("a11y:larger_text",
+     "can you make the text larger?",
+     ["settings"], [], None, []),
+    ("a11y:simpler",
+     "use easier language please",
+     [], [],
+     lambda t: None if len(t.split()) < 80 else "reply too long for 'simpler language'",
+     []),
+    ("a11y:translate_es",
+     "translate to Spanish",
+     ["español", "spanish", "qué", "¿"], [], None, []),
 ]
 
 
