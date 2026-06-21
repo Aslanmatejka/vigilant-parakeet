@@ -73,8 +73,12 @@ class AuthService {
             await this.setUser(session.user)
           }
         } else if (event === 'TOKEN_REFRESHED' && session) {
+          // Honor a recent explicit sign-out: a refresh event queued before
+          // the user clicked Sign Out would otherwise silently re-authenticate.
+          if (this._userExplicitlySignedOut) return
           await this.setUser(session.user)
         } else if (event === 'PASSWORD_RECOVERY' && session) {
+          if (this._userExplicitlySignedOut) return
           await this.setUser(session.user)
         } else if (event === 'SIGNED_OUT') {
           // Always clear state when Supabase says signed out.
@@ -466,10 +470,18 @@ class AuthService {
       if (!file || !(file instanceof File)) {
         throw new Error('Invalid file provided')
       }
-      // Reject anything that isn't an image, and cap size to keep the avatars
-      // bucket healthy (5 MB is plenty for a profile picture).
-      if (!file.type || !file.type.startsWith('image/')) {
-        throw new Error('Avatar must be an image file (jpg, png, gif, webp).')
+      // Whitelist real raster image types so the public bucket can't serve a
+      // user-supplied SVG (script-bearing) under an image content-type.
+      const IMAGE_TYPE_EXT = {
+        'image/jpeg': 'jpg',
+        'image/jpg': 'jpg',
+        'image/png': 'png',
+        'image/webp': 'webp',
+        'image/gif': 'gif',
+      }
+      const safeExt = IMAGE_TYPE_EXT[file.type?.toLowerCase()]
+      if (!safeExt) {
+        throw new Error('Avatar must be a JPG, PNG, WebP, or GIF image.')
       }
       const MAX_AVATAR_BYTES = 5 * 1024 * 1024
       if (file.size > MAX_AVATAR_BYTES) {
@@ -477,9 +489,11 @@ class AuthService {
       }
       console.log('Uploading file:', { name: file.name, type: file.type, size: file.size })
 
-      // 3. Set up file path
-      const fileExt = file.name.split('.').pop()
-      const fileName = `avatar.${fileExt}`
+      // 3. Set up file path — derive extension from the whitelisted MIME type,
+      // not from the user-controlled filename, so attackers can't pick the
+      // stored extension or path.
+      const fileName = `avatar.${safeExt}`
+      const safeContentType = file.type.toLowerCase()
       const filePath = `${this.currentUser.id}/${fileName}` // Remove 'avatars/' prefix as it's the bucket name
       console.log('Upload path:', filePath)
 
@@ -495,7 +509,7 @@ class AuthService {
         .from('avatars')
         .upload(filePath, file, {
           upsert: true,
-          contentType: file.type
+          contentType: safeContentType
         })
 
       if (uploadError) {

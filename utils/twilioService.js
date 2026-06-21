@@ -11,30 +11,53 @@ class TwilioService {
     }
 
     /**
-     * Format phone number to E.164 format
+     * Format phone number to E.164 format.
+     *
+     * IMPORTANT: A bare 10-digit number is *assumed* to be US (+1). This is a
+     * pragmatic default for the current US-focused deployment, but it will
+     * mis-route any non-US 10-digit local number. Prefer storing phone numbers
+     * in E.164 (`+<country><number>`) at signup and pass them through unchanged.
+     *
      * @param {string} phone - Phone number to format
-     * @returns {string} Formatted phone number
+     * @returns {string} E.164-formatted phone number
+     * @throws {Error} If the input can't be coerced into a plausible E.164 value
      */
     formatPhoneNumber(phone) {
-        // Remove all non-digit characters
-        const cleaned = phone.replace(/\D/g, '');
-        
-        // Add +1 for US numbers if not present
-        if (cleaned.length === 10) {
-            return `+1${cleaned}`;
+        if (typeof phone !== 'string' || !phone.trim()) {
+            throw new Error('Phone number is required');
         }
-        
-        // If already has country code
+        const trimmed = phone.trim();
+
+        // Already E.164 (or close): trust the country code the caller provided.
+        if (trimmed.startsWith('+')) {
+            const digitsAfterPlus = trimmed.slice(1).replace(/\D/g, '');
+            // E.164 allows 8–15 digits total (country code + subscriber).
+            if (digitsAfterPlus.length < 8 || digitsAfterPlus.length > 15) {
+                throw new Error(`Phone number "${phone}" is not a valid E.164 value`);
+            }
+            return `+${digitsAfterPlus}`;
+        }
+
+        const cleaned = trimmed.replace(/\D/g, '');
+
+        // 11 digits starting with 1 → US/Canada with country code already.
         if (cleaned.length === 11 && cleaned.startsWith('1')) {
             return `+${cleaned}`;
         }
-        
-        // Already formatted or international
-        if (phone.startsWith('+')) {
-            return phone;
+
+        // 10 digits → assume US/Canada. Warn so non-US callers notice the assumption.
+        if (cleaned.length === 10) {
+            console.warn(
+                'twilioService.formatPhoneNumber: assuming +1 for 10-digit number. ' +
+                'Store phone numbers in E.164 format (+<country><number>) to avoid this.'
+            );
+            return `+1${cleaned}`;
         }
-        
-        return `+${cleaned}`;
+
+        throw new Error(
+            `Phone number "${phone}" is not in a recognized format. ` +
+            'Use E.164 (e.g. +14155551234).'
+        );
     }
 
     /**

@@ -73,8 +73,8 @@ describe('useAuthContext hook behavior', () => {
   });
 
   test('context value includes user, isAuthenticated, isAdmin, loading, initialized', () => {
-    // The value object is defined as `const value = { ... }` before being passed to Provider
-    const valueMatch = authContextSource.match(/const value\s*=\s*\{([\s\S]*?)\};/);
+    // The value is either `const value = { ... };` or `const value = useMemo(() => ({ ... }), [...]);`
+    const valueMatch = authContextSource.match(/const value\s*=\s*(?:useMemo\(\s*\(\)\s*=>\s*)?\(?\{([\s\S]*?)\}\)?/);
     expect(valueMatch).toBeTruthy();
     const valueContent = valueMatch[1];
     expect(valueContent).toContain('user');
@@ -85,7 +85,7 @@ describe('useAuthContext hook behavior', () => {
   });
 
   test('context value includes signIn, signUp, signOut methods', () => {
-    const valueMatch = authContextSource.match(/const value\s*=\s*\{([\s\S]*?)\};/);
+    const valueMatch = authContextSource.match(/const value\s*=\s*(?:useMemo\(\s*\(\)\s*=>\s*)?\(?\{([\s\S]*?)\}\)?/);
     expect(valueMatch).toBeTruthy();
     const valueContent = valueMatch[1];
     expect(valueContent).toContain('signIn');

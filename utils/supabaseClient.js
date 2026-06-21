@@ -1,9 +1,11 @@
 
 import { createClient } from '@supabase/supabase-js'
 
-// Get environment variables
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY
+// Get environment variables — guard `process` so a missing VITE_ var
+// doesn't ReferenceError in the browser (Vite only inlines NODE_ENV).
+const nodeEnv = (typeof process !== 'undefined' && process.env) || {}
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || nodeEnv.SUPABASE_URL
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || nodeEnv.SUPABASE_ANON_KEY
 
 // Validate configuration
 if (!supabaseUrl || !supabaseKey) {
