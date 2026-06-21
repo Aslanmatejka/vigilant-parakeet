@@ -205,11 +205,56 @@ TOOL_DEFINITIONS = [
                         "type": "string",
                         "description": (
                             "Optional food category filter using DB enum values: "
-                            "produce (vegetables, fruits, carrots, apples, etc.), "
-                            "dairy (milk, cheese, eggs, etc.), "
-                            "bakery (bread, pastries, etc.), "
-                            "pantry (canned goods, grains, dry goods, etc.). "
-                            "Pass the DB enum value exactly: produce, dairy, bakery, or pantry."
+                            "produce (vegetables, fruits, greens, etc.), "
+                            "dairy (milk, cheese, eggs, yogurt, butter), "
+                            "bakery (bread, pastries, muffins, bagels), "
+                            "pantry (canned goods, grains, rice, beans, pasta, dry goods), "
+                            "meat (beef, pork, chicken, poultry), "
+                            "seafood (fish, shellfish), "
+                            "frozen (frozen meals, ice cream), "
+                            "snacks (chips, crackers, cookies), "
+                            "beverages (juice, soda, water, tea), "
+                            "prepared (cooked meals, sandwiches, leftovers). "
+                            "Pass the DB enum value exactly. If unsure, omit this "
+                            "and use dietary_tags / exclude_allergens instead."
+                        ),
+                    },
+                    "dietary_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional dietary tags the listing must include (ALL required). "
+                            "Examples: vegan, vegetarian, gluten-free, halal, kosher, "
+                            "dairy-free, nut-free, organic, low-sodium, high-protein. "
+                            "Case-insensitive; hyphens optional ('gluten free' == 'gluten-free')."
+                        ),
+                    },
+                    "exclude_allergens": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional allergens to exclude. Listings whose `allergens` "
+                            "field contains ANY of these are filtered out. "
+                            "Examples: nuts, peanuts, tree nuts, dairy, milk, eggs, "
+                            "gluten, wheat, soy, shellfish, fish, sesame."
+                        ),
+                    },
+                    "expiry_within_days": {
+                        "type": "integer",
+                        "description": (
+                            "Optional. Only return listings whose expiry_date is within "
+                            "this many days from today. Use 0 for 'expiring today', "
+                            "1 for 'today or tomorrow', 3 for 'within 3 days', 7 for "
+                            "'this week'. Listings without an expiry date are still "
+                            "included (they are non-perishable / unlabeled)."
+                        ),
+                    },
+                    "min_quantity": {
+                        "type": "number",
+                        "description": (
+                            "Optional. Only return listings whose quantity is at least "
+                            "this number. Useful for 'food for 10 people' style requests "
+                            "where you want listings large enough to feed a group."
                         ),
                     },
                     "max_results": {
@@ -1567,17 +1612,65 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 # ---------------------------------------------------------------------------
 
 # Map common synonyms / GPT guesses → actual DB enum values for category.
-_FOOD_TYPE_SYNONYMS: dict[str, str] = {
-    "vegetable": "produce", "vegetables": "produce",
-    "fruit": "produce", "fruits": "produce",
-    "produce": "produce",
-    "protein": "pantry", "proteins": "pantry",
-    "grain": "pantry", "grains": "pantry",
-    "canned": "pantry", "pantry": "pantry", "dry": "pantry", "dry goods": "pantry",
-    "bread": "bakery", "bakery": "bakery", "pastry": "bakery", "pastries": "bakery",
-    "dairy": "dairy", "milk": "dairy", "cheese": "dairy", "eggs": "dairy",
-    "prepared": "pantry",
-    "other": None,
+# DB enum (food_category): produce, dairy, bakery, pantry, meat, seafood,
+# frozen, snacks, beverages, prepared, other.
+_FOOD_TYPE_SYNONYMS: dict[str, Optional[str]] = {
+    # Produce
+    "vegetable": "produce", "vegetables": "produce", "veggie": "produce",
+    "veggies": "produce", "greens": "produce", "leafy greens": "produce",
+    "salad": "produce", "fruit": "produce", "fruits": "produce",
+    "produce": "produce", "vegetal": "produce",
+    # Bakery
+    "bread": "bakery", "breads": "bakery", "bakery": "bakery",
+    "baked": "bakery", "baked goods": "bakery", "pastry": "bakery",
+    "pastries": "bakery", "bagel": "bakery", "bagels": "bakery",
+    "croissant": "bakery", "muffin": "bakery", "muffins": "bakery",
+    "cake": "bakery", "cakes": "bakery", "donut": "bakery", "donuts": "bakery",
+    # Dairy
+    "dairy": "dairy", "milk": "dairy", "cheese": "dairy", "yogurt": "dairy",
+    "yoghurt": "dairy", "butter": "dairy", "cream": "dairy", "eggs": "dairy",
+    "egg": "dairy",
+    # Meat
+    "meat": "meat", "meats": "meat", "beef": "meat", "pork": "meat",
+    "chicken": "meat", "poultry": "meat", "turkey": "meat", "lamb": "meat",
+    "ground meat": "meat", "ground beef": "meat",
+    # Seafood
+    "seafood": "seafood", "fish": "seafood", "shellfish": "seafood",
+    "shrimp": "seafood", "salmon": "seafood", "tuna": "seafood",
+    "crab": "seafood",
+    # Frozen
+    "frozen": "frozen", "frozen meal": "frozen", "frozen meals": "frozen",
+    "frozen food": "frozen", "frozen foods": "frozen", "ice cream": "frozen",
+    # Snacks
+    "snack": "snacks", "snacks": "snacks", "chips": "snacks",
+    "crackers": "snacks", "cookies": "snacks", "candy": "snacks",
+    "granola bar": "snacks", "granola bars": "snacks",
+    # Beverages
+    "beverage": "beverages", "beverages": "beverages", "drink": "beverages",
+    "drinks": "beverages", "juice": "beverages", "soda": "beverages",
+    "water": "beverages", "tea": "beverages", "coffee": "beverages",
+    # Prepared
+    "prepared": "prepared", "prepared meal": "prepared",
+    "prepared meals": "prepared", "prepared food": "prepared",
+    "prepared foods": "prepared", "cooked": "prepared",
+    "cooked meal": "prepared", "cooked meals": "prepared", "meal": "prepared",
+    "meals": "prepared", "hot meal": "prepared", "hot meals": "prepared",
+    "ready meal": "prepared", "ready meals": "prepared", "takeout": "prepared",
+    "sandwich": "prepared", "sandwiches": "prepared", "leftover": "prepared",
+    "leftovers": "prepared",
+    # Pantry / dry / canned / grains / staples
+    "grain": "pantry", "grains": "pantry", "rice": "pantry", "bean": "pantry",
+    "beans": "pantry", "lentil": "pantry", "lentils": "pantry",
+    "pasta": "pantry", "noodle": "pantry", "noodles": "pantry",
+    "cereal": "pantry", "cereals": "pantry", "oat": "pantry", "oats": "pantry",
+    "oatmeal": "pantry", "flour": "pantry", "sugar": "pantry",
+    "salt": "pantry", "canned": "pantry", "can": "pantry", "cans": "pantry",
+    "canned good": "pantry", "canned goods": "pantry", "pantry": "pantry",
+    "dry": "pantry", "dry goods": "pantry", "nonperishable": "pantry",
+    "non-perishable": "pantry", "shelf stable": "pantry",
+    "shelf-stable": "pantry", "staple": "pantry", "staples": "pantry",
+    # Ambiguous / unmapped: let model decide (no category filter).
+    "protein": None, "proteins": None, "other": None,
 }
 
 
@@ -1586,13 +1679,20 @@ async def _search_food_near_user(
     radius_km: float = 10,
     food_type: Optional[str] = None,
     max_results: int = 20,
+    dietary_tags: Optional[list] = None,
+    exclude_allergens: Optional[list] = None,
+    expiry_within_days: Optional[int] = None,
+    min_quantity: Optional[float] = None,
+    **_ignored,
 ) -> dict:
     """Search available food listings near the user's location.
 
     1. Fetch the user's location from the users table
     2. Query food_listings with status in [approved, active], not expired
     3. Filter by Haversine distance and optional food_type
-    4. Format natural-language-friendly results
+    4. Apply post-fetch filters for dietary_tags, exclude_allergens,
+       expiry_within_days, and min_quantity
+    5. Format natural-language-friendly results
     """
     from backend.ai_engine import supabase_get
 
@@ -1601,9 +1701,18 @@ async def _search_food_near_user(
         normalized = _FOOD_TYPE_SYNONYMS.get(food_type.strip().lower())
         food_type = normalized  # May become None for "other" / unmapped values
 
+    # Normalize dietary/allergen filter terms for case-insensitive comparison.
+    def _norm_tag(s: str) -> str:
+        return (s or "").strip().lower().replace("_", "-").replace(" ", "-")
+
+    want_diet = {_norm_tag(t) for t in (dietary_tags or []) if t}
+    bad_allergens = {_norm_tag(t) for t in (exclude_allergens or []) if t}
+
     logger.info(
-        "search_food_near_user: user=%s radius=%skm type=%s",
-        user_id, radius_km, food_type,
+        "search_food_near_user: user=%s radius=%skm type=%s diet=%s "
+        "exclude_allergens=%s expiry_within=%s min_qty=%s",
+        user_id, radius_km, food_type, want_diet, bad_allergens,
+        expiry_within_days, min_quantity,
     )
 
     # --- 1. Get user location ---
@@ -1666,6 +1775,21 @@ async def _search_food_near_user(
     if food_type:
         params["category"] = f"eq.{food_type}"
 
+    # Tighter expiry window when caller asks for "expiring soon" style queries.
+    # Listings without an expiry_date stay included (non-perishable / unlabeled).
+    if expiry_within_days is not None and expiry_within_days >= 0:
+        cutoff = (
+            datetime.now(timezone.utc) + timedelta(days=int(expiry_within_days))
+        ).strftime("%Y-%m-%d")
+        params["or"] = (
+            f"(expiry_date.is.null,"
+            f"and(expiry_date.gte.{today_str},expiry_date.lte.{cutoff}))"
+        )
+
+    # Server-side minimum quantity filter.
+    if min_quantity is not None and min_quantity > 0:
+        params["quantity"] = f"gte.{min_quantity}"
+
     # Bounding box pre-filter: narrow DB results to ~radius before fetching
     if user_lat is not None and user_lng is not None:
         # Rough degree offset for the given radius (1 deg lat ≈ 111 km)
@@ -1710,6 +1834,29 @@ async def _search_food_near_user(
 
         # Include listing if within radius, or if no location data available
         if dist is not None and dist > radius_km:
+            continue
+
+        # Dietary / allergen filters (post-fetch so we can normalise tags).
+        # Listing tag columns may be a list, comma-separated string, or null.
+        def _as_tag_set(val) -> set:
+            if val is None:
+                return set()
+            if isinstance(val, str):
+                items = [t for t in val.replace(";", ",").split(",") if t.strip()]
+            elif isinstance(val, (list, tuple)):
+                items = list(val)
+            else:
+                return set()
+            return {_norm_tag(str(t)) for t in items if str(t).strip()}
+
+        listing_diet = _as_tag_set(listing.get("dietary_tags"))
+        listing_allergens = _as_tag_set(listing.get("allergens"))
+
+        # Require ALL requested dietary tags to be present on the listing.
+        if want_diet and not want_diet.issubset(listing_diet):
+            continue
+        # Drop listings that contain ANY excluded allergen.
+        if bad_allergens and (bad_allergens & listing_allergens):
             continue
 
         result = {
@@ -1759,9 +1906,22 @@ async def _search_food_near_user(
             + "\n\n(Quantities shown are current now but may change as others claim food.)"
         )
     else:
+        active_filters = []
+        if food_type:
+            active_filters.append(f"category={food_type}")
+        if want_diet:
+            active_filters.append(f"dietary={','.join(sorted(want_diet))}")
+        if bad_allergens:
+            active_filters.append(f"no {','.join(sorted(bad_allergens))}")
+        if expiry_within_days is not None:
+            active_filters.append(f"expiring within {expiry_within_days}d")
+        if min_quantity:
+            active_filters.append(f"qty>={min_quantity}")
+        hint = f" (filters: {'; '.join(active_filters)})" if active_filters else ""
         summary = (
-            "No available food listings found within your area right now. "
-            "Try expanding your search radius or check back later!"
+            f"No available food listings found within {radius_km} km{hint}. "
+            "Try widening your radius, relaxing dietary/allergen filters, "
+            "or check back later!"
         )
 
     return {
@@ -1774,6 +1934,13 @@ async def _search_food_near_user(
         "total": len(results),
         "radius_km": radius_km,
         "user_location_available": user_lat is not None,
+        "filters_applied": {
+            "food_type": food_type,
+            "dietary_tags": sorted(want_diet) if want_diet else [],
+            "exclude_allergens": sorted(bad_allergens) if bad_allergens else [],
+            "expiry_within_days": expiry_within_days,
+            "min_quantity": min_quantity,
+        },
         "summary": summary,
     }
 

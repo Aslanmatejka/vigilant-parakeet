@@ -4691,7 +4691,7 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
         # "Alameda Unified, Oakland Tech, or another"
         # Match 1-4 capitalized words in sequence
         pattern = r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b'
-        matches = _re_comm.findall(full)
+        matches = _re_comm.findall(pattern, full)
         
         # Filter matches: exclude common false positives
         exclude = {
