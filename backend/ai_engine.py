@@ -19,6 +19,7 @@ from __future__ import annotations
 
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -414,15 +415,34 @@ def get_canned_response(error_type: str, lang: str = "en") -> str:
 
 _rate_store: dict[str, list[float]] = {}
 _user_rate_store: dict[str, list[float]] = {}
+# Periodically drop buckets whose newest timestamp is older than the window
+# so the stores can't grow unbounded as unique IPs / user ids accumulate.
+_RATE_SWEEP_INTERVAL = 1000
+_rate_calls_since_sweep = 0
+
+
+def _sweep_rate_stores(now: float) -> None:
+    cutoff = now - RATE_LIMIT_WINDOW
+    for store in (_rate_store, _user_rate_store):
+        stale = [k for k, ts in store.items() if not ts or ts[-1] < cutoff]
+        for k in stale:
+            store.pop(k, None)
 
 
 def check_rate_limit(client_ip: str, limit: int = RATE_LIMIT_DEFAULT) -> bool:
+    global _rate_calls_since_sweep
     now = time.time()
+    _rate_calls_since_sweep += 1
+    if _rate_calls_since_sweep >= _RATE_SWEEP_INTERVAL:
+        _rate_calls_since_sweep = 0
+        _sweep_rate_stores(now)
     timestamps = _rate_store.setdefault(client_ip, [])
-    _rate_store[client_ip] = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
-    if len(_rate_store[client_ip]) >= limit:
+    fresh = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
+    if len(fresh) >= limit:
+        _rate_store[client_ip] = fresh
         return False
-    _rate_store[client_ip].append(now)
+    fresh.append(now)
+    _rate_store[client_ip] = fresh
     return True
 
 
@@ -434,10 +454,12 @@ def check_user_rate_limit(user_id: str, limit: int = RATE_LIMIT_DEFAULT) -> bool
         return True
     now = time.time()
     timestamps = _user_rate_store.setdefault(user_id, [])
-    _user_rate_store[user_id] = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
-    if len(_user_rate_store[user_id]) >= limit:
+    fresh = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
+    if len(fresh) >= limit:
+        _user_rate_store[user_id] = fresh
         return False
-    _user_rate_store[user_id].append(now)
+    fresh.append(now)
+    _user_rate_store[user_id] = fresh
     return True
 
 
@@ -458,14 +480,25 @@ class CircuitBreaker:
         self.state = CircuitState.CLOSED
         self.failure_count = 0
         self.last_failure_time: float = 0
+        # In HALF_OPEN we allow exactly one probe; further requests are
+        # rejected until record_success / record_failure settles the state.
+        self.probe_in_flight: bool = False
 
     def record_success(self) -> None:
         self.failure_count = 0
         self.state = CircuitState.CLOSED
+        self.probe_in_flight = False
 
     def record_failure(self) -> None:
         self.failure_count += 1
         self.last_failure_time = time.time()
+        if self.state == CircuitState.HALF_OPEN:
+            # Probe failed — re-open immediately rather than waiting for
+            # the failure_count to climb back to the threshold.
+            self.state = CircuitState.OPEN
+            self.probe_in_flight = False
+            return
+        self.probe_in_flight = False
         if self.failure_count >= self.failure_threshold:
             self.state = CircuitState.OPEN
 
@@ -475,9 +508,15 @@ class CircuitBreaker:
         if self.state == CircuitState.OPEN:
             if time.time() - self.last_failure_time >= self.reset_timeout:
                 self.state = CircuitState.HALF_OPEN
+                self.probe_in_flight = True
                 return True
             return False
-        return True
+        # HALF_OPEN: single-probe gate so a burst doesn't flood a still-
+        # unhealthy upstream the instant the reset timer expires.
+        if not self.probe_in_flight:
+            self.probe_in_flight = True
+            return True
+        return False
 
 
 _circuit = CircuitBreaker()
@@ -877,12 +916,15 @@ async def legacy_ai_request(endpoint: str, payload: dict[str, Any]) -> dict[str,
 # Training data + system prompt builder
 # ---------------------------------------------------------------------------
 
+@functools.lru_cache(maxsize=1)
 def _load_training_data() -> dict[str, Any]:
     try:
         with open(TRAINING_DATA_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
-    except FileNotFoundError:
-        logger.warning("Training data not found: %s", TRAINING_DATA_PATH)
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        logger.warning(
+            "Training data load failed (%s): %s", type(exc).__name__, exc,
+        )
         return {}
 
 
@@ -4967,12 +5009,17 @@ def compute_next_step(
         # 3) After a broad search → narrow it
         if tool in _NEXT_STEP_SEARCH_TOOLS:
             results = result.get("results") or result.get("listings") or []
-            if isinstance(results, list):
+            total = result.get("total")
+            count_field = result.get("count")
+            # Prefer the server-reported total over the visible page size:
+            # a paginated response may return 8 visible + total=42, and we
+            # still want to offer the narrow chip in that case.
+            if isinstance(total, int) and total > 0:
+                count = total
+            elif isinstance(count_field, int) and count_field > 0:
+                count = count_field
+            elif isinstance(results, list):
                 count = len(results)
-            elif isinstance(result.get("total"), int):
-                count = result["total"]
-            elif isinstance(result.get("count"), int):
-                count = result["count"]
             else:
                 count = 0
             if count > _NEXT_STEP_SEARCH_THRESHOLD:
