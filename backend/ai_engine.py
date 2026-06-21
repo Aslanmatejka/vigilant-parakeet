@@ -949,6 +949,26 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         safety = "\n".join(f"- {s}" for s in training_data["food_safety"])
         sections.append(f"## Food Safety Guidelines\n{safety}")
 
+    if "privacy_rules" in training_data:
+        rules = "\n".join(f"- {r}" for r in training_data["privacy_rules"])
+        sections.append(f"## Privacy Rules (NEVER VIOLATE)\n{rules}")
+
+    caps = training_data.get("capabilities")
+    if isinstance(caps, dict):
+        can_do = caps.get("can_do") or []
+        cannot_do = caps.get("cannot_do") or []
+        cap_lines: list[str] = []
+        if can_do:
+            cap_lines.append("**I can:**")
+            cap_lines.extend(f"- {c}" for c in can_do)
+        if cannot_do:
+            if cap_lines:
+                cap_lines.append("")
+            cap_lines.append("**I cannot (do not promise these — say so plainly):**")
+            cap_lines.extend(f"- {c}" for c in cannot_do)
+        if cap_lines:
+            sections.append("## What I Can / Cannot Do\n" + "\n".join(cap_lines))
+
     if "tone_guidelines" in training_data:
         sections.append(f"## Communication Style\n{training_data['tone_guidelines']}")
 

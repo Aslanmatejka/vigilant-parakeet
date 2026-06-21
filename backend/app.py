@@ -532,6 +532,22 @@ async def lifespan(app: FastAPI):
     # Startup: launch background reminder job
     task = asyncio.create_task(_reminder_loop())
     logger.info("Background reminder job scheduled")
+    # Surface the training-data version so rolling deploys can be told apart
+    # in logs when two pods disagree on prompt content.
+    try:
+        from backend.ai_engine import _load_training_data
+        _td = _load_training_data()
+        logger.info(
+            "Training data loaded: version=%s updated_at=%s sections=%d",
+            _td.get("version", "<missing>"),
+            _td.get("updated_at", "<missing>"),
+            sum(1 for k in (
+                "platform_overview", "user_roles", "processes", "food_safety",
+                "privacy_rules", "capabilities", "tone_guidelines", "spanish_guidelines",
+            ) if k in _td),
+        )
+    except Exception as exc:  # never block startup on logging
+        logger.warning("Could not log training-data version: %s", exc)
     yield
     # Shutdown: cancel background task and close shared HTTP client
     task.cancel()
