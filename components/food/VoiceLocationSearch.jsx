@@ -288,8 +288,8 @@ export default function VoiceLocationSearch({
                                 <i className="fas fa-microphone-lines text-sm" aria-hidden="true" />
                             </span>
                             <div>
-                                <h2 className="text-sm font-semibold leading-tight">Voice + GPS food finder</h2>
-                                <p className="text-[11px] text-gray-500 mt-0.5">Speak naturally — we rank by urgency & distance</p>
+                                <h2 className="text-sm font-semibold leading-tight">Search with your voice</h2>
+                                <p className="text-[11px] text-gray-500 mt-0.5">Speak naturally — we rank by urgency &amp; distance</p>
                             </div>
                         </div>
                     </div>

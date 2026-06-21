@@ -430,18 +430,33 @@ function FindFoodPage({ initialCategory }) {
                                 name="search"
                                 value={searchTerm}
                                 onChange={e => setSearchTerm(e.target.value)}
-                                placeholder="Search food..."
+                                placeholder="Search food, or tap the mic to speak"
                                 aria-label="Search food listings"
-                                className="w-full min-h-[44px] pl-10 pr-10 py-2.5 rounded-full bg-white border border-gray-200 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3]"
+                                className="w-full min-h-[44px] pl-10 pr-12 py-2.5 rounded-full bg-white border border-gray-200 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3]"
                             />
-                            {searchTerm && (
+                            {searchTerm ? (
                                 <button
                                     type="button"
                                     onClick={() => setSearchTerm('')}
                                     aria-label="Clear search"
-                                    className="absolute right-3 top-1/2 -translate-y-1/2 h-7 w-7 inline-flex items-center justify-center rounded-full text-gray-400 hover:bg-gray-100"
+                                    title="Clear search"
+                                    className="absolute right-2 top-1/2 -translate-y-1/2 h-9 w-9 inline-flex items-center justify-center rounded-full text-gray-400 hover:bg-gray-100"
                                 >
-                                    <i className="fas fa-times text-xs" aria-hidden="true" />
+                                    <i className="fas fa-times text-sm" aria-hidden="true" />
+                                </button>
+                            ) : (
+                                <button
+                                    type="button"
+                                    onClick={() => setVoiceModalOpen(true)}
+                                    aria-label="Search by voice"
+                                    title="Search by voice"
+                                    className={`absolute right-2 top-1/2 -translate-y-1/2 h-9 w-9 inline-flex items-center justify-center rounded-full transition touch-manipulation ${
+                                        voiceModalOpen
+                                            ? 'bg-[#2CABE3] text-white shadow-sm ring-2 ring-[#2CABE3]/30'
+                                            : 'text-gray-500 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3]'
+                                    }`}
+                                >
+                                    <i className="fas fa-microphone text-sm" aria-hidden="true" />
                                 </button>
                             )}
                         </div>
@@ -499,14 +514,15 @@ function FindFoodPage({ initialCategory }) {
                                 ))}
                             </select>
                         </label>
-                        <button
-                            type="button"
-                            onClick={() => setVoiceModalOpen(true)}
-                            className="inline-flex items-center justify-center gap-2 min-h-[36px] rounded-full bg-gradient-to-r from-[#2CABE3] to-[#1d8fbf] px-4 py-1.5 text-sm font-semibold text-white shadow-md shadow-[#2CABE3]/25 hover:shadow-lg hover:shadow-[#2CABE3]/30 transition touch-manipulation"
-                        >
-                            <i className="fas fa-microphone text-xs" aria-hidden="true" />
-                            Voice + GPS
-                        </button>
+                        {locationSource === 'gps' && currentLocation && (
+                            <span
+                                className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 border border-emerald-200 px-3 py-1 text-xs font-medium text-emerald-700"
+                                title="Distance and 'Nearest' sort are using your current location"
+                            >
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" aria-hidden="true" />
+                                Using your location
+                            </span>
+                        )}
                         {activeFilterCount > 0 && (
                             <button
                                 type="button"
@@ -554,20 +570,27 @@ function FindFoodPage({ initialCategory }) {
                         is not already on GPS. Keeps distance/radius controls
                         meaningful without nagging granted users. */}
                     {locationSource !== 'gps' && (
-                        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs sm:text-sm text-amber-900 flex items-start gap-2">
-                            <i className="fas fa-location-arrow text-amber-500 mt-0.5" aria-hidden="true" />
-                            <span className="flex-1">
-                                {geoError ? 'Location access blocked. ' : ''}
-                                Enable location to sort by nearest and filter by radius.
-                                <button
-                                    type="button"
-                                    onClick={enableGeolocation}
-                                    disabled={geoLoading}
-                                    className="ml-1 font-semibold underline hover:no-underline disabled:opacity-50"
-                                >
-                                    {geoLoading ? 'Locating…' : 'Enable location'}
-                                </button>
+                        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs sm:text-sm text-amber-900 flex items-center gap-3">
+                            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-600" aria-hidden="true">
+                                <i className="fas fa-location-arrow" />
                             </span>
+                            <div className="flex-1 leading-snug">
+                                <span className="font-semibold">See food near you.</span>
+                                <span className="ml-1 text-amber-800">
+                                    {geoError
+                                        ? 'Location access is blocked — re-enable it in your browser.'
+                                        : 'Share your location to sort by nearest and filter by distance.'}
+                                </span>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={enableGeolocation}
+                                disabled={geoLoading}
+                                className="shrink-0 inline-flex items-center gap-1.5 rounded-full bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                <i className="fas fa-location-crosshairs text-[10px]" aria-hidden="true" />
+                                {geoLoading ? 'Locating…' : 'Use my location'}
+                            </button>
                         </div>
                     )}
                 </div>
@@ -723,7 +746,7 @@ function FindFoodPage({ initialCategory }) {
                     className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/45 backdrop-blur-sm px-0 sm:px-4 py-0 sm:py-8"
                     role="dialog"
                     aria-modal="true"
-                    aria-label="Voice and GPS food finder"
+                    aria-label="Search with your voice"
                     onClick={() => setVoiceModalOpen(false)}
                 >
                     <div
