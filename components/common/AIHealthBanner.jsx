@@ -35,7 +35,7 @@ function AIHealthBanner() {
             role="status"
             aria-live="polite"
             aria-label={`${title}. ${subtitle}`}
-            className="fixed top-4 right-4 z-[9999] w-[300px] pointer-events-none"
+            className="fixed top-4 right-4 z-[9999] w-[300px] max-w-[calc(100vw-2rem)] pointer-events-none"
         >
             <div className="ai-heal-card relative px-4 py-3 text-white pointer-events-auto">
                 {/* Animated diagonal scan sweep */}

@@ -27,6 +27,66 @@ body {
     background-color: #f7f9fc;
 }
 
+/* =====================================================================
+   Mobile & Small-Device UX Enhancements
+   App-wide, progressive improvements. Desktop layout is unaffected.
+   ===================================================================== */
+
+/* Prevent accidental horizontal scrolling on phones WITHOUT breaking the
+   sticky header — overflow-x: clip does not create a new scroll container. */
+body {
+    overflow-x: clip;
+}
+
+/* Stop iOS from auto-resizing text on orientation change. */
+html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+}
+
+/* Snappier touch: removes the 300ms tap delay and the grey tap flash. */
+a,
+button,
+[role="button"],
+input,
+select,
+textarea,
+label,
+summary {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+}
+
+/* Floating-action buttons that respect the notch / home-indicator. */
+.fab-base {
+    bottom: calc(1.25rem + env(safe-area-inset-bottom));
+}
+.fab-stacked {
+    bottom: calc(6rem + env(safe-area-inset-bottom));
+}
+
+@media (max-width: 640px) {
+    /* iOS Safari zooms the page in when focusing any control under 16px. */
+    input:not([type="checkbox"]):not([type="radio"]),
+    select,
+    textarea {
+        font-size: 16px;
+    }
+
+    /* Thumb-friendly tap target for the assistant quick-question pills. */
+    .assistant-quick-question {
+        min-height: 38px;
+        display: inline-flex;
+        align-items: center;
+    }
+
+    /* Tame oversized desktop vertical rhythm so content fits the viewport. */
+    .section-spacing {
+        padding-top: 2.5rem;
+        padding-bottom: 2.5rem;
+    }
+}
+
 /* Custom Scrollbar */
 ::-webkit-scrollbar {
     width: 8px;
@@ -79,16 +139,18 @@ body {
     padding: 0 1rem;
 }
 
-/* Typography */
+/* Typography — fluid sizes so titles never overflow a narrow viewport. */
 .page-title {
-    font-size: 2.5rem;
+    font-size: clamp(1.75rem, 6vw, 2.5rem);
+    line-height: 1.2;
     font-weight: 700;
     color: #1a1a1a;
     margin-bottom: 1.5rem;
 }
 
 .section-title {
-    font-size: 1.8rem;
+    font-size: clamp(1.35rem, 4.5vw, 1.8rem);
+    line-height: 1.25;
     font-weight: 600;
     color: #2d3748;
     margin-bottom: 1rem;

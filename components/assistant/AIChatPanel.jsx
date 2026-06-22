@@ -2584,7 +2584,7 @@ function AIChatPanel() {
   // ─── Floating bubble (closed state) ──────
   if (!isOpen) {
     return (
-      <div className="fixed bottom-20 right-5 z-40 group" style={{ perspective: '600px' }}>
+      <div className="fixed right-4 sm:right-5 z-40 group fab-base" style={{ perspective: '600px' }}>
         {/* Speech bubble with "?" */}
         <div className="absolute -top-14 -left-12 animate-float-slow opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none">
           <div className="relative bg-white rounded-2xl px-3 py-2 shadow-lg border border-cyan-200/50">
@@ -2703,8 +2703,8 @@ function AIChatPanel() {
 
   // ─── Chat panel (open state) ─────────────
   const panelClasses = isExpanded
-    ? 'fixed inset-4 z-50 md:inset-8'
-    : 'fixed bottom-20 right-4 z-50 w-[540px] max-w-[calc(100vw-2rem)] h-[820px] max-h-[calc(100vh-6rem)]'
+    ? 'fixed inset-2 z-50 sm:inset-4 md:inset-8'
+    : 'fixed z-50 inset-x-2 top-2 bottom-2 sm:inset-x-auto sm:top-auto sm:bottom-20 sm:right-4 sm:w-[540px] sm:max-w-[calc(100vw-2rem)] sm:h-[820px] sm:max-h-[calc(100vh-6rem)]'
 
   return (
     <div ref={panelRef} className={`${panelClasses} flex flex-col rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 border border-slate-700/50`} style={{ background: 'linear-gradient(145deg, #0f172a 0%, #1e293b 50%, #0f172a 100%)' }}>

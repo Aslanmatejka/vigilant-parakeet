@@ -244,22 +244,22 @@ function UserDashboard() {
     };
 
     return (
-        <div className="max-w-7xl mx-auto py-8 px-4">
+        <div className="max-w-7xl mx-auto py-5 sm:py-8 px-1 sm:px-4">
             {/* Welcome Section */}
-            <div className="bg-white rounded-lg shadow-sm p-6 mb-8" role="banner">
+            <div className="bg-white rounded-lg shadow-sm p-4 sm:p-6 mb-5 sm:mb-8" role="banner">
                 <div className="flex items-center">
                     <Avatar 
                         src={user?.avatar} 
                         size="xl" 
                         alt={`${user?.name}'s avatar`}
                     />
-                    <div className="ml-6">
+                    <div className="ml-4 sm:ml-6">
                         <div className="flex items-center gap-3">
-                            <h1 className="text-2xl font-bold text-gray-900">
+                            <h1 className="text-xl sm:text-2xl font-bold text-gray-900">
                                 Welcome back, {user?.name}!
                             </h1>
                         </div>
-                        <p className="text-gray-600">
+                        <p className="text-sm sm:text-base text-gray-600">
                             Here's what's happening with your food sharing activities
                         </p>
                     </div>

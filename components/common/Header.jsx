@@ -124,8 +124,8 @@ function Header({ menuItems: menuItemsProp }) {
 
     return (
         <header data-name="header" className="header sticky top-0 z-50 bg-white shadow-sm">
-            <div className="container mx-auto px-4">
-                <div className="flex items-center justify-between h-16">
+            <div className="container mx-auto px-3 sm:px-4">
+                <div className="flex items-center justify-between h-14 sm:h-16">
                     {/* Mobile menu button */}
                     <div className="flex items-center lg:hidden">
                         <button

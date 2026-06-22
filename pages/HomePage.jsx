@@ -78,18 +78,18 @@ function HomePage() {
                     {/* Hero Section with Slideshow Background */}
                     <HeroSlideshow>
                         <section 
-                            className="py-24"
+                            className="py-14 sm:py-20 md:py-24"
                             aria-labelledby="hero-heading"
                         >
                             <div className="container mx-auto px-4">
                                 <div className="max-w-3xl mx-auto text-center">
                                     <h1 
                                         id="hero-heading"
-                                        className="text-4xl md:text-5xl font-bold mb-6 text-white drop-shadow-lg"
+                                        className="text-3xl sm:text-4xl md:text-5xl font-bold mb-4 sm:mb-6 text-white drop-shadow-lg"
                                     >
                                         Find Food, Reduce Waste, Build Community
                                     </h1>
-                                    <p className="text-xl mb-12 text-white drop-shadow-md">
+                                    <p className="text-lg sm:text-xl mb-0 text-white drop-shadow-md">
                                         Join our movement to combat food waste and hunger through community-driven food sharing.
                                     </p>
                                     {/* <div className="flex gap-6 justify-center items-center max-w-4xl mx-auto">
@@ -220,24 +220,24 @@ function HomePage() {
 
                     {/* Communities Section */}
                     <section 
-                        className="py-16 bg-gray-50"
+                        className="py-10 sm:py-16 bg-gray-50"
                         aria-labelledby="communities-heading"
                         data-tutorial="communities-section"
                     >
                         <div className="container mx-auto px-4">
-                            <div className="text-center mb-12">
+                            <div className="text-center mb-8 sm:mb-12">
                                 <h2 
                                     id="communities-heading"
-                                    className="text-3xl font-bold text-gray-900 mb-4"
+                                    className="text-2xl sm:text-3xl font-bold text-gray-900 mb-3 sm:mb-4"
                                 >
                                     Active Communities
                                 </h2>
-                                <p className="text-xl text-gray-600 mb-6">
+                                <p className="text-base sm:text-xl text-gray-600 mb-6">
                                     Join local food sharing groups in your area
                                 </p>
                                 
                                 {/* Location Filter */}
-                                <div className="flex justify-center gap-4 flex-wrap">
+                                <div className="flex justify-center gap-2 sm:gap-4 flex-wrap">
                                     <button
                                         onClick={() => setSelectedLocation('all')}
                                         className={`px-6 py-2 rounded-lg font-semibold transition-all ${
@@ -387,9 +387,9 @@ function HomePage() {
                     </section>
 
                     {/* Support the Community Section */}
-                    <section className="mt-10 mb-16">
+                    <section className="mt-8 mb-10 sm:mt-10 sm:mb-16">
                         <div className="container mx-auto px-4">
-                            <h2 className="text-2xl font-bold mb-4">Support the Community</h2>
+                            <h2 className="text-xl sm:text-2xl font-bold mb-4">Support the Community</h2>
                             <DonateVolunteerButtons />
                         </div>
                     </section>

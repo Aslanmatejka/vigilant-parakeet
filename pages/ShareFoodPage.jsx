@@ -117,13 +117,13 @@ function ShareFoodPageContent() {
     }
 
     return (
-        <div data-name="share-food-page" className="max-w-4xl mx-auto py-10 px-4">
+        <div data-name="share-food-page" className="max-w-4xl mx-auto py-5 sm:py-10 px-1 sm:px-4">
             <div className="mb-4 flex justify-end">
                 <Button onClick={() => navigate('/find')} variant="secondary" className="mr-2">Find Food</Button>
             </div>
-            <div className="mb-8 text-center">
-                <h1 className="text-4xl font-extrabold text-primary-700 drop-shadow-sm mb-2">{isEditing ? 'Edit Listing' : 'Share Food'}</h1>
-                <p className="mt-2 text-lg text-gray-600">
+            <div className="mb-5 sm:mb-8 text-center">
+                <h1 className="text-2xl sm:text-3xl md:text-4xl font-extrabold text-primary-700 drop-shadow-sm mb-2">{isEditing ? 'Edit Listing' : 'Share Food'}</h1>
+                <p className="mt-1.5 sm:mt-2 text-sm sm:text-lg text-gray-600">
                     {isEditing
                         ? 'Update your food listing information.'
                         : 'Share your surplus food with families and organizations in need. All donations are reviewed and must be approved.'}

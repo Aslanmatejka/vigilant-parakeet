@@ -390,27 +390,27 @@ function FindFoodPage({ initialCategory }) {
                 {/* Mobile: quick jump between map and listings */}
                 <nav
                     aria-label="Page sections"
-                    className="lg:hidden sticky top-[4.25rem] z-30 -mx-3 sm:-mx-4 px-3 sm:px-4 py-2 mb-4 bg-white/95 backdrop-blur-md border-y border-gray-100 shadow-sm"
+                    className="lg:hidden sticky top-14 sm:top-16 z-30 -mx-3 sm:-mx-4 px-3 sm:px-4 py-2 mb-4 bg-white/95 backdrop-blur-md border-y border-gray-100 shadow-sm"
                 >
                     <div className="flex gap-2">
                         <a
-                            href="#food-map-heading"
-                            className="flex-1 inline-flex items-center justify-center gap-1.5 min-h-[44px] rounded-full bg-cyan-50 text-cyan-800 text-sm font-semibold border border-cyan-100 touch-manipulation"
-                        >
-                            <i className="fas fa-map-marked-alt text-xs" aria-hidden="true" />
-                            Map
-                        </a>
-                        <a
                             href="#food-listings-heading"
-                            className="flex-1 inline-flex items-center justify-center gap-1.5 min-h-[44px] rounded-full bg-white text-gray-700 text-sm font-semibold border border-gray-200 touch-manipulation"
+                            className="flex-1 inline-flex items-center justify-center gap-1.5 min-h-[44px] rounded-full bg-cyan-50 text-cyan-800 text-sm font-semibold border border-cyan-100 touch-manipulation"
                         >
                             <i className="fas fa-list text-xs" aria-hidden="true" />
                             Listings
                             {filteredFoods.length > 0 && (
-                                <span className="ml-0.5 inline-flex min-w-[1.25rem] justify-center rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-bold text-gray-600">
+                                <span className="ml-0.5 inline-flex min-w-[1.25rem] justify-center rounded-full bg-white px-1.5 py-0.5 text-[10px] font-bold text-cyan-700">
                                     {filteredFoods.length}
                                 </span>
                             )}
+                        </a>
+                        <a
+                            href="#food-map-heading"
+                            className="flex-1 inline-flex items-center justify-center gap-1.5 min-h-[44px] rounded-full bg-white text-gray-700 text-sm font-semibold border border-gray-200 touch-manipulation"
+                        >
+                            <i className="fas fa-map-marked-alt text-xs" aria-hidden="true" />
+                            Map
                         </a>
                     </div>
                 </nav>
@@ -576,8 +576,10 @@ function FindFoodPage({ initialCategory }) {
                 </div>
                 <div className="mt-4 sm:mt-12">
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
-                        {/* Map first on mobile for location-first discovery */}
-                        <aside aria-labelledby="food-map-heading" className="order-1 lg:order-2">
+                        {/* Listings first on mobile so available food is the
+                            primary above-the-fold content; map sits to the
+                            right on desktop and just below on phones. */}
+                        <aside aria-labelledby="food-map-heading" className="order-2">
                             <div className="lg:sticky lg:top-24 overflow-visible">
                                 <h2
                                     id="food-map-heading"
@@ -596,7 +598,7 @@ function FindFoodPage({ initialCategory }) {
                             </div>
                         </aside>
 
-                        <div className="order-2 lg:order-1">
+                        <div className="order-1">
                             <h2
                                 id="food-listings-heading"
                                 className="scroll-mt-28 text-lg sm:text-2xl font-bold text-gray-800 mb-3 sm:mb-4"

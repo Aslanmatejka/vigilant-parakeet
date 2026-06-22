@@ -13,8 +13,8 @@ function Footer({
             role="contentinfo"
             aria-label="Site footer"
         >
-            <div className="container mx-auto px-6 lg:px-12 py-16">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-12 lg:gap-16">
+            <div className="container mx-auto px-5 sm:px-6 lg:px-12 py-10 sm:py-14 lg:py-16">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-8 md:gap-12 lg:gap-16">
                     {/* About Section - Left Column */}
                     <div data-name="footer-about" className="md:col-span-1">
                         <a
@@ -25,10 +25,10 @@ function Footer({
                             <img
                                 src="/dogoodlogo.png"
                                 alt="All Good Living Foundation Logo"
-                                className="h-16 w-auto"
+                                className="h-14 sm:h-16 w-auto"
                             />
                         </a>
-                        <p className="text-gray-700 text-sm leading-relaxed mb-8">
+                        <p className="text-gray-700 text-sm leading-relaxed mb-6 sm:mb-8">
                             All Good Living Foundation is the community's safety net and spirit lifter, rolling up its sleeves to support students and families who are facing the most challenging moments of their lives. From school-based Community Closets to food access programs and youth-centered initiatives, the foundation brings practical help, dignity, and genuine connection to Alameda, Oakland, and other surrounding areas. It's simple: when our neighbors struggle, AGLF shows up — and keeps showing up — to make sure no one is left behind.
                         </p>
 
@@ -178,10 +178,10 @@ function Footer({
                 </div>
 
                 {/* Bottom Section */}
-                <div className="border-t border-gray-400 mt-12 pt-8">
-                    <div className="flex flex-col md:flex-row justify-between items-center text-sm text-gray-600">
+                <div className="border-t border-gray-400 mt-10 sm:mt-12 pt-6 sm:pt-8">
+                    <div className="flex flex-col md:flex-row justify-between items-center gap-4 text-sm text-gray-600 text-center md:text-left">
                         <p>© {new Date().getFullYear()} All Good Living Foundation. All rights reserved.</p>
-                        <div className="flex gap-6 mt-4 md:mt-0">
+                        <div className="flex flex-wrap justify-center gap-x-6 gap-y-2">
                             <a href="/privacy" className="hover:text-gray-900 transition-colors">Privacy Policy</a>
                             <a href="/terms" className="hover:text-gray-900 transition-colors">Terms of Service</a>
                             <a href="/cookies" className="hover:text-gray-900 transition-colors">Cookie Policy</a>

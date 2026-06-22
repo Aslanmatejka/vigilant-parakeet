@@ -152,7 +152,7 @@ function UserChatWidget() {
             {/* Chat Button (icon-only) */}
             <button
                 onClick={() => setIsOpen(!isOpen)}
-                className="fixed bottom-6 right-24 z-40 w-10 h-10 text-gray-600 hover:text-blue-600 bg-white/80 hover:bg-white rounded-full shadow-md hover:shadow-lg transition-all duration-200 flex items-center justify-center"
+                className="fixed fab-stacked right-4 sm:right-5 z-40 w-11 h-11 text-gray-600 hover:text-blue-600 bg-white/90 hover:bg-white rounded-full shadow-md hover:shadow-lg transition-all duration-200 flex items-center justify-center"
                 aria-label="Open chat with admin"
                 title="Chat with admin"
             >
@@ -171,7 +171,7 @@ function UserChatWidget() {
 
             {/* Chat Window */}
             {isOpen && (
-                <div className="fixed bottom-24 right-24 z-40 w-96 max-w-[calc(100vw-3rem)] bg-white rounded-lg shadow-2xl flex flex-col overflow-hidden border border-gray-200">
+                <div className="fixed z-50 inset-x-3 bottom-3 sm:inset-x-auto sm:right-5 sm:bottom-24 w-auto sm:w-96 max-w-[28rem] mx-auto sm:mx-0 max-h-[80vh] sm:max-h-none bg-white rounded-2xl sm:rounded-lg shadow-2xl flex flex-col overflow-hidden border border-gray-200">
                     {/* Header */}
                     <div className="bg-blue-600 text-white px-4 py-3 flex items-center justify-between">
                         <div className="flex items-center space-x-2">
