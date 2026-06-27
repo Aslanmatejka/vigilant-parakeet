@@ -1,0 +1,577 @@
+AI Assistant Requirements for Food Sharing Platform
+
+OBJECTIVE
+
+The AI assistant must act as both:
+
+1. Food Discovery Assistant
+2. Platform Help Assistant
+
+The AI should understand questions, commands, requests, incomplete sentences, spelling mistakes, and conversational language.
+
+---
+
+FOOD SEARCH CAPABILITIES
+
+The AI must be able to find food listings based on:
+
+Food Type
+
+* Rice
+* Beans
+* Greens
+* Fruits
+* Vegetables
+* Bread
+* Meat
+* Chicken
+* Fish
+* Dairy
+* Milk products
+* Snacks
+* Cooked meals
+* Raw ingredients
+
+Dietary Requirements
+
+* Vegan
+* Vegetarian
+* Halal
+* Kosher
+* Gluten free
+* Dairy free
+* Lactose free
+* Nut free
+* Egg free
+* Soy free
+* Allergen free
+
+Food Condition
+
+* Fresh food
+* Frozen food
+* Chilled food
+* Cold food
+* Hot food
+* Ready to eat food
+
+Expiry Status
+
+* Expiring today
+* Expiring tomorrow
+* Expiring within 3 days
+* Expiring within 7 days
+* Long shelf life
+
+Quantity Based Search
+
+* Food for 1 person
+* Food for 2 people
+* Food for 5 people
+* Food for 10 people
+* Food for family
+* Large group food
+* Party food
+
+Location Based Search
+
+* Food near me
+* Closest food
+* Food within 1 mile
+* Food within 5 km
+* Food available today
+
+Special Needs Search
+
+* Food for children
+* Food for elderly people
+* Low sugar food
+* Low salt food
+* High protein food
+* Healthy meals
+* Quick meals
+
+---
+
+NATURAL LANGUAGE UNDERSTANDING
+
+The AI should understand different ways users ask the same thing.
+
+Examples:
+
+Show me greens.
+Find green vegetables.
+Any vegetables available?
+I need healthy vegetables.
+Do you have greens near me?
+
+All should return similar results.
+
+Examples:
+
+Food for ten people.
+Food enough for a family.
+Large quantity food.
+Meals for many people.
+
+All should return similar results.
+
+Examples:
+
+Show allergen free food.
+Food with no allergens.
+Safe food for allergies.
+Allergy friendly meals.
+
+All should return similar results.
+
+---
+
+INTENT RECOGNITION
+
+The AI must detect user intent.
+
+Intent Types:
+
+SEARCH_FOOD
+CLAIM_FOOD
+HELP
+PICKUP_INFORMATION
+POST_FOOD
+CANCEL_CLAIM
+REPORT_ISSUE
+CONTACT_DONOR
+ACCOUNT_HELP
+GENERAL_QUESTION
+
+---
+
+FOLLOW-UP CONVERSATIONS
+
+The AI must remember the current conversation context.
+
+Example:
+
+User:
+Show dairy free meals.
+
+AI:
+Returns results.
+
+User:
+Which one serves 10 people?
+
+AI:
+Filters previous results.
+
+User:
+Which one expires soon?
+
+AI:
+Filters previous results again.
+
+---
+
+FOOD RECOMMENDATION CAPABILITIES
+
+The AI should suggest listings based on:
+
+* User search history
+* Previous claims
+* Dietary preferences
+* Nearby food
+* Soon expiring food
+* Frequently claimed foods
+
+---
+
+PLATFORM HELP ASSISTANT
+
+The AI should answer platform questions.
+
+Examples:
+
+How do I claim food?
+How do I pick up food?
+How do I contact the donor?
+What happens after claiming?
+Can I cancel a claim?
+How do I post food?
+How do I update a listing?
+Why was my claim rejected?
+How do I report a problem?
+Can someone else pick up food for me?
+
+---
+
+HELP RESPONSE STYLE
+
+The AI should provide:
+
+* Step by step instructions
+* Clear explanations
+* Links to relevant screens
+* Relevant actions users can take next
+
+Example:
+
+User:
+How do I pick up food after claiming?
+
+AI:
+
+1. Open My Claims.
+2. Select your claimed food.
+3. Review pickup details.
+4. Contact donor if needed.
+5. Arrive during pickup window.
+6. Confirm collection in the app.
+
+---
+
+ERROR HANDLING
+
+The AI should never simply respond:
+
+"I don't understand."
+
+Instead:
+
+* Ask clarifying questions.
+* Suggest similar searches.
+* Suggest categories.
+
+Example:
+
+User:
+I need food for a school event.
+
+AI:
+How many people are attending?
+Would you like prepared meals or ingredients?
+
+---
+
+FUZZY MATCHING
+
+The AI must handle:
+
+Misspellings
+
+Examples:
+
+vegtables → vegetables
+vegtables → vegetables
+mlik → milk
+allergn free → allergen free
+
+Synonyms
+
+greens = vegetables
+milk products = dairy
+kids = children
+family meal = food for multiple people
+
+---
+
+ADVANCED FILTERS
+
+The AI should combine filters.
+
+Examples:
+
+Show vegan food for 10 people.
+
+Find dairy free food near me.
+
+Show fresh vegetables expiring within 3 days.
+
+Find cold milk products nearby.
+
+Show gluten free meals for children.
+
+---
+
+SAFETY FEATURES
+
+Warn users when:
+
+* Food is close to expiry.
+* Allergens are present.
+* Quantity information is uncertain.
+* Pickup time has passed.
+
+---
+
+SUCCESS CRITERIA
+
+The AI should correctly help users find food and answer platform questions regardless of:
+
+* Question format
+* Command format
+* Request format
+* Spelling mistakes
+* Synonyms
+* Partial sentences
+* Conversational language
+
+The AI should behave like a knowledgeable food-sharing assistant, not a simple keyword search engine.
+
+1. Food Discovery
+
+Users may ask:
+
+Show me food near me
+What food is available today?
+What's new?
+Show recently posted food
+What food hasn't been claimed?
+Show food available right now
+What's popular?
+What food is likely to be claimed soon?
+What can I get for dinner?
+What can I cook with these ingredients?
+What's best for a family?
+What's healthy?
+What's high protein?
+Show breakfast foods
+Show lunch foods
+Show dinner foods
+2. Food Suitability
+
+Users may not know what to search for.
+
+Examples:
+
+I'm diabetic, what can I eat?
+I can't eat dairy.
+I have a peanut allergy.
+I need food for kids.
+I need food for elderly people.
+I need food for a pregnant woman.
+What food lasts the longest?
+Which food should I claim first?
+
+The AI should reason and recommend.
+
+3. Quantity Estimation
+
+Very common.
+
+Examples:
+
+Is this enough for 5 people?
+Will this feed my family?
+How many people can this serve?
+I have 8 guests. What should I claim?
+I need food for a party.
+4. Pickup Assistance
+
+Many users get stuck here.
+
+Examples:
+
+What do I do next?
+How do I collect it?
+Where do I pick it up?
+What time should I arrive?
+Can someone else collect it?
+What if I'm late?
+How do I contact the donor?
+Can I change pickup time?
+5. Claim Assistance
+
+Examples:
+
+How do I claim food?
+Why can't I claim this?
+Did my claim go through?
+Who claimed before me?
+Can I cancel my claim?
+How many claims do I have?
+6. Posting Assistance
+
+For donors.
+
+Examples:
+
+How do I post food?
+What information should I include?
+Is this enough information?
+Can you improve my description?
+Which category should I use?
+How many people will this serve?
+
+The AI can automatically generate listing descriptions.
+
+7. Food Safety Questions
+
+Extremely important.
+
+Examples:
+
+Is this food still safe?
+It expires tomorrow. Is that okay?
+Can I freeze this?
+How long does cooked rice last?
+Should I refrigerate this?
+
+The AI should provide general safety guidance.
+
+8. Location Questions
+
+Examples:
+
+What's closest to me?
+Show food within walking distance.
+Show food within 5 km.
+Can I get this by public transport?
+Is there food near my workplace?
+9. Account Support
+
+Examples:
+
+I forgot my password.
+How do I update my email?
+Delete my account.
+Change my phone number.
+Why am I blocked?
+How do notifications work?
+10. Reporting Problems
+
+Examples:
+
+The donor didn't show up.
+The food wasn't available.
+This listing is inaccurate.
+I feel unsafe.
+Report this user.
+Report spoiled food.
+11. Recommendation Mode
+
+The AI proactively helps.
+
+Examples:
+
+Recommend food for me.
+What should I claim?
+Show me the best options.
+What's likely to expire today?
+What food might suit me?
+12. Conversational Queries
+
+Many users talk naturally.
+
+Examples:
+
+I'm hungry.
+I need something for dinner.
+I have guests coming.
+My kids need lunch.
+I'm on a tight budget.
+I need something quick.
+
+The AI should understand intent.
+
+13. Elderly and Non-Technical Users
+
+These users often ask differently.
+
+Examples:
+
+Help.
+I don't understand.
+What should I do?
+Where do I start?
+Can you show me?
+I am confused.
+I don't know how this works.
+
+The AI should switch into a guided mode.
+
+Example:
+
+"Would you like to:
+
+Find food
+Share food
+View your claims
+Contact support"
+14. Multi-Step Conversations
+
+The AI should remember context.
+
+Example:
+
+User:
+"I need food for my family."
+
+AI:
+"How many people?"
+
+User:
+"Seven."
+
+AI:
+"Any dietary restrictions?"
+
+User:
+"No."
+
+AI:
+Returns results.
+
+This is much more natural than forcing users to type everything at once.
+
+15. Accessibility Support
+
+Examples:
+
+Read this to me.
+Make the text larger.
+Explain simply.
+Explain step by step.
+Use easier language.
+Translate this.
+16. Smart Actions (Advanced)
+
+The AI should be able to perform actions.
+
+Examples:
+
+Claim this food for me.
+Contact the donor.
+Cancel my claim.
+Save this listing.
+Remind me about pickup.
+Show my claims.
+Show my saved foods.
+Find another similar listing.
+17. The Most Important Feature
+
+Most teams miss this.
+
+The AI should answer:
+
+What can you do?
+Help.
+Show me examples.
+How do I use you?
+What can I ask?
+
+When a user is stuck, the AI should immediately show examples like:
+
+I can help you:
+
+• Find food near you
+• Find allergy-friendly food
+• Find food for families
+• Claim food
+• Explain pickup steps
+• Contact donors
+• Report issues
+• Manage your account
+
+A good test is this:
+
+Can a 70-year-old who has never used AI, and a 15-year-old power user, both accomplish their goal without reading documentation?
