@@ -5,3 +5,26 @@ httpx>=0.25.0
 python-dotenv>=1.0.0
 pydantic>=2.5.0
 python-multipart>=0.0.6
+
+# OpenAI SDK
+openai>=1.10.0
+
+# LangGraph & LangChain for Agentic AI
+langgraph>=0.2.45
+langchain>=0.3.11
+langchain-openai>=0.2.10
+langchain-core>=0.3.27
+langchain-community>=0.3.10
+langgraph-checkpoint>=2.0.8
+
+# Performance & Caching
+redis>=5.0.0
+hiredis>=2.3.0
+
+# JWT validation
+pyjwt>=2.8.0
+cryptography>=41.0.0
+
+# Vector store (Supabase pgvector)
+pgvector>=0.3.0
+numpy>=1.24.0

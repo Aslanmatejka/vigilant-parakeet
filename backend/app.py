@@ -53,6 +53,17 @@ from backend.ai_engine import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
 
+# Feature flag for new agentic system
+# Default: true (agentic mode enabled)
+# Set ENABLE_AGENTIC_MODE=false to use legacy conversation engine
+ENABLE_AGENTIC_MODE = os.getenv("ENABLE_AGENTIC_MODE", "true").lower() in ("true", "1", "yes")
+
+if ENABLE_AGENTIC_MODE:
+    logger.info("🤖 Agentic mode enabled - using LangGraph agent")
+    from backend.agent import invoke_agent
+else:
+    logger.info("📋 Using legacy conversation engine")
+
 ALLOWED_ORIGINS = [
     o.strip() for o in os.getenv(
         "CORS_ORIGINS",
@@ -845,12 +856,58 @@ async def ai_chat(body: AIChatRequest, request: Request) -> dict:
     await _require_auth_for_user(request, body.user_id)
 
     try:
-        return await conversation_engine.chat(
-            user_id=body.user_id,
-            message=body.message,
-            include_audio=body.include_audio,
-            silent=body.silent,
-        )
+        # Use new agentic system if enabled
+        if ENABLE_AGENTIC_MODE:
+            # Fetch user context for agent
+            user_profile = await supabase_get("users", {
+                "id": f"eq.{body.user_id}",
+                "select": "id,email,full_name,address,phone,dietary_restrictions,allergies",
+            })
+            user_context = user_profile[0] if user_profile else {"user_id": body.user_id}
+            
+            # Invoke agent
+            result = await invoke_agent(
+                user_id=body.user_id,
+                message=body.message,
+                conversation_id=None,  # Will be auto-generated
+                user_context=user_context,
+            )
+            
+            # Transform to AIChatResponse format
+            response = {
+                "text": result.get("text", ""),
+                "user_id": body.user_id,
+                "conversation_id": result.get("conversation_id"),
+                "lang": result.get("lang", "en"),
+                "timestamp": result.get("timestamp"),
+            }
+            
+            # Add TTS audio if requested
+            if body.include_audio and not body.silent:
+                try:
+                    from backend.ai_engine import generate_tts
+                    audio_url = await generate_tts(
+                        text=response["text"],
+                        lang=response["lang"],
+                    )
+                    response["audio_url"] = audio_url
+                except Exception as e:
+                    logger.warning(f"TTS generation failed: {e}")
+                    # Continue without audio
+            
+            # Include proactive suggestions if any
+            if result.get("suggestions"):
+                response["suggestions"] = result["suggestions"]
+            
+            return response
+        else:
+            # Use legacy conversation engine
+            return await conversation_engine.chat(
+                user_id=body.user_id,
+                message=body.message,
+                include_audio=body.include_audio,
+                silent=body.silent,
+            )
     except AIError:
         # Already structured — let the AIError handler render it.
         raise

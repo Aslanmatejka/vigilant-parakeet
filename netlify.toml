@@ -2,10 +2,12 @@
   command = "npm run build"
   publish = "dist"
 
-[build.environment]
-  VITE_SUPABASE_URL = "https://ifzbpqyuhnxbhdcnmvfs.supabase.co"
-  VITE_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlmemJwcXl1aG54YmhkY25tdmZzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYwNTI5NTgsImV4cCI6MjA3MTYyODk1OH0.ivjNXt8z704sVv6Jt2Z3tVkkelUzeb8Ih4SaCQFHerk"
-  VITE_MAPBOX_TOKEN = "pk.eyJ1Ijoic2lnbndpc2UiLCJhIjoiY21rc2tjNjQ3MGFjajNkcHJ1cTNsbWV6dyJ9.xbJQFP3HCM2jmG87wvwC1Q"
+# Environment variables should be set in Netlify dashboard, not here
+# SECURITY: Never commit secrets to git!
+# Required variables:
+#   VITE_SUPABASE_URL
+#   VITE_SUPABASE_ANON_KEY  
+#   VITE_MAPBOX_TOKEN
 
 # Proxy AI API to Railway backend
 [[redirects]]
