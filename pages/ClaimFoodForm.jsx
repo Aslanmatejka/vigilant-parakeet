@@ -171,7 +171,14 @@ export default function ClaimFoodForm() {
 
             if (claimError) throw claimError;
 
-            // Update food listing: decrement quantity, or mark claimed if fully taken
+            // Update food listing: decrement quantity, or mark claimed if fully
+            // taken. CRITICAL: use compare-and-swap (CAS) — only PATCH if the
+            // listing's current quantity still matches the value we read when
+            // the user opened this page. If two users race or this page is
+            // stale, the PATCH affects zero rows and we roll back the claim
+            // we just inserted (otherwise the listing would be over-claimed).
+            let casFailed = false;
+            let patchUnreachable = false;
             try {
                 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
                 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -187,23 +194,52 @@ export default function ClaimFoodForm() {
                     : { quantity: remainingQty };
 
                 const patchResp = await fetch(
-                    `${supabaseUrl}/rest/v1/food_listings?id=eq.${food.id}`,
+                    `${supabaseUrl}/rest/v1/food_listings?id=eq.${food.id}&quantity=eq.${availableQty}`,
                     {
                         method: 'PATCH',
                         headers: {
                             'Content-Type': 'application/json',
                             apikey: supabaseKey,
                             Authorization: `Bearer ${accessToken}`,
-                            Prefer: 'return=minimal',
+                            Prefer: 'return=representation',
                         },
                         body: JSON.stringify(patchBody),
                     }
                 );
-                if (!patchResp.ok) {
+                if (patchResp.ok) {
+                    const updatedRows = await patchResp.json().catch(() => []);
+                    if (!Array.isArray(updatedRows) || updatedRows.length === 0) {
+                        // CAS miss: someone else claimed between page load and now.
+                        casFailed = true;
+                    }
+                } else {
                     console.warn('Could not update listing:', patchResp.status, await patchResp.text());
+                    patchUnreachable = true;
                 }
             } catch (statusErr) {
                 console.warn('Non-critical: failed to update listing', statusErr);
+                patchUnreachable = true;
+            }
+
+            if (casFailed || patchUnreachable) {
+                // Roll back the orphan claim so the donor's inventory stays
+                // accurate. We deliberately ignore the delete error — if the
+                // delete itself fails, an admin can reconcile from logs and
+                // the user already sees the error toast below.
+                try {
+                    await supabase
+                        .from('food_claims')
+                        .delete()
+                        .eq('id', claimData.id);
+                } catch (rollbackErr) {
+                    console.error('Claim rollback failed (admin reconcile needed):', rollbackErr);
+                }
+                toast.error(
+                    casFailed
+                        ? 'Someone else just claimed this item. Please refresh and try a different listing.'
+                        : 'Could not reserve this item right now. Please try again in a moment.'
+                );
+                return;
             }
 
             // Send SMS notifications if phone numbers are available

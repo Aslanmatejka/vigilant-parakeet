@@ -246,7 +246,6 @@ class AuthService {
                 .insert({
                   user_id: user.id,
                   total_donations: 0,
-                  total_trades: 0,
                   total_food_saved: 0.0,
                   total_impact_score: 0
                 })

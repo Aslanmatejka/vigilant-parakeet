@@ -161,6 +161,10 @@ function SignupPageContent() {
             if (user) {
                 // Mark the approval code as claimed — fire-and-forget so it never blocks navigation.
                 // Admin can reconcile if this fails. Cannot block on this: the JS client is known to hang.
+                //
+                // CAS filter `is_claimed=false` makes a concurrent-signup race
+                // visible: only one parallel writer will get rows back. The
+                // loser logs a warning so admins can spot the rare double-use.
                 supabase
                     .from('approval_codes')
                     .update({
@@ -169,8 +173,17 @@ function SignupPageContent() {
                         claimed_at: new Date().toISOString()
                     })
                     .eq('code', codeValue)
-                    .then(({ error: claimErr }) => {
-                        if (claimErr) console.warn('Failed to mark approval code as claimed:', claimErr);
+                    .eq('is_claimed', false)
+                    .select('id')
+                    .then(({ data: claimedRows, error: claimErr }) => {
+                        if (claimErr) {
+                            console.warn('Failed to mark approval code as claimed:', claimErr);
+                        } else if (!claimedRows || claimedRows.length === 0) {
+                            console.warn(
+                                'Approval code race detected — code was already claimed before our update landed. user=%s code=%s',
+                                user.id, codeValue
+                            );
+                        }
                     });
 
                 if (session) {

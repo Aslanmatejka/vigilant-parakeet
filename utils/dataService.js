@@ -876,241 +876,6 @@ class DataService {
     }
   }
 
-  // Trades
-  async getTrades(userId = null) {
-    try {
-      let query = supabase
-        .from('trades')
-        .select(`
-          *,
-          initiator:users!trades_initiator_id_fkey (
-            id,
-            name,
-            avatar_url
-          ),
-          recipient:users!trades_recipient_id_fkey (
-            id,
-            name,
-            avatar_url
-          ),
-          offered_listing:food_listings!trades_offered_listing_id_fkey (
-            id,
-            title,
-            image_url,
-            quantity,
-            unit
-          ),
-          requested_listing:food_listings!trades_requested_listing_id_fkey (
-            id,
-            title,
-            image_url,
-            quantity,
-            unit
-          )
-        `)
-
-      if (userId) {
-        query = query.or(`initiator_id.eq.${userId},recipient_id.eq.${userId}`)
-      }
-
-      const { data, error } = await query.order('created_at', { ascending: false })
-
-      if (error) throw error
-
-      return data
-    } catch (error) {
-      console.error('Get trades error:', error)
-      reportError(error)
-      throw error
-    }
-  }
-
-  async createTrade(tradeData) {
-    try {
-      const { data, error } = await supabase
-        .from('trades')
-        .insert(tradeData)
-        .select()
-        .single()
-
-      if (error) throw error
-
-      return data
-    } catch (error) {
-      console.error('Create trade error:', error)
-      reportError(error)
-      throw error
-    }
-  }
-
-  async updateTradeStatus(id, status) {
-    try {
-      const { data, error } = await supabase
-        .from('trades')
-        .update({ status })
-        .eq('id', id)
-        .select()
-        .single()
-
-      if (error) throw error
-
-      return data
-    } catch (error) {
-      console.error('Update trade status error:', error)
-      reportError(error)
-      throw error
-    }
-  }
-
-  // Barter Trades
-  async getBarterTrades(userId = null, filters = {}) {
-    try {
-      console.log('Fetching barter trades with filters:', { userId, filters });
-      
-      // Start with a simple query first
-      let query = supabase
-        .from('barter_trades')
-        .select(`
-          *,
-          initiator:users!initiator_id (
-            id,
-            name,
-            avatar_url
-          ),
-          offered_listing:food_listings!offered_listing_id (
-            id,
-            title,
-            description,
-            image_url,
-            quantity,
-            unit,
-            category
-          )
-        `)
-
-      // Filter by user involvement
-      if (userId) {
-        if (filters.type === 'offered') {
-          query = query.eq('initiator_id', userId)
-        } else if (filters.type === 'received') {
-          query = query.neq('initiator_id', userId)
-        } else {
-          // All trades involving the user
-          query = query.or(`initiator_id.eq.${userId}`)
-        }
-      }
-
-      // Filter by status
-      if (filters.status) {
-        query = query.eq('status', filters.status)
-      }
-
-      // Filter by trade type
-      if (filters.trade_type) {
-        query = query.eq('trade_type', filters.trade_type)
-      }
-
-      console.log('Executing barter trades query...');
-      const { data, error } = await query.order('created_at', { ascending: false })
-
-      if (error) {
-        console.error('Supabase query error:', error);
-        throw error;
-      }
-
-      console.log('Barter trades query successful, returned:', data?.length || 0, 'records');
-      return data || []
-    } catch (error) {
-      console.error('Get barter trades error:', error)
-      reportError(error)
-      throw error
-    }
-  }
-
-  async createBarterTrade(tradeData) {
-    try {
-      const { data, error } = await supabase
-        .from('barter_trades')
-        .insert({
-          initiator_id: tradeData.initiator_id,
-          offered_listing_id: tradeData.offered_listing_id,
-          requested_items: tradeData.requested_items,
-          trade_type: tradeData.trade_type || 'direct',
-          message: tradeData.message,
-          status: 'pending',
-          analysis: tradeData.analysis,
-          created_at: new Date().toISOString()
-        })
-        .select(`
-          *,
-          initiator:users!barter_trades_initiator_id_fkey (
-            id,
-            name,
-            avatar_url
-          ),
-          offered_listing:food_listings!barter_trades_offered_listing_id_fkey (
-            id,
-            title,
-            description,
-            image_url,
-            quantity,
-            unit,
-            category
-          )
-        `)
-        .single()
-
-      if (error) throw error
-
-      return data
-    } catch (error) {
-      console.error('Create barter trade error:', error)
-      reportError(error)
-      throw error
-    }
-  }
-
-  async updateBarterTradeStatus(tradeId, status, additionalData = {}) {
-    try {
-      const updateData = {
-        status,
-        updated_at: new Date().toISOString(),
-        ...additionalData
-      }
-
-      const { data, error } = await supabase
-        .from('barter_trades')
-        .update(updateData)
-        .eq('id', tradeId)
-        .select(`
-          *,
-          initiator:users!barter_trades_initiator_id_fkey (
-            id,
-            name,
-            avatar_url
-          ),
-          offered_listing:food_listings!barter_trades_offered_listing_id_fkey (
-            id,
-            title,
-            description,
-            image_url,
-            quantity,
-            unit,
-            category
-          )
-        `)
-        .single()
-
-      if (error) throw error
-
-      return data
-    } catch (error) {
-      console.error('Update barter trade status error:', error)
-      reportError(error)
-      throw error
-    }
-  }
-
   // Users
   async getUsers(filters = {}) {
     try {
@@ -1239,105 +1004,6 @@ class DataService {
     }
   }
 
-  // Comments and Likes
-  async createComment(commentData) {
-    try {
-      const { data, error } = await supabase
-        .from('comments')
-        .insert(commentData)
-        .select(`
-          *,
-          author:users (
-            id,
-            name,
-            avatar_url
-          )
-        `)
-        .single()
-
-      if (error) throw error
-
-      return data
-    } catch (error) {
-      console.error('Create comment error:', error)
-      reportError(error)
-      throw error
-    }
-  }
-
-  async getCommentsForPost(postId) {
-    try {
-      const { data, error } = await supabase
-        .from('comments')
-        .select(`
-          *,
-          author:users (
-            id,
-            name,
-            avatar_url
-          )
-        `)
-        .eq('post_id', postId)
-        .order('created_at', { ascending: true })
-
-      if (error) throw error
-
-      return data
-    } catch (error) {
-      console.error('Get comments for post error:', error)
-      reportError(error)
-      throw error
-    }
-  }
-
-  async likePost(postId, userId) {
-    try {
-      const { data, error } = await supabase
-        .from('post_likes')
-        .insert({ post_id: postId, user_id: userId })
-        .select()
-        .single()
-
-      if (error) throw error
-
-      const { error: rpcError } = await supabase.rpc('increment_likes_count', { post_id_arg: postId })
-      if (rpcError) {
-        console.error('Failed to increment likes count:', rpcError)
-        reportError(rpcError)
-      }
-
-      return data
-    } catch (error) {
-      console.error('Like post error:', error)
-      reportError(error)
-      throw error
-    }
-  }
-
-  async unlikePost(postId, userId) {
-    try {
-      const { error } = await supabase
-        .from('post_likes')
-        .delete()
-        .eq('post_id', postId)
-        .eq('user_id', userId)
-
-      if (error) throw error
-
-      const { error: rpcError } = await supabase.rpc('decrement_likes_count', { post_id_arg: postId })
-      if (rpcError) {
-        console.error('Failed to decrement likes count:', rpcError)
-        reportError(rpcError)
-      }
-
-      return { success: true }
-    } catch (error) {
-      console.error('Unlike post error:', error)
-      reportError(error)
-      throw error
-    }
-  }
-
   // Community Posts (main definitions in the Community Posts Methods section below)
 
   async addCommentToCommunityPost(postId, comment) {
@@ -1364,42 +1030,6 @@ class DataService {
       return data
     } catch (error) {
       console.error('Add comment to community post error:', error)
-      reportError(error)
-      throw error
-    }
-  }
-
-  async likeCommunityPost(postId, userId) {
-    try {
-      const { data, error } = await supabase
-        .from('community_post_likes')
-        .insert({ post_id: postId, user_id: userId })
-        .select()
-        .single()
-
-      if (error) throw error
-
-      return data
-    } catch (error) {
-      console.error('Like community post error:', error)
-      reportError(error)
-      throw error
-    }
-  }
-
-  async unlikeCommunityPost(postId, userId) {
-    try {
-      const { data, error } = await supabase
-        .from('community_post_likes')
-        .delete()
-        .eq('post_id', postId)
-        .eq('user_id', userId)
-
-      if (error) throw error
-
-      return data
-    } catch (error) {
-      console.error('Unlike community post error:', error)
       reportError(error)
       throw error
     }
@@ -1434,13 +1064,9 @@ class DataService {
 
       if (error) throw error
 
-      // Update event registration count
-      const { error: rpcError } = await supabase.rpc('increment_registration_count', { event_id: eventId })
-      if (rpcError) {
-        console.error('Failed to increment registration count:', rpcError)
-        reportError(rpcError)
-      }
-
+      // Note: no denormalized counter on distribution_events. If we ever
+      // need a count, derive it from `distribution_registrations` with a
+      // COUNT(*) query rather than maintaining a stale column.
       return { success: true }
     } catch (error) {
       console.error('Register for event error:', error)
@@ -1541,36 +1167,6 @@ class DataService {
       })
 
     this.subscriptions.set('food_claims', subscription)
-    return subscription
-  }
-
-  subscribeToTrades(userId, callback) {
-    const subscription = supabase
-      .channel('trades_changes')
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'trades',
-        filter: `initiator_id=eq.${userId} OR recipient_id=eq.${userId}`
-      }, callback)
-      .subscribe()
-
-    this.subscriptions.set('trades', subscription)
-    return subscription
-  }
-
-  subscribeToBarterTrades(userId, callback) {
-    const subscription = supabase
-      .channel('barter_trades_changes')
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'barter_trades',
-        filter: `initiator_id=eq.${userId}`
-      }, callback)
-      .subscribe()
-
-    this.subscriptions.set('barter_trades', subscription)
     return subscription
   }
 
@@ -1789,7 +1385,6 @@ class DataService {
   // Admin functions
   async getAdminStats() {
     try {
-      // trades table does not exist in this schema — query only existing tables.
       const [
         { count: totalUsers },
         { count: totalListings },
@@ -1799,12 +1394,10 @@ class DataService {
         supabase.from('food_listings').select('*', { count: 'exact', head: true }),
         supabase.from('food_listings').select('*', { count: 'exact', head: true }).eq('listing_type', 'donation')
       ])
-      const activeTrades = 0; // trades table not yet implemented
 
       return {
         totalUsers,
         totalListings,
-        activeTrades,
         totalDonations,
         lastUpdated: new Date().toISOString()
       }

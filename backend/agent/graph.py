@@ -21,7 +21,9 @@ Conditional edges:
 import logging
 from typing import Dict, Any, Optional, List, Literal
 from datetime import datetime, timezone
+import asyncio
 import json
+import time
 
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
@@ -536,6 +538,75 @@ def create_agent_graph() -> StateGraph:
 
 
 # ============================================================================
+# Telemetry
+# ============================================================================
+
+async def _log_agent_telemetry(
+    user_id: str,
+    conversation_id: str,
+    final_state: Optional[Dict[str, Any]],
+    total_execution_time_ms: int,
+    error: Optional[BaseException] = None,
+) -> None:
+    """Best-effort insert into agent_telemetry. Never raises.
+
+    Wired in fire-and-forget mode so a telemetry failure (network, missing
+    table, RLS misconfig) can never break a user-facing chat turn.
+    """
+    try:
+        from backend.ai_engine import supabase_post
+
+        state = final_state or {}
+        tool_results = state.get("recent_tool_results") or []
+        tool_names: List[str] = []
+        success_count = 0
+        failure_count = 0
+        for tr in tool_results:
+            if not isinstance(tr, dict):
+                continue
+            name = tr.get("tool") or tr.get("name")
+            if name:
+                tool_names.append(str(name))
+            res = tr.get("result") if isinstance(tr.get("result"), dict) else None
+            ok = bool(tr.get("ok")) or (res or {}).get("success") is True
+            if ok:
+                success_count += 1
+            else:
+                failure_count += 1
+
+        response_text = state.get("response_text") or ""
+        suggestions = state.get("pending_suggestions") or []
+        active_plan = state.get("active_plan") or []
+
+        row: Dict[str, Any] = {
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "detected_intent": state.get("detected_intent"),
+            "detected_language": state.get("detected_language") or "en",
+            "tools_called": tool_names,
+            "tool_success_count": success_count,
+            "tool_failure_count": failure_count,
+            "response_generated": bool(response_text),
+            "response_length": len(response_text),
+            "total_execution_time_ms": int(total_execution_time_ms),
+            "plan_created": bool(active_plan),
+            "plan_steps_count": len(active_plan),
+            "plan_steps_completed": int(state.get("current_step") or 0),
+            "suggestions_generated": len(suggestions),
+            "error_occurred": error is not None or bool(state.get("error")),
+        }
+        if error is not None:
+            row["error_message"] = str(error)[:1000]
+            row["error_type"] = type(error).__name__
+        elif state.get("error"):
+            row["error_message"] = str(state.get("error"))[:1000]
+
+        await supabase_post("agent_telemetry", row)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never raise
+        logger.warning("agent_telemetry insert failed (non-fatal): %s", exc)
+
+
+# ============================================================================
 # Main Invocation Function
 # ============================================================================
 
@@ -563,7 +634,9 @@ async def invoke_agent(
     # Create or load conversation state
     if not conversation_id:
         conversation_id = str(uuid.uuid4())
-    
+
+    _t0 = time.monotonic()
+
     # Initialize state
     initial_state: AgentState = {
         "conversation_id": conversation_id,
@@ -586,7 +659,19 @@ async def invoke_agent(
     # Invoke graph
     try:
         final_state = await graph.ainvoke(initial_state)
-        
+
+        # Fire-and-forget telemetry write so analytics doesn't add latency.
+        try:
+            asyncio.create_task(_log_agent_telemetry(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                final_state=final_state,
+                total_execution_time_ms=int((time.monotonic() - _t0) * 1000),
+                error=None,
+            ))
+        except Exception:  # noqa: BLE001
+            pass
+
         return {
             "text": final_state.get("response_text", ""),
             "user_id": user_id,
@@ -599,6 +684,17 @@ async def invoke_agent(
         
     except Exception as e:
         logger.error(f"Agent invocation failed: {e}")
+        try:
+            asyncio.create_task(_log_agent_telemetry(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                final_state=None,
+                total_execution_time_ms=int((time.monotonic() - _t0) * 1000),
+                error=e,
+            ))
+        except Exception:  # noqa: BLE001
+            pass
+
         return {
             "text": ERROR_RESPONSES["en"]["unknown"],
             "user_id": user_id,

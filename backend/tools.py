@@ -187,7 +187,14 @@ TOOL_DEFINITIONS = [
             "description": (
                 "Search for available food listings near a user's location. "
                 "Returns food items that are currently available for pickup "
-                "within the specified radius."
+                "within the specified radius. "
+                "Each result includes `image_url` (the listing's real photo) and "
+                "`community_name` (the community the listing belongs to, if any). "
+                "The chat UI renders the photo and community badge from these "
+                "fields automatically \u2014 do NOT repeat image URLs in your reply, "
+                "do NOT embed markdown image links like ![alt](url), and never "
+                "invent or substitute a photo URL. If `image_url` is missing, "
+                "do not mention a photo."
             ),
             "parameters": {
                 "type": "object",
@@ -274,7 +281,12 @@ TOOL_DEFINITIONS = [
             "description": (
                 "Check the newest food listings that were posted recently. "
                 "Use this when the user asks what's new, asks to check new listings, "
-                "or wants the latest available listings."
+                "or wants the latest available listings. "
+                "Each result includes `image_url` and `community_name`; the chat UI "
+                "renders these automatically. Do NOT repeat image URLs in your "
+                "reply, do NOT emit markdown image links, and never invent or "
+                "substitute a photo URL. If `image_url` is missing, do not "
+                "mention a photo."
             ),
             "parameters": {
                 "type": "object",
@@ -1377,6 +1389,82 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_my_claims",
+            "description": (
+                "List the current user's food claims (default: active claims only — "
+                "pending or approved). Use when the user asks 'what did I claim?', "
+                "'where am I picking up today?', 'show me my reservations', or wants "
+                "to manage their pickups. Each result includes the listing's photo, "
+                "address, expiry, pickup deadline, and community badge; the chat UI "
+                "renders these automatically. Do not repeat image URLs in your reply, "
+                "do not embed markdown image links, and never invent a photo."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "UUID of the authenticated user (auto-filled by the server).",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "completed", "all"],
+                        "description": (
+                            "'active' (default) returns pending/approved claims; "
+                            "'completed' returns confirmed pickups; 'all' returns every claim."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max claims to return (default 10, capped at 25).",
+                        "default": 10,
+                    },
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_community_listings",
+            "description": (
+                "Return active food donations posted by a specific community, given "
+                "its community_id (typically obtained from get_active_communities). "
+                "Use when the user asks about food from a named community "
+                "('what does Mission Food Hub have?'). Results follow the same shape "
+                "as search_food_near_user (image_url, community_name, expiry, etc.); "
+                "the chat UI renders them automatically. Do not repeat image URLs in "
+                "your reply, do not embed markdown image links, and never invent a photo."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "community_id": {
+                        "type": "string",
+                        "description": "UUID of the community (from get_active_communities).",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": (
+                            "Optional category filter using DB enum values: produce, "
+                            "dairy, bakery, pantry, meat, seafood, frozen, snacks, "
+                            "beverages, prepared."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max listings to return (default 10, capped at 25).",
+                        "default": 10,
+                    },
+                },
+                "required": ["community_id"],
+            },
+        },
+    },
 ]
 
 
@@ -1421,6 +1509,8 @@ async def execute_tool(name: str, arguments: dict) -> dict:
         "update_food_listing": _update_food_listing,
         "update_listing": _update_food_listing,
         "edit_listing": _update_food_listing,
+        "get_my_claims": _get_my_claims,
+        "get_community_listings": _get_community_listings,
     }
 
     handler = handlers.get(name)
@@ -1461,6 +1551,7 @@ async def _get_recent_listings(
         "select": (
             "id,title,description,category,quantity,unit,"
             "latitude,longitude,full_address,location,donor_name,"
+            "image_url,"
             "community_id,communities(id,name),"
             "expiry_date,pickup_by,status,dietary_tags,allergens,created_at"
         ),
@@ -1503,6 +1594,9 @@ async def _get_recent_listings(
             "category": row.get("category"),
             "quantity": row.get("quantity"),
             "unit": row.get("unit"),
+            # Real listing photo so the chat tool card matches the listing
+            # the user would see on FindFoodPage. Pass through verbatim.
+            "image_url": row.get("image_url"),
             "latitude": row.get("latitude"),
             "longitude": row.get("longitude"),
             "address": row.get("full_address") or _extract_location_text(row.get("location")),
@@ -1544,6 +1638,199 @@ async def _get_recent_listings(
         "hours": safe_hours,
         "summary": summary,
     }
+
+
+# ---------------------------------------------------------------------------
+# get_my_claims — list the user's active food claims
+# ---------------------------------------------------------------------------
+
+async def _get_my_claims(
+    user_id: str,
+    status: Optional[str] = None,
+    limit: int = 10,
+    **_ignored,
+) -> dict:
+    """List the current user's food claims (default: active = pending/approved)."""
+    from backend.ai_engine import supabase_get
+
+    logger.info("get_my_claims: user=%s status=%s limit=%s", user_id, status, limit)
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    status_norm = str(status or "active").lower()
+    safe_limit = max(1, min(int(limit or 10), 25))
+
+    params: dict = {
+        "claimer_id": f"eq.{user_id}",
+        # Nested select pulls all fields the chat card needs in one round trip
+        # (photo, address, expiry, community badge) so the model doesn't have
+        # to chain a second lookup per claim.
+        "select": (
+            "id,food_id,status,quantity,pickup_date,created_at,receipt_id,"
+            "food_listings("
+            "id,title,category,quantity,unit,image_url,"
+            "full_address,location,expiry_date,pickup_by,"
+            "communities(id,name)"
+            ")"
+        ),
+        "order": "created_at.desc",
+        "limit": str(safe_limit),
+    }
+    if status_norm == "active":
+        params["status"] = "in.(pending,approved)"
+    elif status_norm == "completed":
+        params["status"] = "eq.completed"
+    # status_norm == "all" → no filter
+
+    try:
+        rows = await supabase_get("food_claims", params)
+    except Exception as exc:
+        logger.error("get_my_claims fetch failed: %s", exc)
+        return {"success": False, "error": f"Could not fetch your claims: {exc}"}
+
+    # Best-effort: pull pickup deadlines from receipts in a single batched
+    # query. Failures are non-fatal — the card just won't show a deadline.
+    receipt_deadlines: dict = {}
+    receipt_ids = sorted({str(r.get("receipt_id")) for r in rows if r.get("receipt_id")})
+    if receipt_ids:
+        try:
+            receipts = await supabase_get("receipts", {
+                "id": f"in.({','.join(receipt_ids)})",
+                "select": "id,pickup_by",
+            })
+            for r in receipts:
+                receipt_deadlines[str(r.get("id"))] = r.get("pickup_by")
+        except Exception as exc:
+            logger.warning("get_my_claims: receipt deadline lookup failed (non-fatal): %s", exc)
+
+    listings = []
+    for row in rows:
+        listing = row.get("food_listings") or {}
+        listings.append({
+            # id is the *listing* id so the model can chain claim/cancel/etc.
+            "id": listing.get("id"),
+            "claim_id": row.get("id"),
+            "claim_status": row.get("status"),
+            "claim_quantity": row.get("quantity"),
+            "pickup_date": row.get("pickup_date"),
+            "pickup_deadline": receipt_deadlines.get(str(row.get("receipt_id"))) if row.get("receipt_id") else None,
+            "title": listing.get("title"),
+            "category": listing.get("category"),
+            "quantity": listing.get("quantity"),
+            "unit": listing.get("unit"),
+            "image_url": listing.get("image_url"),
+            "address": listing.get("full_address") or _extract_location_text(listing.get("location")),
+            "expiry_date": listing.get("expiry_date"),
+            "pickup_by": listing.get("pickup_by"),
+            "community_name": (
+                (listing.get("communities") or {}).get("name") or None
+            ),
+        })
+
+    if not listings:
+        summary = (
+            "You have no active claims right now."
+            if status_norm == "active"
+            else "No claims found."
+        )
+    else:
+        summary = f"You have {len(listings)} claim{'s' if len(listings) != 1 else ''}."
+
+    return {
+        "success": True,
+        "listings": listings,
+        "total": len(listings),
+        "summary": summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# get_community_listings — active donations for a specific community
+# ---------------------------------------------------------------------------
+
+async def _get_community_listings(
+    community_id: str,
+    limit: int = 10,
+    category: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    """Return active donations posted by a specific community."""
+    from backend.ai_engine import supabase_get
+
+    logger.info(
+        "get_community_listings: community=%s category=%s limit=%s",
+        community_id, category, limit,
+    )
+    if not community_id or not isinstance(community_id, str):
+        return {"success": False, "error": "missing community_id"}
+
+    safe_limit = max(1, min(int(limit or 10), 25))
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    params: dict = {
+        "community_id": f"eq.{community_id}",
+        "status": "in.(approved,active)",
+        # Donations only — requests live in their own feed.
+        "listing_type": "eq.donation",
+        # Mirror search_food_near_user: include unlabeled (no expiry) plus
+        # listings whose expiry hasn't passed.
+        "or": f"(expiry_date.is.null,expiry_date.gte.{today_str})",
+        "select": (
+            "id,title,description,category,quantity,unit,"
+            "image_url,full_address,location,"
+            "expiry_date,pickup_by,dietary_tags,allergens,created_at,"
+            "communities(id,name)"
+        ),
+        "order": "created_at.desc",
+        "limit": str(safe_limit),
+    }
+    if category:
+        params["category"] = f"eq.{category}"
+
+    try:
+        rows = await supabase_get("food_listings", params)
+    except Exception as exc:
+        logger.error("get_community_listings fetch failed: %s", exc)
+        return {"success": False, "error": f"Could not fetch community listings: {exc}"}
+
+    now = datetime.now(timezone.utc)
+    listings = []
+    for row in rows:
+        if not _listing_is_fresh_enough(row, now=now):
+            continue
+        listings.append({
+            "id": row.get("id"),
+            "title": row.get("title"),
+            "description": (row.get("description") or "")[:200],
+            "category": row.get("category"),
+            "quantity": row.get("quantity"),
+            "unit": row.get("unit"),
+            "image_url": row.get("image_url"),
+            "address": row.get("full_address") or _extract_location_text(row.get("location")),
+            "expiry_date": row.get("expiry_date"),
+            "pickup_by": row.get("pickup_by"),
+            "dietary_tags": row.get("dietary_tags", []),
+            "allergens": row.get("allergens", []),
+            "community_name": (
+                (row.get("communities") or {}).get("name") or None
+            ),
+        })
+
+    community_label = listings[0].get("community_name") if listings else None
+    if not listings:
+        summary = "No active listings from this community right now."
+    elif community_label:
+        summary = f"Found {len(listings)} listing{'s' if len(listings) != 1 else ''} from {community_label}."
+    else:
+        summary = f"Found {len(listings)} listing{'s' if len(listings) != 1 else ''}."
+
+    return {
+        "success": True,
+        "listings": listings,
+        "total": len(listings),
+        "summary": summary,
+    }
+
 
 # Allowed UI navigation routes (mirrors the React Router config). Keeping this
 # server-side prevents the model from sending the user to bogus paths.
@@ -1830,6 +2117,7 @@ async def _search_food_near_user(
         "select": (
             "id,title,description,category,quantity,unit,"
             "latitude,longitude,full_address,location,donor_name,user_id,"
+            "image_url,"
             "community_id,communities(id,name),"
             "expiry_date,pickup_by,status,"
             "dietary_tags,allergens,created_at"
@@ -1938,6 +2226,10 @@ async def _search_food_near_user(
             "category": listing.get("category"),
             "quantity": listing.get("quantity"),
             "unit": listing.get("unit"),
+            # The chat panel renders this thumbnail in the search tool card so
+            # the user sees the exact photo attached to the listing. Pass it
+            # through verbatim; never substitute a placeholder here.
+            "image_url": listing.get("image_url"),
             "address": listing.get("full_address") or _extract_location_text(listing.get("location")),
             # donor_name intentionally excluded: GPT must NOT use display names
             # to infer ownership — two accounts can share the same name. Use
@@ -3066,12 +3358,18 @@ async def _get_active_communities(
     results = []
     for c in communities:
         entry = {
+            # `id` lets the frontend deep-link to /communities/:id and lets
+            # the model pass the community to follow-up tool calls.
+            "id": c.get("id"),
             "name": c.get("name", ""),
             "address": c.get("location", ""),
             "contact": c.get("contact", ""),
             "phone": c.get("phone", ""),
             "hours": c.get("hours", ""),
             "description": c.get("description", ""),
+            # `image` is the community's cover photo (already SELECTed above)
+            # so cards can show a thumbnail.
+            "image": c.get("image"),
             "impact": {
                 "food_given_lb": c.get("food_given_lb", 0),
                 "families_helped": c.get("families_helped", 0),
@@ -3662,7 +3960,13 @@ async def _claim_food_listing(
     try:
         listings = await supabase_get("food_listings", {
             "id": f"eq.{listing_id}",
-            "select": "id,title,quantity,unit,status,user_id,listing_type,expiry_date,pickup_by,full_address,location",
+            "select": (
+                "id,title,quantity,unit,status,user_id,listing_type,"
+                "expiry_date,pickup_by,full_address,location,"
+                # Pulled so the claim confirmation card can show the same
+                # photo / category / community badge as the search card.
+                "image_url,category,community_id,communities(id,name)"
+            ),
             "limit": "1",
         })
     except Exception as exc:
@@ -3920,6 +4224,16 @@ async def _claim_food_listing(
         "remaining_on_listing": max(remaining, 0),
         "pickup_location": pickup_loc,
         "pickup_deadline": pickup_deadline_db,
+        # Echo back the listing's photo / category / community so the chat
+        # claim card can mirror the search card (same fields the user saw
+        # before confirming the claim).
+        "image_url": listing.get("image_url"),
+        "category": listing.get("category"),
+        "expiry_date": listing.get("expiry_date"),
+        "community_name": (
+            (listing.get("communities") or {}).get("name")
+            or None
+        ),
         "summary": summary,
     }
 

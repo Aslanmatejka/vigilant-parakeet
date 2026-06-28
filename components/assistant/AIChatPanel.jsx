@@ -490,7 +490,7 @@ function ToolResultCard({ toolResult, language = 'en' }) {
   const ok = result?.success || toolResult.ok
 
   const searchItems = result.listings ?? result.results ?? []
-  if ((tool === 'search_food_near_user' || tool === 'search_food_nearby' || tool === 'get_recent_listings') && searchItems.length > 0) {
+  if ((tool === 'search_food_near_user' || tool === 'search_food_nearby' || tool === 'get_recent_listings' || tool === 'get_my_claims' || tool === 'get_community_listings') && searchItems.length > 0) {
     const t = TOOL_CARD_TOKENS.search
 
     /** Format an ISO date string (YYYY-MM-DD) as a short human-readable label. */
@@ -525,29 +525,48 @@ function ToolResultCard({ toolResult, language = 'en' }) {
 
             const meta = [distance, item.category, expiryLabel ? `Exp ${expiryLabel}` : null].filter(Boolean).join(' · ')
             const address = item.address || item.full_address || item.pickup_location || null
+            // Only show the real listing photo. We deliberately do NOT fall
+            // back to a category placeholder so the chat thumbnail always
+            // matches the photo the donor actually attached to the listing.
+            const photoUrl = typeof item.image_url === 'string' && /^https?:\/\//i.test(item.image_url)
+              ? item.image_url
+              : null
             return (
               <li key={item.id} className="rounded-lg bg-slate-900/40 px-2.5 py-2 border border-emerald-500/15">
-                <div className={`font-medium ${t.accent}`}>{item.title}</div>
-                {meta && <div className={`${t.sub} text-[11px] mt-0.5`}>{meta}</div>}
-                {address && (
-                  <div className={`${t.sub} text-[11px] mt-0.5 flex items-start gap-1`}>
-                    <i className="fas fa-map-marker-alt mt-[2px] text-[10px] opacity-70" aria-hidden="true" />
-                    <span className="break-words">{address}</span>
+                <div className="flex gap-2.5">
+                  {photoUrl && (
+                    <img
+                      src={photoUrl}
+                      alt={item.title || ''}
+                      loading="lazy"
+                      className="h-14 w-14 flex-shrink-0 rounded-md object-cover border border-emerald-500/15 bg-slate-800"
+                      onError={(e) => { e.currentTarget.style.display = 'none' }}
+                    />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className={`font-medium ${t.accent}`}>{item.title}</div>
+                    {meta && <div className={`${t.sub} text-[11px] mt-0.5`}>{meta}</div>}
+                    {address && (
+                      <div className={`${t.sub} text-[11px] mt-0.5 flex items-start gap-1`}>
+                        <i className="fas fa-map-marker-alt mt-[2px] text-[10px] opacity-70" aria-hidden="true" />
+                        <span className="break-words">{address}</span>
+                      </div>
+                    )}
+                    {item.community_name && (
+                      <div className={`${t.sub} text-[11px] mt-0.5 flex items-center gap-1`}>
+                        <i className="fas fa-people-group text-[10px] opacity-70" aria-hidden="true" />
+                        <span>{item.community_name}</span>
+                      </div>
+                    )}
+                    {item.dietary_tags?.length > 0 && (
+                      <div className="flex gap-1 mt-1.5 flex-wrap">
+                        {item.dietary_tags.map(tag => (
+                          <span key={tag} className={`${t.tag} text-[10px] px-1.5 py-0.5 rounded border`}>{tag}</span>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                )}
-                {item.community_name && (
-                  <div className={`${t.sub} text-[11px] mt-0.5 flex items-center gap-1`}>
-                    <i className="fas fa-people-group text-[10px] opacity-70" aria-hidden="true" />
-                    <span>{item.community_name}</span>
-                  </div>
-                )}
-                {item.dietary_tags?.length > 0 && (
-                  <div className="flex gap-1 mt-1.5 flex-wrap">
-                    {item.dietary_tags.map(tag => (
-                      <span key={tag} className={`${t.tag} text-[10px] px-1.5 py-0.5 rounded border`}>{tag}</span>
-                    ))}
-                  </div>
-                )}
+                </div>
               </li>
             )
           })}
@@ -570,24 +589,49 @@ function ToolResultCard({ toolResult, language = 'en' }) {
   }
 
   if ((tool === 'claim_listing' || tool === 'claim_food') && ok) {
+    // Only show the real listing photo (no category placeholder fallback)
+    // so the thumbnail always matches the photo the donor attached.
+    const photoUrl = typeof result.image_url === 'string' && /^https?:\/\//i.test(result.image_url)
+      ? result.image_url
+      : null
     return (
       <ToolCardShell kind="claim" language={language}>
-        {result.title && (
-          <div className="text-emerald-100">
-            {result.quantity ? <span className="font-medium">{result.quantity} {result.unit || ''} </span> : null}
-            {result.quantity ? (language === 'es' ? 'de ' : 'of ') : null}
-            <span className="font-semibold">{result.title}</span>
+        <div className="flex gap-2.5">
+          {photoUrl && (
+            <img
+              src={photoUrl}
+              alt={result.title || ''}
+              loading="lazy"
+              className="h-14 w-14 flex-shrink-0 rounded-md object-cover border border-emerald-500/15 bg-slate-800"
+              onError={(e) => { e.currentTarget.style.display = 'none' }}
+            />
+          )}
+          <div className="min-w-0 flex-1">
+            {result.title && (
+              <div className="text-emerald-100">
+                {result.quantity ? <span className="font-medium">{result.quantity} {result.unit || ''} </span> : null}
+                {result.quantity ? (language === 'es' ? 'de ' : 'of ') : null}
+                <span className="font-semibold">{result.title}</span>
+                {result.category && <span className="text-emerald-400/70"> · {result.category}</span>}
+              </div>
+            )}
+            {result.pickup_location && (
+              <div className="text-emerald-400/80 text-[11px] mt-1 flex items-start gap-1">
+                <i className="fas fa-location-dot text-[10px] mt-[2px] opacity-70" aria-hidden="true" />
+                <span className="break-words">{result.pickup_location}</span>
+              </div>
+            )}
+            {result.community_name && (
+              <div className="text-emerald-400/80 text-[11px] mt-0.5 flex items-center gap-1">
+                <i className="fas fa-people-group text-[10px] opacity-70" aria-hidden="true" />
+                <span>{result.community_name}</span>
+              </div>
+            )}
+            {(result.summary || result.message) && (
+              <div className="text-emerald-400/70 text-[12px] mt-1">{result.summary || result.message}</div>
+            )}
           </div>
-        )}
-        {result.pickup_location && (
-          <div className="text-emerald-400/80 mt-1 flex items-center gap-1">
-            <i className="fas fa-location-dot text-[10px]" aria-hidden="true" />
-            <span>{result.pickup_location}</span>
-          </div>
-        )}
-        {(result.summary || result.message) && (
-          <div className="text-emerald-400/70 mt-1">{result.summary || result.message}</div>
-        )}
+        </div>
       </ToolCardShell>
     )
   }
@@ -833,7 +877,13 @@ function MessageBubble({
                 <span className="text-[11px] opacity-70">📷</span>
               </div>
             ) : (
-              <p className="whitespace-pre-wrap">{msg.message}</p>
+              // Defensive: if the model emits markdown image syntax
+              // (`![alt](url)`) — typically a hallucinated photo URL — strip
+              // it before rendering. Real listing photos are shown in the
+              // search tool card from `item.image_url`, never in prose.
+              <p className="whitespace-pre-wrap">
+                {String(msg.message || '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim()}
+              </p>
             )}
 
             {/* Typed error metadata: small chip + retry button. Only renders

@@ -880,6 +880,11 @@ async def ai_chat(body: AIChatRequest, request: Request) -> dict:
                 "conversation_id": result.get("conversation_id"),
                 "lang": result.get("lang", "en"),
                 "timestamp": result.get("timestamp"),
+                # Surface structured tool outputs (e.g. food search listings with
+                # community_name and image_url) so the chat panel can render
+                # them as cards. Without this the frontend gets the agent's
+                # prose only and the structured tool card stays empty.
+                "tool_results": result.get("tool_results", []),
             }
             
             # Add TTS audio if requested
