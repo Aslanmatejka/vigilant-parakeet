@@ -62,7 +62,6 @@ function Header({ menuItems: menuItemsProp }) {
         }
         if (isOrganizer) {
             return [
-                { label: 'DoGoods Home', path: '/' },
                 { label: 'Share Food', path: '/share' },
                 { label: 'Find Food', path: '/find' },
                 { label: 'Recipes', path: '/recipes' },
