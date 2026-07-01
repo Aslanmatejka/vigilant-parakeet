@@ -35,6 +35,7 @@ with patch.dict("os.environ", _ENV, clear=False):
         CircuitBreaker,
         CircuitState,
         ConversationEngine,
+        _build_legacy_intercept_summary,
         _build_memory_snapshot,
         _build_system_prompt,
         _chip_language,
@@ -42,6 +43,7 @@ with patch.dict("os.environ", _ENV, clear=False):
         _detect_turn_intent_hints,
         _history_suggests_active_intake,
         _load_training_data,
+        _maybe_intercept_legacy_tool_call,
         check_rate_limit,
         detect_spanish,
         generate_quick_replies,
@@ -656,6 +658,113 @@ class TestToolFormat:
         }
         assert expected.issubset(names)
 
+    def test_every_tool_has_handler(self, engine):
+        """Every TOOL_DEFINITIONS entry must map to an entry in _HANDLERS."""
+        from backend.tools import _HANDLERS
+        schema_names = {t["function"]["name"] for t in engine.tool_definitions}
+        missing = schema_names - set(_HANDLERS.keys())
+        assert not missing, f"Tools declared with no handler: {sorted(missing)}"
+
+    def test_every_handler_has_tool_definition(self, engine):
+        """Every _HANDLERS key must have a matching TOOL_DEFINITIONS entry.
+
+        Guards against orphan aliases: handlers reachable via execute_tool
+        but never exposed to the model in the schema payload.
+        """
+        from backend.tools import _HANDLERS
+        schema_names = {t["function"]["name"] for t in engine.tool_definitions}
+        orphans = set(_HANDLERS.keys()) - schema_names
+        assert not orphans, f"Handlers with no TOOL_DEFINITIONS entry: {sorted(orphans)}"
+
+    def test_tool_required_params_match_handler_signatures(self, engine):
+        """Each schema `required` name must be accepted by the handler."""
+        import inspect
+        from backend.tools import _HANDLERS
+        for tool in engine.tool_definitions:
+            name = tool["function"]["name"]
+            handler = _HANDLERS.get(name)
+            assert handler is not None, f"No handler for tool '{name}'"
+            required = tool["function"].get("parameters", {}).get("required", []) or []
+            sig = inspect.signature(handler)
+            explicit = {
+                pname for pname, p in sig.parameters.items()
+                if p.kind not in (
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                )
+            }
+            accepts_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in sig.parameters.values()
+            )
+            for pname in required:
+                assert pname in explicit or accepts_kwargs, (
+                    f"Tool '{name}' schema requires '{pname}' but handler "
+                    f"'{handler.__name__}' doesn't accept it"
+                )
+
+    def test_user_id_tools_handlers_accept_user_id(self, engine):
+        """Any tool whose schema exposes `user_id` must have a handler
+        that accepts it — the ai_engine dispatch layer force-injects the
+        authenticated user_id and would raise TypeError otherwise."""
+        import inspect
+        from backend.tools import _HANDLERS
+        for tool in engine.tool_definitions:
+            name = tool["function"]["name"]
+            props = tool["function"].get("parameters", {}).get("properties", {}) or {}
+            if "user_id" not in props:
+                continue
+            handler = _HANDLERS.get(name)
+            assert handler is not None
+            sig = inspect.signature(handler)
+            explicit = set(sig.parameters.keys())
+            accepts_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in sig.parameters.values()
+            )
+            assert "user_id" in explicit or accepts_kwargs, (
+                f"Tool '{name}' exposes user_id but handler "
+                f"'{handler.__name__}' cannot accept it"
+            )
+
+    def test_validate_tool_definitions_returns_empty(self):
+        """The startup validator must return no errors for the current
+        TOOL_DEFINITIONS / _HANDLERS state. Regressions here indicate a
+        newly-added tool without a matching handler (or vice versa)."""
+        from backend.tools import _validate_tool_definitions
+        errors = _validate_tool_definitions()
+        assert errors == [], "Tool signature validation errors:\n  - " + "\n  - ".join(errors)
+
+    def test_no_ghost_tools_referenced_in_backend(self):
+        """No prompt, code list, or comment may reference a tool name that
+        has no handler. Regressions here mean the model will be told about
+        a tool the runtime cannot dispatch, producing "Unknown tool" errors
+        for every user who triggers that instruction path."""
+        import pathlib
+        ghost_names = (
+            "post_food_request",
+            "get_driver_route_plan",
+            "get_dispatch_queue",
+            "get_platform_stats",
+        )
+        root = pathlib.Path(__file__).resolve().parent.parent
+        offenders: list[str] = []
+        for path in root.rglob("*.py"):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            # Skip this test file itself and its docstring listing the names.
+            if path.resolve() == pathlib.Path(__file__).resolve():
+                continue
+            for name in ghost_names:
+                if name in text:
+                    offenders.append(f"{path.relative_to(root)}: contains '{name}'")
+        assert not offenders, (
+            "Ghost tool references found (these names have no handler):\n  - "
+            + "\n  - ".join(offenders)
+        )
+
     def test_needs_tools_detects_tool_keywords(self):
         """_needs_tools should return True for database-related queries.
 
@@ -956,7 +1065,6 @@ class TestToolFormat:
             "confirm_claim",
             "post_food_listing",
             "create_food_listing",
-            "post_food_request",
             "update_user_profile",
             "create_reminder",
             "attach_photos_to_listing",
@@ -1766,3 +1874,355 @@ class TestClassifyException:
         assert body["error_code"] == "timeout"
         assert body["retryable"] is True
         assert body["retry_after_seconds"] == 5
+
+
+
+# ===================================================================
+# Legacy tool-loop destructive-write intercept
+# ===================================================================
+
+class TestLegacyInterceptSummary:
+    """`_build_legacy_intercept_summary` must render bilingual (EN/ES)
+    phrasing that matches backend/agent/planner._build_intercept_summary
+    so the v1, v2, and legacy paths all show the user the same words."""
+
+    def test_delete_listing_en_with_title(self):
+        out = _build_legacy_intercept_summary(
+            "delete_listing", {"title": "Sourdough"}, language="en"
+        )
+        assert out == "permanently delete your listing 'Sourdough'"
+
+    def test_delete_listing_en_without_title(self):
+        assert _build_legacy_intercept_summary(
+            "delete_listing", {}, language="en"
+        ) == "permanently delete your listing"
+
+    def test_delete_listing_es_with_title(self):
+        out = _build_legacy_intercept_summary(
+            "delete_listing", {"title": "Pan"}, language="es"
+        )
+        assert out == "eliminar permanentemente tu publicación 'Pan'"
+
+    def test_delete_listing_es_without_title(self):
+        assert _build_legacy_intercept_summary(
+            "delete_listing", {}, language="es"
+        ) == "eliminar permanentemente tu publicación"
+
+    def test_delete_listing_falls_back_to_listing_title(self):
+        # Some callers use `listing_title` instead of `title`.
+        assert _build_legacy_intercept_summary(
+            "delete_listing", {"listing_title": "Eggs"}, language="en"
+        ) == "permanently delete your listing 'Eggs'"
+
+    def test_cancel_claim_en(self):
+        assert _build_legacy_intercept_summary(
+            "cancel_claim", {}, language="en"
+        ) == "release your claim"
+
+    def test_cancel_claim_es(self):
+        assert _build_legacy_intercept_summary(
+            "cancel_claim", {}, language="es"
+        ) == "cancelar tu reserva"
+
+    def test_leave_community_en(self):
+        assert _build_legacy_intercept_summary(
+            "leave_community", {}, language="en"
+        ) == "leave the community"
+
+    def test_leave_community_es(self):
+        assert _build_legacy_intercept_summary(
+            "leave_community", {}, language="es"
+        ) == "salir de la comunidad"
+
+    def test_forget_about_me_en(self):
+        assert _build_legacy_intercept_summary(
+            "forget_about_me", {}, language="en"
+        ) == "forget what I've learned about you"
+
+    def test_forget_about_me_es(self):
+        assert _build_legacy_intercept_summary(
+            "forget_about_me", {}, language="es"
+        ) == "olvidar lo que he aprendido sobre ti"
+
+    def test_language_defaults_to_english(self):
+        assert _build_legacy_intercept_summary(
+            "cancel_claim", {}
+        ) == "release your claim"
+
+    def test_unknown_tool_returns_tool_name(self):
+        assert _build_legacy_intercept_summary(
+            "some_new_tool", {"foo": "bar"}, language="en"
+        ) == "some_new_tool"
+
+
+class TestMaybeInterceptLegacyToolCall:
+    """`_maybe_intercept_legacy_tool_call` mirrors
+    planner._maybe_intercept_destructive but for the raw GPT tool-loop
+    inside ConversationEngine._call_openai_chat
+    (ENABLE_AGENTIC_MODE=false). Both paths must gate the same 4 tools
+    and produce the same pending_action envelope shape so switching
+    feature flags never opens a hole.
+    """
+
+    _USER_ID = "11111111-2222-3333-4444-555555555555"
+
+    @pytest.mark.asyncio
+    async def test_intercepts_delete_listing_en(self):
+        fake = MagicMock()
+        fake.status = "pending"
+        fake.pending_id = "pend-en-1"
+        with patch(
+            "backend.agent.actions.plan_action",
+            new=AsyncMock(return_value=fake),
+        ) as mock_plan:
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="delete_listing",
+                fn_args={"listing_id": "L-1", "title": "Bread"},
+                auth_user_id=self._USER_ID,
+                language="en",
+            )
+        assert isinstance(out, dict)
+        assert out["success"] is False
+        assert out["awaiting_confirmation"] is True
+        assert out["error"] == "awaiting_user_confirmation"
+        assert "'Bread'" in out["summary"]
+        assert "permanently delete" in out["summary"]
+        # The message must instruct the model NOT to retry and to ask
+        # the user, in English.
+        assert "Do NOT retry" in out["message"]
+        assert "Just to confirm" in out["message"]
+        env = out["pending_action"]
+        assert isinstance(env, dict)
+        assert env["pending_id"] == "pend-en-1"
+        assert env["tool"] == "delete_listing"
+        # `confirmed` must NEVER be persisted on the pending row.
+        assert "confirmed" not in env["args"]
+        mock_plan.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_intercepts_delete_listing_es(self):
+        fake = MagicMock()
+        fake.status = "pending"
+        fake.pending_id = "pend-es-1"
+        with patch(
+            "backend.agent.actions.plan_action",
+            new=AsyncMock(return_value=fake),
+        ):
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="delete_listing",
+                fn_args={"listing_id": "L-1", "title": "Pan"},
+                auth_user_id=self._USER_ID,
+                language="es",
+            )
+        assert out is not None
+        assert "eliminar permanentemente" in out["summary"]
+        assert "'Pan'" in out["summary"]
+        # Message is fully translated.
+        assert "NO reintentes" in out["message"]
+        assert "¿Confirmas" in out["message"]
+        # Envelope summary should also carry the Spanish phrasing so
+        # the frontend card reads correctly.
+        assert "eliminar permanentemente" in out["pending_action"]["summary"]
+
+    @pytest.mark.asyncio
+    async def test_intercepts_cancel_claim(self):
+        fake = MagicMock()
+        fake.status = "pending"
+        fake.pending_id = "pend-cc-1"
+        with patch(
+            "backend.agent.actions.plan_action",
+            new=AsyncMock(return_value=fake),
+        ):
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="cancel_claim",
+                fn_args={"claim_id": "C-3"},
+                auth_user_id=self._USER_ID,
+                language="en",
+            )
+        assert out is not None
+        assert out["pending_action"]["tool"] == "cancel_claim"
+        assert out["pending_action"]["args"] == {"claim_id": "C-3"}
+
+    @pytest.mark.asyncio
+    async def test_intercepts_leave_community_zero_arg(self):
+        fake = MagicMock()
+        fake.status = "pending"
+        fake.pending_id = "pend-lc-1"
+        with patch(
+            "backend.agent.actions.plan_action",
+            new=AsyncMock(return_value=fake),
+        ):
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="leave_community",
+                fn_args={},
+                auth_user_id=self._USER_ID,
+                language="en",
+            )
+        assert out is not None
+        assert out["pending_action"]["tool"] == "leave_community"
+
+    @pytest.mark.asyncio
+    async def test_intercepts_forget_about_me(self):
+        fake = MagicMock()
+        fake.status = "pending"
+        fake.pending_id = "pend-fm-1"
+        with patch(
+            "backend.agent.actions.plan_action",
+            new=AsyncMock(return_value=fake),
+        ):
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="forget_about_me",
+                fn_args={},
+                auth_user_id=self._USER_ID,
+                language="es",
+            )
+        assert out is not None
+        assert out["pending_action"]["tool"] == "forget_about_me"
+        assert "olvidar lo que he aprendido" in out["summary"]
+
+    @pytest.mark.asyncio
+    async def test_confirmed_flag_bypasses_intercept(self):
+        """POST /api/ai/confirm re-issues the tool call with
+        `confirmed=True`. That flag MUST bypass the intercept so the
+        write actually fires this time."""
+        with patch(
+            "backend.agent.actions.plan_action", new=AsyncMock()
+        ) as mock_plan:
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="delete_listing",
+                fn_args={"listing_id": "L-1", "confirmed": True},
+                auth_user_id=self._USER_ID,
+                language="en",
+            )
+        assert out is None
+        mock_plan.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_destructive_tool_never_intercepted(self):
+        with patch(
+            "backend.agent.actions.plan_action", new=AsyncMock()
+        ) as mock_plan:
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="get_recipes",
+                fn_args={"ingredients": ["rice"]},
+                auth_user_id=self._USER_ID,
+                language="en",
+            )
+        assert out is None
+        mock_plan.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_user_id_skips_intercept(self):
+        """Empty auth_user_id (never-logged-in browser session) means
+        we have no one to bill the pending row to. Skip rather than
+        queue an orphan row."""
+        with patch(
+            "backend.agent.actions.plan_action", new=AsyncMock()
+        ) as mock_plan:
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="delete_listing",
+                fn_args={"listing_id": "L-1"},
+                auth_user_id=None,
+                language="en",
+            )
+        assert out is None
+        mock_plan.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_nil_uuid_skips_intercept(self):
+        """The landing-page anonymous sentinel UUID is treated the
+        same as no user id."""
+        with patch(
+            "backend.agent.actions.plan_action", new=AsyncMock()
+        ) as mock_plan:
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="delete_listing",
+                fn_args={"listing_id": "L-1"},
+                auth_user_id="00000000-0000-0000-0000-000000000000",
+                language="en",
+            )
+        assert out is None
+        mock_plan.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_dict_args_returns_none(self):
+        with patch(
+            "backend.agent.actions.plan_action", new=AsyncMock()
+        ) as mock_plan:
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="delete_listing",
+                fn_args="not-a-dict",  # type: ignore[arg-type]
+                auth_user_id=self._USER_ID,
+                language="en",
+            )
+        assert out is None
+        mock_plan.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fails_open_on_timeout(self):
+        """A Supabase outage that blocks plan_action must not wedge the
+        tool loop. Return None (fall through to normal dispatch); the
+        post-hoc audit log still records the write."""
+        async def _hang(*_a, **_kw):
+            raise asyncio.TimeoutError()
+
+        with patch(
+            "backend.agent.actions.plan_action", new=AsyncMock(side_effect=_hang)
+        ):
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="delete_listing",
+                fn_args={"listing_id": "L-1"},
+                auth_user_id=self._USER_ID,
+                language="en",
+            )
+        assert out is None
+
+    @pytest.mark.asyncio
+    async def test_fails_open_on_plan_action_exception(self):
+        with patch(
+            "backend.agent.actions.plan_action",
+            new=AsyncMock(side_effect=RuntimeError("db exploded")),
+        ):
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="cancel_claim",
+                fn_args={"claim_id": "C-1"},
+                auth_user_id=self._USER_ID,
+                language="en",
+            )
+        assert out is None
+
+    @pytest.mark.asyncio
+    async def test_non_pending_status_returns_none(self):
+        """If plan_action returns something other than status=pending
+        (e.g. immediate commit for a low-risk write), fall through."""
+        fake = MagicMock()
+        fake.status = "committed"
+        fake.pending_id = None
+        with patch(
+            "backend.agent.actions.plan_action",
+            new=AsyncMock(return_value=fake),
+        ):
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="delete_listing",
+                fn_args={"listing_id": "L-1"},
+                auth_user_id=self._USER_ID,
+                language="en",
+            )
+        assert out is None
+
+    @pytest.mark.asyncio
+    async def test_missing_pending_id_returns_none(self):
+        fake = MagicMock()
+        fake.status = "pending"
+        fake.pending_id = None
+        with patch(
+            "backend.agent.actions.plan_action",
+            new=AsyncMock(return_value=fake),
+        ):
+            out = await _maybe_intercept_legacy_tool_call(
+                fn_name="delete_listing",
+                fn_args={"listing_id": "L-1"},
+                auth_user_id=self._USER_ID,
+                language="en",
+            )
+        assert out is None

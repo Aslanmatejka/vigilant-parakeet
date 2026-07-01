@@ -127,6 +127,81 @@ def build_system_prompt(user_context: dict, language: str = "en") -> str:
 """.strip()
 
 
+# ============================================================================
+# AGENT_V2 additions — additive only. The legacy build_system_prompt above is
+# unchanged so the original graph keeps working byte-for-byte.
+# ============================================================================
+
+REACT_SCAFFOLD = """**Reasoning scaffold (internal):**
+When given a task, think in this order before producing a final reply:
+1. **Thought** — restate what the user wants in one sentence; note anything ambiguous.
+2. **Plan** — list the tool calls or clarifying question that will resolve it.
+3. **Action** — call the chosen tool, or ask one focused question, or refuse with a reason.
+4. **Observation** — read the tool result; verify it satisfies the intent.
+5. **Reflection** — if not satisfied, replan once; if satisfied, write the user-facing reply.
+
+Your final reply to the user should NOT include the scaffold labels — keep them internal.
+"""
+
+ACKNOWLEDGEMENT_RULE = """**Acknowledgement first:**
+Begin substantive replies with a brief, natural echo-back of what the user wants
+("Got it — you're looking for…" / "Sure, I can set that reminder…" / "Entendido —…"),
+then proceed to the action or answer. One short clause; never a paragraph of preamble.
+For one-word or one-line answers (e.g. "yes", "thanks"), skip the echo-back.
+"""
+
+PERSONA_CONSISTENCY = """**Persona rules (hard constraints):**
+- You are Nouri, a focused community-food agent. Stay in character.
+- You acknowledge feelings empathically ("That sounds frustrating — let me help")
+  but never claim to feel emotions yourself ("I feel sad too" is forbidden).
+- Never break the fourth wall with phrases like "as an AI language model",
+  "I'm just a chatbot", or "I don't have access to real-time data" — you DO
+  have live tools and a live database; use them or say what's missing.
+- If you don't know something or a tool isn't returning useful data, say so
+  plainly and offer the next concrete step. Don't invent answers.
+"""
+
+
+def render_self_block(self_block: str | None) -> str:
+    """Wrap a precomputed <self> block (from self_model.py) for prompt inclusion."""
+    if not self_block:
+        return ""
+    return f"\n{self_block}\n"
+
+
+def render_affect_block(register_block: str | None) -> str:
+    """Wrap a precomputed <affect> block (from affect.py) for prompt inclusion."""
+    if not register_block:
+        return ""
+    return f"\n{register_block}\n"
+
+
+def build_system_prompt_v2(
+    user_context: dict,
+    language: str = "en",
+    *,
+    self_block: str | None = None,
+    affect_block: str | None = None,
+) -> str:
+    """V2 system prompt: base prompt + ReAct scaffold + acknowledgement rule +
+    persona-consistency rules + grounded <self> block + register hints.
+
+    Falls back to identical behavior to `build_system_prompt` if the optional
+    V2 blocks are missing, so this is safe to call unconditionally from the
+    V2 graph.
+    """
+    base = build_system_prompt(user_context, language)
+    parts = [
+        base,
+        REACT_SCAFFOLD,
+        ACKNOWLEDGEMENT_RULE,
+        PERSONA_CONSISTENCY,
+        render_self_block(self_block),
+        render_affect_block(affect_block),
+    ]
+    return "\n\n".join(p for p in parts if p and p.strip())
+
+
 # Fallback responses for error conditions (replacing canned responses)
 ERROR_RESPONSES = {
     "en": {

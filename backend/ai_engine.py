@@ -247,6 +247,32 @@ async def supabase_delete(table: str, params: dict[str, Any]) -> int:
         return 0
 
 
+async def supabase_rpc(fn_name: str, body: dict[str, Any]) -> Any:
+    """Invoke a Postgres function via PostgREST RPC.
+
+    Returns whatever the RPC returned (typically a list of rows). Any
+    Supabase / RLS / missing-function error propagates so callers can
+    decide whether to fall back. Callers that treat RPC as best-effort
+    should wrap in their own try/except.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return None
+    client = _get_http_client(SUPABASE_TIMEOUT)
+    resp = await client.post(
+        f"{SUPABASE_URL}/rest/v1/rpc/{fn_name}",
+        json=body or {},
+        headers=_supabase_headers({
+            "Content-Type": "application/json",
+        }),
+        timeout=SUPABASE_TIMEOUT,
+    )
+    resp.raise_for_status()
+    try:
+        return resp.json()
+    except Exception:
+        return None
+
+
 async def fetch_donor_listing_defaults(user_id: str) -> dict[str, Any]:
     """Load donor profile fields to stamp onto new food_listings rows."""
     if not user_id:
@@ -1264,8 +1290,6 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "user verbatim (e.g. missing address, invalid category, expired "
         "date) and ask for the missing info. NEVER say 'I posted your "
         "listing' without that listing_id.\n"
-        "  - post_food_request: same rule. Only claim it was posted when "
-        "you have a request_id from the tool.\n"
         "  - claim_listing: ONLY say 'claimed' or 'reserved' when the tool "
         "result contains `success: true` AND a `claim_id`. If the tool "
         "returned an error (e.g. 'was just claimed by someone else', "
@@ -1325,8 +1349,7 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "After post_food_listing returns success, lead with 'Posted!' (or "
         "'Your listing is up!') and include the listing title and the "
         "listing_id. Briefly mention what happens next (recipients can "
-        "claim it; you'll be notified). After post_food_request returns "
-        "success, lead with 'Request posted!' and the request id.\n"
+        "claim it; you'll be notified).\n"
         "\n"
         "### ALWAYS CONFIRM COMPLETION (CRITICAL — APPLIES TO EVERY TOOL)\n"
         "After ANY action tool returns successfully, your reply MUST start "
@@ -1339,7 +1362,6 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "they can verify it, then (optional) one helpful next step.\n"
         "Per-tool completion phrases:\n"
         "  • post_food_listing      -> 'Posted! Listing #N is live at <addr>.'\n"
-        "  • post_food_request      -> 'Request posted! #N is live for nearby donors.'\n"
         "  • bulk_import_listings   -> 'Bulk import complete: X/Y posted, Z verified live.'\n"
         "  • claim_listing          -> 'Claimed <title> for you. Pick up at <address> — let me know when you\\'ve got it!'\n"
         "  • confirm_claim          -> 'Pickup confirmed for <title>. You're all set.'\n"
@@ -1385,7 +1407,7 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "\n"
         "## Track an ACTIVE TASK across turns\n"
         "Once a multi-step flow starts (post_food_listing intake, "
-        "post_food_request intake, claim flow, profile update), treat it "
+        "claim flow, profile update), treat it "
         "as the ACTIVE TASK. Hold the partial info you've gathered "
         "(title, qty, address, etc.) in working memory across turns. Do "
         "NOT silently overwrite captured fields when the user mentions a "
@@ -1780,15 +1802,11 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "  7. ACKNOWLEDGE warmly but BRIEFLY ('Got it.', 'Perfect.', "
         "'Noted.'). No long preambles, no listing-style summaries "
         "until the final confirm sentence.\n"
-        "  8. SAME PATTERN for post_food_request (gather → confirm → "
-        "post). For requests, instead of allergens/photo, ask about "
-        "household size, urgency, dietary restrictions, and pickup "
-        "vs. delivery preference.\n"
-        "  9. LISTINGS ARE ALWAYS POSTED IN ENGLISH (CRITICAL). Even "
+        "  8. LISTINGS ARE ALWAYS POSTED IN ENGLISH (CRITICAL). Even "
         "when the donor is talking to you in Spanish or any other "
         "language, the `title`, `description`, `unit`, `allergens`, "
         "and `dietary_tags` fields you send to post_food_listing / "
-        "post_food_request / bulk_post_food_listings MUST be in "
+        "bulk_post_food_listings MUST be in "
         "English. Translate the donor's words: 'pan' → 'Bread', "
         "'manzanas' → 'Apples', 'comida preparada' → 'Prepared meal', "
         "'lácteos' → 'dairy', 'sin gluten' → 'gluten-free', "
@@ -1970,9 +1988,6 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "community_confirmed=true). The server pre-flights and refuses the "
         "    whole batch if any row is missing title, address, or expiry, "
         "    or if community is not confirmed.\n"
-        "  • post_food_request → title, qty, recipient address (or "
-        "    delivery vs pickup), urgency. Recommended: dietary "
-        "    restrictions, household size.\n"
         "  • claim_listing → listing_id (you must have searched and "
         "    presented options first), recipient phone on profile (the "
         "    server enforces this — if missing, prompt to add one via "
@@ -2406,22 +2421,21 @@ _ROLE_BEHAVIOR_EN: dict[str, str] = {
     ),
     "volunteer": (
         "The user is a VOLUNTEER. Help with pickup logistics — call "
-        "get_driver_route_plan for an optimised stop order and get_mapbox_route for "
-        "directions. Encourage safe driving and on-time arrivals."
+        "get_mapbox_route for directions. Encourage safe driving and on-time arrivals."
     ),
     "driver": (
-        "The user is a DRIVER. Prioritise route optimisation (get_driver_route_plan) "
-        "and next-stop ETA. Surface pickup deadlines. Keep directions concise."
+        "The user is a DRIVER. Focus on next-stop ETA and clear directions "
+        "(get_mapbox_route). Surface pickup deadlines. Keep replies concise."
     ),
     "dispatcher": (
-        "The user is a DISPATCHER. Help them triage by calling get_dispatch_queue; "
-        "match open requests to unclaimed listings, flag urgency, and recommend "
+        "The user is a DISPATCHER. Help them triage: match open needs to "
+        "unclaimed listings from search results, flag urgency, and recommend "
         "volunteer assignments. Be operational and concise."
     ),
     "admin": (
-        "The user is an ADMIN. Use get_platform_stats when they ask about health, "
-        "activity, or outcomes. Offer encouraging, positive framing ('great growth "
-        "this week!') and flag real anomalies. Never expose raw user PII unasked."
+        "The user is an ADMIN. When they ask about health, activity, or "
+        "outcomes, summarise from the data at hand. Offer encouraging, positive framing "
+        "('great growth this week!') and flag real anomalies. Never expose raw user PII unasked."
     ),
 }
 
@@ -2452,19 +2466,20 @@ _ROLE_BEHAVIOR_ES: dict[str, str] = {
     ),
     "volunteer": (
         "El usuario es VOLUNTARIO. Ayúdalo con la logística de recogidas: "
-        "get_driver_route_plan y get_mapbox_route. Recomienda manejar con seguridad."
+        "usa get_mapbox_route para las indicaciones. Recomienda manejar con seguridad."
     ),
     "driver": (
-        "El usuario es CONDUCTOR. Prioriza rutas optimizadas (get_driver_route_plan) "
+        "El usuario es CONDUCTOR. Prioriza indicaciones claras (get_mapbox_route) "
         "y tiempos estimados a la siguiente parada."
     ),
     "dispatcher": (
-        "El usuario es DESPACHADOR. Apóyalo con get_dispatch_queue, empareja "
+        "El usuario es DESPACHADOR. Ayúdalo a triar: empareja "
         "solicitudes con listados disponibles y señala urgencias."
     ),
     "admin": (
-        "El usuario es ADMIN. Usa get_platform_stats al preguntar por la salud de la "
-        "plataforma. Usa tono alentador y positivo. No expongas datos personales sin pedirlo."
+        "El usuario es ADMIN. Cuando pregunte por la salud de la plataforma, "
+        "resume a partir de los datos disponibles. Usa tono alentador y positivo. "
+        "No expongas datos personales sin pedirlo."
     ),
 }
 
@@ -2764,7 +2779,7 @@ def _build_memory_snapshot(history: list[dict[str, Any]]) -> Optional[str]:
     }
     CLAIM_TOOLS = {"claim_listing", "claim_food", "confirm_claim"}
     CANCEL_TOOLS = {"cancel_claim"}
-    POST_TOOLS = {"post_food_listing", "create_food_listing", "post_food_request"}
+    POST_TOOLS = {"post_food_listing", "create_food_listing"}
 
     for msg in reversed(history):
         if msg.get("role") != "assistant":
@@ -2912,7 +2927,6 @@ _PERSONAL_DATA_TOOLS = frozenset({
     "cancel_claim",
     "create_food_listing",
     "post_food_listing",
-    "post_food_request",
     "bulk_import_listings",
     "bulk_post_food_listings",
     "get_donor_expiring_listings",
@@ -3546,6 +3560,155 @@ def _annotate_no_results(fn_name: str, result: dict[str, Any]) -> dict[str, Any]
     return result
 
 
+# ============================================================================
+# Legacy tool-loop destructive-write intercept
+# ============================================================================
+#
+# Mirrors backend/agent/planner._maybe_intercept_destructive but for the
+# ENABLE_AGENTIC_MODE=false path (raw OpenAI tool-loop inside
+# ConversationEngine._call_openai_chat). Both paths must gate the same set
+# of tools so switching feature flags never opens a hole.
+
+_LEGACY_INTERCEPT_TOOLS: frozenset[str] = frozenset({
+    "delete_listing",
+    "cancel_claim",
+    "leave_community",
+    "forget_about_me",
+})
+
+_LEGACY_INTERCEPT_TIMEOUT_SEC: float = 4.0
+
+
+def _build_legacy_intercept_summary(
+    fn_name: str,
+    fn_args: dict[str, Any],
+    language: str = "en",
+) -> str:
+    """Short user-facing summary rendered on the confirmation card.
+
+    Mirrors backend/agent/planner._build_intercept_summary so the v1, v2,
+    and legacy paths all render identical EN/ES phrasing.
+    """
+    is_es = language == "es"
+    if fn_name == "delete_listing":
+        title = (fn_args or {}).get("title") or (fn_args or {}).get("listing_title")
+        if title:
+            return (
+                f"eliminar permanentemente tu publicaci\u00f3n '{title}'"
+                if is_es else
+                f"permanently delete your listing '{title}'"
+            )
+        return (
+            "eliminar permanentemente tu publicaci\u00f3n"
+            if is_es else
+            "permanently delete your listing"
+        )
+    if fn_name == "cancel_claim":
+        return "cancelar tu reserva" if is_es else "release your claim"
+    if fn_name == "leave_community":
+        return "salir de la comunidad" if is_es else "leave the community"
+    if fn_name == "forget_about_me":
+        return (
+            "olvidar lo que he aprendido sobre ti"
+            if is_es else
+            "forget what I've learned about you"
+        )
+    return fn_name
+
+
+async def _maybe_intercept_legacy_tool_call(
+    fn_name: str,
+    fn_args: dict[str, Any],
+    auth_user_id: Optional[str],
+    language: str = "en",
+) -> Optional[dict[str, Any]]:
+    """Queue a pending_action envelope instead of executing the write.
+
+    Returns a synthetic tool result dict (with `pending_action` + `error`
+    fields so the model doesn't retry) when the write was queued, or
+    ``None`` when normal dispatch should proceed. Fails open (returns
+    ``None``) on any error/timeout so a Supabase outage can't wedge the
+    tool loop — the post-hoc audit log still captures the actual write
+    that ultimately fires.
+    """
+    if fn_name not in _LEGACY_INTERCEPT_TOOLS:
+        return None
+    if not isinstance(fn_args, dict):
+        return None
+    if fn_args.get("confirmed") is True:
+        return None
+    if not auth_user_id or auth_user_id == "00000000-0000-0000-0000-000000000000":
+        return None
+
+    try:
+        from backend.agent.actions import ActionRequest, plan_action
+        from backend.agent.pending_intercept import build_pending_action_envelope
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("legacy intercept imports failed for %s (%s), falling through", fn_name, exc)
+        return None
+
+    summary = _build_legacy_intercept_summary(fn_name, fn_args, language=language)
+    persisted_args = {k: v for k, v in fn_args.items() if k not in ("confirmed",)}
+
+    try:
+        req = ActionRequest(
+            tool=fn_name,
+            args=persisted_args,
+            user_id=str(auth_user_id),
+            turn_id="",
+            conversation_id=None,
+            requires_confirmation=True,
+            summary=summary,
+        )
+        plan_result = await asyncio.wait_for(plan_action(req), timeout=_LEGACY_INTERCEPT_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        logger.warning("legacy intercept for %s timed out; falling through", fn_name)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("legacy intercept plan_action for %s raised %s; falling through", fn_name, exc)
+        return None
+
+    if not plan_result or getattr(plan_result, "status", None) != "pending":
+        return None
+    pending_id = getattr(plan_result, "pending_id", None)
+    if not pending_id:
+        return None
+
+    envelope = build_pending_action_envelope(
+        pending_id=str(pending_id),
+        tool=fn_name,
+        args=persisted_args,
+        summary=summary,
+        expires_at=None,
+    )
+    logger.info("legacy intercept queued %s as pending_id=%s", fn_name, pending_id)
+    # Return a synthetic tool result. The `error` field with a specific
+    # `awaiting_user_confirmation` code tells the model "don't retry, just
+    # confirm with the user". The `pending_action` field is what
+    # `actions_out` will surface up to chat() so the frontend can render
+    # the confirmation card.
+    if language == "es":
+        instruction = (
+            f"Esta acción necesita la confirmación explícita del usuario. NO reintentes "
+            f"la herramienta. En su lugar, pregúntale: '¿Confirmas que quieres que "
+            f"{summary}?'"
+        )
+    else:
+        instruction = (
+            f"This action needs the user's explicit confirmation. Do NOT retry "
+            f"the tool. Instead, ask the user: 'Just to confirm — do you want "
+            f"me to {summary}?'"
+        )
+    return {
+        "success": False,
+        "awaiting_confirmation": True,
+        "error": "awaiting_user_confirmation",
+        "message": instruction,
+        "pending_action": envelope,
+        "summary": summary,
+    }
+
+
 # Markdown / formatting artefacts that should never be spoken aloud.
 _TTS_MARKDOWN_RE = re.compile(r"[*_`#~]+")
 _TTS_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
@@ -3607,7 +3770,17 @@ class ConversationEngine:
 
     def __init__(self) -> None:
         self.training_data = _load_training_data()
-        from backend.tools import TOOL_DEFINITIONS, execute_tool
+        from backend.tools import TOOL_DEFINITIONS, execute_tool, _validate_tool_definitions
+        # Verify every declared tool has a matching handler and required-param
+        # contract before serving traffic. Errors are logged by default so a
+        # latent mismatch can't take down the service, but CI sets
+        # DOGOODS_STRICT_TOOL_VALIDATION=1 to fail fast.
+        _tool_validation_errors = _validate_tool_definitions()
+        if _tool_validation_errors:
+            _msg = "Tool signature validation failed:\n  - " + "\n  - ".join(_tool_validation_errors)
+            if os.getenv("DOGOODS_STRICT_TOOL_VALIDATION", "").lower() in ("1", "true", "yes", "on"):
+                raise RuntimeError(_msg)
+            logger.error(_msg)
         self.tool_definitions = TOOL_DEFINITIONS
         self._execute_tool = execute_tool
         # Derived at boot: every tool whose JSON schema declares a `user_id`
@@ -3980,8 +4153,8 @@ class ConversationEngine:
                 "• Before responding, SCAN the full conversation above for "
                 "facts the user already provided. Reuse them silently.\n"
                 "• Multi-turn form filling: when you are gathering fields "
-                "for a tool (post_food_listing, post_food_request, "
-                "create_reminder, etc.), TRACK every field across turns. "
+                "for a tool (post_food_listing, create_reminder, etc.), "
+                "TRACK every field across turns. "
                 "If turn 1 the user said 'I want to share apples', turn 2 "
                 "you asked 'how many?', and turn 3 they said '10', you "
                 "ALREADY know title=apples qty=10 — proceed to the next "
@@ -4034,13 +4207,13 @@ class ConversationEngine:
         if True:
             action_policy_en = (
                 "You can take actions for the user through tool calls. Use the ACTION "
-                "tools (claim_listing, cancel_claim, update_user_profile, post_food_request, "
+                "tools (claim_listing, cancel_claim, update_user_profile, "
                 "post_food_listing, send_notification) whenever the user asks — you do not "
                 "need to ask them to click buttons. "
                 "Rules: "
                 "(1) The server enforces the authenticated user_id; still pass the id shown above. "
-                "(2) For destructive / irreversible actions (cancel_claim, post_food_listing, "
-                "post_food_request), confirm briefly once before calling. "
+                "(2) For destructive / irreversible actions (cancel_claim, post_food_listing), "
+                "confirm briefly once before calling. "
                 "(3) For small updates (e.g. adding an allergy, opting into SMS), act immediately and report what changed. "
                 "(4) When the user says things like 'I'll take it', 'reserve that', 'grab #42', "
                 "call claim_listing. Then tell them where to pick up and to let you know once "
@@ -4078,7 +4251,7 @@ class ConversationEngine:
             )
             action_policy_es = (
                 "Puedes realizar acciones por el usuario mediante tool calls. Usa las herramientas "
-                "de ACCIÓN (claim_listing, cancel_claim, update_user_profile, post_food_request, "
+                "de ACCIÓN (claim_listing, cancel_claim, update_user_profile, "
                 "post_food_listing, send_notification) cuando el usuario lo pida — no le digas que "
                 "haga clic en botones. Reglas: (1) El servidor impone el user_id autenticado. "
                 "(2) Confirma brevemente antes de acciones destructivas. (3) Para cambios pequeños, "
@@ -4354,6 +4527,16 @@ class ConversationEngine:
             "actions": actions,
             "suggestions": suggestions,
             "next_step": next_step,
+            # Surface the first pending_action envelope so the frontend
+            # renders the confirmation card. The legacy tool loop drops
+            # its intercept envelope into actions[*]['pending_action']
+            # inside _call_openai_chat; pull it up here so
+            # /api/ai/chat can attach it to the response payload without
+            # unwrapping the tool_results list on the frontend.
+            "pending_action": next(
+                (a.get("pending_action") for a in actions if isinstance(a, dict) and a.get("pending_action")),
+                None,
+            ),
         }
 
     async def _persist_conversation(
@@ -4721,36 +4904,56 @@ class ConversationEngine:
                 if cached_result is not None:
                     result: dict[str, Any] = cached_result
                 else:
-                    try:
-                        result = await self._execute_tool(fn_name, fn_args)
-                        # Validate the shape: handlers must return a dict. A
-                        # non-dict (None, list, str) means a buggy/legacy tool
-                        # path — coerce it into a structured error so the model
-                        # never tries to read fields off a bad value.
-                        if not isinstance(result, dict):
-                            logger.warning(
-                                "Tool %s returned non-dict %s; coercing to error",
-                                fn_name, type(result).__name__,
-                            )
+                    # Destructive-write intercept (safety net for the
+                    # ENABLE_AGENTIC_MODE=false legacy path). The agentic
+                    # v1/v2 graphs intercept via
+                    # backend.agent.planner._maybe_intercept_destructive
+                    # and backend.agent.pending_intercept respectively;
+                    # this branch covers the "plain GPT tool loop" that
+                    # runs when agentic mode is off, so a delete_listing /
+                    # cancel_claim / leave_community / forget_about_me
+                    # tool call from the model here can't fire without a
+                    # confirmation card. `confirmed=True` in args (set by
+                    # POST /api/ai/confirm) bypasses this guard.
+                    intercept_result = await _maybe_intercept_legacy_tool_call(
+                        fn_name=fn_name,
+                        fn_args=fn_args,
+                        auth_user_id=auth_user_id,
+                        language=lang,
+                    )
+                    if intercept_result is not None:
+                        result = intercept_result
+                    else:
+                        try:
+                            result = await self._execute_tool(fn_name, fn_args)
+                            # Validate the shape: handlers must return a dict. A
+                            # non-dict (None, list, str) means a buggy/legacy tool
+                            # path — coerce it into a structured error so the model
+                            # never tries to read fields off a bad value.
+                            if not isinstance(result, dict):
+                                logger.warning(
+                                    "Tool %s returned non-dict %s; coercing to error",
+                                    fn_name, type(result).__name__,
+                                )
+                                result = {
+                                    "success": False,
+                                    "error": f"{fn_name} returned an unexpected result. Please try again.",
+                                }
+                            # Annotate empty list-style results so the model
+                            # explicitly handles the "no_results" case instead of
+                            # hallucinating items or claiming it didn't search.
+                            result = _annotate_no_results(fn_name, result)
+                            if isinstance(result, dict) and not result.get("error"):
+                                _tool_cache[_call_key] = result
+                        except Exception as tool_exc:
+                            # Log full traceback server-side; surface a generic
+                            # message so internal exception text doesn't reach
+                            # the user via the AI's reply.
+                            logger.exception("Tool %s failed", fn_name)
                             result = {
                                 "success": False,
-                                "error": f"{fn_name} returned an unexpected result. Please try again.",
+                                "error": f"{fn_name} failed. Please try again.",
                             }
-                        # Annotate empty list-style results so the model
-                        # explicitly handles the "no_results" case instead of
-                        # hallucinating items or claiming it didn't search.
-                        result = _annotate_no_results(fn_name, result)
-                        if isinstance(result, dict) and not result.get("error"):
-                            _tool_cache[_call_key] = result
-                    except Exception as tool_exc:
-                        # Log full traceback server-side; surface a generic
-                        # message so internal exception text doesn't reach
-                        # the user via the AI's reply.
-                        logger.exception("Tool %s failed", fn_name)
-                        result = {
-                            "success": False,
-                            "error": f"{fn_name} failed. Please try again.",
-                        }
 
                 # Trace tool calls so we can debug why the model picked a tool.
                 try:
@@ -4810,6 +5013,7 @@ class ConversationEngine:
                             "coords_lat", "coords_lng", "address",
                             "verified", "verify_issues", "duplicate_of_recent",
                             "claim_id", "receipt_id",
+                            "pending_action", "awaiting_confirmation",
                         ):
                             if extra_key in result and result[extra_key] is not None:
                                 entry[extra_key] = result[extra_key]

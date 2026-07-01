@@ -795,6 +795,38 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "forget_about_me",
+            "description": (
+                "Delete long-term facts the agent has learned about the user from "
+                "`agent_user_facts`. Use this when the user says things like 'forget that', "
+                "'don't remember that', 'clear my preferences', or 'wipe what you know about me'. "
+                "Optional `kind` filter narrows the purge (preference | dietary | style | "
+                "relationship | other). If omitted, ALL of the user's stored facts are removed. "
+                "This is irreversible — the agent should confirm with the user before calling "
+                "unless they have already explicitly asked to forget everything."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "The user's UUID (always provided from the auth context).",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": (
+                            "Optional fact category to limit the purge to. One of: "
+                            "preference, dietary, style, relationship, other. Omit to delete all."
+                        ),
+                    },
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ui_action",
             "description": (
                 "Drive the DoGoods web UI on the user's behalf. Use this when "
@@ -1229,7 +1261,7 @@ TOOL_DEFINITIONS = [
                     "ingredients": {"type": "array", "items": {"type": "string"}},
                     "dietary_preferences": {"type": "string"},
                 },
-                "required": ["ingredients"],
+                "required": [],
             },
         },
     },
@@ -1357,6 +1389,62 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "update_listing",
+            "description": "Alias of update_food_listing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "listing_id": {"type": "string"},
+                    "title_lookup": {"type": "string"},
+                    "title": {"type": "string"},
+                    "quantity": {"type": "number"},
+                    "unit": {"type": "string"},
+                    "description": {"type": "string"},
+                    "category": {"type": "string"},
+                    "expiry_date": {"type": "string"},
+                    "pickup_by": {"type": "string"},
+                    "location": {"type": "string"},
+                    "dietary_tags": {"type": "array", "items": {"type": "string"}},
+                    "allergens": {"type": "array", "items": {"type": "string"}},
+                    "image_url": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_listing",
+            "description": "Alias of update_food_listing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "listing_id": {"type": "string"},
+                    "title_lookup": {"type": "string"},
+                    "title": {"type": "string"},
+                    "quantity": {"type": "number"},
+                    "unit": {"type": "string"},
+                    "description": {"type": "string"},
+                    "category": {"type": "string"},
+                    "expiry_date": {"type": "string"},
+                    "pickup_by": {"type": "string"},
+                    "location": {"type": "string"},
+                    "dietary_tags": {"type": "array", "items": {"type": "string"}},
+                    "allergens": {"type": "array", "items": {"type": "string"}},
+                    "image_url": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "bulk_post_food_listings",
             "description": "Alias of bulk_import_listings.",
             "parameters": {
@@ -1465,6 +1553,100 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    # -----------------------------------------------------------------------
+    # AGENT_V2 (Phase 4) — 4 new WRITE tools
+    # -----------------------------------------------------------------------
+    {
+        "type": "function",
+        "function": {
+            "name": "message_donor",
+            "description": (
+                "Send a short in-app message to the donor of a food listing. "
+                "Use when the user wants to ask a question about the food, "
+                "coordinate pickup timing, or thank the donor. The message "
+                "is delivered as an in-app notification (title: 'Message from "
+                "<requester name>'). Requires listing_id + message. Requires "
+                "user confirmation before sending."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "UUID of the authenticated sender (auto-filled by the server)."},
+                    "listing_id": {"type": "string", "description": "UUID of the food listing whose donor should receive the message."},
+                    "message": {"type": "string", "description": "The message body. Kept under 500 chars.", "maxLength": 500},
+                },
+                "required": ["user_id", "listing_id", "message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_pickup",
+            "description": (
+                "Schedule a pickup time for an active claim. Sets the "
+                "food_claims.pickup_datetime to the requested ISO 8601 "
+                "timestamp AND creates a pickup reminder for the user. "
+                "Use when the user says 'I'll pick it up at 5pm tomorrow', "
+                "'schedule pickup for Saturday morning', etc. Provide either "
+                "claim_id (preferred) or listing_id — the tool looks up the "
+                "user's active claim on that listing. Requires user confirmation."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "UUID of the authenticated user."},
+                    "claim_id": {"type": "string", "description": "UUID of the food_claims row (preferred)."},
+                    "listing_id": {"type": "string", "description": "UUID of the listing — used to find the user's active claim."},
+                    "pickup_datetime": {"type": "string", "description": "ISO 8601 timestamp for the intended pickup (must be in the future, within 7 days)."},
+                    "note": {"type": "string", "description": "Optional note stored on the reminder."},
+                },
+                "required": ["user_id", "pickup_datetime"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "join_community",
+            "description": (
+                "Make the authenticated user a member of a community. Sets "
+                "users.community_id to the resolved community. Only one "
+                "community per user at a time — calling this replaces any "
+                "existing membership. Provide community_id (preferred) or "
+                "community_name (fuzzy-resolved via _resolve_community). "
+                "Requires user confirmation."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "UUID of the authenticated user."},
+                    "community_id": {"type": "string", "description": "UUID of the community (preferred)."},
+                    "community_name": {"type": "string", "description": "Community name — resolved to id via active communities."},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "leave_community",
+            "description": (
+                "Remove the authenticated user from their current community "
+                "(sets users.community_id to NULL). No arguments beyond "
+                "user_id — a user can only be in one community at a time. "
+                "Requires user confirmation."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "UUID of the authenticated user."},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
 ]
 
 
@@ -1473,47 +1655,15 @@ TOOL_DEFINITIONS = [
 # ---------------------------------------------------------------------------
 
 async def execute_tool(name: str, arguments: dict) -> dict:
-    """Route a tool call to its handler and return the result."""
-    handlers = {
-        "search_food_near_user": _search_food_near_user,
-        "get_recent_listings": _get_recent_listings,
-        "get_user_profile": _get_user_profile,
-        "update_user_profile": _update_user_profile,
-        "get_pickup_schedule": _get_pickup_schedule,
-        "create_reminder": _create_reminder,
-        "get_mapbox_route": _get_mapbox_route,
-        "query_distribution_centers": _query_distribution_centers,
-        "get_user_dashboard": _get_user_dashboard,
-        "check_pickup_schedule": _check_pickup_schedule,
-        "get_recipes": _get_recipes,
-        "get_storage_tips": _get_storage_tips,
-        "get_active_communities": _get_active_communities,
-        "get_user_notifications": _get_user_notifications,
-        "send_notification": _send_notification,
-        "mark_notifications_read": _mark_notifications_read,
-        "ui_action": _ui_action,
-        "create_food_listing": _create_food_listing,
-        "claim_listing": _claim_food_listing,
-        "cancel_claim": _cancel_claim,
-        "confirm_claim": _confirm_claim,
-        "post_food_listing": _create_food_listing,
-        "bulk_import_listings": _bulk_import_listings,
-        "get_donor_expiring_listings": _get_donor_expiring_listings,
-        "attach_photos_to_listing": _attach_photos_to_listing,
-        "navigate_ui": _navigate_ui,
-        "meal_suggestions": _get_recipes,
-        "bulk_post_food_listings": _bulk_import_listings,
-        "deactivate_listing": _deactivate_listing,
-        "delete_listing": _delete_listing,
-        "get_user_listings": _get_user_listings,
-        "update_food_listing": _update_food_listing,
-        "update_listing": _update_food_listing,
-        "edit_listing": _update_food_listing,
-        "get_my_claims": _get_my_claims,
-        "get_community_listings": _get_community_listings,
-    }
+    """Route a tool call to its handler and return the result.
 
-    handler = handlers.get(name)
+    Handlers are registered in the module-level `_HANDLERS` dict at end of
+    this file (after all handler implementations are defined). Looking up
+    from a module global here — instead of rebuilding a local dict per call
+    — lets `_validate_tool_definitions()` introspect the registration table
+    without invoking the dispatcher.
+    """
+    handler = _HANDLERS.get(name)
     if handler is None:
         logger.warning("Unknown tool requested: %s", name)
         return {"error": f"Unknown tool: {name}"}
@@ -2396,6 +2546,7 @@ _UPDATABLE_PROFILE_FIELDS = {
     "phone",
     "organization",
     "community_role",
+    "community_id",
     "dietary_restrictions",
     "allergies",
     "dietary_preferences",
@@ -5458,3 +5609,488 @@ async def _get_profile_gaps(user_id: str) -> dict:
 
     return {"prompts_en": prompts_en, "prompts_es": prompts_es}
 
+
+
+# ---------------------------------------------------------------------------
+# forget_about_me � user-initiated wipe of long-term memory (agent_user_facts)
+# ---------------------------------------------------------------------------
+
+async def _forget_about_me(
+    user_id: str,
+    kind: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    """Delete the user's stored facts from `agent_user_facts`.
+
+    The optional `kind` argument narrows the purge to one category
+    (preference | dietary | style | relationship | other). With no `kind`
+    every fact owned by the user is removed.
+
+    Returns a dict shaped like the other write tools so the action framework
+    can extract a stable `before_state` snapshot for the audit log.
+    """
+    from backend.ai_engine import supabase_get, supabase_delete
+
+    logger.info("forget_about_me: user=%s kind=%s", user_id, kind)
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    filters: dict[str, str] = {"user_id": f"eq.{user_id}"}
+    valid_kinds = {"preference", "dietary", "style", "relationship", "other"}
+    if kind:
+        norm = str(kind).strip().lower()
+        if norm not in valid_kinds:
+            return {
+                "success": False,
+                "error": f"invalid kind: {norm}",
+                "allowed_kinds": sorted(valid_kinds),
+            }
+        filters["kind"] = f"eq.{norm}"
+
+    # Snapshot the rows we are about to delete so the audit log has a
+    # before_state worth inspecting. We deliberately keep this best-effort:
+    # if the SELECT fails we still attempt the DELETE.
+    snapshot: list[dict] = []
+    try:
+        snapshot = await supabase_get("agent_user_facts", {
+            **filters,
+            "select": "id,kind,content,importance,confirmed_by_user,created_at",
+            "limit": "500",
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("forget_about_me: snapshot failed (non-fatal): %s", exc)
+
+    try:
+        await supabase_delete("agent_user_facts", filters)
+    except Exception as exc:
+        logger.error("forget_about_me: delete failed: %s", exc)
+        return {"success": False, "error": f"Could not forget facts: {exc}"}
+
+    count = len(snapshot)
+    if kind:
+        summary = (
+            f"Forgot {count} {kind} fact{'s' if count != 1 else ''} about you."
+            if count else f"Nothing to forget under '{kind}'."
+        )
+    else:
+        summary = (
+            f"Forgot {count} stored fact{'s' if count != 1 else ''} about you."
+            if count else "Nothing was stored about you."
+        )
+
+    return {
+        "success": True,
+        "deleted_count": count,
+        "kind": kind,
+        "deleted_facts": snapshot,
+        "summary": summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# AGENT_V2 (Phase 4) — 4 new WRITE tools
+# ---------------------------------------------------------------------------
+
+async def _message_donor(
+    user_id: str,
+    listing_id: str,
+    message: str,
+    **_ignored,
+) -> dict:
+    """Send an in-app message to the donor of a food listing.
+
+    Delivered as a `notifications` row on the donor (title: "Message from
+    <sender name>"). Rejects empty or self-directed messages.
+    """
+    from backend.ai_engine import supabase_get
+
+    logger.info("message_donor: user=%s listing=%s", user_id, listing_id)
+
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+    if not listing_id:
+        return {"success": False, "error": "missing listing_id"}
+    body = (message or "").strip()
+    if not body:
+        return {"success": False, "error": "Message is empty."}
+    if len(body) > 500:
+        body = body[:500].rstrip() + "…"
+
+    # Look up donor + a friendly listing title.
+    try:
+        listings = await supabase_get("food_listings", {
+            "id": f"eq.{listing_id}",
+            "select": "id,title,user_id",
+            "limit": "1",
+        })
+    except Exception as exc:
+        logger.error("message_donor: listing lookup failed: %s", exc)
+        return {"success": False, "error": f"Could not look up listing: {exc}"}
+
+    if not listings:
+        return {"success": False, "error": "Listing not found."}
+    listing = listings[0]
+    donor_id = str(listing.get("user_id") or "")
+    if not donor_id:
+        return {"success": False, "error": "Listing has no donor on file."}
+    if donor_id == str(user_id):
+        return {"success": False, "error": "You cannot message yourself."}
+
+    # Look up sender's display name.
+    sender_name = "a community member"
+    try:
+        senders = await supabase_get("users", {
+            "id": f"eq.{user_id}",
+            "select": "id,name,full_name",
+            "limit": "1",
+        })
+        if senders:
+            sender_name = (
+                senders[0].get("name")
+                or senders[0].get("full_name")
+                or sender_name
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("message_donor: sender name lookup failed (non-fatal): %s", exc)
+
+    title = f"Message from {sender_name}"
+    return await _send_notification(
+        user_id=donor_id,
+        title=title,
+        message=body,
+        notification_type="system",
+        data={
+            "kind": "donor_message",
+            "listing_id": str(listing_id),
+            "listing_title": str(listing.get("title") or ""),
+            "from_user_id": str(user_id),
+        },
+    )
+
+
+async def _schedule_pickup(
+    user_id: str,
+    pickup_datetime: str,
+    claim_id: Optional[str] = None,
+    listing_id: Optional[str] = None,
+    note: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    """Schedule a pickup reminder for one of the user's active claims.
+
+    Resolves the target claim from claim_id (preferred) or listing_id,
+    validates the requested time is in the future and within 7 days, then
+    creates a reminder row via the existing `_create_reminder` helper.
+    """
+    logger.info(
+        "schedule_pickup: user=%s claim=%s listing=%s when=%s",
+        user_id, claim_id, listing_id, pickup_datetime,
+    )
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+    if not pickup_datetime:
+        return {"success": False, "error": "missing pickup_datetime"}
+    if not (claim_id or listing_id):
+        return {"success": False, "error": "Provide either claim_id or listing_id."}
+
+    # Parse + validate the requested datetime.
+    try:
+        raw = str(pickup_datetime).replace("Z", "+00:00")
+        when = datetime.fromisoformat(raw)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return {"success": False, "error": "Invalid pickup_datetime — use ISO 8601."}
+
+    now = datetime.now(timezone.utc)
+    if when <= now:
+        return {"success": False, "error": "Pickup time must be in the future."}
+    if when - now > timedelta(days=7):
+        return {"success": False, "error": "Pickup can't be scheduled more than 7 days out."}
+
+    claim = await _find_user_claim(user_id, claim_id, listing_id)
+    if not claim:
+        return {
+            "success": False,
+            "error": "Could not find an active claim to schedule. Claim the listing first.",
+        }
+
+    reminder_msg = (note or "").strip() or f"Pickup for '{claim.get('id')}'"
+    reminder_result = await _create_reminder(
+        user_id=user_id,
+        message=reminder_msg,
+        trigger_time=when.isoformat(),
+        reminder_type="pickup_scheduled",
+        related_id=str(claim.get("id")),
+    )
+
+    if not reminder_result.get("success"):
+        return {
+            "success": False,
+            "claim_id": str(claim.get("id")),
+            "error": reminder_result.get("error") or "Reminder creation failed.",
+        }
+
+    summary = f"Pickup scheduled for {when.isoformat()}."
+    return {
+        "success": True,
+        "claim_id": str(claim.get("id")),
+        "pickup_datetime": when.isoformat(),
+        "reminder_id": reminder_result.get("reminder_id"),
+        "summary": summary,
+        "message": summary,
+    }
+
+
+async def _join_community(
+    user_id: str,
+    community_id: Optional[str] = None,
+    community_name: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    """Make the user a member of a community (single-community model)."""
+    from backend.ai_engine import supabase_patch
+
+    logger.info(
+        "join_community: user=%s community_id=%s name=%s",
+        user_id, community_id, community_name,
+    )
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+    if not (community_id or (community_name and community_name.strip())):
+        return {"success": False, "error": "Provide either community_id or community_name."}
+
+    resolved_id, resolved_name = await _resolve_community(community_name, community_id)
+    if not resolved_id:
+        return {
+            "success": False,
+            "error": "community_not_found",
+            "message": "I couldn't find that community. Try get_active_communities.",
+        }
+
+    try:
+        rows = await supabase_patch(
+            "users",
+            {"id": f"eq.{user_id}"},
+            {"community_id": resolved_id},
+        )
+    except Exception as exc:
+        logger.error("join_community: patch failed: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+    display = resolved_name or resolved_id
+    summary = f"Joined community: {display}."
+    return {
+        "success": True,
+        "community_id": resolved_id,
+        "community_name": resolved_name,
+        "profile": (rows[0] if isinstance(rows, list) and rows else None),
+        "summary": summary,
+        "message": summary,
+    }
+
+
+async def _leave_community(user_id: str, **_ignored) -> dict:
+    """Remove the user from their current community (sets community_id NULL)."""
+    from backend.ai_engine import supabase_get, supabase_patch
+
+    logger.info("leave_community: user=%s", user_id)
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    # Look up current membership so we can echo which one we left.
+    prior_name: Optional[str] = None
+    try:
+        rows = await supabase_get("users", {
+            "id": f"eq.{user_id}",
+            "select": "id,community_id,communities(id,name)",
+            "limit": "1",
+        })
+        if rows:
+            cur = rows[0]
+            if not cur.get("community_id"):
+                return {
+                    "success": False,
+                    "error": "not_in_community",
+                    "message": "You're not currently in any community.",
+                }
+            prior_name = (
+                (cur.get("communities") or {}).get("name")
+                if isinstance(cur.get("communities"), dict) else None
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("leave_community: membership lookup failed (non-fatal): %s", exc)
+
+    try:
+        await supabase_patch(
+            "users",
+            {"id": f"eq.{user_id}"},
+            {"community_id": None},
+        )
+    except Exception as exc:
+        logger.error("leave_community: patch failed: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+    summary = f"Left community: {prior_name}." if prior_name else "Left your community."
+    return {
+        "success": True,
+        "prior_community_name": prior_name,
+        "summary": summary,
+        "message": summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Handler registration & signature validation
+# ---------------------------------------------------------------------------
+#
+# `_HANDLERS` is the single source of truth mapping schema tool names
+# (TOOL_DEFINITIONS[*]["function"]["name"]) to their Python implementations.
+# It must be declared AFTER every handler function so all names resolve at
+# module load. `execute_tool()` above reads from this dict at call time.
+#
+# Aliases (e.g. `post_food_listing` -> `_create_food_listing`) intentionally
+# share a handler and each MUST have its own TOOL_DEFINITIONS entry; the
+# validator below enforces that contract.
+
+import inspect as _inspect
+
+_HANDLERS: dict[str, callable] = {
+    "search_food_near_user": _search_food_near_user,
+    "get_recent_listings": _get_recent_listings,
+    "get_user_profile": _get_user_profile,
+    "update_user_profile": _update_user_profile,
+    "get_pickup_schedule": _get_pickup_schedule,
+    "create_reminder": _create_reminder,
+    "get_mapbox_route": _get_mapbox_route,
+    "query_distribution_centers": _query_distribution_centers,
+    "get_user_dashboard": _get_user_dashboard,
+    "check_pickup_schedule": _check_pickup_schedule,
+    "get_recipes": _get_recipes,
+    "get_storage_tips": _get_storage_tips,
+    "get_active_communities": _get_active_communities,
+    "get_user_notifications": _get_user_notifications,
+    "send_notification": _send_notification,
+    "mark_notifications_read": _mark_notifications_read,
+    "ui_action": _ui_action,
+    "forget_about_me": _forget_about_me,
+    "create_food_listing": _create_food_listing,
+    "claim_listing": _claim_food_listing,
+    "cancel_claim": _cancel_claim,
+    "confirm_claim": _confirm_claim,
+    "post_food_listing": _create_food_listing,
+    "bulk_import_listings": _bulk_import_listings,
+    "get_donor_expiring_listings": _get_donor_expiring_listings,
+    "attach_photos_to_listing": _attach_photos_to_listing,
+    "navigate_ui": _navigate_ui,
+    "meal_suggestions": _get_recipes,
+    "bulk_post_food_listings": _bulk_import_listings,
+    "deactivate_listing": _deactivate_listing,
+    "delete_listing": _delete_listing,
+    "get_user_listings": _get_user_listings,
+    "update_food_listing": _update_food_listing,
+    "update_listing": _update_food_listing,
+    "edit_listing": _update_food_listing,
+    "get_my_claims": _get_my_claims,
+    "get_community_listings": _get_community_listings,
+    # AGENT_V2 (Phase 4) — 4 new WRITE tools
+    "message_donor": _message_donor,
+    "schedule_pickup": _schedule_pickup,
+    "join_community": _join_community,
+    "leave_community": _leave_community,
+}
+
+
+def _handler_accepts_var_keyword(handler) -> bool:
+    """True if the handler declares **kwargs (e.g. **_ignored)."""
+    try:
+        sig = _inspect.signature(handler)
+    except (TypeError, ValueError):
+        return False
+    return any(
+        p.kind == _inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+
+
+def _handler_param_names(handler) -> set[str]:
+    """Explicit parameter names on the handler (excludes *args / **kwargs)."""
+    try:
+        sig = _inspect.signature(handler)
+    except (TypeError, ValueError):
+        return set()
+    return {
+        name
+        for name, param in sig.parameters.items()
+        if param.kind
+        not in (_inspect.Parameter.VAR_POSITIONAL, _inspect.Parameter.VAR_KEYWORD)
+    }
+
+
+def _validate_tool_definitions() -> list[str]:
+    """Cross-check TOOL_DEFINITIONS against the `_HANDLERS` registry.
+
+    Returns a list of human-readable error strings. Empty list means every
+    declared tool has a handler, every handler has a schema, every schema
+    `required[]` name resolves to a handler parameter (or the handler
+    accepts **kwargs), and every tool whose schema exposes `user_id` has
+    a handler willing to receive it (the ai_engine dispatch layer
+    unconditionally injects the authenticated user_id).
+    """
+    errors: list[str] = []
+
+    schema_names = {
+        t["function"]["name"]
+        for t in TOOL_DEFINITIONS
+        if isinstance(t, dict)
+        and isinstance(t.get("function"), dict)
+        and "name" in t["function"]
+    }
+
+    # (1) Every declared tool must have a handler.
+    for name in sorted(schema_names):
+        if name not in _HANDLERS:
+            errors.append(f"tool '{name}' declared in TOOL_DEFINITIONS but no handler in _HANDLERS")
+
+    # (2) Every handler must have a declared tool (catches orphan aliases).
+    for name in sorted(_HANDLERS.keys()):
+        if name not in schema_names:
+            errors.append(f"handler '{name}' registered in _HANDLERS but no TOOL_DEFINITIONS entry")
+
+    # (3) For each shared schema+handler pair, verify required params + user_id.
+    for tool in TOOL_DEFINITIONS:
+        if not (isinstance(tool, dict) and isinstance(tool.get("function"), dict)):
+            continue
+        name = tool["function"].get("name")
+        handler = _HANDLERS.get(name)
+        if handler is None:
+            continue  # already reported in (1)
+
+        params_schema = tool["function"].get("parameters") or {}
+        properties = params_schema.get("properties") or {}
+        required = params_schema.get("required") or []
+
+        explicit_params = _handler_param_names(handler)
+        accepts_kwargs = _handler_accepts_var_keyword(handler)
+
+        # (3a) Every required schema param must be in the handler signature,
+        # or the handler must accept **kwargs.
+        for pname in required:
+            if pname not in explicit_params and not accepts_kwargs:
+                errors.append(
+                    f"tool '{name}': schema requires '{pname}' but handler "
+                    f"'{handler.__name__}' does not accept it"
+                )
+
+        # (3b) If the schema exposes `user_id`, the handler must accept it
+        # (either explicitly or via **kwargs). The ai_engine dispatch layer
+        # force-injects the authenticated user_id, so a handler that can't
+        # receive it would raise TypeError at call time.
+        if "user_id" in properties:
+            if "user_id" not in explicit_params and not accepts_kwargs:
+                errors.append(
+                    f"tool '{name}': schema exposes 'user_id' but handler "
+                    f"'{handler.__name__}' does not accept it "
+                    f"(ai_engine dispatch always injects user_id)"
+                )
+
+    return errors

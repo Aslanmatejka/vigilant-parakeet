@@ -24,7 +24,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from base64 import b64encode
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
@@ -58,11 +58,29 @@ logger = logging.getLogger("app")
 # Set ENABLE_AGENTIC_MODE=false to use legacy conversation engine
 ENABLE_AGENTIC_MODE = os.getenv("ENABLE_AGENTIC_MODE", "true").lower() in ("true", "1", "yes")
 
+# AGENT_V2: next-generation agent with reasoning trace, affect-aware register,
+# typed action framework, persona consistency guard, and food-safety post-filter.
+# Default OFF so production traffic stays on v1 until we flip it explicitly.
+# AGENT_V2 wraps the v1 graph — ENABLE_AGENTIC_MODE must also be true.
+# Gradual rollout is controlled by AGENT_V2_ROLLOUT_PCT (0-100, default 100).
+# See backend/agent/rollout.py.
+AGENT_V2 = os.getenv("AGENT_V2", "false").strip().lower() in ("true", "1", "yes", "on")
+
 if ENABLE_AGENTIC_MODE:
     logger.info("🤖 Agentic mode enabled - using LangGraph agent")
     from backend.agent import invoke_agent
+    if AGENT_V2:
+        from backend.agent.rollout import rollout_percentage
+        logger.info(
+            "🧠 AGENT_V2 enabled — wrapping v1 graph with reasoning + safety + affect layers (rollout=%d%%)",
+            rollout_percentage(),
+        )
+        from backend.agent.v2_graph import invoke_agent_v2
 else:
     logger.info("📋 Using legacy conversation engine")
+    if AGENT_V2:
+        logger.warning("AGENT_V2=true ignored because ENABLE_AGENTIC_MODE=false")
+        AGENT_V2 = False
 
 ALLOWED_ORIGINS = [
     o.strip() for o in os.getenv(
@@ -823,6 +841,52 @@ class AIChatResponse(BaseModel):
     suggestions: list[str | dict[str, Any]] = []
     next_step: dict[str, str] | None = None
     timestamp: str
+    # ---- AGENT_V2 optional fields (omitted on v1 responses) ----
+    pending_action: dict[str, Any] | None = None  # {pending_id, tool, summary, args, expires_at}
+    refusal: dict[str, Any] | None = None         # {code, severity} when InputGuard blocked
+    affect: dict[str, Any] | None = None          # classified user affect (debug)
+    reasoning_trace: list[dict[str, Any]] | None = None  # ReAct trace (Phase 1)
+    confidence: float | None = None               # final-step confidence
+    reflection: dict[str, Any] | None = None      # outcome grade (Phase 1)
+    goals: list[dict[str, Any]] | None = None     # goal stack snapshot (Phase 2)
+    next_step_hint: str | None = None             # replan suggestion (Phase 2)
+    memories: list[dict[str, Any]] | None = None  # retrieved long-term memory (Phase 3)
+    world_model: dict[str, Any] | None = None     # per-user world snapshot (Phase 3)
+    new_memories: list[dict[str, Any]] | None = None  # facts persisted this turn (Phase 3)
+    privacy_disclosure: str | None = None         # first-write disclosure (Phase 3)
+    self_eval: dict[str, Any] | None = None       # metacognitive self-eval (Phase 7)
+    pushback_detected: bool | None = None         # user disagreed (Phase 7)
+    retried: bool | None = None                   # self-refine retry fired (Phase 7)
+    original_response: str | None = None          # pre-refine draft (Phase 7)
+    original_self_eval: dict[str, Any] | None = None  # eval of pre-refine draft (Phase 7)
+    user_style: dict[str, Any] | None = None      # per-user style snapshot (Phase 6)
+    few_shot_examples: list[dict[str, Any]] | None = None  # similar past trajectories (Phase 6)
+    reward: float | None = None                   # turn reward in [-1, 1] (Phase 6)
+    brainstorm_used: bool | None = None           # brainstorm short-circuit fired (Phase 5)
+    brainstorm_ideas: list[str] | None = None     # generated ideas (Phase 5)
+    curiosity_followup: str | None = None         # appended follow-up question (Phase 5)
+    procedural_hint: str | None = None            # learned (intent, action) hint (Phase 6 mid)
+    procedural_rule: dict[str, Any] | None = None # full procedural rule record (Phase 6 mid)
+    antipattern_hint: str | None = None           # learned avoid-hint (Phase 6 ext)
+    antipattern_rule: dict[str, Any] | None = None# full anti-pattern rule record (Phase 6 ext)
+    confirmation_recommended: bool | None = None  # policy says a write should be confirmed (Phase 4 mid)
+    confirmation_decisions: list[dict[str, Any]] | None = None  # per-tool verdicts (Phase 4 mid)
+    intent_confirmation_decision: dict[str, Any] | None = None  # intent-level verdict (Phase 4 mid)
+    confirmation_summary: str | None = None       # one-line user-facing summary (Phase 4 mid)
+    agent_v2: bool | None = None
+
+
+class ConfirmActionRequest(BaseModel):
+    pending_id: str = Field(min_length=1, max_length=64)
+    decision: Literal["confirm", "cancel"] = "confirm"
+
+
+class ConfirmActionResponse(BaseModel):
+    status: str                     # committed | cancelled | failed | expired
+    tool: str | None = None
+    summary: str | None = None
+    audit_id: str | None = None
+    error: str | None = None
 
 
 class ConversationMessage(BaseModel):
@@ -861,17 +925,40 @@ async def ai_chat(body: AIChatRequest, request: Request) -> dict:
             # Fetch user context for agent
             user_profile = await supabase_get("users", {
                 "id": f"eq.{body.user_id}",
-                "select": "id,email,full_name,address,phone,dietary_restrictions,allergies",
+                "select": "id,email,full_name,address,phone,dietary_restrictions,allergies,is_admin",
             })
             user_context = user_profile[0] if user_profile else {"user_id": body.user_id}
-            
-            # Invoke agent
-            result = await invoke_agent(
-                user_id=body.user_id,
-                message=body.message,
-                conversation_id=None,  # Will be auto-generated
-                user_context=user_context,
-            )
+            is_admin = bool(user_context.get("is_admin")) if user_profile else False
+
+            # Route to AGENT_V2 when enabled. v2 wraps v1, so the existing
+            # graph runs inside it — any v2 failure short-circuits to a
+            # safe response from the wrapper itself. Routing is per-user
+            # via the AGENT_V2_ROLLOUT_PCT bucket in backend/agent/rollout.py.
+            use_v2 = False
+            if AGENT_V2:
+                try:
+                    from backend.agent.rollout import is_agent_v2_enabled_for_user
+                    use_v2 = is_agent_v2_enabled_for_user(body.user_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("rollout check failed (%s) — staying on v1", exc)
+                    use_v2 = False
+
+            if use_v2:
+                result = await invoke_agent_v2(
+                    user_id=body.user_id,
+                    message=body.message,
+                    conversation_id=None,
+                    user_context=user_context,
+                    is_admin=is_admin,
+                    channel="text",
+                )
+            else:
+                result = await invoke_agent(
+                    user_id=body.user_id,
+                    message=body.message,
+                    conversation_id=None,  # Will be auto-generated
+                    user_context=user_context,
+                )
             
             # Transform to AIChatResponse format
             response = {
@@ -903,7 +990,82 @@ async def ai_chat(body: AIChatRequest, request: Request) -> dict:
             # Include proactive suggestions if any
             if result.get("suggestions"):
                 response["suggestions"] = result["suggestions"]
-            
+
+            # pending_action envelope: v1 destructive-write intercepts
+            # (delete_listing, cancel_claim, leave_community,
+            # forget_about_me) queue a confirmation card BEFORE any write
+            # fires. Frontend renders it regardless of `agent_v2`, so it
+            # lives outside the v2-only block below.
+            if result.get("pending_action"):
+                response["pending_action"] = result["pending_action"]
+
+            # AGENT_V2 extras — only set when present so v1 responses stay
+            # byte-identical to before.
+            if result.get("agent_v2"):
+                response["agent_v2"] = True
+                if result.get("pending_action"):
+                    response["pending_action"] = result["pending_action"]
+                if result.get("refusal"):
+                    response["refusal"] = result["refusal"]
+                if result.get("affect"):
+                    response["affect"] = result["affect"]
+                if result.get("reasoning_trace"):
+                    response["reasoning_trace"] = result["reasoning_trace"]
+                if result.get("confidence") is not None:
+                    response["confidence"] = result["confidence"]
+                if result.get("reflection"):
+                    response["reflection"] = result["reflection"]
+                if result.get("goals"):
+                    response["goals"] = result["goals"]
+                if result.get("next_step_hint"):
+                    response["next_step_hint"] = result["next_step_hint"]
+                if result.get("memories"):
+                    response["memories"] = result["memories"]
+                if result.get("world_model"):
+                    response["world_model"] = result["world_model"]
+                if result.get("new_memories"):
+                    response["new_memories"] = result["new_memories"]
+                if result.get("privacy_disclosure"):
+                    response["privacy_disclosure"] = result["privacy_disclosure"]
+                if result.get("self_eval"):
+                    response["self_eval"] = result["self_eval"]
+                if result.get("pushback_detected"):
+                    response["pushback_detected"] = bool(result["pushback_detected"])
+                if result.get("retried"):
+                    response["retried"] = True
+                    if result.get("original_response"):
+                        response["original_response"] = result["original_response"]
+                    if result.get("original_self_eval"):
+                        response["original_self_eval"] = result["original_self_eval"]
+                if result.get("user_style"):
+                    response["user_style"] = result["user_style"]
+                if result.get("few_shot_examples"):
+                    response["few_shot_examples"] = result["few_shot_examples"]
+                if result.get("reward") is not None:
+                    response["reward"] = float(result["reward"])
+                if result.get("brainstorm_used"):
+                    response["brainstorm_used"] = True
+                    if result.get("brainstorm_ideas"):
+                        response["brainstorm_ideas"] = list(result["brainstorm_ideas"])
+                if result.get("curiosity_followup"):
+                    response["curiosity_followup"] = result["curiosity_followup"]
+                if result.get("procedural_hint"):
+                    response["procedural_hint"] = result["procedural_hint"]
+                if result.get("procedural_rule"):
+                    response["procedural_rule"] = result["procedural_rule"]
+                if result.get("antipattern_hint"):
+                    response["antipattern_hint"] = result["antipattern_hint"]
+                if result.get("antipattern_rule"):
+                    response["antipattern_rule"] = result["antipattern_rule"]
+                if result.get("confirmation_recommended"):
+                    response["confirmation_recommended"] = True
+                if result.get("confirmation_decisions"):
+                    response["confirmation_decisions"] = result["confirmation_decisions"]
+                if result.get("intent_confirmation_decision"):
+                    response["intent_confirmation_decision"] = result["intent_confirmation_decision"]
+                if result.get("confirmation_summary"):
+                    response["confirmation_summary"] = result["confirmation_summary"]
+
             return response
         else:
             # Use legacy conversation engine
@@ -921,6 +1083,35 @@ async def ai_chat(body: AIChatRequest, request: Request) -> dict:
         # stays consistent. Log with the request ID so we can correlate.
         logger.error("[%s] AI chat failed: %s", rid, exc, exc_info=True)
         raise classify_exception(exc) from exc
+
+
+# ---------------------------------------------------------------------------
+# AGENT_V2: rollout / health snapshot for the ops dashboard
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ai/health")
+async def ai_health() -> dict:
+    """Snapshot of the AI runtime for dashboards and ops checks.
+
+    Returns the current agentic-mode flag, AGENT_V2 master switch, and
+    rollout percentage in effect. No auth required — the response is
+    non-sensitive and useful for uptime probes.
+    """
+    body: dict = {
+        "agentic_mode": ENABLE_AGENTIC_MODE,
+        "agent_v2": {
+            "enabled": False,
+            "rollout_pct": 0,
+        },
+    }
+    try:
+        from backend.agent.rollout import rollout_snapshot
+        snap = rollout_snapshot()
+        body["agent_v2"]["enabled"] = bool(snap.get("enabled"))
+        body["agent_v2"]["rollout_pct"] = int(snap.get("rollout_pct") or 0)
+    except Exception as exc:  # noqa: BLE001 — health MUST NOT fail
+        logger.debug("rollout snapshot unavailable: %s", exc)
+    return body
 
 
 @app.get("/api/ai/history/{user_id}")
@@ -1027,6 +1218,72 @@ async def ai_feedback(body: AIFeedbackRequest, request: Request) -> dict:
     except Exception as exc:
         logger.error("Feedback save error: %s", exc)
         raise classify_exception(exc) from exc
+
+
+# ---------------------------------------------------------------------------
+# AGENT_V2: confirm or cancel a pending typed action
+# ---------------------------------------------------------------------------
+
+@app.post("/api/ai/confirm", response_model=ConfirmActionResponse)
+async def ai_confirm_action(body: ConfirmActionRequest, request: Request) -> dict:
+    """Resolve a typed action that's waiting on user confirmation.
+
+    Flow: the AGENT_V2 graph returns a `pending_action` envelope. The
+    frontend renders a Confirm/Cancel card. User taps Confirm -> we hit
+    this endpoint with {pending_id, decision:"confirm"}. The action handler
+    runs server-side with the user's identity, writes an audit row, and
+    returns the committed status.
+
+    Auth: requires the authenticated caller to own the pending row. The
+    actions module enforces this with a service-role check on `user_id`.
+    """
+    _enforce_rate_limit(request)
+
+    auth_uid = await _authenticate_request(request)
+    if not auth_uid:
+        raise HTTPException(401, "Authentication required to confirm actions")
+
+    try:
+        from backend.agent import actions as agent_actions
+    except Exception as exc:  # noqa: BLE001
+        logger.error("agent.actions import failed: %s", exc)
+        raise HTTPException(503, "Action framework unavailable") from exc
+
+    try:
+        if body.decision == "cancel":
+            ok = await agent_actions.cancel_pending_action(
+                pending_id=body.pending_id,
+                user_id=auth_uid,
+            )
+            return {
+                "status": "cancelled" if ok else "failed",
+                "tool": None,
+                "summary": None,
+                "audit_id": None,
+                "error": None if ok else "pending action not found or already resolved",
+            }
+
+        result = await agent_actions.commit_pending_action(
+            pending_id=body.pending_id,
+            user_id=auth_uid,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Confirm action failed: %s", exc, exc_info=True)
+        return {
+            "status": "failed",
+            "tool": None,
+            "summary": None,
+            "audit_id": None,
+            "error": "Action execution failed",
+        }
+
+    return {
+        "status": result.status,
+        "tool": result.tool,
+        "summary": result.summary,
+        "audit_id": result.audit_id,
+        "error": result.error,
+    }
 
 
 @app.post("/api/ai/voice", response_model=AIChatResponse)
@@ -3075,7 +3332,7 @@ def _normalize_listing_row(
         # Normalize to YYYY-MM-DD before writing. The AI (enrich-listings or
         # vision-listing) may supply a full ISO datetime ('2026-06-15T00:00:00')
         # which PostgreSQL's date column would reject. Matches the normalization
-        # applied in _create_food_listing and _post_food_request (bugs AV, AX).
+        # applied in _create_food_listing.
         from backend.tools import _normalize_expiry_date as _ned
         _exp = _ned(item.expiry_date.strip())
         if _exp:

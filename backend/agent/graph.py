@@ -224,7 +224,28 @@ async def execute_tools(state: AgentState) -> AgentState:
         # Store tool results for response generation
         recent_results = state.get("recent_tool_results", [])
         recent_results.append(result)
-        
+
+        # v1 destructive-write intercept: if a step returned a
+        # pending_action envelope, stash it on state, short-circuit the
+        # rest of the plan, and let the responder render the confirmation
+        # summary (bypassing the LLM). Anything remaining in active_plan
+        # after a destructive tool is irrelevant until the user confirms.
+        pending_from_step: Optional[Dict[str, Any]] = None
+        if isinstance(result, dict) and isinstance(result.get("pending_action"), dict):
+            pending_from_step = result["pending_action"]
+
+        if pending_from_step is not None:
+            return {
+                **state,
+                "active_plan": updated_plan,
+                "current_step": len(active_plan),  # skip remaining steps
+                "recent_tool_results": recent_results[-5:],
+                "pending_action": pending_from_step,
+                "requires_user_input": True,
+                "conversation_phase": "confirming",
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            }
+
         return {
             **state,
             "active_plan": updated_plan,
@@ -267,10 +288,69 @@ async def generate_response(state: AgentState) -> AgentState:
     recent_results = state.get("recent_tool_results", [])
     current_message = state.get("current_message", "")
     detected_intent = state.get("detected_intent")
-    
+
+    # Fast path: a destructive tool was intercepted with pending_action.
+    # Render the confirmation summary directly and skip the LLM — we
+    # neither need creative phrasing nor another OpenAI round-trip when
+    # the frontend is about to show a "Yes / No" card.
+    pending_action = state.get("pending_action")
+    if pending_action:
+        summary = ""
+        if isinstance(pending_action, dict):
+            summary = str(pending_action.get("summary") or "").strip()
+        if language == "es":
+            confirmation_text = (
+                f"¿Confirmas que quieres {summary}?"
+                if summary else
+                "¿Confirmas esta acción?"
+            )
+        else:
+            confirmation_text = (
+                f"Just to confirm — do you want me to {summary}?"
+                if summary else
+                "Just to confirm — do you want me to proceed?"
+            )
+
+        updated_messages = state.get("messages", []).copy()
+        updated_messages.extend([
+            Message(
+                role="user",
+                content=current_message,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                tool_calls=None,
+                tool_results=None,
+            ),
+            Message(
+                role="assistant",
+                content=confirmation_text,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                tool_calls=None,
+                tool_results=recent_results if recent_results else None,
+            ),
+        ])
+
+        return {
+            **state,
+            "response_text": confirmation_text,
+            "messages": updated_messages[-50:],
+            "conversation_phase": "confirming",
+            "turn_count": state.get("turn_count", 0) + 1,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+        }
+
     # Build system prompt (minimal ~2k tokens)
     system_prompt = build_system_prompt(user_context, language)
-    
+
+    # AGENT_V2: when the v2 graph is in front of us it may have stashed a
+    # `<v2_context>` block (world snapshot + retrieved memories + few-shot
+    # examples) inside user_context. Splice it into the system prompt so
+    # gpt-4o actually sees the retrieved context instead of it being
+    # observability-only. When the block is absent (v1-only path) this is a
+    # no-op and behaviour stays byte-for-byte identical to before.
+    v2_context_block = user_context.get("v2_context_block") if isinstance(user_context, dict) else None
+    if v2_context_block and isinstance(v2_context_block, str) and v2_context_block.strip():
+        system_prompt = f"{system_prompt}\n\n{v2_context_block.strip()}"
+
     # Build context from tool results
     tool_context = ""
     if recent_results:
@@ -430,24 +510,36 @@ async def update_learning(state: AgentState) -> AgentState:
 def requires_planning(state: AgentState) -> Literal["plan", "execute", "respond"]:
     """Decide if intent requires multi-step planning."""
     intent = state.get("detected_intent")
-    
-    # Complex intents that benefit from planning
-    complex_intents = ["donate", "claim"]  # Multi-step workflows
-    
+
+    # Complex intents that benefit from planning (rule-based `_plan_*` fires).
+    complex_intents = ["donate", "claim"]
     if intent in complex_intents:
         return "plan"
-    
-    # Simple intents execute directly
-    simple_intents = ["search", "help", "general"]
-    if intent in simple_intents:
+
+    # `help` / `general` (or any unknown intent) may still be actionable
+    # — e.g. "what recipes work with rice?" is `help` but wants a
+    # `get_recipes` tool call. Route through the planner so
+    # `create_plan_llm` can pick a tool from the full non-destructive
+    # registry when the classifier flagged `requires_action=true`.
+    if state.get("conversation_phase") == "planning":
+        return "plan"
+
+    # Simple intents that already have an active_plan (e.g. `search` after
+    # a prior planning step) fall through to execute; otherwise respond.
+    if intent in ("search",) and state.get("active_plan"):
         return "execute"
-    
-    # Default: skip planning
+
     return "respond"
 
 
 def plan_complete(state: AgentState) -> Literal["execute_next", "respond"]:
     """Check if there are more steps to execute."""
+    # A destructive step that queued a pending_action envelope aborts the
+    # rest of the plan — subsequent steps can only run after the user
+    # confirms via /api/ai/confirm.
+    if state.get("pending_action"):
+        return "respond"
+
     active_plan = state.get("active_plan", [])
     current_step = state.get("current_step", 0)
     
@@ -680,6 +772,7 @@ async def invoke_agent(
             "tool_results": final_state.get("recent_tool_results", []),
             "suggestions": final_state.get("pending_suggestions", []),
             "timestamp": final_state.get("last_updated"),
+            "pending_action": final_state.get("pending_action"),
         }
         
     except Exception as e:

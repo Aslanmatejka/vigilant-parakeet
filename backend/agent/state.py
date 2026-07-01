@@ -55,6 +55,59 @@ class ProactiveSuggestion(TypedDict):
     action_label: Optional[str]
 
 
+class ReasoningStep(TypedDict, total=False):
+    """One step of explicit ReAct-style reasoning (AGENT_V2)."""
+    step: int
+    thought: str
+    decision: str               # "use_tool" | "ask_clarification" | "respond" | "refuse"
+    tool_name: Optional[str]
+    confidence: float           # 0..1
+    observation: Optional[str]  # result summary after tool fires
+
+
+class PendingActionEnvelope(TypedDict, total=False):
+    """Action queued for user confirmation (AGENT_V2)."""
+    pending_id: str
+    tool: str
+    summary: str
+    args: Dict[str, Any]
+    expires_at: Optional[str]
+
+
+class AffectSnapshot(TypedDict, total=False):
+    """Classified user affect for this turn (AGENT_V2)."""
+    sentiment: float
+    urgency: float
+    frustration: float
+    joy: float
+    confusion: float
+    dominant: str
+
+
+class RegisterSnapshot(TypedDict, total=False):
+    """Communication register chosen for this turn (AGENT_V2)."""
+    tone: str
+    verbosity: str
+    formality: str
+    acknowledgement_required: bool
+    notes: List[str]
+
+
+class GoalSnapshot(TypedDict, total=False):
+    """One goal on the agent's stack (AGENT_V2 — Phase 2)."""
+    id: str
+    user_id: str
+    description: str
+    intent: str
+    status: Literal["open", "in_progress", "blocked", "done", "abandoned"]
+    priority: Literal["low", "normal", "high", "urgent"]
+    parent_goal_id: Optional[str]
+    success_criteria: Optional[str]
+    created_at: str
+    updated_at: str
+    notes: List[str]
+
+
 class AgentState(TypedDict, total=False):
     """Complete agent state for LangGraph workflow.
     
@@ -64,6 +117,7 @@ class AgentState(TypedDict, total=False):
     # Conversation identity
     conversation_id: str
     user_id: str
+    turn_id: str               # AGENT_V2: stable id for this conversation turn
     
     # Message history
     messages: List[Message]
@@ -104,6 +158,25 @@ class AgentState(TypedDict, total=False):
     response_text: Optional[str]
     include_audio: bool
     audio_url: Optional[str]
+
+    # ---------------------------------------------------------------
+    # AGENT_V2 extensions — all optional, additive only. Legacy graph
+    # writes the original fields; v2 graph writes both old and new so
+    # downstream code that only knows about the originals keeps working.
+    # ---------------------------------------------------------------
+    reasoning_trace: List[ReasoningStep]   # ReAct steps for this turn
+    confidence: float                       # final-step confidence
+    pending_action: Optional[PendingActionEnvelope]  # action awaiting user "yes"
+    affect: AffectSnapshot                  # classified inbound affect
+    register: RegisterSnapshot              # chosen communication register
+    goals: List[GoalSnapshot]               # goal stack for this turn (Phase 2)
+    next_step_hint: Optional[str]           # replan suggestion surfaced to next turn (Phase 2)
+    self_model_block: Optional[str]         # rendered <self> prompt block
+    allowed_tools: List[str]                # scope enforcer output
+    blocked_listings: List[Dict[str, Any]]  # listings filtered by FoodSafetyGate
+    safety_decision: Optional[Dict[str, Any]]  # input guard / scope decision if not ok
+    refusal_text: Optional[str]             # calibrated refusal copy (when blocked)
+    agent_v2: bool                          # True when this state was processed by v2 graph
     
     # Metadata
     turn_count: int
