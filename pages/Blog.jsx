@@ -39,26 +39,47 @@ function Blog() {
     };
 
     return (
-        <div data-name="blog" className="max-w-7xl mx-auto py-12 px-4">
-            <div className="text-center mb-16">
-                <h1 className="text-4xl font-bold text-gray-900 mb-4">
-                    ShareFoods Blog
-                </h1>
-                <p className="text-xl text-gray-600">
-                    Stories, updates, and insights from our community
-                </p>
-                <div className="flex justify-center gap-4 md:gap-8 mt-8 flex-wrap">
-                    <span className="bg-[#2CABE3] text-white px-6 py-3 rounded-xl font-semibold shadow-md cursor-default">
-                        Blog
-                    </span>
-                    <Link to="/news" className="bg-gray-200 text-gray-700 px-6 py-3 rounded-xl font-semibold hover:bg-[#2CABE3] hover:text-white transition-all">
-                        News
-                    </Link>
-                    <Link to="/testimonials" className="bg-gray-200 text-gray-700 px-6 py-3 rounded-xl font-semibold hover:bg-[#2CABE3] hover:text-white transition-all">
-                        Testimonials
-                    </Link>
+        <div data-name="blog" className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40">
+            {/* Hero */}
+            <header className="relative overflow-hidden">
+                <div className="absolute inset-0 -z-10" aria-hidden="true">
+                    <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#2CABE3]/15 blur-3xl" />
+                    <div className="absolute top-10 -right-24 w-96 h-96 rounded-full bg-emerald-300/20 blur-3xl" />
                 </div>
-            </div>
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-16 pb-12 sm:pt-20 sm:pb-16">
+                    <div className="text-center">
+                        <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#2CABE3]/10 text-[#2CABE3] text-xs font-semibold mb-5 ring-1 ring-[#2CABE3]/20">
+                            <i className="fas fa-pen-nib mr-2" aria-hidden="true"></i>
+                            ShareFoods Blog
+                        </span>
+                        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 mb-5 tracking-tight">
+                            Stories from{" "}
+                            <span className="bg-gradient-to-r from-[#2CABE3] to-emerald-500 bg-clip-text text-transparent">
+                                our community
+                            </span>
+                        </h1>
+                        <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
+                            Updates, insights, and stories from the people making food sharing possible.
+                        </p>
+                        <div className="mt-7 flex flex-wrap items-center justify-center gap-2 text-sm">
+                            <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-gradient-to-r from-[#2CABE3] to-emerald-500 text-white font-medium shadow-md">
+                                <i className="fas fa-pen-nib text-[10px]" aria-hidden="true" />
+                                Blog
+                            </span>
+                            <Link to="/news" className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white shadow-sm ring-1 ring-gray-200 text-gray-700 font-medium hover:text-[#2CABE3] transition">
+                                <i className="fas fa-newspaper text-[10px]" aria-hidden="true" />
+                                News
+                            </Link>
+                            <Link to="/testimonials" className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white shadow-sm ring-1 ring-gray-200 text-gray-700 font-medium hover:text-[#2CABE3] transition">
+                                <i className="fas fa-quote-left text-[10px]" aria-hidden="true" />
+                                Testimonials
+                            </Link>
+                        </div>
+                    </div>
+                </div>
+            </header>
+
+            <main className="max-w-7xl mx-auto py-8 px-4">
 
             <div 
                 className="flex flex-wrap gap-4 mb-8"
@@ -158,6 +179,7 @@ function Blog() {
                     )}
                 </>
             )}
+            </main>
         </div>
     );
 }

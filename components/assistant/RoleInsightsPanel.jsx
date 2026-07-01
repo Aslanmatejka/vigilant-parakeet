@@ -10,10 +10,7 @@ const ROLE_LABELS = {
     admin: 'Admin coach',
     donor: 'Donor coach',
     recipient: 'Recipient guide',
-    dispatcher: 'Dispatcher copilot',
-    volunteer: 'Volunteer copilot',
     organizer: 'Organizer copilot',
-    sponsor: 'Sponsor insights',
 };
 
 const PRIORITY_BADGE = {

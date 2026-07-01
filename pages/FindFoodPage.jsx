@@ -376,16 +376,35 @@ function FindFoodPage({ initialCategory }) {
     return (
         <div
             data-name="find-food-page"
-            className="container mx-auto px-3 sm:px-4"
+            className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40"
             role="main"
         >
-            <div className="pt-0 pb-6 sm:pb-10">
-                <div className="mb-3 sm:mb-4 text-center">
-                    <h1 className="text-xl sm:text-2xl font-bold drop-shadow-sm mb-1" style={{ color: '#2CABE3' }}>Find Food Assistance</h1>
-                    <p className="mt-1 text-xs sm:text-sm text-gray-600 max-w-lg mx-auto leading-relaxed">
-                        Browse nearby food listings and claim what you need. All requests are confidential.
-                    </p>
+            {/* Hero */}
+            <header className="relative overflow-hidden">
+                <div className="absolute inset-0 -z-10" aria-hidden="true">
+                    <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#2CABE3]/15 blur-3xl" />
+                    <div className="absolute top-10 -right-24 w-96 h-96 rounded-full bg-emerald-300/20 blur-3xl" />
                 </div>
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-16 pb-12 sm:pt-20 sm:pb-16">
+                    <div className="text-center">
+                        <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#2CABE3]/10 text-[#2CABE3] text-xs font-semibold mb-5 ring-1 ring-[#2CABE3]/20">
+                            <i className="fas fa-location-dot mr-2" aria-hidden="true"></i>
+                            Food Near You
+                        </span>
+                        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 mb-5 tracking-tight">
+                            Find Food{" "}
+                            <span className="bg-gradient-to-r from-[#2CABE3] to-emerald-500 bg-clip-text text-transparent">
+                                Assistance
+                            </span>
+                        </h1>
+                        <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
+                            Browse nearby food listings and claim what you need. All requests are confidential.
+                        </p>
+                    </div>
+                </div>
+            </header>
+
+            <div className="container mx-auto px-3 sm:px-4 pt-0 pb-6 sm:pb-10">
 
                 {/* Mobile: quick jump between map and listings */}
                 <nav

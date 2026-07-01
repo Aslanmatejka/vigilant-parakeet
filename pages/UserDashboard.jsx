@@ -144,11 +144,11 @@ function UserDashboard() {
     }, [userListings]);
 
     // Quick actions tailored to community_role so the dashboard actually
-    // changes when the user switches between donor / recipient / volunteer.
+    // changes when the user switches between donor / recipient / organizer.
     const role = String(user?.community_role || '').toLowerCase();
     const isDonor = role === 'donor';
     const isRecipient = role === 'recipient';
-    const isVolunteer = role === 'volunteer' || role === 'driver' || role === 'dispatcher';
+    const isOrganizer = role === 'organizer';
 
     const quickActions = isDonor
         ? [
@@ -162,10 +162,10 @@ function UserDashboard() {
             { title: 'Near Me', description: 'See pickups on the map', icon: 'fa-location-dot', path: '/near-me', color: 'bg-emerald-500' },
             { title: 'My Receipts', description: 'View claims and pickups', icon: 'fa-receipt', path: '/receipts', color: 'bg-purple-500' },
         ]
-        : isVolunteer
+        : isOrganizer
         ? [
-            { title: 'Pickup Routes', description: 'Plan your delivery run', icon: 'fa-route', path: '/donations', color: 'bg-[#2CABE3]' },
-            { title: 'Find Food', description: 'See what needs delivering', icon: 'fa-search', path: '/find', color: 'bg-blue-500' },
+            { title: 'Distribution Events', description: 'Coordinate food pickups', icon: 'fa-calendar', path: '/donations', color: 'bg-[#2CABE3]' },
+            { title: 'Find Food', description: 'Browse items to distribute', icon: 'fa-search', path: '/find', color: 'bg-blue-500' },
             { title: 'Near Me', description: 'Pickups on the map', icon: 'fa-location-dot', path: '/near-me', color: 'bg-emerald-500' },
         ]
         : [
@@ -244,38 +244,56 @@ function UserDashboard() {
     };
 
     return (
-        <div className="max-w-7xl mx-auto py-5 sm:py-8 px-1 sm:px-4">
-            {/* Welcome Section */}
-            <div className="bg-white rounded-lg shadow-sm p-4 sm:p-6 mb-5 sm:mb-8" role="banner">
-                <div className="flex items-center">
-                    <Avatar 
-                        src={user?.avatar} 
-                        size="xl" 
-                        alt={`${user?.name}'s avatar`}
-                    />
-                    <div className="ml-4 sm:ml-6">
-                        <div className="flex items-center gap-3">
-                            <h1 className="text-xl sm:text-2xl font-bold text-gray-900">
-                                Welcome back, {user?.name}!
-                            </h1>
-                        </div>
-                        <p className="text-sm sm:text-base text-gray-600">
-                            Here's what's happening with your food sharing activities
+        <div className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40">
+            {/* Hero */}
+            <header className="relative overflow-hidden">
+                <div className="absolute inset-0 -z-10" aria-hidden="true">
+                    <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#2CABE3]/15 blur-3xl" />
+                    <div className="absolute top-10 -right-24 w-96 h-96 rounded-full bg-emerald-300/20 blur-3xl" />
+                </div>
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-16 pb-12 sm:pt-20 sm:pb-16">
+                    <div className="text-center">
+                        <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#2CABE3]/10 text-[#2CABE3] text-xs font-semibold mb-5 ring-1 ring-[#2CABE3]/20">
+                            <i className="fas fa-house-user mr-2" aria-hidden="true"></i>
+                            Your Hub
+                        </span>
+                        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 mb-5 tracking-tight">
+                            Welcome back,{" "}
+                            <span className="bg-gradient-to-r from-[#2CABE3] to-emerald-500 bg-clip-text text-transparent">
+                                {user?.name || 'friend'}
+                            </span>
+                        </h1>
+                        <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
+                            Here&apos;s what&apos;s happening with your food sharing activities.
                         </p>
                     </div>
+                </div>
+            </header>
+
+            <div className="max-w-7xl mx-auto py-2 sm:py-4 px-1 sm:px-4 pb-8">
+            {/* Compact user card */}
+            <div className="bg-white rounded-lg shadow-sm p-4 sm:p-6 mb-5 sm:mb-8 flex items-center gap-4" role="banner">
+                <Avatar
+                    src={user?.avatar}
+                    size="lg"
+                    alt={`${user?.name}'s avatar`}
+                />
+                <div>
+                    <p className="text-sm text-gray-500">Signed in as</p>
+                    <p className="font-semibold text-gray-900">{user?.name}</p>
                 </div>
             </div>
 
             {/* AI Role-Specific Insights */}
             <RoleInsightsPanel className="mb-8" />
 
-            {/* Smart Pickup Route Optimizer — donor/volunteer only */}
-            {(isDonor || isVolunteer) && <PickupRouteOptimizer className="mb-8" />}
+            {/* Smart Pickup Route Optimizer — donor/organizer only */}
+            {(isDonor || isOrganizer) && <PickupRouteOptimizer className="mb-8" />}
 
             {/* Natural-language Query Panel */}
             <AIQueryPanel className="mb-8" />
 
-            {/* Food Receipts Section — recipient/volunteer/default; hidden for donors */}
+            {/* Food Receipts Section — recipient/organizer/default; hidden for donors */}
             {!isDonor && (
             <div className="mb-8" role="region" aria-label="Food Claim Receipts">
                 <h2 className="text-2xl font-bold text-gray-900 mb-6">Your Food Receipts</h2>
@@ -424,6 +442,7 @@ function UserDashboard() {
                     </div>
                 </div>
             )}
+            </div>
         </div>
     );
 }

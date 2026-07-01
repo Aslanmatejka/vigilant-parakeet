@@ -209,7 +209,7 @@ function SignupPageContent() {
     };
 
     return (
-        <div className="min-h-screen bg-gray-100 py-12 px-4 sm:px-6 lg:px-8">
+        <div className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40 py-12 px-4 sm:px-6 lg:px-8">
             <div className="absolute top-4 left-4">
                 <Button
                                             onClick={() => navigate('/')}
@@ -228,7 +228,7 @@ function SignupPageContent() {
                             <i className="fas fa-seedling text-white text-2xl" aria-hidden="true"></i>
                         </div>
                     </div>
-                    <h1 className="text-3xl font-bold text-gray-900">Join DoGoods</h1>
+                    <h1 className="text-3xl font-bold text-gray-900">Join <span className="bg-gradient-to-r from-[#2CABE3] to-emerald-500 bg-clip-text text-transparent">DoGoods</span></h1>
                     <p className="mt-2 text-gray-600">
                         Create your account and start sharing food with your community
                     </p>

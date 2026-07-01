@@ -196,10 +196,7 @@ function AdminBroadcasts() {
                                         <option value="all">All Users</option>
                                         <option value="donor">Donor</option>
                                         <option value="recipient">Recipient</option>
-                                        <option value="volunteer">Volunteer</option>
-                                        <option value="driver">Driver</option>
                                         <option value="organizer">Organizer</option>
-                                        <option value="sponsor">Sponsor</option>
                                     </select>
                                 </div>
 

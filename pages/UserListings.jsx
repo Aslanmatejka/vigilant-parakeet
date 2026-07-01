@@ -111,11 +111,33 @@ function UserListings() {
     }
 
     return (
-        <div className="max-w-7xl mx-auto py-8 px-4">
-            <div className="mb-8">
-                <h1 className="text-3xl font-bold text-gray-900 mb-4">My Listings</h1>
-                <p className="text-gray-600">Manage your food listings and track their status</p>
-            </div>
+        <div className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40">
+            {/* Hero */}
+            <header className="relative overflow-hidden">
+                <div className="absolute inset-0 -z-10" aria-hidden="true">
+                    <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#2CABE3]/15 blur-3xl" />
+                    <div className="absolute top-10 -right-24 w-96 h-96 rounded-full bg-emerald-300/20 blur-3xl" />
+                </div>
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-16 pb-12 sm:pt-20 sm:pb-16">
+                    <div className="text-center">
+                        <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#2CABE3]/10 text-[#2CABE3] text-xs font-semibold mb-5 ring-1 ring-[#2CABE3]/20">
+                            <i className="fas fa-list-check mr-2" aria-hidden="true"></i>
+                            Your Donations
+                        </span>
+                        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 mb-5 tracking-tight">
+                            My{" "}
+                            <span className="bg-gradient-to-r from-[#2CABE3] to-emerald-500 bg-clip-text text-transparent">
+                                Listings
+                            </span>
+                        </h1>
+                        <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
+                            Manage your food listings and track their status.
+                        </p>
+                    </div>
+                </div>
+            </header>
+
+            <div className="max-w-7xl mx-auto px-4 pb-8">
 
             {error && (
                 <div className="mb-4 p-4 rounded-lg bg-red-50 text-red-800" role="alert">
@@ -266,6 +288,7 @@ function UserListings() {
                         )}
                     </div>
                 </div>
+            </div>
             </div>
         </div>
     );

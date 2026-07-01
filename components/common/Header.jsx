@@ -33,7 +33,7 @@ function Header({ menuItems: menuItemsProp }) {
     const communityRole = useCommunityRole();
     const isDonor = communityRole === 'donor';
     const isRecipient = communityRole === 'recipient';
-    const isVolunteer = ['volunteer', 'driver', 'dispatcher'].includes(communityRole);
+    const isOrganizer = communityRole === 'organizer';
 
     const menuItems = React.useMemo(() => {
         if (menuItemsProp) return menuItemsProp;
@@ -43,28 +43,37 @@ function Header({ menuItems: menuItemsProp }) {
         if (isDonor) {
             return [
                 { label: 'Share Food', path: '/share' },
-                { label: 'My Listings', path: '/listings' },
-                { label: 'Donation Schedules', path: '/donations' },
-                ...AUTH_TAIL,
+                { label: 'Partners', path: '/sponsors' },
+                { label: 'Impact', path: '/impact-story' },
+                SUPPORT_DROPDOWN,
+                { label: 'Contact', path: '/contact' },
             ];
         }
         if (isRecipient) {
             return [
                 { label: 'Find Food', path: '/find' },
-                { label: 'Near Me', path: '/near-me' },
-                { label: 'My Receipts', path: '/receipts' },
-                ...AUTH_TAIL,
+                { label: 'Recipes', path: '/recipes' },
+                { label: 'Receipts & Activity', path: '/receipts' },
+                { label: 'Partners', path: '/sponsors' },
+                { label: 'Impact', path: '/impact-story' },
+                SUPPORT_DROPDOWN,
+                { label: 'Contact', path: '/contact' },
             ];
         }
-        if (isVolunteer) {
+        if (isOrganizer) {
             return [
-                { label: 'Pickup Routes', path: '/donations' },
-                { label: 'Near Me', path: '/near-me' },
-                ...AUTH_TAIL,
+                { label: 'DoGoods Home', path: '/' },
+                { label: 'Share Food', path: '/share' },
+                { label: 'Find Food', path: '/find' },
+                { label: 'Recipes', path: '/recipes' },
+                { label: 'Partners', path: '/sponsors' },
+                { label: 'Impact', path: '/impact-story' },
+                SUPPORT_DROPDOWN,
+                { label: 'Contact', path: '/contact' },
             ];
         }
         return [{ label: 'Find Food', path: '/find' }, ...AUTH_TAIL];
-    }, [menuItemsProp, isAuthenticated, isDonor, isRecipient, isVolunteer]);
+    }, [menuItemsProp, isAuthenticated, isDonor, isRecipient, isOrganizer]);
 
     const navigate = useNavigate();
     const location = useLocation();
@@ -147,7 +156,7 @@ function Header({ menuItems: menuItemsProp }) {
                         </a>
                     </div>
 
-                    <nav data-name="desktop-nav" className="hidden lg:flex items-center gap-x-5 xl:gap-x-6 whitespace-nowrap text-sm xl:text-base">
+                    <nav data-name="desktop-nav" className="hidden lg:flex flex-1 items-center justify-center gap-x-5 xl:gap-x-6 whitespace-nowrap text-sm xl:text-base">
                         {menuItems.map((item, index) => (
                             item.dropdown ? (
                                 <div 

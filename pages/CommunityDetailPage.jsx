@@ -120,7 +120,7 @@ function CommunityDetailPage() {
     const schoolStaffHelpedValue = parseInt(community.school_staff_helped) || 0;
 
     return (
-        <div className="min-h-screen bg-gradient-to-b from-cyan-50 via-white to-cyan-100">
+        <div className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40">
             {/* Header Section */}
             <div className="bg-white shadow-sm border-b">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">

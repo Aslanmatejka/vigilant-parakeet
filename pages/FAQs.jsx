@@ -103,25 +103,31 @@ function FAQs() {
     ];
 
     return (
-        <div className="min-h-screen bg-gradient-to-br from-primary-50 via-white to-blue-50">
-            {/* Header Section */}
-            <div className="bg-gradient-to-r from-primary-600 to-primary-800 text-white py-16">
-                <div className="container mx-auto px-4">
-                    <button
-                        onClick={() => navigate(-1)}
-                        className="mb-6 text-white hover:text-primary-100 transition-colors flex items-center gap-2"
-                    >
-                        <i className="fas fa-arrow-left"></i>
-                        <span>Back</span>
-                    </button>
-                    <h1 className="text-4xl md:text-5xl font-bold mb-4">
-                        Frequently Asked Questions
-                    </h1>
-                    <p className="text-xl text-primary-100 max-w-3xl">
-                        Find answers to common questions about the Do Good Store and All Good Living Foundation
-                    </p>
+        <div className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40">
+            {/* Hero */}
+            <header className="relative overflow-hidden">
+                <div className="absolute inset-0 -z-10" aria-hidden="true">
+                    <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#2CABE3]/15 blur-3xl" />
+                    <div className="absolute top-10 -right-24 w-96 h-96 rounded-full bg-emerald-300/20 blur-3xl" />
                 </div>
-            </div>
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-16 pb-12 sm:pt-20 sm:pb-16">
+                    <div className="text-center">
+                        <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#2CABE3]/10 text-[#2CABE3] text-xs font-semibold mb-5 ring-1 ring-[#2CABE3]/20">
+                            <i className="fas fa-circle-question mr-2" aria-hidden="true"></i>
+                            Help Center
+                        </span>
+                        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 mb-5 tracking-tight">
+                            Got questions?{" "}
+                            <span className="bg-gradient-to-r from-[#2CABE3] to-emerald-500 bg-clip-text text-transparent">
+                                We&apos;ve got answers
+                            </span>
+                        </h1>
+                        <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
+                            Find answers to common questions about the Do Good Store and All Good Living Foundation
+                        </p>
+                    </div>
+                </div>
+            </header>
 
             {/* FAQs Content */}
             <div className="container mx-auto px-4 py-12">

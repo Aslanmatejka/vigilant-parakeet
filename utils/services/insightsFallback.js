@@ -94,10 +94,7 @@ if (typeof supabase?.auth?.onAuthStateChange === 'function') {
 const PROFILE_FIELDS = {
     donor:      ['name', 'phone', 'address', 'avatar_url'],
     recipient:  ['name', 'phone', 'address', 'dietary_restrictions'],
-    volunteer:  ['name', 'phone', 'address', 'avatar_url'],
-    dispatcher: ['name', 'phone', 'address', 'avatar_url'],
     organizer:  ['name', 'phone', 'address', 'avatar_url'],
-    sponsor:    ['name', 'phone', 'avatar_url'],
     admin:      [],
 }
 
@@ -131,7 +128,7 @@ function profileStats(role, userRow) {
 function resolveRole(userRow, roleHint) {
     if (userRow?.is_admin) return 'admin'
     const raw = (roleHint || userRow?.community_role || 'recipient').toLowerCase()
-    const allowed = ['admin', 'donor', 'recipient', 'volunteer', 'dispatcher', 'organizer', 'sponsor']
+    const allowed = ['admin', 'donor', 'recipient', 'organizer']
     if (!allowed.includes(raw)) return 'recipient'
     return raw
 }
@@ -280,7 +277,7 @@ export async function computeLocalInsights(userId, roleHint = null) {
             })
         }
     } else {
-        // recipient / volunteer / dispatcher / organizer / sponsor — generic helpful nudges
+        // recipient / organizer — generic helpful nudges
         if (pendingClaims > 0) {
             activityInsights.push({
                 id: 'recipient_pending',

@@ -320,8 +320,33 @@ function UserSettings() {
     }
 
     return (
-        <div className="max-w-4xl mx-auto py-8 px-4">
-            <h1 className="text-3xl font-bold text-gray-900 mb-8">Settings</h1>
+        <div className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40">
+            {/* Hero */}
+            <header className="relative overflow-hidden">
+                <div className="absolute inset-0 -z-10" aria-hidden="true">
+                    <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#2CABE3]/15 blur-3xl" />
+                    <div className="absolute top-10 -right-24 w-96 h-96 rounded-full bg-emerald-300/20 blur-3xl" />
+                </div>
+                <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pt-16 pb-12 sm:pt-20 sm:pb-16">
+                    <div className="text-center">
+                        <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#2CABE3]/10 text-[#2CABE3] text-xs font-semibold mb-5 ring-1 ring-[#2CABE3]/20">
+                            <i className="fas fa-gear mr-2" aria-hidden="true"></i>
+                            Account
+                        </span>
+                        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 mb-5 tracking-tight">
+                            Your{" "}
+                            <span className="bg-gradient-to-r from-[#2CABE3] to-emerald-500 bg-clip-text text-transparent">
+                                Settings
+                            </span>
+                        </h1>
+                        <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
+                            Manage your profile, notifications, and account preferences.
+                        </p>
+                    </div>
+                </div>
+            </header>
+
+            <div className="max-w-4xl mx-auto px-4 pb-8">
 
             {error && (
                 <div 
@@ -413,10 +438,7 @@ function UserSettings() {
                                 <option value="">Select your role…</option>
                                 <option value="donor">Donor — I share food</option>
                                 <option value="recipient">Recipient — I receive food</option>
-                                <option value="volunteer">Volunteer — I help organize</option>
-                                <option value="driver">Driver — I deliver food</option>
-                                <option value="organizer">Organizer — I run distributions</option>
-                                <option value="sponsor">Sponsor — I support the community</option>
+                                <option value="organizer">Organizer — I coordinate distributions</option>
                             </select>
                             <p className="mt-1 text-xs text-gray-500">
                                 Helps the AI assistant tailor suggestions to how you participate.
@@ -794,6 +816,7 @@ function UserSettings() {
                     </div>
                 </div>
             )}
+            </div>
         </div>
     );
 }

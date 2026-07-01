@@ -4,19 +4,38 @@ function CookiesPolicy() {
     try {
         return (
             <ErrorBoundary>
-                <div 
-                    data-name="cookies-policy" 
-                    className="max-w-4xl mx-auto py-12 px-4"
-                    role="main"
-                    aria-labelledby="cookies-policy-title"
-                >
-                    <h1 
-                        id="cookies-policy-title"
-                        className="text-3xl font-bold text-gray-900 mb-8"
+                <div className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40">
+                    {/* Hero */}
+                    <header className="relative overflow-hidden">
+                        <div className="absolute inset-0 -z-10" aria-hidden="true">
+                            <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#2CABE3]/15 blur-3xl" />
+                            <div className="absolute top-10 -right-24 w-96 h-96 rounded-full bg-emerald-300/20 blur-3xl" />
+                        </div>
+                        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pt-16 pb-12 sm:pt-20 sm:pb-16">
+                            <div className="text-center">
+                                <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#2CABE3]/10 text-[#2CABE3] text-xs font-semibold mb-5 ring-1 ring-[#2CABE3]/20">
+                                    <i className="fas fa-cookie-bite mr-2" aria-hidden="true"></i>
+                                    Legal
+                                </span>
+                                <h1 id="cookies-policy-title" className="text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 mb-5 tracking-tight">
+                                    Cookie{" "}
+                                    <span className="bg-gradient-to-r from-[#2CABE3] to-emerald-500 bg-clip-text text-transparent">
+                                        Policy
+                                    </span>
+                                </h1>
+                                <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
+                                    How and why we use cookies on DoGoods.
+                                </p>
+                            </div>
+                        </div>
+                    </header>
+
+                    <div
+                        data-name="cookies-policy"
+                        className="max-w-4xl mx-auto pb-12 px-4"
+                        role="main"
+                        aria-labelledby="cookies-policy-title"
                     >
-                        Cookie Policy
-                    </h1>
-                    
                     <div className="prose prose-cyan max-w-none">
                         <p className="text-gray-600 mb-6" aria-label="Last update date">
                             Last Updated: January 15, 2024
@@ -135,6 +154,7 @@ function CookiesPolicy() {
                             Phone: <a href="tel:+11234567890" className="text-primary-600 hover:text-primary-700">(123) 456-7890</a>
                         </address>
                     </div>
+                </div>
                 </div>
             </ErrorBoundary>
         );

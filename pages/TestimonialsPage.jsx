@@ -101,7 +101,7 @@ function TestimonialsPage() {
     };
 
     return (
-        <div className="bg-gray-50 min-h-screen">
+        <div className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40">
             <style>{`
                 @keyframes fadeSlideIn {
                     from { opacity: 0; transform: translateY(20px); }
@@ -110,28 +110,46 @@ function TestimonialsPage() {
                 .fade-slide { animation: fadeSlideIn 0.6s ease-out forwards; }
             `}</style>
 
-            <div className="container mx-auto px-4 py-12">
-                {/* Header */}
-                <div className="max-w-4xl mx-auto mb-12 text-center fade-slide">
-                    <h1 className="text-4xl md:text-5xl font-bold text-gray-900 mb-4">
-                        Community Testimonials
-                    </h1>
-                    <p className="text-xl text-gray-600">
-                        Real testimonials from real people making a difference in our communities
-                    </p>
-                    <div className="flex justify-center gap-4 md:gap-8 mt-8 flex-wrap">
-                        <Link to="/impact-story" onClick={(e) => { e.preventDefault(); navigate('/impact-story'); setTimeout(() => document.getElementById('blog-section')?.scrollIntoView({ behavior: 'smooth' }), 300); }} className="bg-gray-200 text-gray-700 px-6 py-3 rounded-xl font-semibold hover:bg-[#2CABE3] hover:text-white transition-all">
-                            Blog
-                        </Link>
-                        <Link to="/news" className="bg-gray-200 text-gray-700 px-6 py-3 rounded-xl font-semibold hover:bg-[#2CABE3] hover:text-white transition-all">
-                            News
-                        </Link>
-                        <span className="bg-[#2CABE3] text-white px-6 py-3 rounded-xl font-semibold shadow-md cursor-default">
-                            Testimonials
+            {/* Hero */}
+            <header className="relative overflow-hidden">
+                <div className="absolute inset-0 -z-10" aria-hidden="true">
+                    <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#2CABE3]/15 blur-3xl" />
+                    <div className="absolute top-10 -right-24 w-96 h-96 rounded-full bg-emerald-300/20 blur-3xl" />
+                </div>
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-16 pb-12 sm:pt-20 sm:pb-16">
+                    <div className="text-center">
+                        <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#2CABE3]/10 text-[#2CABE3] text-xs font-semibold mb-5 ring-1 ring-[#2CABE3]/20">
+                            <i className="fas fa-quote-left mr-2" aria-hidden="true"></i>
+                            Community Voices
                         </span>
+                        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 mb-5 tracking-tight">
+                            Community{" "}
+                            <span className="bg-gradient-to-r from-[#2CABE3] to-emerald-500 bg-clip-text text-transparent">
+                                Testimonials
+                            </span>
+                        </h1>
+                        <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
+                            Real testimonials from real people making a difference in our communities
+                        </p>
+                        <div className="mt-7 flex flex-wrap items-center justify-center gap-2 text-sm">
+                            <Link to="/impact-story" onClick={(e) => { e.preventDefault(); navigate('/impact-story'); setTimeout(() => document.getElementById('blog-section')?.scrollIntoView({ behavior: 'smooth' }), 300); }} className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white shadow-sm ring-1 ring-gray-200 text-gray-700 font-medium hover:text-[#2CABE3] transition">
+                                <i className="fas fa-pen-nib text-[10px]" aria-hidden="true" />
+                                Blog
+                            </Link>
+                            <Link to="/news" className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white shadow-sm ring-1 ring-gray-200 text-gray-700 font-medium hover:text-[#2CABE3] transition">
+                                <i className="fas fa-newspaper text-[10px]" aria-hidden="true" />
+                                News
+                            </Link>
+                            <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-gradient-to-r from-[#2CABE3] to-emerald-500 text-white font-medium shadow-md">
+                                <i className="fas fa-quote-left text-[10px]" aria-hidden="true" />
+                                Testimonials
+                            </span>
+                        </div>
                     </div>
                 </div>
+            </header>
 
+            <div className="container mx-auto px-4 py-12">
                 {/* Swipeable Carousel */}
                 <div className="max-w-3xl mx-auto">
                     {loading ? (

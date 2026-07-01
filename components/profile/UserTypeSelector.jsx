@@ -6,7 +6,7 @@ export const USER_TYPES = {
     USER: 'user',
     DONOR: 'donor',
     RECIPIENT: 'recipient',
-    VOLUNTEER: 'volunteer'
+    ORGANIZER: 'organizer'
 };
 
 function UserTypeSelector({ 
@@ -16,7 +16,7 @@ function UserTypeSelector({
         { id: USER_TYPES.USER, label: 'Regular User', description: 'Can claim available food' },
         { id: USER_TYPES.DONOR, label: 'Donor', description: 'Can share food and create listings' },
         { id: USER_TYPES.RECIPIENT, label: 'Recipient', description: 'Can claim food from donors' },
-        { id: USER_TYPES.VOLUNTEER, label: 'Volunteer', description: 'Can help with food distribution' }
+        { id: USER_TYPES.ORGANIZER, label: 'Organizer', description: 'Can coordinate food distributions' }
     ]
 }) {
     return (

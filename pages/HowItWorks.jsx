@@ -51,21 +51,35 @@ function HowItWorks() {
             <ErrorBoundary>
                 <div 
                     data-name="how-it-works" 
-                    className="max-w-7xl mx-auto py-12 px-4"
+                    className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40"
                     role="main"
                 >
-                    <div className="text-center mb-16">
-                        <h1 
-                            className="text-4xl font-bold text-gray-900 mb-4"
-                            id="page-title"
-                        >
-                            How ShareFoods Works
-                        </h1>
-                        <p className="text-xl text-gray-600 max-w-3xl mx-auto">
-                            Join our community and start making a difference in reducing food waste
-                            while helping those in need.
-                        </p>
-                    </div>
+                    {/* Hero */}
+                    <header className="relative overflow-hidden">
+                        <div className="absolute inset-0 -z-10" aria-hidden="true">
+                            <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#2CABE3]/15 blur-3xl" />
+                            <div className="absolute top-10 -right-24 w-96 h-96 rounded-full bg-emerald-300/20 blur-3xl" />
+                        </div>
+                        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-16 pb-12 sm:pt-20 sm:pb-16">
+                            <div className="text-center">
+                                <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#2CABE3]/10 text-[#2CABE3] text-xs font-semibold mb-5 ring-1 ring-[#2CABE3]/20">
+                                    <i className="fas fa-book-open mr-2" aria-hidden="true"></i>
+                                    Platform Guide
+                                </span>
+                                <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 mb-5 tracking-tight" id="page-title">
+                                    How DoGoods{" "}
+                                    <span className="bg-gradient-to-r from-[#2CABE3] to-emerald-500 bg-clip-text text-transparent">
+                                        Works
+                                    </span>
+                                </h1>
+                                <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
+                                    Join our community and start making a difference in reducing food waste while helping those in need.
+                                </p>
+                            </div>
+                        </div>
+                    </header>
+
+                    <main className="max-w-7xl mx-auto py-12 px-4">
 
                     <section 
                         className="mb-20"
@@ -182,6 +196,7 @@ function HowItWorks() {
                             </Button>
                         </div>
                     </section>
+                    </main>
                 </div>
             </ErrorBoundary>
         );
