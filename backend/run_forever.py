@@ -374,7 +374,18 @@ async def check_new_listings_once(last_check_at: datetime) -> tuple[datetime, in
 
 
 async def check_draft_listings_once() -> int:
-    """Find stale drafts and remind owners to publish or discard."""
+    """Find stale drafts and remind owners to publish or discard.
+
+    No-op in the current schema: food_listings.status is an enum without a
+    'draft' value, so the query returns 400 and the whole feature is inert.
+    Kept as a function so the scheduler wiring stays intact if drafts get
+    added to the enum later.
+    """
+    return 0
+
+
+async def _check_draft_listings_disabled_legacy() -> int:
+    """Original implementation — preserved for reference only."""
     now = datetime.now(timezone.utc)
     try:
         drafts = await _supabase_get_rows(

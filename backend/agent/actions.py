@@ -181,6 +181,14 @@ def list_actions() -> list[str]:
     return sorted(_REGISTRY.keys())
 
 
+def tools_requiring_confirmation() -> frozenset[str]:
+    """All registered WRITE tools that must queue pending_action first."""
+    return frozenset(
+        name for name in _REGISTRY
+        if _REGISTRY[name].requires_confirmation
+    )
+
+
 # ============================================================================
 # Decorator sugar — @action / @rollback_for / @fetch_before_for
 # ============================================================================
@@ -593,6 +601,72 @@ async def rollback_action(audit_id: str, user_id: str) -> bool:
     return ok
 
 
+async def rollback_tool_write(
+    tool_name: str,
+    wrapped_result: dict[str, Any],
+    *,
+    user_id: str,
+) -> bool:
+    """Compensate an in-turn write when a later plan step fails.
+
+    Builds a synthetic audit row from the wrapped tool result so registered
+    rollback handlers can run even before ``agent_audit_log`` is written.
+    """
+    spec = get_action(tool_name or "")
+    if not spec or not spec.rollback:
+        return False
+
+    inner = wrapped_result.get("result") if isinstance(wrapped_result.get("result"), dict) else wrapped_result
+    if not isinstance(inner, dict):
+        return False
+
+    target_id: str | None = None
+    for key in ("claim_id", "listing_id", "notification_id", "reminder_id", "id"):
+        val = inner.get(key)
+        if val:
+            target_id = str(val)
+            break
+
+    synthetic_row = {
+        "tool_name": tool_name,
+        "actor_user_id": user_id,
+        "after_state": inner,
+        "target_id": target_id,
+        "args_redacted": redact_args(wrapped_result.get("args") or {}),
+    }
+    try:
+        return await spec.rollback(synthetic_row)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("rollback_tool_write for %s failed: %s", tool_name, exc, exc_info=True)
+        return False
+
+
+async def rollback_successful_writes(
+    tool_results: list[dict[str, Any]],
+    *,
+    user_id: str,
+) -> list[str]:
+    """Rollback every successful registered write in ``tool_results``.
+
+    Returns tool names that were rolled back (best-effort).
+    """
+    rolled_back: list[str] = []
+    if not user_id or user_id.startswith("00000000"):
+        return rolled_back
+
+    for tr in tool_results:
+        if not isinstance(tr, dict):
+            continue
+        tool_name = tr.get("tool") or tr.get("name")
+        if not tool_name or not tr.get("ok"):
+            continue
+        if not get_action(tool_name):
+            continue
+        if await rollback_tool_write(tool_name, tr, user_id=user_id):
+            rolled_back.append(tool_name)
+    return rolled_back
+
+
 __all__ = [
     "ActionSpec",
     "ActionRequest",
@@ -606,10 +680,15 @@ __all__ = [
     "fetch_before_for",
     "get_action",
     "list_actions",
+    "tools_requiring_confirmation",
     "plan_action",
     "commit_action",
     "commit_pending_action",
     "cancel_pending_action",
+    "list_actions",
+    "tools_requiring_confirmation",
     "rollback_action",
+    "rollback_tool_write",
+    "rollback_successful_writes",
     "redact_args",
 ]

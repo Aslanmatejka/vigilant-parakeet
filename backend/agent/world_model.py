@@ -111,7 +111,9 @@ class WorldSnapshot:
 # ============================================================================
 
 #: Statuses we treat as "open / pending" on the claims side.
-_OPEN_CLAIM_STATUSES = {"pending", "approved", "confirmed", "in_progress"}
+#: `confirmed` is intentionally omitted — the claim_status enum in prod only
+#: has {pending, approved, completed, rejected, cancelled}.
+_OPEN_CLAIM_STATUSES = {"pending", "approved", "in_progress"}
 
 #: Statuses we treat as "active" on the listings side.
 _ACTIVE_LISTING_STATUSES = {"available", "active", "open"}
@@ -166,7 +168,7 @@ async def build_world_snapshot(
 
     profile_task = _safe_get("users", {
         "id": f"eq.{user_id}",
-        "select": "id,full_name,address,dietary_restrictions,allergies,communities",
+        "select": "id,name,address,dietary_restrictions,allergies,communities",
         "limit": "1",
     })
     claims_task = _safe_get("food_claims", {
@@ -195,7 +197,7 @@ async def build_world_snapshot(
     if isinstance(profile_rows, list) and profile_rows:
         p = profile_rows[0]
         if isinstance(p, dict):
-            snap.user_name = p.get("full_name")
+            snap.user_name = p.get("name") or p.get("full_name")
             snap.address = p.get("address")
             snap.dietary_restrictions = _coerce_str_list(p.get("dietary_restrictions"))
             snap.allergies = _coerce_str_list(p.get("allergies"))

@@ -6,20 +6,20 @@ LangChain wrappers for UI navigation commands.
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from langchain_core.tools import tool
 
 logger = logging.getLogger(__name__)
 
 
 @tool
-async def navigate_ui(action: str, path: str) -> Dict[str, Any]:
+async def navigate_ui(action: str, path: Optional[str] = None) -> Dict[str, Any]:
     """
     Navigate the user to a specific page in the app.
     
     Args:
-        action: Navigation action (always "open_page")
-        path: Page path (dashboard, find-food, share-food, profile, community, etc.)
+        action: Navigation action (navigate, open_map, open_page, etc.)
+        path: Page path when action is navigate (dashboard, find, share, etc.)
     
     Returns:
         Dict with navigation instruction for frontend
@@ -27,7 +27,10 @@ async def navigate_ui(action: str, path: str) -> Dict[str, Any]:
     try:
         from backend.tools import _navigate_ui as original_navigate
         
-        result = await original_navigate(action=action, path=path)
+        kwargs: Dict[str, Any] = {"action": action}
+        if path is not None:
+            kwargs["path"] = path
+        result = await original_navigate(**kwargs)
         return result
         
     except Exception as e:

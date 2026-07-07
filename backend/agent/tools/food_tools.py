@@ -60,31 +60,41 @@ async def search_food_near_user(
 @tool
 async def claim_listing(
     user_id: str,
-    food_id: str,
-    quantity_requested: int = 1,
+    listing_id: Optional[str] = None,
+    food_id: Optional[str] = None,
+    quantity: Optional[int] = None,
+    quantity_requested: Optional[int] = None,
+    pickup_date: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Claim a food listing.
-    
+
     Args:
         user_id: User's UUID
-        food_id: Food listing UUID to claim
-        quantity_requested: Quantity to claim (default 1)
-    
+        listing_id: Food listing UUID to claim
+        food_id: Legacy alias for listing_id
+        quantity: How many units to claim (default 1)
+        quantity_requested: Legacy alias for quantity
+        pickup_date: Optional pickup date (ISO YYYY-MM-DD)
+
     Returns:
         Dict with claim confirmation details
     """
     try:
         from backend.tools import _claim_food_listing as original_claim
-        
+
+        resolved_listing_id = listing_id or food_id
+        resolved_quantity = quantity if quantity is not None else quantity_requested
+
         result = await original_claim(
             user_id=user_id,
-            food_id=food_id,
-            quantity_requested=quantity_requested,
+            listing_id=resolved_listing_id,
+            quantity=resolved_quantity,
+            pickup_date=pickup_date,
         )
-        
+
         return result
-        
+
     except Exception as e:
         logger.error(f"Claim listing failed: {e}")
         return {
@@ -97,14 +107,19 @@ async def claim_listing(
 async def post_food_listing(
     user_id: str,
     title: str,
-    quantity: int,
-    unit: str,
-    category: str,
-    address: str,
+    quantity: float,
+    unit: str = "servings",
+    category: str = "other",
+    address: Optional[str] = None,
+    location: Optional[str] = None,
     description: Optional[str] = None,
     expiry_date: Optional[str] = None,
     dietary_tags: Optional[List[str]] = None,
     allergens: Optional[List[str]] = None,
+    community_name: Optional[str] = None,
+    community_id: Optional[str] = None,
+    community_confirmed: bool = False,
+    image_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Post a food donation listing.
@@ -130,14 +145,18 @@ async def post_food_listing(
         result = await original_post(
             user_id=user_id,
             title=title,
-            quantity=quantity,
-            unit=unit,
-            category=category,
-            address=address,
+            quantity=float(quantity),
+            unit=unit or "servings",
+            category=category or "other",
+            location=location or address,
             description=description,
             expiry_date=expiry_date,
             dietary_tags=dietary_tags or [],
             allergens=allergens or [],
+            community_name=community_name,
+            community_id=community_id,
+            community_confirmed=bool(community_confirmed),
+            image_url=image_url,
         )
         
         return result

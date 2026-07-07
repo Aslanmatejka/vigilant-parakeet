@@ -147,6 +147,34 @@ def test_decide_writes_back_to_thought_decision_field() -> None:
     assert t.to_dict()["decision"] == "use_tool"
 
 
+def test_reconcile_overrides_llm_over_clarification() -> None:
+    from backend.agent.reasoning import reconcile_thought_with_heuristic
+
+    llm_thought = Thought(
+        intent="search",
+        next_action="ask_clarification",
+        confidence=0.70,
+        thought="unsure",
+    )
+    fixed = reconcile_thought_with_heuristic("Find food near me", llm_thought)
+    assert fixed.intent == "search"
+    assert fixed.next_action == "use_tool"
+    assert decide(fixed) == "use_tool"
+
+
+def test_reconcile_fixes_claim_number() -> None:
+    from backend.agent.reasoning import reconcile_thought_with_heuristic
+
+    llm_thought = Thought(
+        intent="chitchat",
+        next_action="ask_clarification",
+        confidence=0.80,
+    )
+    fixed = reconcile_thought_with_heuristic("Claim #1", llm_thought)
+    assert fixed.intent == "claim"
+    assert fixed.next_action == "use_tool"
+
+
 # ============================================================================
 # 6. reflect_heuristic
 # ============================================================================

@@ -123,13 +123,14 @@ class TestWhisperNoiseFilter:
 # ===================================================================
 
 class TestVoiceEndpoint:
+    @patch("backend.app._run_agent_turn")
     @patch("backend.app.conversation_engine")
-    def test_voice_success(self, mock_engine, client):
-        """Valid audio → transcribe → chat → response with transcript."""
+    def test_voice_success(self, mock_engine, mock_agent_turn, client):
+        """Valid audio → transcribe → agent turn → response with transcript."""
         mock_engine.transcribe_audio = AsyncMock(return_value="Find food near me")
-        mock_engine.chat = AsyncMock(return_value=_chat_result(
-            text="Here's food nearby!", transcript="Find food near me"
-        ))
+        mock_agent_turn.return_value = _chat_result(
+            text="Here's food nearby!",
+        )
 
         resp = client.post(
             "/api/ai/voice",
@@ -140,6 +141,7 @@ class TestVoiceEndpoint:
         data = resp.json()
         assert data["text"] == "Here's food nearby!"
         assert data["transcript"] == "Find food near me"
+        mock_agent_turn.assert_awaited_once()
 
     @patch("backend.app.conversation_engine")
     def test_voice_filters_noise(self, mock_engine, client):

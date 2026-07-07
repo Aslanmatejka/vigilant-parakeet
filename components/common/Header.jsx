@@ -74,6 +74,11 @@ function Header({ menuItems: menuItemsProp }) {
         return [{ label: 'Find Food', path: '/find' }, ...AUTH_TAIL];
     }, [menuItemsProp, isAuthenticated, isDonor, isRecipient, isOrganizer]);
 
+    const hasReceiptsNavItem = menuItems.some(
+        (item) => item.label === 'Receipts & Activity' || item.path === '/receipts',
+    );
+    const showReceiptsActivity = !isDonor && !isOrganizer;
+
     const navigate = useNavigate();
     const location = useLocation();
     const isAdminRoute = location.pathname.startsWith('/admin');
@@ -213,7 +218,7 @@ function Header({ menuItems: menuItemsProp }) {
                                 </a>
                             )
                         ))}
-                        {isAuthenticated && (
+                        {isAuthenticated && showReceiptsActivity && !hasReceiptsNavItem && (
                             <a
                                 href="/dashboard"
                                 className="nav-link hover:text-[#2CABE3] transition-colors duration-200"
@@ -261,13 +266,15 @@ function Header({ menuItems: menuItemsProp }) {
                                         role="menu"
                                     >
                                         <div className="py-1">
-                                            <a
-                                                href="/dashboard"
-                                                className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                                                role="menuitem"
-                                            >
-                                                Receipts & Activity
-                                            </a>
+                                            {showReceiptsActivity && (
+                                                <a
+                                                    href="/dashboard"
+                                                    className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                                                    role="menuitem"
+                                                >
+                                                    Receipts & Activity
+                                                </a>
+                                            )}
                                             {!isAdminRoute && (
                                                 <a
                                                     href="/profile"
@@ -403,6 +410,7 @@ function Header({ menuItems: menuItemsProp }) {
                                     ))}
                                     {isAuthenticated && (
                                         <>
+                                            {showReceiptsActivity && !hasReceiptsNavItem && (
                                             <li className="border-t border-gray-200 mt-2 pt-2">
                                                 <a
                                                     href="/dashboard"
@@ -412,6 +420,7 @@ function Header({ menuItems: menuItemsProp }) {
                                                     Receipts & Activity
                                                 </a>
                                             </li>
+                                            )}
                                             {!isAdminRoute && (
                                                 <li>
                                                     <a

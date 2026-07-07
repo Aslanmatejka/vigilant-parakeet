@@ -215,6 +215,10 @@ class TestActionRegistry:
         "dismiss_all_notifications",
         "create_reminder",
         "forget_about_me",
+        "message_donor",
+        "schedule_pickup",
+        "join_community",
+        "leave_community",
     }
 
     def test_all_expected_actions_registered(self) -> None:

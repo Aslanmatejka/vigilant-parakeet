@@ -161,10 +161,11 @@ async def _check_milestones(user_id: str) -> List[ProactiveSuggestion]:
     try:
         from backend.ai_engine import supabase_get
         
-        # Count total food claimed
+        # Count total food claimed. Only 'approved' and 'completed' are
+        # valid claim_status enum values in prod (there is no 'confirmed').
         claims = await supabase_get("food_claims", {
             "claimer_id": f"eq.{user_id}",
-            "status": "in.(approved,completed,confirmed)",
+            "status": "in.(approved,completed)",
             "select": "id",
         })
         

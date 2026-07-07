@@ -12,6 +12,7 @@ import { assignImagestoRows, assignFoodImage } from '../../utils/foodImages.js'
 import dataService from '../../utils/dataService.js'
 import supabase from '../../utils/supabaseClient.js'
 import { toast } from 'react-toastify'
+import { getLazyPreChips, resolveInputChips } from '../../utils/suggestionChips.js'
 
 // ─── Welcome hero categories (richer onboarding surface) ───────────
 // Replaces the flat 6-pill row when the chat is empty. Each category
@@ -157,6 +158,20 @@ function WelcomeHero({ language, userName, onPromptClick }) {
         <p className="text-xs text-slate-400/90 mt-0.5">{subtitle}</p>
       </div>
 
+      {/* Quick one-tap chips — tap to send, no typing required */}
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {getLazyPreChips(language).slice(0, 4).map((chip) => (
+          <button
+            key={chip}
+            type="button"
+            onClick={() => onPromptClick?.(chip)}
+            className="text-[11px] px-2.5 py-1 rounded-full bg-cyan-500/10 text-cyan-200 border border-cyan-500/25 hover:bg-cyan-500/20 transition-colors"
+          >
+            {chip}
+          </button>
+        ))}
+      </div>
+
       <div className="grid grid-cols-2 gap-2">
         {categories.map((cat) => {
           const accent = ACCENT_MAP[cat.accent] || ACCENT_MAP.cyan
@@ -296,101 +311,23 @@ const SUGGESTIONS_ES = [
 ]
 
 // ─── Typing indicator ─────────────────────────────────
-const THINKING_STAGES = [
-  { icon: 'brain', label: 'Analyzing your request' },
-  { icon: 'database', label: 'Searching knowledge base' },
-  { icon: 'satellite-dish', label: 'Consulting live activity' },
-  { icon: 'wand-magic-sparkles', label: 'Generating response' },
-]
-
-function TypingIndicator() {
-  const [stageIdx, setStageIdx] = useState(0)
-  useEffect(() => {
-    const t = setInterval(() => {
-      setStageIdx((i) => (i + 1) % THINKING_STAGES.length)
-    }, 1400)
-    return () => clearInterval(t)
-  }, [])
-  const stage = THINKING_STAGES[stageIdx]
-
+function TypingIndicator({ language = 'en' }) {
+  const label = language === 'es' ? 'Nouri está escribiendo' : 'Nouri is typing'
   return (
-    <div className="flex items-center gap-3 px-4 py-3">
-      {/* Avatar with orbiting rings + core */}
-      <div className="relative w-10 h-10 flex-shrink-0">
-        {/* Outer fast-spinning gradient ring */}
-        <div
-          className="absolute inset-0 rounded-full ai-typing-orbit-fast"
-          style={{
-            background:
-              'conic-gradient(from 0deg, transparent 0%, rgba(34,211,238,0.95) 28%, transparent 55%, rgba(168,85,247,0.85) 82%, transparent 100%)',
-            WebkitMask: 'radial-gradient(circle, transparent 56%, black 58%)',
-            mask: 'radial-gradient(circle, transparent 56%, black 58%)',
-          }}
-          aria-hidden="true"
-        />
-        {/* Inner counter-rotating ring */}
-        <div
-          className="absolute inset-1 rounded-full ai-typing-orbit-slow"
-          style={{
-            background:
-              'conic-gradient(from 180deg, transparent 0%, rgba(165,243,252,0.7) 40%, transparent 80%)',
-            WebkitMask: 'radial-gradient(circle, transparent 62%, black 64%)',
-            mask: 'radial-gradient(circle, transparent 62%, black 64%)',
-          }}
-          aria-hidden="true"
-        />
-        {/* Pulsing core */}
-        <div className="absolute inset-2 rounded-full bg-gradient-to-br from-cyan-400 via-blue-500 to-purple-600 flex items-center justify-center ai-typing-core">
-          <i className="fas fa-sparkles text-[9px] text-white" aria-hidden="true" />
-        </div>
-        {/* Rising particles */}
-        <span
-          className="ai-typing-particle absolute top-0 left-1 w-1 h-1 rounded-full bg-cyan-300"
-          style={{ animationDelay: '0ms' }}
-          aria-hidden="true"
-        />
-        <span
-          className="ai-typing-particle absolute top-0 right-1 w-1 h-1 rounded-full bg-fuchsia-300"
-          style={{ animationDelay: '550ms' }}
-          aria-hidden="true"
-        />
-        <span
-          className="ai-typing-particle absolute top-1 left-4 w-0.5 h-0.5 rounded-full bg-white"
-          style={{ animationDelay: '1100ms' }}
-          aria-hidden="true"
-        />
+    <div
+      className="flex items-start gap-2.5 px-4 py-2"
+      role="status"
+      aria-live="polite"
+      aria-label={label}
+    >
+      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex-shrink-0 flex items-center justify-center shadow-sm">
+        <i className="fas fa-sparkles text-[10px] text-white" aria-hidden="true" />
       </div>
-
-      {/* Status bubble with shimmer */}
-      <div className="relative flex-1 min-w-0 max-w-[260px]">
-        <div className="ai-typing-shimmer relative bg-slate-800/60 backdrop-blur-md rounded-2xl px-3.5 py-2 border border-cyan-500/30 shadow-lg shadow-cyan-500/10">
-          <div className="flex items-center gap-2 relative z-10">
-            <i
-              key={`icon-${stageIdx}`}
-              className={`fas fa-${stage.icon} text-cyan-300 text-[11px] ai-typing-status`}
-              aria-hidden="true"
-            />
-            <span
-              key={`label-${stageIdx}`}
-              className="text-[11px] text-cyan-100 font-medium tracking-wide truncate ai-typing-status"
-            >
-              {stage.label}…
-            </span>
-          </div>
-          <div className="flex items-center gap-1 mt-1 relative z-10">
-            <span
-              className="ai-typing-dot w-1.5 h-1.5 rounded-full bg-cyan-300"
-              style={{ animationDelay: '0ms' }}
-            />
-            <span
-              className="ai-typing-dot w-1.5 h-1.5 rounded-full bg-blue-400"
-              style={{ animationDelay: '180ms' }}
-            />
-            <span
-              className="ai-typing-dot w-1.5 h-1.5 rounded-full bg-fuchsia-400"
-              style={{ animationDelay: '360ms' }}
-            />
-          </div>
+      <div className="bg-slate-800/75 rounded-2xl rounded-tl-md px-4 py-3 border border-slate-700/60">
+        <div className="flex items-center gap-1.5" aria-hidden="true">
+          <span className="ai-typing-dot w-2 h-2 rounded-full bg-slate-300" style={{ animationDelay: '0ms' }} />
+          <span className="ai-typing-dot w-2 h-2 rounded-full bg-slate-300" style={{ animationDelay: '150ms' }} />
+          <span className="ai-typing-dot w-2 h-2 rounded-full bg-slate-300" style={{ animationDelay: '300ms' }} />
         </div>
       </div>
     </div>
@@ -766,23 +703,115 @@ function describeErrorCode(code, language = 'en') {
   }
 }
 
+function PendingActionCard({
+  pendingAction,
+  language = 'en',
+  onConfirm,
+  onCancel,
+  disabled = false,
+  resolved = null,
+}) {
+  if (!pendingAction && !resolved) return null
+  const isEs = language === 'es'
+
+  if (resolved === 'cancelled') {
+    return (
+      <div className="mt-2 px-3 py-2 rounded-xl bg-slate-800/50 border border-slate-600/30 text-[11px] text-slate-400">
+        {isEs ? 'Acción cancelada' : 'Action cancelled'}
+      </div>
+    )
+  }
+
+  if (!pendingAction) return null
+
+  return (
+    <div className="mt-2 rounded-xl border border-amber-400/30 bg-amber-500/10 p-3 shadow-sm">
+      <div className="flex items-start gap-2 mb-2.5">
+        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-amber-500/20 text-amber-200 flex items-center justify-center">
+          <i className="fas fa-triangle-exclamation text-[10px]" aria-hidden="true" />
+        </span>
+        <p className="text-[12px] leading-relaxed text-amber-50/90 whitespace-pre-wrap">
+          {pendingAction.summary || (isEs ? 'Confirma esta acción' : 'Confirm this action')}
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={onConfirm}
+          disabled={disabled}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/90 hover:bg-emerald-400 text-white text-[11px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <i className={`fas ${disabled ? 'fa-spinner fa-spin' : 'fa-check'} text-[10px]`} aria-hidden="true" />
+          {isEs ? 'Confirmar' : 'Confirm'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={disabled}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-600 text-slate-100 text-[11px] font-semibold transition-colors ring-1 ring-slate-500/40 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <i className="fas fa-xmark text-[10px]" aria-hidden="true" />
+          {isEs ? 'Cancelar' : 'Cancel'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function ToolAuditUndoCard({
+  toolAudit = [],
+  confirmationRecommended = false,
+  confirmationSummary = null,
+  language = 'en',
+  onRollback,
+  disabled = false,
+}) {
+  const isEs = language === 'es'
+  const undoable = (toolAudit || []).filter(
+    row => row && row.audit_id && row.status === 'committed',
+  )
+  if (!confirmationRecommended && undoable.length === 0) return null
+
+  return (
+    <div className="mt-2 rounded-xl border border-slate-500/30 bg-slate-800/40 p-3">
+      <p className="text-[11px] text-slate-300 mb-2">
+        {confirmationSummary || (isEs ? 'Puedes deshacer acciones recientes.' : 'You can undo recent actions.')}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {undoable.map(row => (
+          <button
+            key={row.audit_id}
+            type="button"
+            disabled={disabled}
+            onClick={() => onRollback?.(row.audit_id)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-600 text-slate-100 text-[11px] font-semibold transition-colors ring-1 ring-slate-500/40 disabled:opacity-40"
+          >
+            <i className="fas fa-rotate-left text-[10px]" aria-hidden="true" />
+            {isEs ? 'Deshacer' : 'Undo'} {row.tool || ''}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function MessageBubble({
   msg,
   onFeedback,
   language,
-  onSuggestionClick,
   isLoading,
   currentUser,
   onRetry,
   onRegenerate,
+  onConfirmPending,
+  onCancelPending,
+  onRollbackAudit,
   showRegenerate = false,
-  showSuggestionChips = false,
 }) {
   const [feedbackGiven, setFeedbackGiven] = useState(null)
   const [avatarBroken, setAvatarBroken] = useState(false)
   const [copied, setCopied] = useState(false)
   const isUser = msg.role === 'user'
-  const suggestionItems = msg.suggestions || msg.suggestedActions || []
   const isVoiceMessage = msg.source === 'voice'
 
   const handleFeedback = (rating) => {
@@ -928,20 +957,29 @@ function MessageBubble({
             <ToolResultCard key={i} toolResult={tr} language={language} />
           ))}
 
-          {/* Suggested actions — only on the latest assistant turn so stale
-              chips from earlier questions don't linger in the scrollback. */}
-          {showSuggestionChips && suggestionItems.length > 0 && !isUser && (
-            <div className="flex flex-wrap gap-1.5 mt-2">
-              {suggestionItems.map((action, i) => (
-                <SuggestedActionButton
-                  key={i}
-                  action={action}
-                  onSuggestionClick={onSuggestionClick}
-                  disabled={isLoading}
-                />
-              ))}
-            </div>
+          {/* Destructive-action confirmation (delete listing, cancel claim, etc.) */}
+          {(msg.pendingAction || msg.pendingResolved === 'cancelled') && (
+            <PendingActionCard
+              pendingAction={msg.pendingAction}
+              resolved={msg.pendingResolved}
+              language={language}
+              disabled={isLoading}
+              onConfirm={() => onConfirmPending?.(msg.id)}
+              onCancel={() => onCancelPending?.(msg.id)}
+            />
           )}
+
+          <ToolAuditUndoCard
+            toolAudit={msg.toolAudit}
+            confirmationRecommended={msg.confirmationRecommended}
+            confirmationSummary={msg.confirmationSummary}
+            language={language}
+            disabled={isLoading}
+            onRollback={(auditId) => onRollbackAudit?.(msg.id, auditId)}
+          />
+
+          {/* Suggestion chips live in the input rail only — avoids duplicate /
+              mismatched chips on the bubble vs above the text box. */}
 
           {/* Hover-revealed action row for assistant replies */}
           {!isUser && !msg.isError && msg.id !== 'welcome' && (
@@ -1023,6 +1061,27 @@ function MessageBubble({
   )
 }
 
+// ─── Persistent quick-chip rail (above input) ─────────────────────
+function QuickChipRail({ chips, language, onChipClick, disabled = false }) {
+  if (!chips?.length) return null
+  return (
+    <div
+      className="flex gap-1.5 overflow-x-auto pb-1.5 nourish-scrollbar snap-x snap-mandatory"
+      role="group"
+      aria-label={language === 'es' ? 'Acciones rápidas' : 'Quick actions'}
+    >
+      {chips.map((chip, i) => (
+        <SuggestedActionButton
+          key={`${typeof chip === 'string' ? chip : chip.label}-${i}`}
+          action={chip}
+          onSuggestionClick={onChipClick}
+          disabled={disabled}
+        />
+      ))}
+    </div>
+  )
+}
+
 // ─── Suggested action button ───────────────────────────
 function SuggestedActionButton({ action, onSuggestionClick, disabled = false }) {
   const navigate = useNavigate()
@@ -1061,7 +1120,7 @@ function SuggestedActionButton({ action, onSuggestionClick, disabled = false }) 
     <button
       onClick={handleClick}
       disabled={disabled}
-      className={`text-xs px-2.5 py-1 rounded-full transition-colors border ${styleClass} disabled:opacity-60 disabled:cursor-not-allowed`}
+      className={`text-xs px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${styleClass} disabled:opacity-60 disabled:cursor-not-allowed`}
     >
       {label}
     </button>
@@ -1387,6 +1446,9 @@ function AIChatPanel() {
     // Error recovery actions surfaced via Retry / Regenerate buttons in the bubble UI.
     retryMessage,
     regenerateLast,
+    confirmPendingAction,
+    cancelPendingAction,
+    rollbackAuditAction,
   } = useAIChat()
 
   const { applyToolResults, clearAIOverlays } = useMapContext()
@@ -1587,6 +1649,12 @@ function AIChatPanel() {
     return null
   }, [messages])
 
+  // Pre-chips above input — single chip rail synced to the latest assistant reply.
+  const inputQuickChips = useMemo(() => {
+    if (isLoading) return []
+    return resolveInputChips(lastAssistantMessage?.suggestions, language)
+  }, [lastAssistantMessage, language, isLoading])
+
   // Autocomplete always follows the sticky conversation language — never
   // flip pools mid-typing from accent marks in English loan-words.
   const suggestionPool = language === 'es' ? SUGGESTIONS_ES : SUGGESTIONS_EN
@@ -1626,13 +1694,14 @@ function AIChatPanel() {
   useEffect(() => {
     if (!isOpen) return
     const el = messagesContainerRef.current
+    const scrollBehavior = isLoading ? 'auto' : 'smooth'
     if (!el) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      messagesEndRef.current?.scrollIntoView({ behavior: scrollBehavior })
       return
     }
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200
-    if (nearBottom) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (nearBottom || isLoading) {
+      messagesEndRef.current?.scrollIntoView({ behavior: scrollBehavior })
     }
   }, [messages, isOpen, isLoading])
 
@@ -3190,20 +3259,21 @@ function AIChatPanel() {
                     msg={msg}
                     onFeedback={submitFeedback}
                     language={language}
-                    onSuggestionClick={handleQuickAction}
                     isLoading={isLoading}
                     currentUser={authUser}
                     onRetry={retryMessage}
                     onRegenerate={regenerateLast}
+                    onConfirmPending={confirmPendingAction}
+                    onCancelPending={cancelPendingAction}
+                    onRollbackAudit={rollbackAuditAction}
                     showRegenerate={idx === lastAssistantIdx}
-                    showSuggestionChips={idx === lastAssistantIdx && !isLoading}
                   />
                 </React.Fragment>
               )
             })
           })()}
 
-          {isLoading && <TypingIndicator />}
+          {isLoading && <TypingIndicator language={language} />}
 
           <div ref={messagesEndRef} />
         </div>
@@ -3260,6 +3330,14 @@ function AIChatPanel() {
 
       {/* Input area */}
       <form onSubmit={handleSend} className="border-t border-cyan-500/20 px-3 pt-2.5 pb-2 flex flex-col gap-1 flex-shrink-0 bg-slate-900/80 backdrop-blur-sm">
+        {!inputText.trim() && !isLoading && (
+          <QuickChipRail
+            chips={inputQuickChips.slice(0, 6)}
+            language={language}
+            onChipClick={handleQuickAction}
+            disabled={isLoading}
+          />
+        )}
         <div className="flex items-end gap-2">
           {/* Attachments menu — collapses photo + CSV uploads behind a
               single "+" button (Slack/Messenger pattern) so the input bar

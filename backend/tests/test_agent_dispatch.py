@@ -422,10 +422,57 @@ class TestExecutePlanStepDestructiveIntercept:
         mock_exec.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_intercepts_claim_listing(self):
+        step: PlanStep = {
+            "step_number": 1,
+            "action": "Claim",
+            "tool_name": "claim_listing",
+            "tool_args": {"listing_id": "L-42", "user_id": "u-1", "quantity": 1},
+            "status": "pending",
+            "result": None,
+        }
+        pending = MagicMock(status="pending", pending_id="pend-claim")
+        with patch(
+            "backend.agent.actions.plan_action",
+            new=AsyncMock(return_value=pending),
+        ) as mock_plan:
+            result = await execute_plan_step(step, user_id="u-1", user_context={})
+        assert result.get("pending_action") is not None
+        assert result["pending_action"]["tool"] == "claim_listing"
+        mock_plan.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_intercepts_post_food_listing(self):
+        step: PlanStep = {
+            "step_number": 1,
+            "action": "Post",
+            "tool_name": "post_food_listing",
+            "tool_args": {
+                "user_id": "u-1",
+                "title": "Bread",
+                "quantity": 2,
+                "unit": "loaves",
+                "category": "bread",
+                "expiry_date": "2026-07-10",
+                "community_confirmed": True,
+            },
+            "status": "pending",
+            "result": None,
+        }
+        pending = MagicMock(status="pending", pending_id="pend-post")
+        with patch(
+            "backend.agent.actions.plan_action",
+            new=AsyncMock(return_value=pending),
+        ) as mock_plan:
+            result = await execute_plan_step(step, user_id="u-1", user_context={})
+        assert result.get("pending_action") is not None
+        assert result["pending_action"]["tool"] == "post_food_listing"
+        mock_plan.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_non_destructive_tool_never_intercepted(self):
         """A read tool (get_recipes) must go straight to dispatch even
-        with matching args shape — the intercept is scoped to the 4
-        destructive tools only."""
+        with matching args shape — the intercept is scoped to write tools."""
         step: PlanStep = {
             "step_number": 1,
             "action": "Recipes",

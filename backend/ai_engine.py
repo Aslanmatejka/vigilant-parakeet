@@ -2391,6 +2391,18 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
     )
 
 
+# Cached platform rules — shared by the LangGraph agent (sole chat orchestrator).
+_platform_rules_cache: str | None = None
+
+
+def get_platform_system_rules() -> str:
+    """Full DoGoods behavioral rules from training data + action policy."""
+    global _platform_rules_cache
+    if _platform_rules_cache is None:
+        _platform_rules_cache = _build_system_prompt(_load_training_data())
+    return _platform_rules_cache
+
+
 # ---------------------------------------------------------------------------
 # Role-specific behaviour
 # ---------------------------------------------------------------------------
@@ -3569,11 +3581,25 @@ def _annotate_no_results(fn_name: str, result: dict[str, Any]) -> dict[str, Any]
 # ConversationEngine._call_openai_chat). Both paths must gate the same set
 # of tools so switching feature flags never opens a hole.
 
-_LEGACY_INTERCEPT_TOOLS: frozenset[str] = frozenset({
+def _legacy_tools_requiring_confirmation() -> frozenset[str]:
+    try:
+        from backend.agent.actions import tools_requiring_confirmation
+        registered = tools_requiring_confirmation()
+        if registered:
+            return registered
+    except Exception:
+        pass
+    return _LEGACY_INTERCEPT_TOOLS_FALLBACK
+
+
+_LEGACY_INTERCEPT_TOOLS_FALLBACK: frozenset[str] = frozenset({
     "delete_listing",
     "cancel_claim",
     "leave_community",
     "forget_about_me",
+    "claim_listing",
+    "post_food_listing",
+    "create_food_listing",
 })
 
 _LEGACY_INTERCEPT_TIMEOUT_SEC: float = 4.0
@@ -3613,6 +3639,32 @@ def _build_legacy_intercept_summary(
             if is_es else
             "forget what I've learned about you"
         )
+    if fn_name == "claim_listing":
+        title = (fn_args or {}).get("title") or (fn_args or {}).get("listing_title")
+        listing_id = (fn_args or {}).get("listing_id") or (fn_args or {}).get("food_id")
+        if title:
+            return f"reclamar '{title}'" if is_es else f"claim '{title}'"
+        if listing_id:
+            return (
+                f"reclamar la publicación #{listing_id}"
+                if is_es else
+                f"claim listing #{listing_id}"
+            )
+        return "reclamar esta comida" if is_es else "claim this food listing"
+    if fn_name in ("post_food_listing", "create_food_listing"):
+        title = (fn_args or {}).get("title") or ("tu comida" if is_es else "your food")
+        return (
+            f"publicar '{title}' en la comunidad"
+            if is_es else
+            f"post '{title}' to the community"
+        )
+    try:
+        from backend.agent.actions import get_action
+        spec = get_action(fn_name)
+        if spec:
+            return spec.render_summary(fn_args or {})
+    except Exception:
+        pass
     return fn_name
 
 
@@ -3631,7 +3683,7 @@ async def _maybe_intercept_legacy_tool_call(
     tool loop — the post-hoc audit log still captures the actual write
     that ultimately fires.
     """
-    if fn_name not in _LEGACY_INTERCEPT_TOOLS:
+    if fn_name not in _legacy_tools_requiring_confirmation():
         return None
     if not isinstance(fn_args, dict):
         return None
@@ -3922,28 +3974,8 @@ class ConversationEngine:
     # ---- History via Supabase ---------------------------------------------
 
     async def get_conversation_history(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
-        try:
-            rows = await supabase_get("ai_conversations", {
-                "user_id": f"eq.{user_id}",
-                "select": "id,role,message,metadata,created_at",
-                "order": "created_at.desc",
-                "limit": str(limit),
-            })
-        except Exception as exc:
-            logger.error("get_conversation_history failed for %s: %s", user_id, exc)
-            return []
-        # Caller expects chronological order (oldest → newest).
-        rows.reverse()
-        return [
-            {
-                "id": r.get("id"),
-                "role": r.get("role", "user"),
-                "message": r.get("message", ""),
-                "metadata": r.get("metadata") or {},
-                "created_at": r.get("created_at", ""),
-            }
-            for r in rows
-        ]
+        from backend.conversation_store import get_conversation_history
+        return await get_conversation_history(user_id, limit=limit)
 
     async def store_message(
         self,
@@ -3952,21 +3984,8 @@ class ConversationEngine:
         message: str,
         metadata: dict[str, Any] | None = None,
     ) -> Optional[str]:
-        try:
-            result = await supabase_post("ai_conversations", {
-                "user_id": user_id,
-                "role": role,
-                "message": message,
-                "metadata": metadata or {},
-            })
-        except Exception as exc:
-            logger.error("store_message failed for %s: %s", user_id, exc)
-            return None
-        if isinstance(result, list) and result:
-            return result[0].get("id")
-        if isinstance(result, dict):
-            return result.get("id")
-        return None
+        from backend.conversation_store import store_message
+        return await store_message(user_id, role, message, metadata=metadata)
 
     async def clear_history(self, user_id: str) -> int:
         try:
@@ -3986,557 +4005,85 @@ class ConversationEngine:
         include_audio: bool = False,
         silent: bool = False,
     ) -> dict[str, Any]:
-        profile_task = asyncio.create_task(self.get_user_profile(user_id))
-        # Pull 30 messages (~15 turns) so multi-step flows — like "find food,
-        # show me #3, what's the address, claim it" spread across breaks —
-        # don't lose context. Each message is also kept much longer below
-        # (4000 char cap instead of 800) so listing IDs / titles survive.
-        history_task = asyncio.create_task(self.get_conversation_history(user_id, limit=30))
-        profile, history = await asyncio.gather(profile_task, history_task)
+        """Deprecated: delegates to the LangGraph agent (sole chat orchestrator)."""
+        logger.warning(
+            "ConversationEngine.chat() is deprecated — routing through LangGraph agent"
+        )
+        profile = await self.get_user_profile(user_id)
+        user_context = dict(profile or {"user_id": user_id})
+        user_context["user_id"] = user_id
+        if not user_context.get("id"):
+            user_context["id"] = user_id
+        is_admin = bool(user_context.get("is_admin"))
 
-        # Sticky language: use the message, then profile preference, then
-        # recent history. Prevents short replies like 'sí' / 'ok' from
-        # flipping a Spanish conversation back to English.
-        lang = self._detect_lang_sticky(message, history=history, profile=profile)
-
-        messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
-
-        if lang == "es":
-            messages.append({
-                "role": "system",
-                "content": (
-                    "The user is communicating in Spanish. You MUST respond "
-                    "ENTIRELY in Spanish for this turn and every following "
-                    "turn unless the user explicitly switches to another "
-                    "language. This includes: your reply text, any natural-"
-                    "language summaries of tool results, error explanations, "
-                    "confirmation prompts, and follow-up questions. Do NOT "
-                    "slip into English even for short phrases (e.g. say "
-                    "'¡Listo!' not 'Done!', 'Reclamado' not 'Claimed', "
-                    "'Publicado' not 'Posted'). Maintain a warm, helpful "
-                    "personality."
-                ),
-            })
-        else:
-            # Symmetric English lock. Without this, if any prior assistant
-            # turn in history was Spanish, the model copies that style and
-            # keeps replying in Spanish even though the user just wrote in
-            # English. This system message overrides that drift.
-            messages.append({
-                "role": "system",
-                "content": (
-                    "The user is communicating in English. You MUST respond "
-                    "ENTIRELY in English for this turn, even if earlier turns "
-                    "in the conversation history were in Spanish or another "
-                    "language. The user has switched (or always was) writing "
-                    "in English — match them. This applies to your reply "
-                    "text, tool-result summaries, confirmation prompts, "
-                    "follow-up questions, and error explanations. Do not "
-                    "include Spanish phrases or translations. Only switch "
-                    "back to Spanish if the user explicitly writes in Spanish "
-                    "again."
-                ),
-            })
-
-        if profile:
-            # Build a rich, conversational context block so the model has
-            # the same situational awareness a human assistant would. Skip
-            # null/blank fields so we don't pollute the prompt.
-            facts = [
-                "## KNOWN USER FACTS (DO NOT RE-ASK)",
-                "These fields are already on file. Treat them as the default "
-                "for any tool call or intake question. Only ask for a value "
-                "when (a) it's not in this block, or (b) the user explicitly "
-                "said 'use a different one this time'. Never echo a question "
-                "the user has already answered earlier in the conversation.",
-                f"Current user: {profile.get('name') or 'Community Member'} (ID: {user_id})",
-            ]
-            role = profile.get("role") or "member"
-            facts.append(f"role: {role}")
-            community_role = profile.get("community_role")
-            if community_role:
-                facts.append(
-                    f"community role: {community_role} — tailor suggestions accordingly "
-                    f"(donor=help them share food, recipient=help them find/claim food, "
-                    f"volunteer/driver/organizer=help with logistics, sponsor=focus on community impact)"
-                )
-            if profile.get("address"):
-                facts.append(f"profile address on file: {profile['address']}")
-            else:
-                facts.append("NO profile address on file (will need one to post listings/requests)")
-            # Surface the geocoded coordinates so the model can pass them to
-            # distance / route / nearby-search tools without having to ask
-            # the user for their location every turn.
+        import os
+        agent_v2 = os.getenv("AGENT_V2", "false").strip().lower() in ("true", "1", "yes", "on")
+        use_v2 = False
+        if agent_v2:
             try:
-                _raw_lat = profile.get("lat")
-                _raw_lng = profile.get("lng")
-                p_lat = float(_raw_lat) if _raw_lat is not None else None
-                p_lng = float(_raw_lng) if _raw_lng is not None else None
-            except (TypeError, ValueError):
-                p_lat, p_lng = None, None
-            if p_lat is not None and p_lng is not None:
-                facts.append(
-                    f"profile coordinates (geocoded from address): lat={p_lat:.6f}, "
-                    f"lng={p_lng:.6f} — USE THESE as the origin for "
-                    "search_food_near_user, get_mapbox_route, and any "
-                    "distance calculation. Do NOT ask the user where they are."
-                )
-            elif profile.get("address"):
-                facts.append(
-                    "address is saved but not yet geocoded — search_food_near_user "
-                    "may not return distance-sorted results. Suggest re-saving the "
-                    "address in Settings if nearby search fails."
-                )
-            if profile.get("phone"):
-                facts.append(f"phone on file: {profile['phone']} (recommended for pickup coordination)")
-            else:
-                # TODO(twilio): once SMS confirmation is live, a phone will be
-                # required to claim — restore the 'claim will fail' warning then.
-                facts.append("NO phone on file (suggest adding one so the donor can coordinate pickup)")
-            if profile.get("dietary_restrictions"):
-                facts.append(f"dietary restrictions: {profile['dietary_restrictions']}")
-            if profile.get("allergens"):
-                facts.append(f"allergens: {profile['allergens']} — NEVER suggest food matching these")
-            if profile.get("household_size"):
-                facts.append(f"household size: {profile['household_size']}")
-            if profile.get("language"):
-                # Annotate the saved preference with the *currently
-                # detected* language so the model doesn't get a mixed
-                # signal (e.g. saved 'es' but they're typing English
-                # right now → reply in English).
-                saved = str(profile.get("language"))
-                if lang == "es":
-                    facts.append(
-                        f"preferred language: {saved} — they ARE writing in "
-                        f"Spanish this turn, respond in Spanish."
-                    )
-                else:
-                    facts.append(
-                        f"preferred language: {saved} (saved), but they are "
-                        f"writing in English this turn — RESPOND IN ENGLISH. "
-                        f"Saved preference does not override the live message."
-                    )
-            facts.append(
-                f"When calling tools that require user_id, always use \"{user_id}\" "
-                "— NEVER ask the user for their id or any other field listed above. "
-                "You already know it."
+                from backend.agent.rollout import is_agent_v2_enabled_for_user
+                use_v2 = is_agent_v2_enabled_for_user(user_id)
+            except Exception:
+                use_v2 = False
+
+        if use_v2:
+            from backend.agent.v2_graph import invoke_agent_v2
+            result = await invoke_agent_v2(
+                user_id=user_id,
+                message=message,
+                conversation_id=None,
+                user_context=user_context,
+                is_admin=is_admin,
+                channel="text",
+                silent=silent,
             )
-            facts.append(
-                "## SLOT-FILLING POLICY (CRITICAL)"
-            )
-            facts.append(
-                "When the user starts an intake flow (post a listing, post a "
-                "request, claim with delivery, schedule pickup), DO NOT ask "
-                "for fields that appear in KNOWN USER FACTS above. Pre-fill "
-                "them silently and ONLY ask for genuinely missing fields "
-                "(e.g. item title, quantity, expiry). For 'use my address' "
-                "type fields, you may briefly confirm ('Using your saved "
-                "address — sound good?') but do not re-ask the address "
-                "itself. If the user volunteers a new value mid-flow, "
-                "use the new value and continue without re-asking."
-            )
-            context = "\n".join(facts)
         else:
-            context = (
-                f"Current user ID: {user_id}. "
-                f"When calling tools that require user_id, always use \"{user_id}\"."
+            from backend.agent.graph import invoke_agent
+            result = await invoke_agent(
+                user_id=user_id,
+                message=message,
+                conversation_id=None,
+                user_context=user_context,
+                silent=silent,
             )
-        messages.append({"role": "system", "content": context})
-
-        # Conversation-awareness reminder. Without this the model treats
-        # every turn as fresh and re-asks for things the user already
-        # answered earlier in the same chat.
-        messages.append({
-            "role": "system",
-            "content": (
-                "CONVERSATION AWARENESS (CRITICAL — read this every turn):\n"
-                "• Before responding, SCAN the full conversation above for "
-                "facts the user already provided. Reuse them silently.\n"
-                "• Multi-turn form filling: when you are gathering fields "
-                "for a tool (post_food_listing, create_reminder, etc.), "
-                "TRACK every field across turns. "
-                "If turn 1 the user said 'I want to share apples', turn 2 "
-                "you asked 'how many?', and turn 3 they said '10', you "
-                "ALREADY know title=apples qty=10 — proceed to the next "
-                "missing field. Never re-ask what is already answered.\n"
-                "• Pronouns + references: 'it', 'that', 'that one', '#3', "
-                "'the bread', 'the one near me' refer to items from "
-                "earlier turns OR the RECENT CONTEXT block below. Resolve "
-                "them locally; do NOT search again unless the user asks.\n"
-                "• Numbered selections after a search ('the 2nd', '#3', "
-                "'the kale'): match against the last list you showed; "
-                "claim_listing directly with that listing_id. BUT this only "
-                "applies when no claim is in progress. If you have already "
-                "locked onto one listing and asked a per-item question "
-                "('how many?', 'pickup or delivery?', 'lock it in?'), a bare "
-                "number is the ANSWER to that question (the quantity / a "
-                "yes-style confirmation) — NOT a new selection. Stay on the "
-                "same listing; never silently switch items mid-claim.\n"
-                "• Bare affirmations ('yes', 'sure', 'ok', 'go ahead', "
-                "'please', 'do it') while you are waiting for a quantity: "
-                "treat as 'use the full available quantity' and proceed to "
-                "claim. Confirm in ONE short sentence ('Claiming all 6 eggs "
-                "for you now.') and call the tool — do NOT loop asking the "
-                "same question. Most people in need (a hungry grandparent, "
-                "a parent for the school lunchbox) want the whole listing.\n"
-                "• Ambiguous reference ('first one' + a food name that does "
-                "NOT match item #1, or '#3' + a name that does not match): "
-                "do NOT silently pick one. Quote both candidates briefly and "
-                "ask which they meant ('Did you mean the eggs (item 1) or "
-                "the turkey sandwiches (item 5)?'). Only auto-resolve when "
-                "the ordinal and the name agree, or only one is given.\n"
-                "• If a tool returned an error, acknowledge what went "
-                "wrong and ask only for the MISSING piece, not the full "
-                "form again.\n"
-                "• NEVER ask for fields already shown in the user-profile "
-                "context above (address, phone, dietary_restrictions, "
-                "allergens). Use them silently.\n"
-                "• If asked 'what did I just claim/post?' or 'what was "
-                "the address?', answer from the RECENT CONTEXT block or "
-                "the prior assistant turn — do NOT call a tool to "
-                "re-fetch unless the user explicitly asks for fresh data."
-            ),
-        })
-
-        # Action policy: let the AI actually DO things on the user's behalf.
-        # Always inject for authenticated users — gating on keyword match
-        # caused the model to silently fall back to text-only replies
-        # whenever the user phrased a donation in an unfamiliar way (e.g.
-        # 'I have a few cans of soup spare'), making listings 'sometimes
-        # work, sometimes not'.
-        if True:
-            action_policy_en = (
-                "You can take actions for the user through tool calls. Use the ACTION "
-                "tools (claim_listing, cancel_claim, update_user_profile, "
-                "post_food_listing, send_notification) whenever the user asks — you do not "
-                "need to ask them to click buttons. "
-                "Rules: "
-                "(1) The server enforces the authenticated user_id; still pass the id shown above. "
-                "(2) For destructive / irreversible actions (cancel_claim, post_food_listing), "
-                "confirm briefly once before calling. "
-                "(3) For small updates (e.g. adding an allergy, opting into SMS), act immediately and report what changed. "
-                "(4) When the user says things like 'I'll take it', 'reserve that', 'grab #42', "
-                "call claim_listing. Then tell them where to pick up and to let you know once "
-                "they've got it so you can confirm the pickup. "
-                "(4a) CLAIMS ARE REVERSIBLE — DO NOT DOUBLE-CONFIRM. claim_listing is in the "
-                "REVERSIBLE bucket (the user can release it any time with cancel_claim). As soon "
-                "as the user expresses claim intent, even with vague phrasing ('yes please', 'go "
-                "ahead', 'sounds good', 'sure', 'do it', 'ok', 'please', 'that one'), CALL "
-                "claim_listing IMMEDIATELY. Do not ask 'should I claim it now?' or 'just to "
-                "confirm…' — that loop is exactly what frustrates older / non-technical users. "
-                "Only stop to ask when the listing is genuinely ambiguous (two items both match) "
-                "or quantity is unclear AND there is no sensible default. "
-                "(5) If a tool returns an error, explain it plainly and suggest the next step. "
-                "(6) ALWAYS CONFIRM COMPLETION: after a tool returns success, lead your reply "
-                "with an explicit completion phrase ('Done!', 'Posted!', 'Sent!', 'Updated.', "
-                "'Released.', 'Confirmed!', 'Saved.', 'Reminder set.') so the user clearly hears "
-                "the action FINISHED. Never leave the turn open-ended after a write tool — the "
-                "user must know the work is complete before any follow-up question or next step. "
-                "(7) STAY FOCUSED + TASK SWITCHES: if a multi-step flow is in "
-                "progress (e.g. listing apples) and the user mentions a different "
-                "food, ask once: 'Add as a second listing after the apples, or "
-                "switch instead?' If they give a completely different command "
-                "(find food, claim something, show dashboard, recipe, navigate), "
-                "ABANDON the incomplete intake immediately and execute the new "
-                "request. Phrases like 'never mind', 'forget that', 'actually let's "
-                "find food' always cancel the open intake. "
-                "(8) IGNORE-AND-STEER: if the user asks something off-topic mid-flow (weather, "
-                "trivia, jokes, unrelated chat), briefly decline and steer back to the open "
-                "task. If they persist, ask once whether to pause the flow. "
-                "(9) FOOD ONLY: DoGoods lists FOOD. If a user tries to list non-food items "
-                "(furniture, electronics, clothes), decline warmly and suggest Buy Nothing / "
-                "Freecycle. If a recipient asks for cash/cars/gift cards, decline and offer to "
-                "search for available food instead. Stay scoped to food sharing, food safety, "
-                "pickups, recipes, storage, and community impact."
-            )
-            action_policy_es = (
-                "Puedes realizar acciones por el usuario mediante tool calls. Usa las herramientas "
-                "de ACCIÓN (claim_listing, cancel_claim, update_user_profile, "
-                "post_food_listing, send_notification) cuando el usuario lo pida — no le digas que "
-                "haga clic en botones. Reglas: (1) El servidor impone el user_id autenticado. "
-                "(2) Confirma brevemente antes de acciones destructivas. (3) Para cambios pequeños, "
-                "actúa de inmediato y reporta el resultado. (4) Frases como 'lo tomo', 'resérvalo' "
-                "deben disparar claim_listing. (5) Si una herramienta falla, explícalo y sugiere el "
-                "siguiente paso. (6) CONFIRMA SIEMPRE QUE TERMINASTE: después de un éxito, comienza "
-                "tu respuesta con una frase clara de finalización ('¡Listo!', '¡Publicado!', "
-                "'¡Enviado!', 'Actualizado.', 'Liberado.', '¡Confirmado!', 'Guardado.', "
-                "'Recordatorio creado.') para que el usuario sepa que la acción YA TERMINÓ antes "
-                "de cualquier siguiente paso. "
-                "(7) MANTÉN EL FOCO + CAMBIOS DE TAREA: si hay un flujo en curso "
-                "(p.ej. publicando manzanas) y el usuario menciona otra comida, "
-                "pregunta una vez si agregar o cambiar. Si da un comando distinto "
-                "(buscar comida, reclamar, panel, receta, navegar), ABANDONA de "
-                "inmediato la publicación incompleta y ejecuta lo nuevo. Frases "
-                "como 'olvídalo', 'mejor busca comida' cancelan el flujo abierto. "
-                "(8) IGNORAR Y REDIRIGIR: si en medio del flujo el usuario pregunta algo fuera "
-                "de tema (clima, chistes, trivia), declina brevemente y vuelve a la tarea. Si "
-                "insiste, pregunta una vez si pausamos el flujo. "
-                "(9) SOLO COMIDA: DoGoods es para comida. Si intenta publicar objetos no "
-                "alimenticios (muebles, ropa, electrónicos), declina con amabilidad y sugiere "
-                "Buy Nothing o Freecycle. Si pide dinero/coches/tarjetas de regalo, declina y "
-                "ofrece buscar comida disponible. Mantente en el ámbito de comida, seguridad "
-                "alimentaria, recogidas, recetas, almacenamiento e impacto comunitario."
-            )
-            messages.append({
-                "role": "system",
-                "content": action_policy_es if lang == "es" else action_policy_en,
-            })
-
-        # Role-specific behaviour + profile-gap nudges (best-effort; non-fatal)
-        try:
-            # community_role ("donor","recipient","volunteer","dispatcher","admin")
-            # is the field that determines which role-behavior block fires.
-            # profile["role"] is the Supabase auth role ("member","admin") and
-            # does NOT match the _ROLE_BEHAVIOR_EN keys — using it meant the
-            # entire block (including the "POSTING/CLAIMING NOT ALLOWED" safety
-            # guardrails) was silently skipped for every non-admin user.
-            role_prompt = _role_behavior_prompt(
-                (profile or {}).get("community_role") or (profile or {}).get("role"),
-                lang=lang,
-            )
-            if role_prompt:
-                messages.append({"role": "system", "content": role_prompt})
-        except Exception as exc:  # pragma: no cover
-            logger.debug("role prompt build failed: %s", exc)
-
-        try:
-            gap_prompt = await _profile_gap_prompt(user_id, lang=lang)
-            if gap_prompt:
-                messages.append({"role": "system", "content": gap_prompt})
-        except Exception as exc:  # pragma: no cover
-            logger.debug("profile gap prompt failed: %s", exc)
-
-        # Skip legacy silent-prompt user rows (created before the silent
-        # flag existed) and silent-trigger assistant rows so the model
-        # never sees orphaned "[Action completed]…" turns or a
-        # congratulatory assistant turn with no preceding user message.
-        _SILENT_USER_PREFIXES = (
-            "[action completed]",
-            "[acción completada]",
-            "[accion completada]",
-        )
-        # Sliding window: keep only the most recent turns that fit the char
-        # budget so a long conversation can't push the system prompt / live
-        # message out of the model's effective attention (context drift). The
-        # system prompt, profile facts, and memory snapshot are re-injected
-        # separately below and are never trimmed.
-        windowed_history = _apply_sliding_window(history)
-
-        # When history was trimmed, inject a deterministic summary of the
-        # dropped turns so the model retains overall shape (topics, actions)
-        # without re-reading verbatim text.
-        dropped_summary = _summarize_dropped_history(history, windowed_history)
-        if dropped_summary:
-            messages.append({"role": "system", "content": dropped_summary})
-
-        for msg in windowed_history:
-            role = msg.get("role", "user")
-            content = msg.get("message", "")
-            if role == "user" and isinstance(content, str) and content.strip().lower().startswith(_SILENT_USER_PREFIXES):
-                continue
-            if role == "assistant" and (msg.get("metadata") or {}).get("silent_trigger"):
-                continue
-            # Per-message cap so previous assistant turns that enumerated
-            # listings (with ids/titles/distances) survive intact. Without
-            # this, "claim #3" can't be resolved because the original list
-            # was sliced mid-item.
-            if len(content) > _HISTORY_PER_MSG_CAP:
-                content = content[:_HISTORY_PER_MSG_CAP] + "... [truncated]"
-            messages.append({"role": role, "content": content})
-
-        # Replay recent tool-result summaries so the model retains the
-        # structured facts that were never persisted as message text.
-        # Without this, after a page refresh the user can say "claim it"
-        # and the model has no listing_id, no donor name, no address.
-        memory_snapshot = _build_memory_snapshot(history)
-        if memory_snapshot:
-            messages.append({
-                "role": "system",
-                "content": memory_snapshot,
-            })
-
-        lower_message = (message or "").lower()
-        wants_new_listings = any(
-            phrase in lower_message
-            for phrase in (
-                "new listings",
-                "new listing",
-                "latest listings",
-                "latest listing",
-                "recent listings",
-                "recent listing",
-                "check new listings",
-                "check latest listings",
-                "what's new",
-                "whats new",
-            )
-        )
-        if wants_new_listings:
-            messages.append({
-                "role": "system",
-                "content": (
-                    "This request is specifically about newly posted listings. "
-                    "You MUST call get_recent_listings for this turn unless the "
-                    "user explicitly asked for nearby distance-based results."
-                ),
-            })
-
-        task_switch_hint = _detect_task_switch_hint(message, history)
-        if task_switch_hint:
-            messages.append({"role": "system", "content": task_switch_hint})
-            messages.append({
-                "role": "system",
-                "content": (
-                    "ACTIVE TASK OVERRIDE: There is NO open listing intake for "
-                    "this turn. Ignore any partial title/qty/address/community/"
-                    "expiry gathered earlier. Do not ask intake follow-ups unless "
-                    "the user explicitly starts a new listing in this same message."
-                ),
-            })
-            # #region agent log
-            _debug_log_bf1680(
-                "ai_engine.py:chat",
-                "task_switch_injected",
-                {
-                    "hintPreview": task_switch_hint[:160],
-                    "messagePreview": (message or "")[:120],
-                    "activeTaskCleared": True,
-                },
-                hypothesis_id="D",
-                run_id="post-fix",
-            )
-            # #endregion
-
-        for intent_hint in _detect_turn_intent_hints(
-            message,
-            history,
-            task_switch_active=bool(task_switch_hint),
-        ):
-            messages.append({"role": "system", "content": intent_hint})
-
-        pivot_hint = _detect_conversational_pivot_hint(message, history)
-        if pivot_hint:
-            messages.append({"role": "system", "content": pivot_hint})
-
-        subject_correction_hint = _detect_subject_correction_hint(message, history)
-        if subject_correction_hint:
-            messages.append({"role": "system", "content": subject_correction_hint})
-
-        # During listing intake, remind the model of the REQUIRED-FIELD
-        # priority order so it doesn't stall on optional questions
-        # (pickup window, allergens, photo) before the required ones
-        # (community confirmation) are gathered. Without this, the
-        # model loops asking about pickup time / handoff and never
-        # advances toward post_food_listing.
-        if not task_switch_hint and _share_intake_active(history):
-            messages.append({
-                "role": "system",
-                "content": (
-                    "INTAKE PRIORITY (this turn): A listing intake is in progress. "
-                    "Ask the NEXT REQUIRED field, not an optional one. Priority "
-                    "order:\n"
-                    "  1. title           (what food?)\n"
-                    "  2. qty             (how much/many?)\n"
-                    "  3. address         (use profile address by default; confirm ONCE if "
-                    "not already done; do not re-confirm every turn)\n"
-                    "  4. expiry_date     (best-by / how long good for)\n"
-                    "  5. community       (HARD GATE \u2014 must ask if profile has none; "
-                    "say 'Which community should I post this to? If you don\u2019t have one, "
-                    "I can post to the general Alameda community.')\n"
-                    "Once 1\u20135 are gathered, CALL post_food_listing immediately. Do NOT "
-                    "ask about pickup window, allergens, dietary tags, photo, or 'post "
-                    "as is?' BEFORE posting \u2014 those are optional and can be offered AFTER "
-                    "the post succeeds as a follow-up.\n"
-                    "If the user has already given handoff preference or pickup time, "
-                    "include it in description/pickup_window but do not loop on it.\n"
-                    "DIRECTIVE OVERRIDE: If the user's latest message includes a post "
-                    "directive ('post it', 'go ahead', 'do it', 'looks good', 'list it', "
-                    "'publish', 'send it', 'yes post') AND all required fields (title, "
-                    "qty, address, expiry, community) are known, call post_food_listing "
-                    "IMMEDIATELY in this same turn. Do not ask another confirmation \u2014 "
-                    "the user already gave one."
-                ),
-            })
-
-        # Deterministically resolve coreferences like '#3', 'the bread',
-        # 'the first one' to a concrete listing from the most recent
-        # search. Injecting the resolved id removes a major source of
-        # "Nouri claimed the wrong thing" errors.
-        # Skip ONLY during a subject correction in a SHARE intake — there
-        # the new noun names a NEW listing being created, not an existing
-        # search hit. For claim corrections we WANT the resolver to fire
-        # so 'i meant the apples' maps to the apples listing's id.
-        share_subject_correction = (
-            bool(subject_correction_hint) and _share_intake_active(history)
-        )
-        resolved_ref = None
-        if not share_subject_correction:
-            resolved_ref = _resolve_listing_reference(message, history)
-        if resolved_ref:
-            ref_title = resolved_ref.get("title") or "(item)"
-            ref_id = resolved_ref.get("id") or "?"
-            ref_owner = resolved_ref.get("listing_owner_id") or "?"
-            messages.append({
-                "role": "system",
-                "content": (
-                    f"REFERENCE RESOLVED: The user's message refers to "
-                    f"listing_id={ref_id} (title='{ref_title}', "
-                    f"listing_owner_id={ref_owner}) from the most recent "
-                    f"search results. Use THIS listing_id for any tool call "
-                    f"(claim_listing, cancel_claim, get_mapbox_route) "
-                    f"unless the user clearly meant a different item. Do "
-                    f"NOT ask the user to repeat which one — you already "
-                    f"resolved it deterministically."
-                ),
-            })
-
-        messages.append({"role": "user", "content": message})
-
-        response_text, actions = await self._call_with_fallbacks(messages, lang, auth_user_id=user_id)
-
-        conversation_id = await self._persist_conversation(
-            user_id, message, response_text, lang, actions=actions, silent=silent,
-        )
 
         audio_b64 = None
-        if include_audio:
-            audio_b64 = await self._generate_audio_b64(response_text, lang=lang)
+        if include_audio and not silent:
+            audio_b64 = await self._generate_audio_b64(
+                result.get("text", ""), lang=result.get("lang", "en")
+            )
 
-        # Quick-reply chips always follow the sticky conversation language
-        # (`lang`) from the user's own messages — never re-detect from the
-        # assistant reply. Mixed-language replies (e.g. English prose ending
-        # in "¿Quieres que lo publique?") must not flip chips to Spanish.
-        suggestions: list[Any] = list(generate_quick_replies(response_text, lang))
-        next_step = compute_next_step(actions, lang)
-        if next_step:
-            # Prepend as the first chip so it renders above the generic
-            # quick-replies without any frontend changes. The leading 👉
-            # gives it visual weight.
+        tool_results = result.get("tool_results") or []
+        next_step = compute_next_step(tool_results, result.get("lang", "en"))
+        suggestions = result.get("suggestions")
+        if suggestions is None:
+            from backend.agent.suggestion_chips import build_turn_suggestions
+            suggestions = build_turn_suggestions(
+                response_text=result.get("text") or "",
+                language=result.get("lang", "en"),
+                tool_results=tool_results,
+                detected_intent=None,
+            )
+        else:
+            suggestions = list(suggestions)
+        if next_step and isinstance(suggestions, list):
             suggestions = [
                 {**next_step, "kind": "next_step"},
-                *(s for s in suggestions if s != next_step["label"]),
+                *(s for s in suggestions if s != next_step.get("label")),
             ]
+
         return {
-            "text": response_text,
-            "audio_url": audio_b64,  # data URL, or None
+            "text": result.get("text", ""),
+            "audio_url": audio_b64,
             "user_id": str(user_id),
-            "lang": lang,
-            "conversation_id": str(conversation_id) if conversation_id else None,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "tool_results": actions,
-            "actions": actions,
-            "suggestions": suggestions,
+            "lang": result.get("lang", "en"),
+            "conversation_id": result.get("conversation_id"),
+            "timestamp": result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+            "tool_results": tool_results,
+            "actions": tool_results,
+            "suggestions": result.get("suggestions") or suggestions,
             "next_step": next_step,
-            # Surface the first pending_action envelope so the frontend
-            # renders the confirmation card. The legacy tool loop drops
-            # its intercept envelope into actions[*]['pending_action']
-            # inside _call_openai_chat; pull it up here so
-            # /api/ai/chat can attach it to the response payload without
-            # unwrapping the tool_results list on the frontend.
-            "pending_action": next(
-                (a.get("pending_action") for a in actions if isinstance(a, dict) and a.get("pending_action")),
-                None,
-            ),
+            "pending_action": result.get("pending_action"),
         }
 
     async def _persist_conversation(
@@ -5405,24 +4952,26 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
         "community", "school", "district", "neighborhood", "comunidad",
         "escuela", "distrito",
     )
-    if any(c in full for c in community_cues) and any(k in t for k in (
+    community_question = any(c in full for c in community_cues) and any(k in full for k in (
             "which community", "what community", "community is this", "community should",
             "post to", "share with", "listed under", "list this under", "list under",
             "for which community", "profile community", "your community",
-            "confirm the community", "is this for",
+            "confirm the community", "is this for", "different community",
+            "profile is set", "profile is connected", "post it there",
             "qué comunidad", "que comunidad", "cuál comunidad", "cual comunidad",
             "para qué comunidad", "a qué comunidad", "tu comunidad",
             "comunidad de tu perfil", "bajo qué comunidad",
-    )):
+    ))
+    if community_question:
         # Try to extract community names from the text.
         # Pattern: capitalized words (2-4 words) near community keywords.
         # Examples: "Alameda Unified", "Oakland Tech", "Lincoln Elementary"
         import re as _re_comm
         # Look for patterns like "post this to Oakland Tech" or
         # "Alameda Unified, Oakland Tech, or another"
-        # Match 1-4 capitalized words in sequence
+        # Match 1-4 capitalized words in sequence (preserve original casing)
         pattern = r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b'
-        matches = _re_comm.findall(pattern, full)
+        matches = _re_comm.findall(pattern, text)
         
         # Filter matches: exclude common false positives
         exclude = {
@@ -5472,7 +5021,7 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
         "¿lo publico", "¿lo publicamos", "¿publicamos",
         "listo para publicar",
     )
-    if any(k in t for k in confirm_post_keys):
+    if any(k in t for k in confirm_post_keys) and not community_question:
         if es:
             add("Sí, publícalo", "Espera, edítalo", "Cancelar")
         else:

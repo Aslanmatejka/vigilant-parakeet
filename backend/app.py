@@ -53,34 +53,21 @@ from backend.ai_engine import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
 
-# Feature flag for new agentic system
-# Default: true (agentic mode enabled)
-# Set ENABLE_AGENTIC_MODE=false to use legacy conversation engine
-ENABLE_AGENTIC_MODE = os.getenv("ENABLE_AGENTIC_MODE", "true").lower() in ("true", "1", "yes")
-
-# AGENT_V2: next-generation agent with reasoning trace, affect-aware register,
-# typed action framework, persona consistency guard, and food-safety post-filter.
-# Default OFF so production traffic stays on v1 until we flip it explicitly.
-# AGENT_V2 wraps the v1 graph — ENABLE_AGENTIC_MODE must also be true.
+# LangGraph agent is the sole chat orchestrator.
+# AGENT_V2 wraps v1 with reasoning trace, affect-aware register, typed actions, etc.
 # Gradual rollout is controlled by AGENT_V2_ROLLOUT_PCT (0-100, default 100).
 # See backend/agent/rollout.py.
 AGENT_V2 = os.getenv("AGENT_V2", "false").strip().lower() in ("true", "1", "yes", "on")
 
-if ENABLE_AGENTIC_MODE:
-    logger.info("🤖 Agentic mode enabled - using LangGraph agent")
-    from backend.agent import invoke_agent
-    if AGENT_V2:
-        from backend.agent.rollout import rollout_percentage
-        logger.info(
-            "🧠 AGENT_V2 enabled — wrapping v1 graph with reasoning + safety + affect layers (rollout=%d%%)",
-            rollout_percentage(),
-        )
-        from backend.agent.v2_graph import invoke_agent_v2
-else:
-    logger.info("📋 Using legacy conversation engine")
-    if AGENT_V2:
-        logger.warning("AGENT_V2=true ignored because ENABLE_AGENTIC_MODE=false")
-        AGENT_V2 = False
+logger.info("🤖 LangGraph agent is the sole chat orchestrator")
+from backend.agent import invoke_agent
+if AGENT_V2:
+    from backend.agent.rollout import rollout_percentage
+    logger.info(
+        "🧠 AGENT_V2 enabled — wrapping v1 graph with reasoning + safety + affect layers (rollout=%d%%)",
+        rollout_percentage(),
+    )
+    from backend.agent.v2_graph import invoke_agent_v2
 
 ALLOWED_ORIGINS = [
     o.strip() for o in os.getenv(
@@ -828,6 +815,9 @@ class AIChatRequest(BaseModel):
     # successful photo/CSV bulk upload) and should NOT appear in the user's
     # chat history. The assistant's reply is still persisted normally.
     silent: bool = False
+    # Optional thread id from a prior assistant row; when omitted the agent
+    # generates one and returns it on the response for the next turn.
+    conversation_id: str | None = None
 
 
 class AIChatResponse(BaseModel):
@@ -874,6 +864,12 @@ class AIChatResponse(BaseModel):
     intent_confirmation_decision: dict[str, Any] | None = None  # intent-level verdict (Phase 4 mid)
     confirmation_summary: str | None = None       # one-line user-facing summary (Phase 4 mid)
     agent_v2: bool | None = None
+    turn_id: str | None = None
+    register: dict[str, Any] | None = None        # communication register (tone/verbosity)
+    self_model: dict[str, Any] | None = None      # grounded capability snapshot
+    persona_check: dict[str, Any] | None = None   # PersonaGuard result
+    tool_audit: list[dict[str, Any]] | None = None
+    blocked_listings: list[dict[str, Any]] | None = None
 
 
 class ConfirmActionRequest(BaseModel):
@@ -889,6 +885,16 @@ class ConfirmActionResponse(BaseModel):
     error: str | None = None
 
 
+class RollbackActionRequest(BaseModel):
+    audit_id: str = Field(min_length=1, max_length=64)
+
+
+class RollbackActionResponse(BaseModel):
+    status: str                     # rolled_back | failed | not_found
+    audit_id: str | None = None
+    error: str | None = None
+
+
 class ConversationMessage(BaseModel):
     role: str
     message: str
@@ -898,6 +904,199 @@ class ConversationMessage(BaseModel):
 # ===================================================================
 #  AI CONVERSATION ROUTES
 # ===================================================================
+
+async def _run_agent_turn(
+    user_id: str,
+    message: str,
+    *,
+    conversation_id: str | None = None,
+    include_audio: bool = False,
+    silent: bool = False,
+    channel: str = "text",
+) -> dict:
+    """Shared agentic turn for /api/ai/chat and /api/ai/voice."""
+    from datetime import datetime, timezone
+    from backend.ai_engine import conversation_engine
+    from backend.debug_log import agent_debug_log
+
+    agent_debug_log(
+        "app.py:_run_agent_turn",
+        "HTTP turn received",
+        {
+            "message_preview": (message or "")[:80],
+            "has_conversation_id": bool(conversation_id),
+            "channel": channel,
+            "user_id_prefix": (user_id or "")[:8],
+        },
+        hypothesis_id="V0",
+    )
+
+    profile = await conversation_engine.get_user_profile(user_id)
+    user_context = dict(profile or {"user_id": user_id})
+    user_context["user_id"] = user_id
+    if not user_context.get("id"):
+        user_context["id"] = user_id
+    is_admin = bool(user_context.get("is_admin")) if profile else False
+
+    use_v2 = False
+    if AGENT_V2:
+        try:
+            from backend.agent.rollout import is_agent_v2_enabled_for_user
+            use_v2 = is_agent_v2_enabled_for_user(user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("rollout check failed (%s) — staying on v1", exc)
+            use_v2 = False
+
+    if use_v2:
+        result = await invoke_agent_v2(
+            user_id=user_id,
+            message=message,
+            conversation_id=conversation_id,
+            user_context=user_context,
+            is_admin=is_admin,
+            channel=channel,
+            silent=silent,
+        )
+    else:
+        result = await invoke_agent(
+            user_id=user_id,
+            message=message,
+            conversation_id=conversation_id,
+            user_context=user_context,
+            silent=silent,
+        )
+
+    agent_debug_log(
+        "app.py:_run_agent_turn",
+        "agent turn complete",
+        {
+            "use_v2": use_v2,
+            "response_preview": (result.get("text") or "")[:120],
+            "tools": [
+                (t.get("tool") if isinstance(t, dict) else None)
+                for t in (result.get("tool_results") or [])
+            ],
+            "has_pending": bool(result.get("pending_action")),
+            "refusal": bool(result.get("refusal")),
+        },
+        hypothesis_id="V0",
+    )
+
+    response: dict = {
+        "text": result.get("text", ""),
+        "user_id": user_id,
+        "conversation_id": result.get("conversation_id"),
+        "lang": result.get("lang", "en"),
+        "timestamp": result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+        "tool_results": result.get("tool_results", []),
+    }
+
+    if include_audio and not silent:
+        try:
+            from backend.ai_engine import generate_tts
+            audio_url = await generate_tts(
+                text=response["text"],
+                lang=response["lang"],
+            )
+            response["audio_url"] = audio_url
+        except Exception as e:
+            logger.warning("TTS generation failed: %s", e)
+
+    if result.get("suggestions") is not None:
+        response["suggestions"] = result["suggestions"]
+    elif result.get("text"):
+        from backend.agent.suggestion_chips import build_turn_suggestions
+        lang = result.get("lang") or "en"
+        response["suggestions"] = build_turn_suggestions(
+            response_text=result.get("text") or "",
+            language=lang,
+            tool_results=result.get("tool_results") or [],
+            detected_intent=result.get("detected_intent"),
+        )
+
+    if result.get("pending_action"):
+        response["pending_action"] = result["pending_action"]
+
+    if result.get("turn_id"):
+        response["turn_id"] = result["turn_id"]
+
+    if result.get("agent_v2"):
+        response["agent_v2"] = True
+        if result.get("refusal"):
+            response["refusal"] = result["refusal"]
+        if result.get("affect"):
+            response["affect"] = result["affect"]
+        if result.get("reasoning_trace"):
+            response["reasoning_trace"] = result["reasoning_trace"]
+        if result.get("confidence") is not None:
+            response["confidence"] = result["confidence"]
+        if result.get("reflection"):
+            response["reflection"] = result["reflection"]
+        if result.get("goals"):
+            response["goals"] = result["goals"]
+        if result.get("next_step_hint"):
+            response["next_step_hint"] = result["next_step_hint"]
+        if result.get("memories"):
+            response["memories"] = result["memories"]
+        if result.get("world_model"):
+            response["world_model"] = result["world_model"]
+        if result.get("new_memories"):
+            response["new_memories"] = result["new_memories"]
+        if result.get("privacy_disclosure"):
+            response["privacy_disclosure"] = result["privacy_disclosure"]
+        if result.get("self_eval"):
+            response["self_eval"] = result["self_eval"]
+        if result.get("pushback_detected"):
+            response["pushback_detected"] = bool(result["pushback_detected"])
+        if result.get("retried"):
+            response["retried"] = True
+            if result.get("original_response"):
+                response["original_response"] = result["original_response"]
+            if result.get("original_self_eval"):
+                response["original_self_eval"] = result["original_self_eval"]
+        if result.get("user_style"):
+            response["user_style"] = result["user_style"]
+        if result.get("few_shot_examples"):
+            response["few_shot_examples"] = result["few_shot_examples"]
+        if result.get("reward") is not None:
+            response["reward"] = float(result["reward"])
+        if result.get("brainstorm_used"):
+            response["brainstorm_used"] = True
+            if result.get("brainstorm_ideas"):
+                response["brainstorm_ideas"] = list(result["brainstorm_ideas"])
+        if result.get("curiosity_followup"):
+            response["curiosity_followup"] = result["curiosity_followup"]
+        if result.get("procedural_hint"):
+            response["procedural_hint"] = result["procedural_hint"]
+        if result.get("procedural_rule"):
+            response["procedural_rule"] = result["procedural_rule"]
+        if result.get("antipattern_hint"):
+            response["antipattern_hint"] = result["antipattern_hint"]
+        if result.get("antipattern_rule"):
+            response["antipattern_rule"] = result["antipattern_rule"]
+        if result.get("confirmation_recommended"):
+            response["confirmation_recommended"] = True
+        if result.get("confirmation_decisions"):
+            response["confirmation_decisions"] = result["confirmation_decisions"]
+        if result.get("intent_confirmation_decision"):
+            response["intent_confirmation_decision"] = result["intent_confirmation_decision"]
+        if result.get("confirmation_summary"):
+            response["confirmation_summary"] = result["confirmation_summary"]
+        if result.get("register"):
+            response["register"] = result["register"]
+        if result.get("self_model"):
+            response["self_model"] = result["self_model"]
+        if result.get("persona_check"):
+            response["persona_check"] = result["persona_check"]
+        if result.get("tool_audit"):
+            response["tool_audit"] = result["tool_audit"]
+        if result.get("blocked_listings"):
+            response["blocked_listings"] = result["blocked_listings"]
+        if result.get("curiosity_followup"):
+            response["curiosity_followup"] = result["curiosity_followup"]
+
+    return response
+
 
 @app.post("/api/ai/chat", response_model=AIChatResponse)
 async def ai_chat(body: AIChatRequest, request: Request) -> dict:
@@ -920,161 +1119,14 @@ async def ai_chat(body: AIChatRequest, request: Request) -> dict:
     await _require_auth_for_user(request, body.user_id)
 
     try:
-        # Use new agentic system if enabled
-        if ENABLE_AGENTIC_MODE:
-            # Fetch user context for agent
-            user_profile = await supabase_get("users", {
-                "id": f"eq.{body.user_id}",
-                "select": "id,email,full_name,address,phone,dietary_restrictions,allergies,is_admin",
-            })
-            user_context = user_profile[0] if user_profile else {"user_id": body.user_id}
-            is_admin = bool(user_context.get("is_admin")) if user_profile else False
-
-            # Route to AGENT_V2 when enabled. v2 wraps v1, so the existing
-            # graph runs inside it — any v2 failure short-circuits to a
-            # safe response from the wrapper itself. Routing is per-user
-            # via the AGENT_V2_ROLLOUT_PCT bucket in backend/agent/rollout.py.
-            use_v2 = False
-            if AGENT_V2:
-                try:
-                    from backend.agent.rollout import is_agent_v2_enabled_for_user
-                    use_v2 = is_agent_v2_enabled_for_user(body.user_id)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("rollout check failed (%s) — staying on v1", exc)
-                    use_v2 = False
-
-            if use_v2:
-                result = await invoke_agent_v2(
-                    user_id=body.user_id,
-                    message=body.message,
-                    conversation_id=None,
-                    user_context=user_context,
-                    is_admin=is_admin,
-                    channel="text",
-                )
-            else:
-                result = await invoke_agent(
-                    user_id=body.user_id,
-                    message=body.message,
-                    conversation_id=None,  # Will be auto-generated
-                    user_context=user_context,
-                )
-            
-            # Transform to AIChatResponse format
-            response = {
-                "text": result.get("text", ""),
-                "user_id": body.user_id,
-                "conversation_id": result.get("conversation_id"),
-                "lang": result.get("lang", "en"),
-                "timestamp": result.get("timestamp"),
-                # Surface structured tool outputs (e.g. food search listings with
-                # community_name and image_url) so the chat panel can render
-                # them as cards. Without this the frontend gets the agent's
-                # prose only and the structured tool card stays empty.
-                "tool_results": result.get("tool_results", []),
-            }
-            
-            # Add TTS audio if requested
-            if body.include_audio and not body.silent:
-                try:
-                    from backend.ai_engine import generate_tts
-                    audio_url = await generate_tts(
-                        text=response["text"],
-                        lang=response["lang"],
-                    )
-                    response["audio_url"] = audio_url
-                except Exception as e:
-                    logger.warning(f"TTS generation failed: {e}")
-                    # Continue without audio
-            
-            # Include proactive suggestions if any
-            if result.get("suggestions"):
-                response["suggestions"] = result["suggestions"]
-
-            # pending_action envelope: v1 destructive-write intercepts
-            # (delete_listing, cancel_claim, leave_community,
-            # forget_about_me) queue a confirmation card BEFORE any write
-            # fires. Frontend renders it regardless of `agent_v2`, so it
-            # lives outside the v2-only block below.
-            if result.get("pending_action"):
-                response["pending_action"] = result["pending_action"]
-
-            # AGENT_V2 extras — only set when present so v1 responses stay
-            # byte-identical to before.
-            if result.get("agent_v2"):
-                response["agent_v2"] = True
-                if result.get("pending_action"):
-                    response["pending_action"] = result["pending_action"]
-                if result.get("refusal"):
-                    response["refusal"] = result["refusal"]
-                if result.get("affect"):
-                    response["affect"] = result["affect"]
-                if result.get("reasoning_trace"):
-                    response["reasoning_trace"] = result["reasoning_trace"]
-                if result.get("confidence") is not None:
-                    response["confidence"] = result["confidence"]
-                if result.get("reflection"):
-                    response["reflection"] = result["reflection"]
-                if result.get("goals"):
-                    response["goals"] = result["goals"]
-                if result.get("next_step_hint"):
-                    response["next_step_hint"] = result["next_step_hint"]
-                if result.get("memories"):
-                    response["memories"] = result["memories"]
-                if result.get("world_model"):
-                    response["world_model"] = result["world_model"]
-                if result.get("new_memories"):
-                    response["new_memories"] = result["new_memories"]
-                if result.get("privacy_disclosure"):
-                    response["privacy_disclosure"] = result["privacy_disclosure"]
-                if result.get("self_eval"):
-                    response["self_eval"] = result["self_eval"]
-                if result.get("pushback_detected"):
-                    response["pushback_detected"] = bool(result["pushback_detected"])
-                if result.get("retried"):
-                    response["retried"] = True
-                    if result.get("original_response"):
-                        response["original_response"] = result["original_response"]
-                    if result.get("original_self_eval"):
-                        response["original_self_eval"] = result["original_self_eval"]
-                if result.get("user_style"):
-                    response["user_style"] = result["user_style"]
-                if result.get("few_shot_examples"):
-                    response["few_shot_examples"] = result["few_shot_examples"]
-                if result.get("reward") is not None:
-                    response["reward"] = float(result["reward"])
-                if result.get("brainstorm_used"):
-                    response["brainstorm_used"] = True
-                    if result.get("brainstorm_ideas"):
-                        response["brainstorm_ideas"] = list(result["brainstorm_ideas"])
-                if result.get("curiosity_followup"):
-                    response["curiosity_followup"] = result["curiosity_followup"]
-                if result.get("procedural_hint"):
-                    response["procedural_hint"] = result["procedural_hint"]
-                if result.get("procedural_rule"):
-                    response["procedural_rule"] = result["procedural_rule"]
-                if result.get("antipattern_hint"):
-                    response["antipattern_hint"] = result["antipattern_hint"]
-                if result.get("antipattern_rule"):
-                    response["antipattern_rule"] = result["antipattern_rule"]
-                if result.get("confirmation_recommended"):
-                    response["confirmation_recommended"] = True
-                if result.get("confirmation_decisions"):
-                    response["confirmation_decisions"] = result["confirmation_decisions"]
-                if result.get("intent_confirmation_decision"):
-                    response["intent_confirmation_decision"] = result["intent_confirmation_decision"]
-                if result.get("confirmation_summary"):
-                    response["confirmation_summary"] = result["confirmation_summary"]
-
-            return response
-        else:
-            # Use legacy conversation engine
-            return await conversation_engine.chat(
-                user_id=body.user_id,
-                message=body.message,
-                include_audio=body.include_audio,
-                silent=body.silent,
-            )
+        return await _run_agent_turn(
+            body.user_id,
+            body.message,
+            conversation_id=body.conversation_id,
+            include_audio=body.include_audio,
+            silent=body.silent,
+            channel="text",
+        )
     except AIError:
         # Already structured — let the AIError handler render it.
         raise
@@ -1086,24 +1138,21 @@ async def ai_chat(body: AIChatRequest, request: Request) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# AGENT_V2: rollout / health snapshot for the ops dashboard
+# AI runtime health / rollout snapshot for FE proxy, dashboards, and probes
 # ---------------------------------------------------------------------------
 
 @app.get("/api/ai/health")
 async def ai_health() -> dict:
-    """Snapshot of the AI runtime for dashboards and ops checks.
+    """Combined health + rollout snapshot for the AI runtime.
 
-    Returns the current agentic-mode flag, AGENT_V2 master switch, and
-    rollout percentage in effect. No auth required — the response is
-    non-sensitive and useful for uptime probes.
+    Returns full `/health` fields (status, ai_configured, database_configured,
+    circuit_state, upstream metrics) plus the agentic-mode / AGENT_V2 rollout
+    snapshot. Mirrored under /api/ai/ so the Vite dev proxy can reach it. No
+    auth required — the response is non-sensitive and useful for uptime probes.
     """
-    body: dict = {
-        "agentic_mode": ENABLE_AGENTIC_MODE,
-        "agent_v2": {
-            "enabled": False,
-            "rollout_pct": 0,
-        },
-    }
+    body: dict = await health()
+    body["agentic_mode"] = True
+    body["agent_v2"] = {"enabled": False, "rollout_pct": 0}
     try:
         from backend.agent.rollout import rollout_snapshot
         snap = rollout_snapshot()
@@ -1286,6 +1335,38 @@ async def ai_confirm_action(body: ConfirmActionRequest, request: Request) -> dic
     }
 
 
+@app.post("/api/ai/rollback", response_model=RollbackActionResponse)
+async def ai_rollback_action(body: RollbackActionRequest, request: Request) -> dict:
+    """Undo a committed agent write using its audit log row."""
+    _enforce_rate_limit(request)
+
+    auth_uid = await _authenticate_request(request)
+    if not auth_uid:
+        raise HTTPException(401, "Authentication required to rollback actions")
+
+    try:
+        from backend.agent.actions import rollback_action
+    except Exception as exc:  # noqa: BLE001
+        logger.error("agent.actions import failed: %s", exc)
+        raise HTTPException(503, "Action framework unavailable") from exc
+
+    try:
+        ok = await rollback_action(body.audit_id, auth_uid)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Rollback action failed: %s", exc, exc_info=True)
+        return {
+            "status": "failed",
+            "audit_id": body.audit_id,
+            "error": "Rollback failed",
+        }
+
+    return {
+        "status": "rolled_back" if ok else "not_found",
+        "audit_id": body.audit_id,
+        "error": None if ok else "Audit row not found or already rolled back",
+    }
+
+
 @app.post("/api/ai/voice", response_model=AIChatResponse)
 async def ai_voice(
     request: Request,
@@ -1349,14 +1430,14 @@ async def ai_voice(
                 "or switch to text input.",
             )
 
-        # 2. Process transcribed text as a chat message
-        result = await conversation_engine.chat(
-            user_id=user_id,
-            message=transcript,
+        # 2. Process transcribed text through the agent
+        result = await _run_agent_turn(
+            user_id,
+            transcript,
             include_audio=include_audio,
             silent=silent,
+            channel="voice",
         )
-        # Include the transcript in the response
         result["transcript"] = transcript
         return result
 
@@ -3827,12 +3908,6 @@ async def health() -> dict:
         "error_rate_pct": metrics["error_rate_pct"],
         "error_rate_ok": metrics["within_threshold"],
     }
-
-
-# Mirror under the /api/ai prefix so the Vite dev proxy can reach it.
-@app.get("/api/ai/health")
-async def health_ai() -> dict:
-    return await health()
 
 
 @app.post("/api/ai/reset-circuit")

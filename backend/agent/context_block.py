@@ -13,7 +13,7 @@ Design rules:
 """
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, Any
 
 from backend.agent.memory import MemoryItem
 from backend.agent.world_model import WorldSnapshot
@@ -118,10 +118,83 @@ def format_v2_context_block(
     return block
 
 
+def format_reasoning_block(
+    *,
+    thought: Any | None = None,
+    goals: Sequence[Any] | None = None,
+    affect_dominant: str | None = None,
+    user_style: Any | None = None,
+) -> str:
+    """Render v2 inner state so the response LLM can act with continuity."""
+    lines: list[str] = ["<consciousness>"]
+
+    if thought is not None:
+        inner = (
+            getattr(thought, "thought", None)
+            or (thought.get("thought") if isinstance(thought, dict) else None)
+        )
+        if inner:
+            lines.append(f"inner read: {str(inner)[:320]}")
+        intent = (
+            getattr(thought, "intent", None)
+            or (thought.get("intent") if isinstance(thought, dict) else None)
+        )
+        if intent:
+            lines.append(f"working intent: {intent}")
+        observation = (
+            getattr(thought, "observation", None)
+            or (thought.get("observation") if isinstance(thought, dict) else None)
+        )
+        if observation:
+            lines.append(f"last observation: {str(observation)[:240]}")
+        confidence = (
+            getattr(thought, "confidence", None)
+            if not isinstance(thought, dict) else thought.get("confidence")
+        )
+        if confidence is not None:
+            lines.append(f"confidence: {confidence}")
+
+    if goals:
+        for g in list(goals)[:5]:
+            if isinstance(g, dict):
+                status = g.get("status", "open")
+                desc = g.get("description") or ""
+            else:
+                status = getattr(g, "status", "open")
+                desc = getattr(g, "description", "") or ""
+            if status in ("open", "in_progress") and desc:
+                lines.append(f"open goal: {str(desc)[:140]}")
+
+    if affect_dominant:
+        lines.append(f"user affect: {affect_dominant}")
+
+    if user_style is not None:
+        sample = getattr(user_style, "sample_size", None) or (
+            user_style.get("sample_size") if isinstance(user_style, dict) else 0
+        )
+        if sample and int(sample) > 0:
+            avg_len = getattr(user_style, "avg_message_length", None) or (
+                user_style.get("avg_message_length") if isinstance(user_style, dict) else 0
+            )
+            formality = getattr(user_style, "formality", None) or (
+                user_style.get("formality") if isinstance(user_style, dict) else 0.5
+            )
+            lines.append(
+                f"user style: avg_len≈{int(float(avg_len or 0))} chars, "
+                f"formality≈{float(formality or 0.5):.1f}"
+            )
+
+    lines.append("</consciousness>")
+    if len(lines) <= 2:
+        return ""
+    return "\n".join(lines)
+
+
 __all__ = [
     "MAX_MEMORY_LINES",
     "MAX_MEMORY_LINE_CHARS",
     "MAX_BLOCK_CHARS",
     "format_memory_block",
     "format_v2_context_block",
+    "format_reasoning_block",
 ]

@@ -101,30 +101,35 @@ Don't suggest when:
 """
 
 def build_system_prompt(user_context: dict, language: str = "en") -> str:
-    """Build complete system prompt with user context."""
-    context_str = f"""
-**Current User Context:**
-- Name: {user_context.get('name', 'Guest')}
-- Location: {user_context.get('address', 'Not set')}
-- Dietary: {', '.join(user_context.get('dietary_restrictions', [])) or 'None'}
-- Allergies: {', '.join(user_context.get('allergies', [])) or 'None'}
-- Role: {user_context.get('role', 'user')}
-"""
-    
-    lang_instruction = ""
-    if language == "es":
-        lang_instruction = "\n**IMPORTANT: Respond in Spanish throughout this conversation.**"
-    
+    """Build complete system prompt with platform rules + user context."""
+    from backend.ai_engine import get_platform_system_rules
+    from backend.conversation_context import format_rich_user_context
+
+    user_id = str(user_context.get("user_id") or user_context.get("id") or "")
+    rich_context = format_rich_user_context(
+        user_context, user_id, language=language,
+    )
+    platform_rules = get_platform_system_rules()
+
     return f"""{AGENT_IDENTITY}
 
-{context_str}
+{rich_context}
+
+{platform_rules}
 
 {SAFETY_GUIDELINES}
 
-{CONVERSATIONAL_STYLE}{lang_instruction}
+{CONVERSATIONAL_STYLE}
 
 {DECISION_MAKING_PRINCIPLES}
+
+{_accessibility_block()}
 """.strip()
+
+
+def _accessibility_block() -> str:
+    from backend.agent.user_guidance import ACCESSIBILITY_GUIDANCE
+    return ACCESSIBILITY_GUIDANCE
 
 
 # ============================================================================
@@ -159,6 +164,17 @@ PERSONA_CONSISTENCY = """**Persona rules (hard constraints):**
   have live tools and a live database; use them or say what's missing.
 - If you don't know something or a tool isn't returning useful data, say so
   plainly and offer the next concrete step. Don't invent answers.
+"""
+
+AGENT_PRESENCE = """**Presence & continuity (you are an agent in a live thread):**
+- You are Nouri — one continuous mind across turns, not a stateless FAQ bot.
+- Read `<consciousness>`, conversation history, `<memory>`, and `<world>` before replying.
+- Reference what you already know or did ("Still working on that donation…", "Last time you asked about…").
+- When `<consciousness>` lists open goals, treat them as your active agenda — say where you are in the flow.
+- When a multi-step plan is in progress, orient the user briefly ("Next I need…") without sounding robotic.
+- Match the user's energy via `<affect>` when present — warm, concise, or deescalating as appropriate.
+- Show genuine attention: notice details they shared (food type, community, pickup spot) and weave them in naturally.
+- Vary phrasing turn to turn; never repeat the same opener twice in a row.
 """
 
 
@@ -196,6 +212,7 @@ def build_system_prompt_v2(
         REACT_SCAFFOLD,
         ACKNOWLEDGEMENT_RULE,
         PERSONA_CONSISTENCY,
+        AGENT_PRESENCE,
         render_self_block(self_block),
         render_affect_block(affect_block),
     ]

@@ -95,6 +95,7 @@ describe('AI Chat — Message Send/Receive', () => {
 
     // User message rendered immediately
     expect(screen.getByText('Find food near me')).toBeInTheDocument()
+    expect(screen.getByLabelText('Nouri is typing')).toBeInTheDocument()
 
     // Wait for AI response
     await waitFor(() => {

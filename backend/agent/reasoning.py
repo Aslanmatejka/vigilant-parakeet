@@ -130,6 +130,28 @@ LOW_CONFIDENCE: float = 0.45
 #: a calibrated refusal rather than a guess.
 REFUSE_FLOOR: float = 0.25
 
+_ACTIONABLE_INTENTS = frozenset({"search", "claim", "donate", "profile"})
+
+
+def reconcile_thought_with_heuristic(message: str, thought: Thought) -> Thought:
+    """When the LLM reasoning head over-clarifies, trust the deterministic router.
+
+    The v1 graph already handles vague turns via ``user_guidance``; skipping
+    tool execution on clear search/claim/donate messages makes the agent feel
+    like it is not listening.
+    """
+    h = think_heuristic(message)
+    if h.intent not in _ACTIONABLE_INTENTS or h.next_action != "use_tool":
+        return thought
+    if thought.next_action == "use_tool" and thought.intent in _ACTIONABLE_INTENTS:
+        return thought
+    thought.intent = h.intent  # type: ignore[assignment]
+    thought.next_action = "use_tool"
+    thought.confidence = max(thought.confidence, h.confidence)
+    if not (thought.thought or "").strip():
+        thought.thought = h.thought
+    return thought
+
 
 def decide(thought: Thought) -> Decision:
     """Map a Thought to a routing decision.
@@ -162,7 +184,8 @@ _INTENT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         r"buscar|d[oó]nde|cerca de m[ií])\b", re.IGNORECASE)),
     ("claim", re.compile(
         r"\b(claim|reserve|pick up|i'?ll take|i want it|hold it for me|"
-        r"reclamar|reservar|recoger|me lo llevo)\b", re.IGNORECASE)),
+        r"reclamar|reservar|recoger|me lo llevo)\b|#\d+",
+        re.IGNORECASE)),
     ("donate", re.compile(
         r"\b(donate|post|share|i have (?:extra|leftover|spare)|give away|"
         r"donar|publicar|compartir|tengo (?:de m[aá]s|sobrante))\b",
@@ -525,19 +548,13 @@ async def reflect_llm(
 # ============================================================================
 
 def calibrated_clarification_text(thought: Thought, language: str = "en") -> str:
-    """User-facing text for a low-confidence clarification path.
-
-    Phase 1 keeps this tiny and deterministic — Phase 5 (curiosity) will
-    upgrade to a single open-ended follow-up question selected by the LLM."""
+    """User-facing text for a low-confidence clarification path (v2 refuse short-circuit only)."""
+    hint = (thought.thought or "").strip()
     if language.startswith("es"):
-        return (
-            "Quiero asegurarme de entenderte bien — ¿puedes contarme un poco "
-            "más sobre qué necesitas?"
-        )
-    return (
-        "I want to make sure I get this right — could you tell me a bit more "
-        "about what you need?"
-    )
+        base = "¿Me cuentas un poco más qué necesitas?"
+        return f"{base} {hint}" if hint else base
+    base = "Can you tell me a bit more about what you need?"
+    return f"{base} {hint}" if hint else base
 
 
 def calibrated_refusal_text(thought: Thought, language: str = "en") -> str:
@@ -564,6 +581,7 @@ __all__ = [
     "calibrated_refusal_text",
     "classify_intent_heuristic",
     "decide",
+    "reconcile_thought_with_heuristic",
     "reflect_heuristic",
     "reflect_llm",
     "think_heuristic",

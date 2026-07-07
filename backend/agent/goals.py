@@ -8,17 +8,8 @@ adds a thin **goal stack**: every user message produces one or more typed
 reflection from Phase 1 grades the parent's outcome so the next turn can
 resume an open goal instead of starting from scratch.
 
-This module is intentionally lite for the first ship:
-
-- **In-memory only.** Goals live on `AgentState.goals` for the duration of
-  a turn. A future PR can persist them to an `agent_goals` Supabase table
-  (migration sketched in `supabase/migrations/<TBD>_agent_goals.sql`) —
-  the dataclass already mirrors that schema.
-- **Pure functions + heuristic + LLM pair**, same shape as
-  `reasoning.py`. Every LLM call has a deterministic fallback so unit
-  tests stay green offline.
-- **No graph mutations.** Integration point is
-  `backend.agent.v2_graph.invoke_agent_v2`. v1 nodes are untouched.
+This module persists goals to the `agent_goals` Supabase table when
+`AGENT_V2` is enabled. The dataclass mirrors that schema.
 
 Public API:
 
@@ -31,6 +22,9 @@ Public API:
     prioritize_goals(goals) -> list[Goal]            # stable sort
     update_status_from_reflection(goals, reflection) -> list[Goal]
     replan_suggestion(thought, reflection) -> Optional[str]
+    load_active_goals(user_id, *, limit=25) -> list[Goal]
+    merge_with_persisted(persisted, extracted) -> list[Goal]
+    persist_goals(user_id, goals, *, turn_id=None) -> int
 """
 
 from __future__ import annotations
@@ -46,6 +40,11 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Literal, Optional
 
 logger = logging.getLogger(__name__)
+
+_NIL_UUID = "00000000-0000-0000-0000-000000000000"
+_ACTIVE_STATUSES: frozenset[str] = frozenset({"open", "in_progress", "blocked"})
+_VALID_STATUSES = frozenset({"open", "in_progress", "blocked", "done", "abandoned"})
+_VALID_PRIORITIES_DB = frozenset({"low", "normal", "high", "urgent"})
 
 
 # ============================================================================
@@ -93,6 +92,58 @@ class Goal:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "notes": list(self.notes),
+        }
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> Optional["Goal"]:
+        if not isinstance(row, dict):
+            return None
+        goal_id = row.get("id")
+        user_id = row.get("user_id")
+        description = row.get("description")
+        if not goal_id or not user_id or not description:
+            return None
+        status = str(row.get("status") or "open")
+        if status not in _VALID_STATUSES:
+            status = "open"
+        priority = str(row.get("priority") or "normal")
+        if priority not in _VALID_PRIORITIES_DB:
+            priority = "normal"
+        raw_notes = row.get("notes")
+        notes: list[str] = []
+        if isinstance(raw_notes, list):
+            notes = [str(n) for n in raw_notes if n]
+        return cls(
+            id=str(goal_id),
+            user_id=str(user_id),
+            description=str(description)[:280],
+            intent=str(row.get("intent") or "chitchat"),
+            status=status,  # type: ignore[arg-type]
+            priority=priority,  # type: ignore[arg-type]
+            parent_goal_id=str(row["parent_goal_id"]) if row.get("parent_goal_id") else None,
+            success_criteria=(
+                str(row["success_criteria"])[:200]
+                if row.get("success_criteria") else None
+            ),
+            created_at=str(row.get("created_at") or datetime.now(timezone.utc).isoformat()),
+            updated_at=str(row.get("updated_at") or datetime.now(timezone.utc).isoformat()),
+            notes=notes,
+        )
+
+    def to_row(self, *, source_turn_id: Optional[str] = None) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "description": self.description[:280],
+            "intent": self.intent,
+            "status": self.status,
+            "priority": self.priority,
+            "parent_goal_id": self.parent_goal_id,
+            "success_criteria": self.success_criteria,
+            "notes": list(self.notes),
+            "source_turn_id": source_turn_id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
 
     def touch(self) -> None:
@@ -468,6 +519,150 @@ def replan_suggestion(
     return None
 
 
+# ============================================================================
+# Supabase persistence (best-effort; v2_graph is the integration point)
+# ============================================================================
+
+async def load_active_goals(
+    user_id: str,
+    *,
+    limit: int = 25,
+) -> list[Goal]:
+    """Fetch open / in-progress / blocked goals for resume across turns."""
+    if not user_id or user_id.startswith("00000000") or user_id == _NIL_UUID:
+        return []
+
+    try:
+        from backend.ai_engine import supabase_get
+    except Exception as exc:  # noqa: BLE001
+        logger.info("load_active_goals: ai_engine unavailable (%s)", exc)
+        return []
+
+    try:
+        rows = await supabase_get("agent_goals", {
+            "user_id": f"eq.{user_id}",
+            "status": "in.(open,in_progress,blocked)",
+            "select": (
+                "id,user_id,description,intent,status,priority,"
+                "parent_goal_id,success_criteria,notes,created_at,updated_at"
+            ),
+            "order": "updated_at.desc",
+            "limit": str(max(1, min(int(limit), 100))),
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.info("load_active_goals: fetch failed (%s)", exc)
+        return []
+
+    out: list[Goal] = []
+    for row in rows or []:
+        goal = Goal.from_row(row)
+        if goal:
+            out.append(goal)
+    return prioritize_goals(out)
+
+
+def merge_with_persisted(
+    persisted: list[Goal],
+    extracted: list[Goal],
+) -> list[Goal]:
+    """Resume persisted goals and append genuinely new extracted work."""
+    active = [g for g in persisted if g.status in _ACTIVE_STATUSES]
+    if not extracted:
+        return prioritize_goals(active)
+    if not active:
+        return prioritize_goals(extracted)
+
+    active_intents = {
+        g.intent for g in active if g.intent not in ("meta", "chitchat")
+    }
+    new_intents = {
+        g.intent for g in extracted
+        if g.intent not in ("meta", "chitchat") and g.intent not in active_intents
+    }
+
+    merged: list[Goal] = list(active)
+    seen_ids = {g.id for g in merged}
+
+    for eg in extracted:
+        if eg.intent == "meta":
+            if len(extracted) > 1 and not any(g.intent == "meta" for g in merged):
+                if eg.id not in seen_ids:
+                    merged.append(eg)
+                    seen_ids.add(eg.id)
+            continue
+        if eg.intent in new_intents:
+            if eg.id not in seen_ids:
+                merged.append(eg)
+                seen_ids.add(eg.id)
+        elif eg.intent in active_intents:
+            for g in merged:
+                if g.intent == eg.intent and g.status == "open":
+                    g.status = "in_progress"
+                    g.touch()
+
+    parent_ids = {g.id for g in merged}
+    for eg in extracted:
+        if eg.parent_goal_id and eg.parent_goal_id in parent_ids and eg.id not in seen_ids:
+            merged.append(eg)
+            seen_ids.add(eg.id)
+
+    return prioritize_goals(merged)
+
+
+async def persist_goals(
+    user_id: str,
+    goals: Iterable[Goal],
+    *,
+    turn_id: Optional[str] = None,
+) -> int:
+    """Upsert goal rows after a turn. Returns rows written (best-effort)."""
+    if not user_id or user_id.startswith("00000000") or user_id == _NIL_UUID:
+        return 0
+
+    rows = [
+        g.to_row(source_turn_id=turn_id)
+        for g in goals
+        if g.user_id == user_id
+    ]
+    if not rows:
+        return 0
+
+    try:
+        import httpx
+        from backend.ai_engine import (
+            SUPABASE_URL,
+            SUPABASE_SERVICE_KEY,
+            SUPABASE_TIMEOUT,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("persist_goals: ai_engine unavailable (%s)", exc)
+        return 0
+
+    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
+        return 0
+
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=representation",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=SUPABASE_TIMEOUT) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/agent_goals",
+                params={"on_conflict": "id"},
+                json=rows,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return len(data) if isinstance(data, list) else 0
+    except Exception as exc:  # noqa: BLE001
+        logger.info("persist_goals: upsert failed (%s)", exc)
+        return 0
+
+
 __all__ = [
     "Goal",
     "GoalPriority",
@@ -478,4 +673,7 @@ __all__ = [
     "prioritize_goals",
     "replan_suggestion",
     "update_status_from_reflection",
+    "load_active_goals",
+    "merge_with_persisted",
+    "persist_goals",
 ]

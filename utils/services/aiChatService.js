@@ -31,6 +31,46 @@ const REQUEST_TIMEOUT = 60000 // allow time for tool-calling flows (GPT call + t
 // Re-export so callers / UI can subscribe to AI health without an extra import path
 export { aiHealth }
 
+/** Normalize backend suggestion chips (strings or proactive objects) for the UI. */
+export function normalizeSuggestionChips(raw = []) {
+  if (!Array.isArray(raw)) return []
+  const out = []
+  const seen = new Set()
+  for (const item of raw) {
+    let chip = item
+    if (typeof item === 'string') {
+      const label = item.trim()
+      if (!label || seen.has(label)) continue
+      seen.add(label)
+      out.push(label)
+      continue
+    }
+    if (!item || typeof item !== 'object') continue
+    const label = String(
+      item.label || item.action_label || item.message || item.prompt || item.text || '',
+    ).trim()
+    const message = String(
+      item.message || item.prompt || item.text || item.query || label,
+    ).trim()
+    // Display label; send the full prompt when they differ (e.g. next-step chips).
+    const sendText = (
+      item.prompt && item.label && item.prompt !== item.label
+        ? item.prompt
+        : message
+    )
+    if (!label || seen.has(label)) continue
+    seen.add(label)
+    chip = {
+      ...item,
+      label,
+      message: sendText,
+      action: item.action || (item.href || item.target ? 'navigate' : 'send'),
+    }
+    out.push(chip)
+  }
+  return out
+}
+
 /** Map a successful /api/ai/chat JSON body to the frontend contract. */
 function mapChatSuccess(data, requestId = null) {
   const toolResults = normalizeToolResults(data.tool_results || [])
@@ -39,10 +79,15 @@ function mapChatSuccess(data, requestId = null) {
     lang: data.lang || 'en',
     audioUrl: data.audio_url || null,
     conversationId: data.conversation_id || null,
+    turnId: data.turn_id || null,
     toolResults,
-    suggestions: data.suggestions || [],
+    suggestions: normalizeSuggestionChips(data.suggestions || []),
     nextStep: data.next_step || null,
     action: extractActionFromToolResults(toolResults),
+    pendingAction: data.pending_action || null,
+    confirmationRecommended: Boolean(data.confirmation_recommended),
+    confirmationSummary: data.confirmation_summary || null,
+    toolAudit: Array.isArray(data.tool_audit) ? data.tool_audit : [],
     requestId,
     error: null,
   }
@@ -81,19 +126,24 @@ class AIChatService {
    *     which returns { response: "...", degraded: true, ... } so the UI
    *     never breaks.
    */
-  async sendMessage(message, { userId, includeAudio = false, silent = false } = {}) {
+  async sendMessage(message, { userId, includeAudio = false, silent = false, conversationId = null } = {}) {
     try {
+      const payload = {
+        user_id: userId,
+        message,
+        include_audio: includeAudio,
+        silent,
+      }
+      if (conversationId) {
+        payload.conversation_id = conversationId
+      }
+
       const response = await resilientFetch(
         `${API_BASE}/chat`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            user_id: userId,
-            message,
-            include_audio: includeAudio,
-            silent,
-          }),
+          body: JSON.stringify(payload),
         },
         {
           retries: 3,
@@ -294,6 +344,71 @@ class AIChatService {
         degraded: true,
         source: fallback._source || 'fallback',
       }
+    }
+  }
+
+  /**
+   * Confirm or cancel a pending destructive action queued by the agent.
+   *
+   * @param {string} pendingId - from `pending_action.pending_id`
+   * @param {'confirm'|'cancel'} decision
+   * @returns {Promise<{ status: string, tool?: string, summary?: string, error?: string }>}
+   */
+  async confirmAction(pendingId, decision = 'confirm') {
+    if (!pendingId) throw new Error('pendingId is required')
+    try {
+      const data = await resilientPostJson(
+        `${API_BASE}/confirm`,
+        { pending_id: pendingId, decision },
+        {
+          retries: 1,
+          timeout: 30000,
+          backoff: [500],
+          label: 'ai/confirm',
+        }
+      )
+      return {
+        status: data.status || 'failed',
+        tool: data.tool || null,
+        summary: data.summary || null,
+        auditId: data.audit_id || null,
+        error: data.error || null,
+      }
+    } catch (error) {
+      console.error('Confirm action error:', error)
+      reportError(error)
+      throw error
+    }
+  }
+
+  /**
+   * Roll back a committed write via its audit log id (from tool_audit).
+   *
+   * @param {string} auditId
+   * @returns {Promise<{ status: string, auditId?: string, error?: string }>}
+   */
+  async rollbackAction(auditId) {
+    if (!auditId) throw new Error('auditId is required')
+    try {
+      const data = await resilientPostJson(
+        `${API_BASE}/rollback`,
+        { audit_id: auditId },
+        {
+          retries: 1,
+          timeout: 30000,
+          backoff: [500],
+          label: 'ai/rollback',
+        }
+      )
+      return {
+        status: data.status || 'failed',
+        auditId: data.audit_id || auditId,
+        error: data.error || null,
+      }
+    } catch (error) {
+      console.error('Rollback action error:', error)
+      reportError(error)
+      throw error
     }
   }
 

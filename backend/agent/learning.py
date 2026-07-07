@@ -37,6 +37,11 @@ async def update_user_preferences(
         entities: Extracted entities from message
         tool_results: Results from tool executions
     """
+    # Skip for anonymous / nil-UUID sessions — user_preferences.user_id has a
+    # NOT NULL FK to users(id), so nil UUIDs raise 23503 (409 via PostgREST).
+    if not user_id or user_id.startswith("00000000"):
+        return
+
     logger.info(f"Updating preferences for user {user_id}, intent {intent}")
     
     try:

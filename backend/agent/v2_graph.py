@@ -28,7 +28,6 @@ Slice A scope (this file):
 Out of scope (Slice B+):
 - Explicit `think` / `reflect` LLM nodes (we use the v1 plan/execute/respond
   loop as the action layer; v2 only adds wrappers around it).
-- Goal stack persistence to `agent_goals`.
 - Memory retrieval / write.
 """
 
@@ -59,11 +58,15 @@ from backend.agent.reasoning import (
     reflect_llm,
     think_heuristic,
     think_llm,
+    reconcile_thought_with_heuristic,
 )
 from backend.agent.goals import (
     Goal,
     extract_goals_heuristic,
     extract_goals_llm,
+    load_active_goals,
+    merge_with_persisted,
+    persist_goals,
     prioritize_goals,
     replan_suggestion,
     update_status_from_reflection,
@@ -146,6 +149,7 @@ from backend.agent.pending_intercept import (
     format_intercept_text,
 )
 from backend.agent.telemetry import log_v2_turn
+from backend.debug_log import agent_debug_log
 
 logger = logging.getLogger(__name__)
 
@@ -365,6 +369,7 @@ async def invoke_agent_v2(
     *,
     is_admin: bool = False,
     channel: str = "text",
+    silent: bool = False,
 ) -> Dict[str, Any]:
     """V2 agent entry point. Mirrors `invoke_agent()` signature so the chat
     endpoint can route between them based on the feature flag.
@@ -441,20 +446,32 @@ async def invoke_agent_v2(
     # generator to use `build_system_prompt_v2`.
 
     # ----------- 3a-pre. Extract goals (Phase 2 lite) ----------------------
-    # One short LLM call (gpt-4o-mini) decomposes the user message into
-    # typed goals. Heuristic fallback handles offline/error paths.
+    # Resume persisted open goals, then merge with freshly extracted work.
+    persisted_goals: list[Goal] = []
+    if user_id and not user_id.startswith("00000000"):
+        try:
+            persisted_goals = await asyncio.wait_for(
+                load_active_goals(user_id),
+                timeout=3.0,
+            )
+        except asyncio.TimeoutError:
+            logger.info("load_active_goals timed out — proceeding without")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("load_active_goals failed (%s) — proceeding without", exc)
+
     try:
-        goals: list[Goal] = await asyncio.wait_for(
+        extracted_goals: list[Goal] = await asyncio.wait_for(
             extract_goals_llm(message, user_id=user_id, language=detected_language),
             timeout=4.0,
         )
     except asyncio.TimeoutError:
         logger.info("extract_goals LLM timed out — using heuristic")
-        goals = extract_goals_heuristic(message, user_id)
+        extracted_goals = extract_goals_heuristic(message, user_id)
     except Exception as exc:  # noqa: BLE001
         logger.info("extract_goals error (%s) — using heuristic", exc)
-        goals = extract_goals_heuristic(message, user_id)
-    goals = prioritize_goals(goals)
+        extracted_goals = extract_goals_heuristic(message, user_id)
+
+    goals = merge_with_persisted(persisted_goals, extracted_goals)
     # Reflect open goal count into the self-model snapshot so
     # "what are you working on?" stays accurate.
     self_model.open_goal_count = sum(1 for g in goals if g.status == "open")
@@ -508,7 +525,22 @@ async def invoke_agent_v2(
         logger.info("think error (%s) — using heuristic", exc)
         thought = think_heuristic(message)
 
+    thought = reconcile_thought_with_heuristic(message, thought)
     chosen_decision = decide(thought)
+
+    agent_debug_log(
+        "v2_graph.py:decide",
+        "v2 reasoning decision",
+        {
+            "message_preview": (message or "")[:60],
+            "intent": thought.intent,
+            "confidence": thought.confidence,
+            "next_action": thought.next_action,
+            "chosen_decision": chosen_decision,
+            "will_refuse": chosen_decision == "refuse",
+        },
+        hypothesis_id="V1",
+    )
 
     # ----------- 3b. Few-shot trajectory retrieval (Phase 6) -------------
     # Now that we have an intent we can pull the user's most successful
@@ -602,22 +634,17 @@ async def invoke_agent_v2(
             except Exception as exc:  # noqa: BLE001
                 logger.info("procedural mining failed (%s) — proceeding without", exc)
 
-    # If the reasoning head is confident the right move is to refuse or
-    # clarify, skip v1 entirely — answer directly with calibrated copy so we
-    # don't burn tokens running the planner against a malformed turn.
-    if chosen_decision in ("refuse", "ask_clarification"):
+    # Only refuse outright — let v1 handle clarification/vagueness with full
+    # conversation history, listing refs, and the planner/tool graph.
+    if chosen_decision == "refuse":
         elapsed_ms = int((time.monotonic() - t0) * 1000)
-        if chosen_decision == "refuse":
-            short_text = _reasoning_refusal_text(thought, detected_language)
-            refusal_block = {
-                "code": "reasoning_refusal",
-                "severity": "medium",
-                "intent": thought.intent,
-                "confidence": thought.confidence,
-            }
-        else:
-            short_text = calibrated_clarification_text(thought, detected_language)
-            refusal_block = None
+        short_text = _reasoning_refusal_text(thought, detected_language)
+        refusal_block = {
+            "code": "reasoning_refusal",
+            "severity": "medium",
+            "intent": thought.intent,
+            "confidence": thought.confidence,
+        }
 
         # Reflect on the early exit so the trace is complete.
         early_reflection = reflect_heuristic(thought, [], short_text)
@@ -625,7 +652,7 @@ async def invoke_agent_v2(
 
         # Mark every open goal blocked/clarifying so the next turn knows
         # where we left off.
-        early_outcome = "failed" if chosen_decision == "refuse" else "deferred"
+        early_outcome = "failed"
         update_status_from_reflection(goals, early_outcome, needs_retry=False)
         early_hint = replan_suggestion(
             thought.next_action,
@@ -633,6 +660,17 @@ async def invoke_agent_v2(
             needs_retry=False,
             intent=thought.intent,
         )
+        self_model.open_goal_count = sum(
+            1 for g in goals if g.status in ("open", "in_progress")
+        )
+        if user_id and not user_id.startswith("00000000") and goals:
+            try:
+                await asyncio.wait_for(
+                    persist_goals(user_id, goals, turn_id=turn_id),
+                    timeout=3.0,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.info("persist_goals early exit failed (%s)", exc)
 
         logger.info(
             "agent_v2 short-circuit user=%s decision=%s intent=%s conf=%.2f ms=%d",
@@ -687,7 +725,6 @@ async def invoke_agent_v2(
     if (
         user_id
         and not user_id.startswith("00000000")
-        and chosen_decision == "execute"
     ):
         try:
             intercepted_action = build_intercepted_action(
@@ -699,6 +736,17 @@ async def invoke_agent_v2(
         except Exception as exc:  # noqa: BLE001
             logger.info("intercept builder failed: %s", exc)
             intercepted_action = None
+
+    agent_debug_log(
+        "v2_graph.py:destructive_intercept",
+        "v2 destructive intercept check",
+        {
+            "intent": thought.intent,
+            "intercepted": intercepted_action is not None,
+            "tool": getattr(intercepted_action, "tool", None),
+        },
+        hypothesis_id="V2",
+    )
 
     if intercepted_action is not None:
         try:
@@ -791,7 +839,7 @@ async def invoke_agent_v2(
     # produced text just like any other path.
     brainstorm_used = False
     brainstorm_ideas: list[str] = []
-    if detect_brainstorm_intent(message) and chosen_decision == "execute":
+    if detect_brainstorm_intent(message):
         bs_topic = _bs_extract_topic(message)
         bs_count = _bs_extract_count(message)
         try:
@@ -841,12 +889,48 @@ async def invoke_agent_v2(
         v1_user_context = dict(user_context)
         if v2_context_block:
             v1_user_context["v2_context_block"] = v2_context_block
+        v1_user_context["agent_v2"] = True
+        v1_user_context["self_prompt_block"] = self_model.to_prompt_block()
+        v1_user_context["register_prompt_block"] = register.to_prompt_block()
+        from backend.agent.context_block import format_reasoning_block
+        v1_user_context["reasoning_block"] = format_reasoning_block(
+            thought=thought,
+            goals=goals,
+            affect_dominant=affect.dominant,
+            user_style=user_style,
+        )
+        v1_user_context["turn_id"] = turn_id
+        v1_user_context["conversation_id"] = conversation_id
+        agent_debug_log(
+            "v2_graph.py:v1_handoff",
+            "v2 delegating to v1 graph",
+            {
+                "message_preview": (message or "")[:60],
+                "intent": thought.intent,
+                "conversation_id": conversation_id,
+            },
+            hypothesis_id="V3",
+        )
         try:
             v1_result = await _invoke_v1(
                 user_id=user_id,
                 message=message,
                 conversation_id=conversation_id,
                 user_context=v1_user_context,
+                silent=silent,
+            )
+            agent_debug_log(
+                "v2_graph.py:v1_handoff",
+                "v1 graph returned",
+                {
+                    "text_preview": (v1_result.get("text") or "")[:80],
+                    "tools": [
+                        (t.get("tool") if isinstance(t, dict) else None)
+                        for t in (v1_result.get("tool_results") or [])
+                    ],
+                    "has_pending": bool(v1_result.get("pending_action")),
+                },
+                hypothesis_id="V3",
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("v1 graph invocation failed: %s", exc, exc_info=True)
@@ -972,6 +1056,17 @@ async def invoke_agent_v2(
     self_model.open_goal_count = sum(
         1 for g in goals if g.status in ("open", "in_progress")
     )
+
+    if user_id and not user_id.startswith("00000000") and goals:
+        try:
+            await asyncio.wait_for(
+                persist_goals(user_id, goals, turn_id=turn_id),
+                timeout=3.0,
+            )
+        except asyncio.TimeoutError:
+            logger.info("persist_goals timed out — proceeding")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("persist_goals failed (%s)", exc)
 
     # ----------- 6b. Persist salient facts to long-term memory (Phase 3) --
     # Only on successful turns and only for authenticated users — we never
@@ -1254,6 +1349,7 @@ async def invoke_agent_v2(
         "lang": v1_result.get("lang") or detected_language,
         "tool_results": filtered_tool_results,
         "suggestions": v1_result.get("suggestions") or [],
+        "pending_action": v1_result.get("pending_action"),
         "affect": affect.to_dict(),
         "register": register.to_dict(),
         "self_model": {

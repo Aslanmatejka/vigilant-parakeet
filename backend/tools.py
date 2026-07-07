@@ -1650,6 +1650,18 @@ TOOL_DEFINITIONS = [
 ]
 
 
+# Planner / legacy names that differ from registered handler keys.
+_TOOL_NAME_ALIASES: dict[str, str] = {
+    "get_my_listings": "get_user_listings",
+    "get_my_profile": "get_user_profile",
+    "search_food_listings": "search_food_near_user",
+    "search_food_nearby": "search_food_near_user",
+    "search_nearby_food": "search_food_near_user",
+    "find_food": "search_food_near_user",
+    "claim_food": "claim_listing",
+}
+
+
 # ---------------------------------------------------------------------------
 # Tool execution dispatcher
 # ---------------------------------------------------------------------------
@@ -1663,7 +1675,8 @@ async def execute_tool(name: str, arguments: dict) -> dict:
     — lets `_validate_tool_definitions()` introspect the registration table
     without invoking the dispatcher.
     """
-    handler = _HANDLERS.get(name)
+    canonical = _TOOL_NAME_ALIASES.get(name, name)
+    handler = _HANDLERS.get(canonical)
     if handler is None:
         logger.warning("Unknown tool requested: %s", name)
         return {"error": f"Unknown tool: {name}"}
@@ -1671,7 +1684,7 @@ async def execute_tool(name: str, arguments: dict) -> dict:
     try:
         return await handler(**arguments)
     except Exception as exc:
-        logger.error("Tool %s failed: %s", name, exc)
+        logger.error("Tool %s failed: %s", canonical, exc)
         return {"error": f"Tool execution failed: {str(exc)}"}
 
 
@@ -3117,6 +3130,25 @@ async def _get_user_dashboard(user_id: str) -> dict:
     }
 
     return dashboard
+
+
+async def _get_my_impact_summary(user_id: str) -> dict:
+    """Lightweight impact stats for 'show my impact' help turns."""
+    dashboard = await _get_user_dashboard(user_id)
+    impact = dashboard.get("impact_summary") or {}
+    shared = int(impact.get("food_shared_count") or 0)
+    received = int(impact.get("food_received_count") or 0)
+    return {
+        "success": True,
+        "food_shared_count": shared,
+        "food_received_count": received,
+        "listings_total": shared,
+        "claims_total": received,
+        "summary": (
+            f"You've shared {shared} listing{'s' if shared != 1 else ''} "
+            f"and received {received} claim{'s' if received != 1 else ''}."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -5471,6 +5503,7 @@ async def _attach_photos_to_listing(
 
 _NAVIGATE_ACTION_ALIASES = {
     "open": "navigate",
+    "open_page": "navigate",
     "go": "navigate",
     "goto": "navigate",
     "go_to": "navigate",
@@ -5537,6 +5570,8 @@ async def _navigate_ui(
     mapped_action = _NAVIGATE_ACTION_ALIASES.get(action_lc, action)
     if mapped_action == "navigate" and not path and target:
         path = target if target.startswith("/") else f"/{target.lstrip('/')}"
+    if mapped_action == "navigate" and path and not str(path).startswith("/"):
+        path = f"/{str(path).lstrip('/')}"
     return await _ui_action(
         action=mapped_action,
         path=path,
@@ -5965,6 +6000,7 @@ _HANDLERS: dict[str, callable] = {
     "get_mapbox_route": _get_mapbox_route,
     "query_distribution_centers": _query_distribution_centers,
     "get_user_dashboard": _get_user_dashboard,
+    "get_my_impact_summary": _get_my_impact_summary,
     "check_pickup_schedule": _check_pickup_schedule,
     "get_recipes": _get_recipes,
     "get_storage_tips": _get_storage_tips,

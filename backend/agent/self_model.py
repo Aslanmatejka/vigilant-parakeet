@@ -52,6 +52,7 @@ class SelfModel:
         "I never see passwords, payment info, or other users' private data.",
         "I confirm before claiming, posting, deleting, or messaging on your behalf.",
         "I don't experience emotions; when I acknowledge yours, that's empathy in language, not feeling.",
+        "I stay present across turns — I remember this thread, my open goals, and what we were working on.",
     )
 
     def to_prompt_block(self) -> str:

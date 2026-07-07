@@ -29,6 +29,9 @@ from backend.agent.goals import (
     Goal,
     decompose_compound,
     extract_goals_heuristic,
+    load_active_goals,
+    merge_with_persisted,
+    persist_goals,
     prioritize_goals,
     replan_suggestion,
     update_status_from_reflection,
@@ -263,3 +266,125 @@ def test_goal_touch_updates_timestamp() -> None:
     time.sleep(0.001)
     g.touch()
     assert g.updated_at >= before
+
+
+# ============================================================================
+# 7. Persistence helpers
+# ============================================================================
+
+def test_goal_from_row_round_trip() -> None:
+    g = Goal(
+        id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        user_id=USER,
+        description="find vegan food",
+        intent="search",
+        priority="high",
+        notes=["retry later"],
+    )
+    row = g.to_row(source_turn_id="turn-1")
+    restored = Goal.from_row(row)
+    assert restored is not None
+    assert restored.id == g.id
+    assert restored.description == g.description
+    assert restored.notes == ["retry later"]
+
+
+def test_merge_with_persisted_resumes_active() -> None:
+    persisted = [
+        Goal(id="p1", user_id=USER, description="find bread", intent="search", status="open"),
+    ]
+    merged = merge_with_persisted(persisted, [])
+    assert len(merged) == 1
+    assert merged[0].id == "p1"
+
+
+def test_merge_with_persisted_marks_in_progress_on_same_intent() -> None:
+    persisted = [
+        Goal(id="p1", user_id=USER, description="find bread", intent="search", status="open"),
+    ]
+    extracted = [
+        Goal(id="e1", user_id=USER, description="find bread near me", intent="search"),
+    ]
+    merged = merge_with_persisted(persisted, extracted)
+    assert any(g.id == "p1" and g.status == "in_progress" for g in merged)
+    assert not any(g.id == "e1" for g in merged)
+
+
+def test_merge_with_persisted_appends_new_intent() -> None:
+    persisted = [
+        Goal(id="p1", user_id=USER, description="find bread", intent="search", status="open"),
+    ]
+    extracted = [
+        Goal(id="e1", user_id=USER, description="post my loaf", intent="donate"),
+    ]
+    merged = merge_with_persisted(persisted, extracted)
+    intents = {g.intent for g in merged}
+    assert "search" in intents
+    assert "donate" in intents
+
+
+def test_load_active_goals_nil_user() -> None:
+    import asyncio
+    assert asyncio.run(load_active_goals("")) == []
+    assert asyncio.run(load_active_goals("00000000-0000-0000-0000-000000000000")) == []
+
+
+def test_load_active_goals_from_supabase(monkeypatch) -> None:
+    import asyncio
+
+    async def _fake_get(table, params):
+        assert table == "agent_goals"
+        return [{
+            "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "user_id": USER,
+            "description": "claim the bread",
+            "intent": "claim",
+            "status": "open",
+            "priority": "normal",
+            "parent_goal_id": None,
+            "success_criteria": None,
+            "notes": [],
+            "created_at": "2026-07-04T00:00:00+00:00",
+            "updated_at": "2026-07-04T00:00:00+00:00",
+        }]
+
+    monkeypatch.setattr("backend.ai_engine.supabase_get", _fake_get)
+    goals = asyncio.run(load_active_goals(USER))
+    assert len(goals) == 1
+    assert goals[0].intent == "claim"
+
+
+def test_persist_goals_upserts(monkeypatch) -> None:
+    import asyncio
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"id": "g1"}]
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def post(self, url, *, params, json, headers):
+            assert "agent_goals" in url
+            assert params.get("on_conflict") == "id"
+            assert len(json) == 1
+            return _Resp()
+
+    monkeypatch.setattr("backend.ai_engine.SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setattr("backend.ai_engine.SUPABASE_SERVICE_KEY", "service-key")
+    monkeypatch.setattr("backend.ai_engine.SUPABASE_TIMEOUT", 5.0)
+
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _Client())
+
+    goal = Goal(id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", user_id=USER, description="donate bread")
+    written = asyncio.run(persist_goals(USER, [goal], turn_id="turn-99"))
+    assert written == 1
+

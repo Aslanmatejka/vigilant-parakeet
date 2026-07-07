@@ -704,11 +704,11 @@ function SponsorsPage() {
                       Start the conversation
                     </Link>
                     <a
-                      href="mailto:partners@dogoods.app"
+                      href="mailto:info@allgoodlivingfoundation.org"
                       className="inline-flex items-center gap-2 text-white/95 hover:text-white text-sm font-medium underline-offset-4 hover:underline transition"
                     >
                       <i className="fas fa-envelope" aria-hidden="true" />
-                      partners@dogoods.app
+                      info@allgoodlivingfoundation.org
                     </a>
                   </div>
                 </div>
