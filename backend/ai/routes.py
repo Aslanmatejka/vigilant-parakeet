@@ -450,28 +450,6 @@ async def ai_chat(
     lang = resolve_lang(request, body.message)
 
     try:
-        # #region agent log
-        import json as _json
-        import os as _os
-        from datetime import datetime as _dt, timezone as _tz
-        try:
-            _path = _os.path.join(
-                _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
-                "debug-d12b6b.log",
-            )
-            _payload = {
-                "sessionId": "d12b6b",
-                "hypothesisId": "A",
-                "location": "routes.py:ai_chat",
-                "message": "chat request tone",
-                "data": {"request_tone": body.tone, "user_id_prefix": str(body.user_id)[:8]},
-                "timestamp": int(_dt.now(_tz.utc).timestamp() * 1000),
-            }
-            with open(_path, "a", encoding="utf-8") as _f:
-                _f.write(_json.dumps(_payload, default=str) + "\n")
-        except Exception:
-            pass
-        # #endregion
         return await conversation_engine.chat(
             user_id=uid,
             message=body.message,

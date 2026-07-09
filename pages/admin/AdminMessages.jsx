@@ -128,19 +128,19 @@ function AdminMessages() {
         if (!newMessage.trim() || !selectedConversation?.id || sending) return;
 
         const messageText = newMessage.trim();
+        const tempMessage = {
+            id: 'temp-' + Date.now(),
+            conversation_id: selectedConversation.id,
+            message: messageText,
+            is_from_admin: true,
+            created_at: new Date().toISOString(),
+            read_at: null
+        };
 
         try {
             setSending(true);
 
             // Optimistic UI update - add message immediately
-            const tempMessage = {
-                id: 'temp-' + Date.now(),
-                conversation_id: selectedConversation.id,
-                message: messageText,
-                is_from_admin: true,
-                created_at: new Date().toISOString(),
-                read_at: null
-            };
             setMessages(prev => [...prev, tempMessage]);
             setNewMessage('');
 

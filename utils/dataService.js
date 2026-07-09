@@ -1,6 +1,5 @@
 import supabase, { SUPABASE_AUTH_KEY } from './supabaseClient.js'
 import { reportError } from './helpers.js'
-import communities from './communities.js'
 import { assignFoodImage } from './foodImages.js'
 import { geocodeAddress } from './geocoding.js'
 

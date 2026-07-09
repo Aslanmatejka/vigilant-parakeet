@@ -61,46 +61,45 @@ export const ADMIN_MENU_GROUPS = [
 export const ADMIN_MENU_FLAT = ADMIN_MENU_GROUPS.flatMap((g) => g.items);
 
 function AdminSidebar({ active, onNavigate, collapsed = false, onToggleCollapse, badges = {} }) {
-    try {
-        const [query, setQuery] = React.useState('');
-        const { user, signOut } = useAuthContext();
-        const searchInputRef = React.useRef(null);
+    const [query, setQuery] = React.useState('');
+    const { user, signOut } = useAuthContext();
+    const searchInputRef = React.useRef(null);
 
-        // Local search across menu items — admins can fly straight to a page.
-        const filteredGroups = React.useMemo(() => {
-            const q = query.trim().toLowerCase();
-            if (!q) return ADMIN_MENU_GROUPS;
-            return ADMIN_MENU_GROUPS
-                .map((g) => ({ ...g, items: g.items.filter((i) => i.label.toLowerCase().includes(q)) }))
-                .filter((g) => g.items.length > 0);
-        }, [query]);
+    // Local search across menu items — admins can fly straight to a page.
+    const filteredGroups = React.useMemo(() => {
+        const q = query.trim().toLowerCase();
+        if (!q) return ADMIN_MENU_GROUPS;
+        return ADMIN_MENU_GROUPS
+            .map((g) => ({ ...g, items: g.items.filter((i) => i.label.toLowerCase().includes(q)) }))
+            .filter((g) => g.items.length > 0);
+    }, [query]);
 
-        const handleKeyPress = (event, path) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault();
-                onNavigate(path);
-            }
-        };
+    const handleKeyPress = (event, path) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onNavigate(path);
+        }
+    };
 
-        const handleSignOut = async () => {
-            try {
-                await signOut?.();
-                onNavigate('/');
-            } catch (err) {
-                console.error('Sign-out failed:', err);
-                reportError(err);
-            }
-        };
+    const handleSignOut = async () => {
+        try {
+            await signOut?.();
+            onNavigate('/');
+        } catch (err) {
+            console.error('Sign-out failed:', err);
+            reportError(err);
+        }
+    };
 
-        const adminName = user?.name || user?.email?.split('@')[0] || 'Admin';
-        const adminInitials = adminName
-            .split(/[\s@.]+/)
-            .filter(Boolean)
-            .slice(0, 2)
-            .map((s) => s[0]?.toUpperCase())
-            .join('');
+    const adminName = user?.name || user?.email?.split('@')[0] || 'Admin';
+    const adminInitials = adminName
+        .split(/[\s@.]+/)
+        .filter(Boolean)
+        .slice(0, 2)
+        .map((s) => s[0]?.toUpperCase())
+        .join('');
 
-        return (
+    return (
             <div
                 data-name="admin-sidebar"
                 className="h-full flex flex-col bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 text-slate-200"
@@ -273,12 +272,7 @@ function AdminSidebar({ active, onNavigate, collapsed = false, onToggleCollapse,
                     </button>
                 </div>
             </div>
-        );
-    } catch (error) {
-        console.error('AdminSidebar error:', error);
-        reportError(error);
-        return null;
-    }
+    );
 }
 
 AdminSidebar.propTypes = {

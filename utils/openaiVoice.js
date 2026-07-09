@@ -11,7 +11,7 @@ import { throwAiHttpError } from './services/aiRequest.js'
  * @param {string} language - Language hint ('en' or 'es') — Whisper auto-detects
  * @returns {Promise<string>} - Transcribed text
  */
-export async function transcribeAudio(audioBlob, language = 'en') {
+export async function transcribeAudio(audioBlob, _language = 'en') {
   const formData = new FormData()
   formData.append('audio', audioBlob, 'audio.webm')
 

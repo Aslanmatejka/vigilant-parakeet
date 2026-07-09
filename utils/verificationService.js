@@ -45,7 +45,7 @@ class VerificationService {
       const filePath = `verification/${listingId}/${fileName}`;
 
       // Upload to Supabase Storage
-      const { data, error } = await supabase.storage
+      const { error } = await supabase.storage
         .from('food-images') // Reuse existing bucket or create 'verification-photos'
         .upload(filePath, file, {
           cacheControl: '3600',
@@ -96,7 +96,7 @@ class VerificationService {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('User not authenticated');
 
-      const { photos, notes, location } = verificationData;
+      const { photos, notes } = verificationData;
 
       // Upload photos if provided
       let photoUrls = [];
@@ -138,7 +138,7 @@ class VerificationService {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('User not authenticated');
 
-      const { photos, notes, location } = verificationData;
+      const { photos, notes } = verificationData;
 
       // Upload photos if provided
       let photoUrls = [];

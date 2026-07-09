@@ -50,28 +50,9 @@ def _utcnow() -> datetime:
     """
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
-# #region agent log
-_TONE_DEBUG_LOG = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "debug-d12b6b.log",
-)
-
 
 def _tone_debug_log(hypothesis_id: str, location: str, message: str, data: dict | None = None) -> None:
-    try:
-        payload = {
-            "sessionId": "d12b6b",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data or {},
-            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
-        }
-        with open(_TONE_DEBUG_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
-# #endregion
+    return
 
 # ---------------------------------------------------------------------------
 # Configuration

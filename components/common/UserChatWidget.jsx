@@ -104,19 +104,19 @@ function UserChatWidget() {
         }
 
         const messageText = newMessage.trim();
+        const tempMessage = {
+            id: 'temp-' + Date.now(),
+            conversation_id: conversation.id,
+            message: messageText,
+            is_from_admin: false,
+            created_at: new Date().toISOString(),
+            read_at: null
+        };
 
         try {
             setSending(true);
 
             // Optimistic UI update - add message immediately
-            const tempMessage = {
-                id: 'temp-' + Date.now(),
-                conversation_id: conversation.id,
-                message: messageText,
-                is_from_admin: false,
-                created_at: new Date().toISOString(),
-                read_at: null
-            };
             setMessages(prev => [...prev, tempMessage]);
             setNewMessage('');
 

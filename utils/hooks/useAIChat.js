@@ -188,9 +188,6 @@ export function useAIChat() {
   const setTone = useCallback(async (nextTone) => {
     const normalized = AI_TONE_OPTIONS.includes(nextTone) ? nextTone : DEFAULT_TONE
     setToneState(normalized)
-    // #region agent log
-    fetch('http://127.0.0.1:7559/ingest/72c771bc-152f-419f-89ff-a5ff31987947',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d12b6b'},body:JSON.stringify({sessionId:'d12b6b',hypothesisId:'D',location:'useAIChat.js:setTone',message:'tone changed in UI',data:{tone:normalized,hasUser:!!user?.id},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     if (user?.id && isAuthenticated) {
       try {
         await aiChatService.setTone(user.id, normalized)
@@ -294,9 +291,6 @@ export function useAIChat() {
     }
 
     try {
-      // #region agent log
-      fetch('http://127.0.0.1:7559/ingest/72c771bc-152f-419f-89ff-a5ff31987947',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d12b6b'},body:JSON.stringify({sessionId:'d12b6b',hypothesisId:'A',location:'useAIChat.js:runChatTurn',message:'sending chat with tone',data:{tone,textPrefix:text.trim().slice(0,40)},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       const result = await aiChatService.sendMessage(text.trim(), {
         userId: user.id,
         tone,

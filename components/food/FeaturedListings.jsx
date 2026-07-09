@@ -6,7 +6,7 @@ import { reportError } from '../../utils/helpers';
 function FeaturedListings({ 
     listings = [], 
     onClaim, 
-
+    onTrade,
     loading = false 
 }) {
     if (loading) {

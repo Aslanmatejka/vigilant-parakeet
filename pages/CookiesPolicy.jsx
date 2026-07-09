@@ -1,8 +1,7 @@
 import ErrorBoundary from "../components/common/ErrorBoundary";
 
 function CookiesPolicy() {
-    try {
-        return (
+    return (
             <ErrorBoundary>
                 <div className="min-h-screen bg-gradient-to-b from-[#2CABE3]/5 via-white to-emerald-50/40">
                     {/* Hero */}
@@ -157,24 +156,7 @@ function CookiesPolicy() {
                 </div>
                 </div>
             </ErrorBoundary>
-        );
-        
-    } catch (error) {
-        console.error('CookiesPolicy page error:', error);
-        return (
-            <div className="text-center py-8">
-                <i className="fas fa-exclamation-circle text-red-500 text-4xl mb-4"></i>
-                <h2 className="text-xl font-bold mb-2">Something went wrong</h2>
-                <p className="text-gray-600">We&apos;re sorry, but there was an error loading this page.</p>
-                <button
-                    onClick={() => window.location.reload()}
-                    className="mt-4 px-4 py-2 bg-primary-600 text-white rounded hover:bg-primary-700"
-                >
-                    Reload Page
-                </button>
-            </div>
-        );
-    }
+    );
 }
 
 export default CookiesPolicy;

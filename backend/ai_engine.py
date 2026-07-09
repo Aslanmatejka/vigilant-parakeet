@@ -3547,23 +3547,7 @@ def _debug_log_bf1680(
     hypothesis_id: str = "",
     run_id: str = "pre-fix",
 ) -> None:
-    # #region agent log
-    try:
-        log_path = os.path.join(_PROJECT_ROOT, "debug-bf1680.log")
-        entry = {
-            "sessionId": "bf1680",
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-            "hypothesisId": hypothesis_id,
-            "runId": run_id,
-        }
-        with open(log_path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry) + "\n")
-    except Exception:
-        pass
-    # #endregion
+    return
 
 
 def _annotate_no_results(fn_name: str, result: dict[str, Any]) -> dict[str, Any]:

@@ -1051,42 +1051,15 @@ async def execute_tool(name: str, arguments: dict) -> dict:
         pass
     try:
         result = await handler(**arguments)
-        # #region agent log
-        if name == "search_food_near_user":
-            import json as _json
-            import os as _os
-            from datetime import datetime as _dt, timezone as _tz
+        if name == "search_food_near_user" and isinstance(result, dict):
             try:
-                if isinstance(result, dict):
-                    from backend.ai.conversation_flow import set_last_search_listings
-                    listings = result.get("listings") or []
-                    uid = str(arguments.get("user_id") or "")
-                    if uid and listings:
-                        set_last_search_listings(uid, listings)
-                _path = _os.path.join(
-                    _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
-                    "debug-d12b6b.log",
-                )
-                _payload = {
-                    "sessionId": "d12b6b",
-                    "hypothesisId": "E",
-                    "location": "ai/tools.py:execute_tool",
-                    "message": "search_food_near_user returned",
-                    "data": {
-                        "total": result.get("total") if isinstance(result, dict) else None,
-                        "has_error": bool(isinstance(result, dict) and result.get("error")),
-                        "user_location_available": (
-                            result.get("user_location_available")
-                            if isinstance(result, dict) else None
-                        ),
-                    },
-                    "timestamp": int(_dt.now(_tz.utc).timestamp() * 1000),
-                }
-                with open(_path, "a", encoding="utf-8") as _f:
-                    _f.write(_json.dumps(_payload, default=str) + "\n")
+                from backend.ai.conversation_flow import set_last_search_listings
+                listings = result.get("listings") or []
+                uid = str(arguments.get("user_id") or "")
+                if uid and listings:
+                    set_last_search_listings(uid, listings)
             except Exception:
                 pass
-        # #endregion
         if name == "claim_listing" and isinstance(result, dict) and result.get("success"):
             try:
                 from backend.ai.conversation_flow import (

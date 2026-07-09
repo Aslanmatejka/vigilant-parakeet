@@ -6,7 +6,7 @@ export function useGeoLocation() {
     const [location, setLocation] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
-    const [watching, setWatching] = useState(false);
+    const [, setWatching] = useState(false);
     const watchingRef = useRef(false);
     // Stable per-instance callback reference so we can unsubscribe THIS
     // consumer on unmount without tearing down the shared watch out from
@@ -106,22 +106,21 @@ export function useGeoLocation() {
  */
 export function useEffectiveLocation() {
     const gps = useGeoLocation();
+    // Always call the hook unconditionally (Rules of Hooks). AuthContext
+    // should provide a stable default when used outside a provider.
+    const auth = useAuthContext() || {};
+    const user = auth.user;
     let profileCoords = null;
-    try {
-        const { user } = useAuthContext() || {};
-        const lat = user?.latitude;
-        const lng = user?.longitude;
-        if (typeof lat === 'number' && typeof lng === 'number') {
-            profileCoords = { latitude: lat, longitude: lng };
-        } else if (lat != null && lng != null) {
-            const nLat = Number(lat);
-            const nLng = Number(lng);
-            if (Number.isFinite(nLat) && Number.isFinite(nLng)) {
-                profileCoords = { latitude: nLat, longitude: nLng };
-            }
+    const lat = user?.latitude;
+    const lng = user?.longitude;
+    if (typeof lat === 'number' && typeof lng === 'number') {
+        profileCoords = { latitude: lat, longitude: lng };
+    } else if (lat != null && lng != null) {
+        const nLat = Number(lat);
+        const nLng = Number(lng);
+        if (Number.isFinite(nLat) && Number.isFinite(nLng)) {
+            profileCoords = { latitude: nLat, longitude: nLng };
         }
-    } catch (_) {
-        // Hook used outside AuthProvider — fall back to GPS only.
     }
 
     const effective = gps.location || profileCoords;

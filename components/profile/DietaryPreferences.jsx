@@ -177,7 +177,7 @@ function DietaryPreferences({
                                 } ${readOnly ? 'cursor-default opacity-70' : 'cursor-pointer'}`}
                             >
                                 <div className="text-2xl mb-1">{option.icon}</div>
-                                <div className="text-sm font-medium text-gray-900">{option.label.replace(/^[🥜🌰🥛🥚🫘🌾🦐🐟🌭🥬]\s/, '')}</div>
+                                <div className="text-sm font-medium text-gray-900">{option.label.replace(/^[🥜🌰🥛🥚🫘🌾🦐🐟🌭🥬]\s/u, '')}</div>
                                 {isSelected('allergies', option.value) && (
                                     <div className="mt-1">
                                         <svg className="w-4 h-4 text-red-600 mx-auto" fill="currentColor" viewBox="0 0 20 20">

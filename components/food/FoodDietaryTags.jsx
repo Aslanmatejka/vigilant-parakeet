@@ -33,6 +33,16 @@ function FoodDietaryTags({
         { value: 'low-sodium', label: '🧂 Low Sodium' }
     ];
 
+    // Hooks must run before any early return (Rules of Hooks).
+    React.useEffect(() => {
+        if (compact || !onChange) return;
+        onChange({
+            dietary_tags: dietaryTags,
+            allergens: allergens,
+            ingredients: ingredientsText
+        });
+    }, [compact, onChange, dietaryTags, allergens, ingredientsText]);
+
     // Compact display mode - only show selected tags/allergens
     if (compact) {
         const hasAnyInfo = displayTags.length > 0 || displayAllergens.length > 0 || displayIngredients;
@@ -73,16 +83,6 @@ function FoodDietaryTags({
             </div>
         );
     }
-
-    React.useEffect(() => {
-        if (onChange) {
-            onChange({
-                dietary_tags: dietaryTags,
-                allergens: allergens,
-                ingredients: ingredientsText
-            });
-        }
-    }, [dietaryTags, allergens, ingredientsText]);
 
     const toggleTag = (value) => {
         if (readOnly) return;
@@ -158,7 +158,7 @@ function FoodDietaryTags({
                             } ${readOnly ? 'cursor-default' : 'cursor-pointer'}`}
                         >
                             <span className="mr-1">{allergen.icon}</span>
-                            {allergen.label.replace(/^[🥜🌰🥛🥚🫘🌾🦐🐟🌭🥬]\s/, '')}
+                            {allergen.label.replace(/^[🥜🌰🥛🥚🫘🌾🦐🐟🌭🥬]\s/u, '')}
                         </button>
                     ))}
                 </div>
