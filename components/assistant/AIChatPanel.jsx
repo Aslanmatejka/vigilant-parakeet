@@ -11,6 +11,7 @@ import { parseListingsCsv, downloadCsvTemplate } from '../../utils/csvListings.j
 import { assignImagestoRows, assignFoodImage } from '../../utils/foodImages.js'
 import dataService from '../../utils/dataService.js'
 import supabase from '../../utils/supabaseClient.js'
+import { getLazyPreChips } from '../../utils/suggestionChips.js'
 import { toast } from 'react-toastify'
 
 // ─── Welcome hero categories (richer onboarding surface) ───────────
@@ -1974,6 +1975,27 @@ function AIChatPanel() {
     requestAnimationFrame(() => inputRef.current?.focus())
   }, [isLoading, sendMessage])
 
+  // Quick-suggestion chip rail above the input. Shows curated starter
+  // prompts only when the conversation would otherwise stall (no backend
+  // suggestions to render inside the last assistant bubble) so we don't
+  // duplicate the per-bubble chips or crowd the WelcomeHero.
+  const railChips = useMemo(() => {
+    if (messages.length <= 1) return []
+    if (isLoading || pendingUpload || voiceMode) return []
+    let lastAssistant = null
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.role === 'assistant' && !m.isError && m.id !== 'welcome') {
+        lastAssistant = m
+        break
+      }
+    }
+    if (lastAssistant?.requiresConfirmation) return []
+    const backendSuggestions = Array.isArray(lastAssistant?.suggestions) ? lastAssistant.suggestions : []
+    if (backendSuggestions.length > 0) return []
+    return getLazyPreChips(language)
+  }, [messages, isLoading, pendingUpload, voiceMode, language])
+
   // ─── File uploads (photo + CSV → bulk-listings) ───────
   // All three uploads require an authenticated user: the vision/enrichment
   // backend rejects anonymous calls, and the storage bucket policy needs a
@@ -3606,6 +3628,29 @@ function AIChatPanel() {
 
       {/* Input area */}
       <form onSubmit={handleSend} className="relative z-0 border-t border-[#2CABE3]/15 px-3 pt-2.5 pb-2 flex flex-col gap-1 flex-shrink-0 bg-white/60 backdrop-blur-md">
+        {/* Quick-suggestion chip rail — appears mid-conversation when the
+            backend didn't return per-turn suggestions, giving the user a
+            one-tap way to keep the conversation moving. */}
+        {railChips.length > 0 && (
+          <div
+            role="toolbar"
+            aria-label={language === 'es' ? 'Sugerencias rápidas' : 'Quick suggestions'}
+            className="flex gap-1.5 overflow-x-auto pb-1 nourish-scrollbar-h"
+          >
+            {railChips.map((chip) => (
+              <button
+                key={chip}
+                type="button"
+                onClick={() => handleQuickAction(chip)}
+                disabled={isLoading}
+                className="whitespace-nowrap flex-shrink-0 text-[11px] px-2.5 py-1 rounded-full border border-[#2CABE3]/25 bg-white/70 text-[#2299c7] hover:bg-[#2CABE3]/10 hover:border-[#2CABE3]/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {chip}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="flex items-end gap-2">
           {/* Attachments menu — collapses photo + CSV uploads behind a
               single "+" button (Slack/Messenger pattern) so the input bar
