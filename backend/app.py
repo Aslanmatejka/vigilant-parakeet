@@ -1,3950 +1,5161 @@
-"""
-DoGoods AI Backend — FastAPI Application
-==========================================
-Provides all AI-related HTTP endpoints:
-
-  POST /api/ai/chat            – Text conversation (returns text + optional audio URL)
-  GET  /api/ai/history/{uid}   – Retrieve conversation history
-  POST /api/ai/voice           – Transcribe audio (Whisper) then process as chat
-  POST /api/ai/tts             – Text-to-speech
-  POST /api/ai/feedback        – Submit feedback on AI message
-  GET  /health                 – Health check
-
-Background jobs (every 15 min): AI reminders, missed pickup alerts, expired listing cleanup.
-
-Run:
-    uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
-"""
-
-import asyncio
-import os
-import re
-import uuid
-import logging
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from base64 import b64encode
-from typing import Any, List, Literal, Optional
-
-import httpx
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, status, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-
-from backend.ai_engine import (
-    conversation_engine,
-    check_rate_limit,
-    check_user_rate_limit,
-    _circuit,
-    _upstream_metrics,
-    supabase_get,
-    supabase_post,
-    fetch_donor_listing_defaults,
-    apply_donor_defaults_to_listing,
-    SUPABASE_URL,
-    SUPABASE_SERVICE_KEY,
-    OPENAI_API_KEY,
-    AIError,
-    AIErrorCode,
-    classify_exception,
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey, Enum
+from sqlalchemy.orm import Session, relationship
+from sqlalchemy import text, func, case
+from pydantic import BaseModel
+from datetime import datetime, timedelta
+from functools import lru_cache
+from typing import Optional, List, Dict, Any
+from backend.aws_secrets import load_aws_secrets
+from dotenv import load_dotenv
+import hmac
+import jwt
+import json
+import os
+import secrets
+import string
+import subprocess
+from urllib.parse import quote
+from passlib.context import CryptContext
+from backend.email_service import (
+    send_reset_email,
+    send_verification_email as send_verification_email_message,
 )
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("app")
-
-# LangGraph agent is the sole chat orchestrator.
-# AGENT_V2 wraps v1 with reasoning trace, affect-aware register, typed actions, etc.
-# Gradual rollout is controlled by AGENT_V2_ROLLOUT_PCT (0-100, default 100).
-# See backend/agent/rollout.py.
-AGENT_V2 = os.getenv("AGENT_V2", "false").strip().lower() in ("true", "1", "yes", "on")
-
-logger.info("🤖 LangGraph agent is the sole chat orchestrator")
-from backend.agent import invoke_agent
-if AGENT_V2:
-    from backend.agent.rollout import rollout_percentage
-    logger.info(
-        "🧠 AGENT_V2 enabled — wrapping v1 graph with reasoning + safety + affect layers (rollout=%d%%)",
-        rollout_percentage(),
-    )
-    from backend.agent.v2_graph import invoke_agent_v2
-
-ALLOWED_ORIGINS = [
-    o.strip() for o in os.getenv(
-        "CORS_ORIGINS",
-        "http://localhost:3001,http://127.0.0.1:3001,https://dogoods.netlify.app,https://dogoods.store,https://www.dogoods.store"
-    ).split(",")
-]
-
-# Twilio configuration
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
-REMINDER_CHECK_INTERVAL = int(os.getenv("REMINDER_CHECK_INTERVAL", "900"))  # 15 min
-
-# Process-level lock so two overlapping scheduler ticks can't both iterate the
-# pending-reminders queue at once (the cross-process race is handled by the
-# atomic per-reminder claim in _claim_reminder).
-_reminder_job_lock = asyncio.Lock()
-
-
-# ---------------------------------------------------------------------------
-# Twilio SMS helper
-# ---------------------------------------------------------------------------
-
-async def send_sms_via_twilio(to_phone: str, message: str) -> dict:
-    """Send an SMS using the Twilio REST API and log it to sms_logs."""
-    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
-        logger.warning("Twilio not configured — skipping SMS to %s", to_phone)
-        return {"sent": False, "error": "Twilio not configured"}
-
-    url = (
-        f"https://api.twilio.com/2010-04-01/Accounts/"
-        f"{TWILIO_ACCOUNT_SID}/Messages.json"
-    )
-    auth_str = b64encode(
-        f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}".encode()
-    ).decode()
-
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                url,
-                data={
-                    "To": to_phone,
-                    "From": TWILIO_PHONE_NUMBER,
-                    "Body": message[:1600],  # Twilio SMS limit
-                },
-                headers={"Authorization": f"Basic {auth_str}"},
-            )
-            # Twilio normally returns JSON, but on infra errors it may return HTML.
-            # Guard against JSONDecodeError so we always return a structured result.
-            try:
-                resp_data = resp.json()
-            except Exception:
-                resp_data = {}
-
-        twilio_sid = resp_data.get("sid", "")
-        error_msg = resp_data.get("error_message")
-        sent_ok = resp.status_code in (200, 201) and not error_msg
-
-        # Log to sms_logs table
-        try:
-            await supabase_post("sms_logs", {
-                "phone_number": to_phone,
-                "message": message[:1600],
-                "type": "reminder",
-                "status": "sent" if sent_ok else "failed",
-                "twilio_sid": twilio_sid,
-                "error_message": error_msg,
-            })
-        except Exception as log_exc:
-            logger.error("Failed to log SMS: %s", log_exc)
-
-        if sent_ok:
-            logger.info("SMS sent to %s (sid=%s)", to_phone, twilio_sid)
-            return {"sent": True, "twilio_sid": twilio_sid}
-        else:
-            logger.error("Twilio error: %s", error_msg or resp.text[:200])
-            return {"sent": False, "error": error_msg or "Twilio request failed"}
-
-    except Exception as exc:
-        logger.error("SMS send failed: %s", exc)
-        return {"sent": False, "error": str(exc)}
-
-
-# ---------------------------------------------------------------------------
-# Background job: process pending reminders every 15 minutes
-# ---------------------------------------------------------------------------
-
-async def process_pending_reminders() -> int:
-    """Find due reminders, look up user phone, send SMS, mark as sent.
-
-    Returns the number of reminders processed.
-
-    Race-safety: each reminder is atomically *claimed* before any SMS is
-    sent, using the `sent` flag as a compare-and-swap lock. The claim is a
-    conditional PATCH (id == rid AND sent == false → sent = true). Only the
-    worker whose PATCH actually returns a row owns the reminder; everyone
-    else skips it. Combined with the process-level lock this guarantees a
-    reminder is sent at most once even if the scheduler overlaps runs or
-    multiple replicas are deployed.
-    """
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        return 0
-
-    # Prevent two overlapping invocations in THIS process from racing each
-    # other (the cross-replica race is handled by the atomic claim below).
-    if _reminder_job_lock.locked():
-        logger.info("Reminder job already running — skipping overlapping run")
-        return 0
-
-    async with _reminder_job_lock:
-        return await _process_pending_reminders_locked()
-
-
-async def _claim_reminder(rid: str) -> bool:
-    """Atomically claim a reminder. Returns True only if THIS call won it.
-
-    Conditional update: only flips `sent` false → true. PostgREST returns the
-    updated rows; an empty list means another worker already claimed it.
-    """
-    headers = {
-        "apikey": SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.patch(
-                f"{SUPABASE_URL}/rest/v1/ai_reminders",
-                params={"id": f"eq.{rid}", "sent": "eq.false"},
-                json={
-                    "sent": True,
-                    "sent_at": datetime.now(timezone.utc).isoformat(),
-                },
-                headers=headers,
-            )
-        if resp.status_code not in (200, 204):
-            logger.warning(
-                "Reminder claim for %s returned HTTP %s", rid, resp.status_code
-            )
-            return False
-        try:
-            rows = resp.json()
-        except Exception:
-            rows = None
-        # With return=representation, a successful claim returns the row(s).
-        # Empty list → already claimed by someone else.
-        if isinstance(rows, list):
-            return len(rows) > 0
-        # Some PostgREST configs return 204/no body; treat 200 as success.
-        return resp.status_code == 200
-    except Exception as exc:
-        logger.error("Failed to claim reminder %s: %s", rid, exc)
-        return False
-
-
-async def _process_pending_reminders_locked() -> int:
-    now_iso = datetime.now(timezone.utc).isoformat()
-    processed = 0
-
-    try:
-        # Fetch due, unsent reminders
-        reminders = await supabase_get("ai_reminders", {
-            "sent": "eq.false",
-            "trigger_time": f"lte.{now_iso}",
-            "select": "id,user_id,message,reminder_type,trigger_time",
-            "order": "trigger_time.asc",
-            "limit": "50",
-        })
-    except Exception as exc:
-        logger.error("Reminder fetch failed: %s", exc)
-        return 0
-
-    for reminder in reminders:
-        rid = reminder.get("id")
-        uid = reminder.get("user_id")
-        msg = reminder.get("message", "")
-        rtype = reminder.get("reminder_type", "general")
-
-        if not rid:
-            continue
-
-        # Atomically claim BEFORE sending. If we don't win the claim, another
-        # worker is handling this reminder — skip to avoid a double SMS.
-        if not await _claim_reminder(rid):
-            logger.info("Reminder %s already claimed elsewhere — skipping", rid)
-            continue
-
-        # Look up user phone
-        phone = None
-        try:
-            user_rows = await supabase_get("users", {
-                "id": f"eq.{uid}",
-                "select": "phone,name,sms_opt_in,sms_notifications_enabled",
-            })
-            if user_rows:
-                user = user_rows[0]
-                # Only send if user has opted in to SMS
-                if user.get("sms_opt_in") or user.get("sms_notifications_enabled"):
-                    phone = user.get("phone")
-        except Exception as exc:
-            logger.error("User phone lookup for reminder %s failed: %s", rid, exc)
-
-        # Send SMS if phone available. The reminder is already marked sent
-        # (claimed), so it will not be re-processed regardless of SMS outcome.
-        if phone:
-            prefix = {
-                "pickup": "🍎 Pickup Reminder",
-                "listing_expiry": "⏰ Listing Expiry",
-                "distribution_event": "📍 Event Reminder",
-                "general": "📋 Reminder",
-            }.get(rtype, "📋 Reminder")
-            sms_body = f"[DoGoods] {prefix}: {msg}"
-            try:
-                await send_sms_via_twilio(phone, sms_body)
-            except Exception as exc:
-                logger.error("SMS send for reminder %s failed: %s", rid, exc)
-        else:
-            logger.info(
-                "No phone/SMS opt-in for user %s, reminder %s claimed without SMS",
-                uid, rid,
-            )
-
-        processed += 1
-
-    if processed:
-        logger.info("Processed %d reminder(s)", processed)
-    return processed
-
-
-# ---------------------------------------------------------------------------
-# Background job: notify users who forgot to pick up claimed food
-# ---------------------------------------------------------------------------
-
-PICKUP_GRACE_HOURS = int(os.getenv("PICKUP_GRACE_HOURS", "6"))
-
-async def check_missed_pickups() -> int:
-    """Find approved claims with pickup_date in the past and notify users.
-
-    Only notifies once per claim by checking the notifications table
-    for an existing 'missed_pickup' notification with the claim ID.
-    Returns the number of notifications sent.
-    """
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        return 0
-
-    from datetime import timedelta
-
-    # Use a strict less-than on today's date so same-day pickups are NEVER
-    # flagged as missed before the day ends. `pickup_date` is a date-only
-    # column, so hour-level grace (PICKUP_GRACE_HOURS) cannot be expressed
-    # in a date comparison — the only safe boundary is midnight (start of
-    # today). Pickups from strictly before today are overdue; today's
-    # pickups are still in progress regardless of the current time.
-    today_iso = datetime.now(timezone.utc).date().isoformat()
-
-    headers = {
-        "apikey": SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation",
-    }
-
-    # Find approved claims where pickup_date has passed
-    try:
-        overdue_claims = await supabase_get("food_claims", {
-            "status": "eq.approved",
-            "pickup_date": f"lt.{today_iso}",
-            "select": "id,claimer_id,food_id,pickup_date",
-            "limit": "50",
-        })
-    except Exception as exc:
-        logger.error("Missed pickup check — claims fetch failed: %s", exc)
-        return 0
-
-    if not overdue_claims:
-        return 0
-
-    notified = 0
-    for claim in overdue_claims:
-        claim_id = claim.get("id")
-        claimer_id = claim.get("claimer_id")
-        food_id = claim.get("food_id")
-        pickup_date = claim.get("pickup_date", "")
-
-        if not claimer_id or not claim_id:
-            continue
-
-        # Check if we already notified for this claim
-        try:
-            existing = await supabase_get("notifications", {
-                "user_id": f"eq.{claimer_id}",
-                "type": "eq.alert",
-                "data->>claim_id": f"eq.{claim_id}",
-                "select": "id",
-                "limit": "1",
-            })
-            if existing:
-                continue  # Already notified
-        except Exception:
-            pass  # If check fails, send anyway to be safe
-
-        # Look up food title
-        food_title = "your claimed food"
-        try:
-            food_rows = await supabase_get("food_listings", {
-                "id": f"eq.{food_id}",
-                "select": "title",
-            })
-            if food_rows:
-                food_title = food_rows[0].get("title", food_title)
-        except Exception:
-            pass
-
-        # Send in-app notification
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(
-                    f"{SUPABASE_URL}/rest/v1/notifications",
-                    json={
-                        "user_id": claimer_id,
-                        "title": "Pickup Reminder",
-                        "message": (
-                            f"It looks like you haven't picked up \"{food_title}\" yet "
-                            f"(scheduled for {pickup_date}). Please pick it up soon "
-                            f"or cancel the claim so others can benefit!"
-                        ),
-                        "type": "alert",
-                        "read": False,
-                        "data": {"claim_id": claim_id, "food_id": food_id},
-                    },
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                notified += 1
-                logger.info(
-                    "Missed pickup notification sent: claim=%s user=%s food=%s",
-                    claim_id, claimer_id, food_title,
-                )
-        except Exception as exc:
-            logger.error(
-                "Failed to notify missed pickup claim=%s: %s", claim_id, exc
-            )
-
-    if notified:
-        logger.info("Sent %d missed-pickup notification(s)", notified)
-    return notified
-
-
-# ---------------------------------------------------------------------------
-# Background job: mark expired listings and delete old expired ones
-# ---------------------------------------------------------------------------
-
-async def delete_expired_listings() -> dict[str, int]:
-    """Mark listings with past expiry_date as expired, then hard-delete very old ones.
-
-    Returns dict with counts: {'marked': N, 'deleted': M}
-    
-    Two-phase cleanup:
-    1. Mark as 'expired' if expiry_date < today AND status is active/approved
-    2. Hard delete if status='expired' AND expiry_date was > 7 days ago
-    """
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        return {"marked": 0, "deleted": 0}
-
-    from datetime import date, timedelta
-
-    today_iso = date.today().isoformat()
-    delete_cutoff = (date.today() - timedelta(days=7)).isoformat()
-    
-    headers = {
-        "apikey": SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
-
-    marked = 0
-    deleted = 0
-
-    try:
-        # Phase 1: Mark as expired (active/approved listings with past expiry_date)
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Find candidates to mark as expired
-            mark_url = (
-                f"{SUPABASE_URL}/rest/v1/food_listings?"
-                f"expiry_date=lt.{today_iso}&"
-                f"status=in.(active,approved)&"
-                f"select=id,title,expiry_date"
-            )
-            resp = await client.get(mark_url, headers=headers)
-            resp.raise_for_status()
-            to_mark = resp.json()
-
-            if to_mark:
-                # Batch update to 'expired' status
-                mark_ids = [item["id"] for item in to_mark]
-                update_url = f"{SUPABASE_URL}/rest/v1/food_listings?id=in.({','.join(mark_ids)})"
-                update_resp = await client.patch(
-                    update_url,
-                    json={"status": "expired"},
-                    headers=headers
-                )
-                update_resp.raise_for_status()
-                marked = len(to_mark)
-                logger.info(
-                    "Marked %d listing(s) as expired (expiry_date < %s)",
-                    marked, today_iso
-                )
-
-            # Phase 2: Hard delete old expired listings (expiry_date > 7 days ago)
-            delete_url = (
-                f"{SUPABASE_URL}/rest/v1/food_listings?"
-                f"status=eq.expired&"
-                f"expiry_date=lt.{delete_cutoff}&"
-                f"select=id,title"
-            )
-            delete_resp = await client.get(delete_url, headers=headers)
-            delete_resp.raise_for_status()
-            to_delete = delete_resp.json()
-
-            if to_delete:
-                delete_ids = [item["id"] for item in to_delete]
-                hard_delete_url = f"{SUPABASE_URL}/rest/v1/food_listings?id=in.({','.join(delete_ids)})"
-                final_resp = await client.delete(hard_delete_url, headers=headers)
-                final_resp.raise_for_status()
-                deleted = len(to_delete)
-                logger.info(
-                    "Hard-deleted %d listing(s) (expiry_date > 7 days ago)",
-                    deleted
-                )
-
-    except Exception as exc:
-        logger.error("Expired listing cleanup failed: %s", exc)
-
-    return {"marked": marked, "deleted": deleted}
-
-
-async def _reminder_loop() -> None:
-    """Background loop: reminders + missed pickup checks with backoff on errors."""
-    logger.info(
-        "Background job started (interval=%ds)", REMINDER_CHECK_INTERVAL
-    )
-    consecutive_failures = 0
-    while True:
-        try:
-            await process_pending_reminders()
-            consecutive_failures = 0  # Reset on success
-        except Exception as exc:
-            consecutive_failures += 1
-            logger.error("Reminder loop error (fail #%d): %s", consecutive_failures, exc)
-        try:
-            await check_missed_pickups()
-        except Exception as exc:
-            logger.error("Missed pickup check error: %s", exc)
-        try:
-            await delete_expired_listings()
-        except Exception as exc:
-            logger.error("Expired listing cleanup error: %s", exc)
-
-        # Exponential backoff on repeated failures (up to 1 hour)
-        if consecutive_failures > 0:
-            backoff = min(REMINDER_CHECK_INTERVAL * (2 ** consecutive_failures), 3600)
-            logger.warning("Backing off reminder loop for %ds", backoff)
-            await asyncio.sleep(backoff)
-        else:
-            await asyncio.sleep(REMINDER_CHECK_INTERVAL)
-
-
-# ---------------------------------------------------------------------------
-# FastAPI lifespan (starts/stops background tasks)
-# ---------------------------------------------------------------------------
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup: launch background reminder job
-    task = asyncio.create_task(_reminder_loop())
-    logger.info("Background reminder job scheduled")
-    # Surface the training-data version so rolling deploys can be told apart
-    # in logs when two pods disagree on prompt content.
-    try:
-        from backend.ai_engine import _load_training_data
-        _td = _load_training_data()
-        logger.info(
-            "Training data loaded: version=%s updated_at=%s sections=%d",
-            _td.get("version", "<missing>"),
-            _td.get("updated_at", "<missing>"),
-            sum(1 for k in (
-                "platform_overview", "user_roles", "processes", "food_safety",
-                "privacy_rules", "capabilities", "tone_guidelines", "spanish_guidelines",
-            ) if k in _td),
-        )
-    except Exception as exc:  # never block startup on logging
-        logger.warning("Could not log training-data version: %s", exc)
-    yield
-    # Shutdown: cancel background task and close shared HTTP client
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        logger.info("Background reminder job stopped")
-    # Close shared httpx client to release connections gracefully
-    from backend.ai_engine import _http_client
-    if _http_client and not _http_client.is_closed:
-        await _http_client.aclose()
-        logger.info("Shared HTTP client closed")
-
-
-# ---------------------------------------------------------------------------
-# FastAPI app
-# ---------------------------------------------------------------------------
-
-app = FastAPI(
-    title="DoGoods AI Backend",
-    version="2.0.0",
-    description="AI conversation engine + food matching + community tools",
-    lifespan=lifespan,
+from backend.schemas import (
+    FoodResourceResponse,
+    DistributionCenterCreate,
+    DistributionCenterResponse,
+    DistributionCenterWithInventory,
+    CenterInventoryResponse,
+    UserRegisterRequest,
+    UserLoginRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
 )
+from backend.models import (
+    Base, FoodResource, User, UserRole, FoodCategory, PerishabilityLevel,
+    DistributionCenter, CenterInventory, Message, DonationSchedule, 
+    DonationReminder, RecurrenceFrequency, ReminderStatus, Feedback,
+    FeedbackType, FeedbackStatus, SafetyReport, ReportType, ReportStatus,
+    PickupReminder, PickupReminderStatus, FavoriteLocation
+)
+# Register AI models on the shared Base so create_all() picks them up
+from backend.ai import models as ai_models  # noqa: F401
+from threading import Timer, Lock
+from twilio.rest import Client
+from backend.db import engine, SessionLocal, get_db
+
+pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
+
+# Helper function to generate unique referral codes
+def generate_referral_code():
+    """Generate a unique 8-character referral code"""
+    alphabet = string.ascii_uppercase + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(8))
+
+app = FastAPI(title="DoGoods Agentic API", version="1.0.0")
+load_aws_secrets()
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+
+# Serve static files at root paths for legacy HTML compatibility
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# Static files will be mounted at the end of the file, after all routes
+security = HTTPBearer()
+# Optional bearer for endpoints where auth is not required but can tailor results
+optional_security = HTTPBearer(auto_error=False)
+
+# Twilio SMS configuration
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")  # Default Twilio number
+
+
+
+
+# CORS middleware — read allowlist from CORS_ORIGINS env (comma-separated).
+# The wildcard `*` used to be hard-coded here even though the env was
+# already documented and populated, so every browser could hit the API
+# from any origin. Now we default to a locked-down set of local origins
+# and require ops to opt in to real production hostnames.
+_cors_env = os.getenv("CORS_ORIGINS", "").strip()
+if _cors_env == "*":
+    # Explicit opt-in wildcard, still incompatible with credentials.
+    _cors_origins: list[str] = ["*"]
+    _cors_credentials = False
+else:
+    _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] or [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+    ]
+    _cors_credentials = True
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
-    # Expose so the browser can read it from JS — without this the
-    # X-Request-ID we attach below is invisible to fetch() callers.
-    expose_headers=["X-Request-ID", "Retry-After"],
 )
 
 
-# ---------------------------------------------------------------------------
-# Request ID middleware
-#
-# Every request gets a UUID that's:
-#   • attached to `request.state.request_id` for downstream handlers/log lines
-#   • echoed back in the X-Request-ID response header
-#   • included in any AIError JSON body
-#
-# Lets us correlate a user-reported "AI failed" with backend logs without
-# guesswork. Honors an inbound X-Request-ID so traces survive a frontend
-# correlation header if/when we add one.
-# ---------------------------------------------------------------------------
+@app.exception_handler(HTTPException)
+async def secure_http_exception_handler(request: Request, exc: HTTPException):
+    """Avoid leaking internal server details through HTTP 500 responses.
+
+    :class:`~backend.ai.errors.AIError` subclasses ship a structured
+    ``detail`` dict (``error_code`` / ``message`` / ``retryable`` / ``lang``);
+    keep that payload intact — it is safe user-facing content, not a raw
+    exception message. Generic 5xx exceptions still get their detail
+    scrubbed to prevent leaking stack traces or DB messages.
+    """
+    from backend.ai.errors import AIError  # local import: avoid cycles at boot
+    if isinstance(exc, AIError) and isinstance(exc.detail, dict):
+        body: dict = dict(exc.detail)
+        return JSONResponse(status_code=exc.status_code, content=body)
+    if exc.status_code >= 500:
+        return JSONResponse(status_code=exc.status_code, content={"detail": "Internal server error"})
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
 
 @app.middleware("http")
-async def request_id_middleware(request: Request, call_next):
-    rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex
-    request.state.request_id = rid
-    try:
-        response = await call_next(request)
-    except Exception:
-        # Re-raise — the AIError handler below will see request.state.request_id
-        raise
-    response.headers["X-Request-ID"] = rid
-    return response
+async def add_cache_control_headers(request: Request, call_next):
+    """Avoid stale frontend assets requiring hard refreshes in development and production."""
+    path = request.url.path
+    relative_path = path.lstrip("/")
+    # /uploads serves user-generated content (chat photos, listing images).
+    # The directory is gitignored on purpose, but it MUST still be reachable
+    # over HTTP — otherwise listing photos and AI chat attachments 404.
+    is_uploads_asset = relative_path.startswith("uploads/") or relative_path == "uploads"
+    if relative_path and not is_uploads_asset and (
+        any(part.startswith(".") for part in relative_path.split("/") if part)
+        or _is_gitignored_path(relative_path)
+    ):
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
+    response = await call_next(request)
 
-def _request_id(request: Request) -> str:
-    return getattr(request.state, "request_id", "") if hasattr(request, "state") else ""
-
-
-# ---------------------------------------------------------------------------
-# AIError exception handler — always emits a consistent JSON body.
-# The frontend uses `error_code` to decide whether to show a Retry button,
-# rate-limit countdown, etc.
-# ---------------------------------------------------------------------------
-
-@app.exception_handler(AIError)
-async def ai_error_handler(request: Request, exc: AIError) -> JSONResponse:
-    rid = _request_id(request)
-    if exc.cause:
-        logger.warning(
-            "[%s] AIError %s (%s) | cause=%s",
-            rid, exc.code.value, exc.http_status, exc.cause,
-        )
-    else:
-        logger.warning(
-            "[%s] AIError %s (%s) | %s",
-            rid, exc.code.value, exc.http_status, exc.message,
-        )
-    body = exc.to_dict()
-    body["request_id"] = rid
-    # Keep `detail` for clients that look for FastAPI's conventional field.
-    body["detail"] = exc.message
-    headers = {"X-Request-ID": rid}
-    if exc.retry_after_seconds is not None:
-        headers["Retry-After"] = str(exc.retry_after_seconds)
-    return JSONResponse(status_code=exc.http_status, content=body, headers=headers)
-
-
-# Also wrap plain HTTPExceptions raised by validation/rate-limit so the
-# frontend gets the same shape (request_id, error_code) for every failure.
-@app.exception_handler(HTTPException)
-async def http_exception_to_ai_error(request: Request, exc: HTTPException) -> JSONResponse:
-    rid = _request_id(request)
-    # Pick the closest AIErrorCode for the status — keeps the contract uniform.
-    if exc.status_code == 429:
-        code = AIErrorCode.RATE_LIMIT
-        retryable = True
-        retry_after = 30
-    elif exc.status_code in (401, 403):
-        code = AIErrorCode.AUTH
-        retryable = False
-        retry_after = None
-    elif 400 <= exc.status_code < 500:
-        code = AIErrorCode.INVALID_INPUT
-        retryable = False
-        retry_after = None
-    elif exc.status_code == 504:
-        code = AIErrorCode.TIMEOUT
-        retryable = True
-        retry_after = 5
-    elif exc.status_code >= 500:
-        code = AIErrorCode.MODEL_UNAVAILABLE
-        retryable = True
-        retry_after = 8
-    else:
-        # 2xx/3xx HTTPException? unusual, but fall back to default handler.
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": exc.detail, "request_id": rid},
-            headers={"X-Request-ID": rid},
-        )
-    body = {
-        "error_code": code.value,
-        "message": str(exc.detail) if exc.detail else code.value,
-        "retryable": retryable,
-        "detail": exc.detail,
-        "request_id": rid,
-    }
-    if retry_after is not None:
-        body["retry_after_seconds"] = retry_after
-    headers = {"X-Request-ID": rid}
-    if retry_after is not None:
-        headers["Retry-After"] = str(retry_after)
-    return JSONResponse(status_code=exc.status_code, content=body, headers=headers)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _get_client_ip(request: Request) -> str:
-    # Behind a reverse proxy (Railway/Netlify/Nginx) request.client.host is the
-    # proxy IP, which would collapse all users into a single rate-limit bucket.
-    # Honour X-Forwarded-For (first hop = original client) when present.
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[0].strip()
-    real_ip = request.headers.get("x-real-ip", "")
-    if real_ip:
-        return real_ip.strip()
-    return request.client.host if request.client else "unknown"
-
-
-def _enforce_rate_limit(request: Request) -> None:
-    if not check_rate_limit(_get_client_ip(request)):
-        raise HTTPException(429, "Rate limit exceeded. Try again later.")
-
-
-_NIL_UUID = "00000000-0000-0000-0000-000000000000"
-
-
-def _enforce_user_rate_limit(user_id: str) -> None:
-    if user_id and user_id != _NIL_UUID and not check_user_rate_limit(user_id):
-        raise HTTPException(429, "You're sending requests too quickly. Slow down a bit.")
-
-
-async def _require_auth_for_user(request: Request, user_id: str) -> str | None:
-    """Auth gate for user-scoped AI routes.
-
-    — Anonymous chat (nil-UUID) is allowed without an Authorization header,
-      so the landing-page assistant keeps working.
-    — Any real user_id MUST present a matching JWT. We refuse to write
-      under (or read from) someone else's identity.
-    """
-    auth_uid = await _authenticate_request(request)
-    if user_id and user_id != _NIL_UUID:
-        if not auth_uid:
-            raise HTTPException(401, "Authentication required")
-        if auth_uid != user_id:
-            raise HTTPException(403, "user_id does not match authenticated user")
-    return auth_uid
-
-
-import re as _re
-
-_UUID_RE = _re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", _re.I
-)
-
-
-def _validate_uuid(value: str, field: str = "user_id") -> str:
-    """Validate that a string is a proper UUID v4 format."""
-    if not _UUID_RE.match(value):
-        raise HTTPException(400, f"Invalid {field}: must be a valid UUID")
-    return value
-
-
-async def _authenticate_request(request: Request) -> str | None:
-    """Validate the Supabase JWT from the Authorization header.
-
-    Returns the authenticated user_id, or None if no auth header is present.
-    In development (no SUPABASE_URL), auth is skipped for convenience.
-    """
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return None  # No token — caller may be unauthenticated
-
-    token = auth_header[7:]
-    if not SUPABASE_URL:
-        return None  # Can't validate without Supabase
-
-    try:
-        from backend.ai_engine import _get_http_client
-        client = _get_http_client(5)
-        resp = await client.get(
-            f"{SUPABASE_URL}/auth/v1/user",
-            headers={
-                "apikey": SUPABASE_SERVICE_KEY,
-                "Authorization": f"Bearer {token}",
-            },
-            timeout=5,
-        )
-        if resp.status_code == 200:
-            user_data = resp.json()
-            return user_data.get("id")
-        return None
-    except Exception as exc:
-        logger.warning("Auth validation failed: %s", exc)
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Pydantic models — AI conversation endpoints
-# ---------------------------------------------------------------------------
-
-class AIChatRequest(BaseModel):
-    user_id: str = Field(min_length=1, max_length=128)
-    message: str = Field(min_length=1, max_length=5000)
-    include_audio: bool = False
-    # True when the message is an internal context push (e.g. after a
-    # successful photo/CSV bulk upload) and should NOT appear in the user's
-    # chat history. The assistant's reply is still persisted normally.
-    silent: bool = False
-    # Optional thread id from a prior assistant row; when omitted the agent
-    # generates one and returns it on the response for the next turn.
-    conversation_id: str | None = None
-
-
-class AIChatResponse(BaseModel):
-    text: str
-    audio_url: str | None = None
-    user_id: str
-    lang: str = "en"
-    conversation_id: str | None = None
-    transcript: str | None = None
-    tool_results: list[dict] = []
-    suggestions: list[str | dict[str, Any]] = []
-    next_step: dict[str, str] | None = None
-    timestamp: str
-    # ---- AGENT_V2 optional fields (omitted on v1 responses) ----
-    pending_action: dict[str, Any] | None = None  # {pending_id, tool, summary, args, expires_at}
-    refusal: dict[str, Any] | None = None         # {code, severity} when InputGuard blocked
-    affect: dict[str, Any] | None = None          # classified user affect (debug)
-    reasoning_trace: list[dict[str, Any]] | None = None  # ReAct trace (Phase 1)
-    confidence: float | None = None               # final-step confidence
-    reflection: dict[str, Any] | None = None      # outcome grade (Phase 1)
-    goals: list[dict[str, Any]] | None = None     # goal stack snapshot (Phase 2)
-    next_step_hint: str | None = None             # replan suggestion (Phase 2)
-    memories: list[dict[str, Any]] | None = None  # retrieved long-term memory (Phase 3)
-    world_model: dict[str, Any] | None = None     # per-user world snapshot (Phase 3)
-    new_memories: list[dict[str, Any]] | None = None  # facts persisted this turn (Phase 3)
-    privacy_disclosure: str | None = None         # first-write disclosure (Phase 3)
-    self_eval: dict[str, Any] | None = None       # metacognitive self-eval (Phase 7)
-    pushback_detected: bool | None = None         # user disagreed (Phase 7)
-    retried: bool | None = None                   # self-refine retry fired (Phase 7)
-    original_response: str | None = None          # pre-refine draft (Phase 7)
-    original_self_eval: dict[str, Any] | None = None  # eval of pre-refine draft (Phase 7)
-    user_style: dict[str, Any] | None = None      # per-user style snapshot (Phase 6)
-    few_shot_examples: list[dict[str, Any]] | None = None  # similar past trajectories (Phase 6)
-    reward: float | None = None                   # turn reward in [-1, 1] (Phase 6)
-    brainstorm_used: bool | None = None           # brainstorm short-circuit fired (Phase 5)
-    brainstorm_ideas: list[str] | None = None     # generated ideas (Phase 5)
-    curiosity_followup: str | None = None         # appended follow-up question (Phase 5)
-    procedural_hint: str | None = None            # learned (intent, action) hint (Phase 6 mid)
-    procedural_rule: dict[str, Any] | None = None # full procedural rule record (Phase 6 mid)
-    antipattern_hint: str | None = None           # learned avoid-hint (Phase 6 ext)
-    antipattern_rule: dict[str, Any] | None = None# full anti-pattern rule record (Phase 6 ext)
-    confirmation_recommended: bool | None = None  # policy says a write should be confirmed (Phase 4 mid)
-    confirmation_decisions: list[dict[str, Any]] | None = None  # per-tool verdicts (Phase 4 mid)
-    intent_confirmation_decision: dict[str, Any] | None = None  # intent-level verdict (Phase 4 mid)
-    confirmation_summary: str | None = None       # one-line user-facing summary (Phase 4 mid)
-    agent_v2: bool | None = None
-    turn_id: str | None = None
-    register: dict[str, Any] | None = None        # communication register (tone/verbosity)
-    self_model: dict[str, Any] | None = None      # grounded capability snapshot
-    persona_check: dict[str, Any] | None = None   # PersonaGuard result
-    tool_audit: list[dict[str, Any]] | None = None
-    blocked_listings: list[dict[str, Any]] | None = None
-
-
-class ConfirmActionRequest(BaseModel):
-    pending_id: str = Field(min_length=1, max_length=64)
-    decision: Literal["confirm", "cancel"] = "confirm"
-
-
-class ConfirmActionResponse(BaseModel):
-    status: str                     # committed | cancelled | failed | expired
-    tool: str | None = None
-    summary: str | None = None
-    audit_id: str | None = None
-    error: str | None = None
-
-
-class RollbackActionRequest(BaseModel):
-    audit_id: str = Field(min_length=1, max_length=64)
-
-
-class RollbackActionResponse(BaseModel):
-    status: str                     # rolled_back | failed | not_found
-    audit_id: str | None = None
-    error: str | None = None
-
-
-class ConversationMessage(BaseModel):
-    role: str
-    message: str
-    created_at: str
-
-
-# ===================================================================
-#  AI CONVERSATION ROUTES
-# ===================================================================
-
-async def _run_agent_turn(
-    user_id: str,
-    message: str,
-    *,
-    conversation_id: str | None = None,
-    include_audio: bool = False,
-    silent: bool = False,
-    channel: str = "text",
-) -> dict:
-    """Shared agentic turn for /api/ai/chat and /api/ai/voice."""
-    from datetime import datetime, timezone
-    from backend.ai_engine import conversation_engine
-    from backend.debug_log import agent_debug_log
-
-    agent_debug_log(
-        "app.py:_run_agent_turn",
-        "HTTP turn received",
-        {
-            "message_preview": (message or "")[:80],
-            "has_conversation_id": bool(conversation_id),
-            "channel": channel,
-            "user_id_prefix": (user_id or "")[:8],
-        },
-        hypothesis_id="V0",
-    )
-
-    profile = await conversation_engine.get_user_profile(user_id)
-    user_context = dict(profile or {"user_id": user_id})
-    user_context["user_id"] = user_id
-    if not user_context.get("id"):
-        user_context["id"] = user_id
-    is_admin = bool(user_context.get("is_admin")) if profile else False
-
-    use_v2 = False
-    if AGENT_V2:
-        try:
-            from backend.agent.rollout import is_agent_v2_enabled_for_user
-            use_v2 = is_agent_v2_enabled_for_user(user_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("rollout check failed (%s) — staying on v1", exc)
-            use_v2 = False
-
-    if use_v2:
-        result = await invoke_agent_v2(
-            user_id=user_id,
-            message=message,
-            conversation_id=conversation_id,
-            user_context=user_context,
-            is_admin=is_admin,
-            channel=channel,
-            silent=silent,
-        )
-    else:
-        result = await invoke_agent(
-            user_id=user_id,
-            message=message,
-            conversation_id=conversation_id,
-            user_context=user_context,
-            silent=silent,
-        )
-
-    agent_debug_log(
-        "app.py:_run_agent_turn",
-        "agent turn complete",
-        {
-            "use_v2": use_v2,
-            "response_preview": (result.get("text") or "")[:120],
-            "tools": [
-                (t.get("tool") if isinstance(t, dict) else None)
-                for t in (result.get("tool_results") or [])
-            ],
-            "has_pending": bool(result.get("pending_action")),
-            "refusal": bool(result.get("refusal")),
-        },
-        hypothesis_id="V0",
-    )
-
-    response: dict = {
-        "text": result.get("text", ""),
-        "user_id": user_id,
-        "conversation_id": result.get("conversation_id"),
-        "lang": result.get("lang", "en"),
-        "timestamp": result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
-        "tool_results": result.get("tool_results", []),
-    }
-
-    if include_audio and not silent:
-        try:
-            from backend.ai_engine import generate_tts
-            audio_url = await generate_tts(
-                text=response["text"],
-                lang=response["lang"],
-            )
-            response["audio_url"] = audio_url
-        except Exception as e:
-            logger.warning("TTS generation failed: %s", e)
-
-    if result.get("suggestions") is not None:
-        response["suggestions"] = result["suggestions"]
-    elif result.get("text"):
-        from backend.agent.suggestion_chips import build_turn_suggestions
-        lang = result.get("lang") or "en"
-        response["suggestions"] = build_turn_suggestions(
-            response_text=result.get("text") or "",
-            language=lang,
-            tool_results=result.get("tool_results") or [],
-            detected_intent=result.get("detected_intent"),
-        )
-
-    if result.get("pending_action"):
-        response["pending_action"] = result["pending_action"]
-
-    if result.get("turn_id"):
-        response["turn_id"] = result["turn_id"]
-
-    if result.get("agent_v2"):
-        response["agent_v2"] = True
-        if result.get("refusal"):
-            response["refusal"] = result["refusal"]
-        if result.get("affect"):
-            response["affect"] = result["affect"]
-        if result.get("reasoning_trace"):
-            response["reasoning_trace"] = result["reasoning_trace"]
-        if result.get("confidence") is not None:
-            response["confidence"] = result["confidence"]
-        if result.get("reflection"):
-            response["reflection"] = result["reflection"]
-        if result.get("goals"):
-            response["goals"] = result["goals"]
-        if result.get("next_step_hint"):
-            response["next_step_hint"] = result["next_step_hint"]
-        if result.get("memories"):
-            response["memories"] = result["memories"]
-        if result.get("world_model"):
-            response["world_model"] = result["world_model"]
-        if result.get("new_memories"):
-            response["new_memories"] = result["new_memories"]
-        if result.get("privacy_disclosure"):
-            response["privacy_disclosure"] = result["privacy_disclosure"]
-        if result.get("self_eval"):
-            response["self_eval"] = result["self_eval"]
-        if result.get("pushback_detected"):
-            response["pushback_detected"] = bool(result["pushback_detected"])
-        if result.get("retried"):
-            response["retried"] = True
-            if result.get("original_response"):
-                response["original_response"] = result["original_response"]
-            if result.get("original_self_eval"):
-                response["original_self_eval"] = result["original_self_eval"]
-        if result.get("user_style"):
-            response["user_style"] = result["user_style"]
-        if result.get("few_shot_examples"):
-            response["few_shot_examples"] = result["few_shot_examples"]
-        if result.get("reward") is not None:
-            response["reward"] = float(result["reward"])
-        if result.get("brainstorm_used"):
-            response["brainstorm_used"] = True
-            if result.get("brainstorm_ideas"):
-                response["brainstorm_ideas"] = list(result["brainstorm_ideas"])
-        if result.get("curiosity_followup"):
-            response["curiosity_followup"] = result["curiosity_followup"]
-        if result.get("procedural_hint"):
-            response["procedural_hint"] = result["procedural_hint"]
-        if result.get("procedural_rule"):
-            response["procedural_rule"] = result["procedural_rule"]
-        if result.get("antipattern_hint"):
-            response["antipattern_hint"] = result["antipattern_hint"]
-        if result.get("antipattern_rule"):
-            response["antipattern_rule"] = result["antipattern_rule"]
-        if result.get("confirmation_recommended"):
-            response["confirmation_recommended"] = True
-        if result.get("confirmation_decisions"):
-            response["confirmation_decisions"] = result["confirmation_decisions"]
-        if result.get("intent_confirmation_decision"):
-            response["intent_confirmation_decision"] = result["intent_confirmation_decision"]
-        if result.get("confirmation_summary"):
-            response["confirmation_summary"] = result["confirmation_summary"]
-        if result.get("register"):
-            response["register"] = result["register"]
-        if result.get("self_model"):
-            response["self_model"] = result["self_model"]
-        if result.get("persona_check"):
-            response["persona_check"] = result["persona_check"]
-        if result.get("tool_audit"):
-            response["tool_audit"] = result["tool_audit"]
-        if result.get("blocked_listings"):
-            response["blocked_listings"] = result["blocked_listings"]
-        if result.get("curiosity_followup"):
-            response["curiosity_followup"] = result["curiosity_followup"]
+    # Keep API responses unchanged; only control cache behavior for frontend routes/assets.
+    path = path.lower()
+    if not path.startswith("/api"):
+        if path in {"/", ""} or path.endswith(".html"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        elif path.endswith((".js", ".css", ".map")):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
 
     return response
 
-
-@app.post("/api/ai/chat", response_model=AIChatResponse)
-async def ai_chat(body: AIChatRequest, request: Request) -> dict:
-    """
-    Handle a text conversation turn.
-
-    Flow: user message + user_id -> profile lookup -> GPT-4.1 query
-          -> text response (+ optional TTS audio URL).
-
-    Errors are returned as structured AIError JSON (see ai_engine.AIError)
-    so the frontend can decide whether to render Retry, rate-limit hint, etc.
-    """
-    rid = _request_id(request)
-    _enforce_rate_limit(request)
-    _validate_uuid(body.user_id)
-    _enforce_user_rate_limit(body.user_id)
-
-    # Verify the caller owns this user_id. Anonymous (nil-UUID) sessions
-    # remain allowed without auth so the landing-page chat keeps working.
-    await _require_auth_for_user(request, body.user_id)
-
-    try:
-        return await _run_agent_turn(
-            body.user_id,
-            body.message,
-            conversation_id=body.conversation_id,
-            include_audio=body.include_audio,
-            silent=body.silent,
-            channel="text",
-        )
-    except AIError:
-        # Already structured — let the AIError handler render it.
-        raise
-    except Exception as exc:
-        # Convert anything else to a typed AIError so the response shape
-        # stays consistent. Log with the request ID so we can correlate.
-        logger.error("[%s] AI chat failed: %s", rid, exc, exc_info=True)
-        raise classify_exception(exc) from exc
-
-
-# ---------------------------------------------------------------------------
-# AI runtime health / rollout snapshot for FE proxy, dashboards, and probes
-# ---------------------------------------------------------------------------
-
-@app.get("/api/ai/health")
-async def ai_health() -> dict:
-    """Combined health + rollout snapshot for the AI runtime.
-
-    Returns full `/health` fields (status, ai_configured, database_configured,
-    circuit_state, upstream metrics) plus the agentic-mode / AGENT_V2 rollout
-    snapshot. Mirrored under /api/ai/ so the Vite dev proxy can reach it. No
-    auth required — the response is non-sensitive and useful for uptime probes.
-    """
-    body: dict = await health()
-    body["agentic_mode"] = True
-    body["agent_v2"] = {"enabled": False, "rollout_pct": 0}
-    try:
-        from backend.agent.rollout import rollout_snapshot
-        snap = rollout_snapshot()
-        body["agent_v2"]["enabled"] = bool(snap.get("enabled"))
-        body["agent_v2"]["rollout_pct"] = int(snap.get("rollout_pct") or 0)
-    except Exception as exc:  # noqa: BLE001 — health MUST NOT fail
-        logger.debug("rollout snapshot unavailable: %s", exc)
-    return body
-
-
-@app.get("/api/ai/history/{user_id}")
-async def ai_history(user_id: str, request: Request, limit: int = 50) -> dict:
-    """
-    Retrieve conversation history for a user.
-
-    Query params:
-      - limit: max messages to return (default 50)
-    """
-    _enforce_rate_limit(request)
-    _validate_uuid(user_id)
-    _enforce_user_rate_limit(user_id)
-
-    # Verify the caller owns this user_id
-    await _require_auth_for_user(request, user_id)
-
-    if limit < 1 or limit > 200:
-        raise HTTPException(400, "limit must be between 1 and 200")
-
-    try:
-        history = await conversation_engine.get_conversation_history(
-            user_id=user_id,
-            limit=limit,
-        )
-        return {
-            "user_id": user_id,
-            "messages": history,
-            "count": len(history),
-        }
-    except Exception as exc:
-        logger.error("History fetch error: %s", exc)
-        raise HTTPException(500, "Failed to retrieve conversation history") from exc
-
-
-@app.delete("/api/ai/history/{user_id}")
-async def ai_clear_history(user_id: str, request: Request) -> dict:
-    """Delete all conversation history for a user."""
-    _enforce_rate_limit(request)
-    _validate_uuid(user_id)
-    _enforce_user_rate_limit(user_id)
-
-    await _require_auth_for_user(request, user_id)
-
-    try:
-        # Use proper query params instead of encoding filters in the table path
-        headers = {
-            "apikey": SUPABASE_SERVICE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-            "Content-Type": "application/json",
-        }
-        from backend.ai_engine import _get_http_client, SUPABASE_TIMEOUT
-        client = _get_http_client(SUPABASE_TIMEOUT)
-        resp = await client.delete(
-            f"{SUPABASE_URL}/rest/v1/ai_conversations",
-            params={"user_id": f"eq.{user_id}"},
-            headers=headers,
-        )
-        resp.raise_for_status()
-        return {"user_id": user_id, "cleared": True}
-    except Exception as exc:
-        logger.error("Clear history error: %s", exc)
-        raise HTTPException(500, "Failed to clear conversation history") from exc
-
-
-class AIFeedbackRequest(BaseModel):
-    conversation_id: str = Field(min_length=1, max_length=128)
-    user_id: str = Field(min_length=1, max_length=128)
-    rating: str = Field(min_length=1, max_length=20)
-    comment: str | None = None
-
-
-@app.post("/api/ai/feedback")
-async def ai_feedback(body: AIFeedbackRequest, request: Request) -> dict:
-    """Submit feedback on an AI message."""
-    _enforce_rate_limit(request)
-    _validate_uuid(body.user_id)
-    _validate_uuid(body.conversation_id, "conversation_id")
-    _enforce_user_rate_limit(body.user_id)
-
-    await _require_auth_for_user(request, body.user_id)
-
-    if body.rating not in ("helpful", "not_helpful", "up", "down"):
-        raise HTTPException(400, "rating must be helpful or not_helpful")
-
-    # Normalise legacy up/down to helpful/not_helpful for storage
-    rating = body.rating
-    if rating == "up":
-        rating = "helpful"
-    elif rating == "down":
-        rating = "not_helpful"
-
-    try:
-        payload = {
-            "conversation_id": body.conversation_id,
-            "user_id": body.user_id,
-            "rating": rating,
-        }
-        if body.comment:
-            payload["comment"] = body.comment
-
-        await supabase_post("ai_feedback", payload)
-        return {"success": True}
-    except Exception as exc:
-        logger.error("Feedback save error: %s", exc)
-        raise classify_exception(exc) from exc
-
-
-# ---------------------------------------------------------------------------
-# AGENT_V2: confirm or cancel a pending typed action
-# ---------------------------------------------------------------------------
-
-@app.post("/api/ai/confirm", response_model=ConfirmActionResponse)
-async def ai_confirm_action(body: ConfirmActionRequest, request: Request) -> dict:
-    """Resolve a typed action that's waiting on user confirmation.
-
-    Flow: the AGENT_V2 graph returns a `pending_action` envelope. The
-    frontend renders a Confirm/Cancel card. User taps Confirm -> we hit
-    this endpoint with {pending_id, decision:"confirm"}. The action handler
-    runs server-side with the user's identity, writes an audit row, and
-    returns the committed status.
-
-    Auth: requires the authenticated caller to own the pending row. The
-    actions module enforces this with a service-role check on `user_id`.
-    """
-    _enforce_rate_limit(request)
-
-    auth_uid = await _authenticate_request(request)
-    if not auth_uid:
-        raise HTTPException(401, "Authentication required to confirm actions")
-
-    try:
-        from backend.agent import actions as agent_actions
-    except Exception as exc:  # noqa: BLE001
-        logger.error("agent.actions import failed: %s", exc)
-        raise HTTPException(503, "Action framework unavailable") from exc
-
-    try:
-        if body.decision == "cancel":
-            ok = await agent_actions.cancel_pending_action(
-                pending_id=body.pending_id,
-                user_id=auth_uid,
-            )
-            return {
-                "status": "cancelled" if ok else "failed",
-                "tool": None,
-                "summary": None,
-                "audit_id": None,
-                "error": None if ok else "pending action not found or already resolved",
-            }
-
-        result = await agent_actions.commit_pending_action(
-            pending_id=body.pending_id,
-            user_id=auth_uid,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Confirm action failed: %s", exc, exc_info=True)
-        return {
-            "status": "failed",
-            "tool": None,
-            "summary": None,
-            "audit_id": None,
-            "error": "Action execution failed",
-        }
-
-    return {
-        "status": result.status,
-        "tool": result.tool,
-        "summary": result.summary,
-        "audit_id": result.audit_id,
-        "error": result.error,
-    }
-
-
-@app.post("/api/ai/rollback", response_model=RollbackActionResponse)
-async def ai_rollback_action(body: RollbackActionRequest, request: Request) -> dict:
-    """Undo a committed agent write using its audit log row."""
-    _enforce_rate_limit(request)
-
-    auth_uid = await _authenticate_request(request)
-    if not auth_uid:
-        raise HTTPException(401, "Authentication required to rollback actions")
-
-    try:
-        from backend.agent.actions import rollback_action
-    except Exception as exc:  # noqa: BLE001
-        logger.error("agent.actions import failed: %s", exc)
-        raise HTTPException(503, "Action framework unavailable") from exc
-
-    try:
-        ok = await rollback_action(body.audit_id, auth_uid)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Rollback action failed: %s", exc, exc_info=True)
-        return {
-            "status": "failed",
-            "audit_id": body.audit_id,
-            "error": "Rollback failed",
-        }
-
-    return {
-        "status": "rolled_back" if ok else "not_found",
-        "audit_id": body.audit_id,
-        "error": None if ok else "Audit row not found or already rolled back",
-    }
-
-
-@app.post("/api/ai/voice", response_model=AIChatResponse)
-async def ai_voice(
-    request: Request,
-    audio: UploadFile = File(..., description="Audio file (webm, wav, mp3, m4a)"),
-    user_id: str = Form(..., min_length=1, max_length=128),
-    include_audio: bool = Form(default=True),
-    silent: bool = Form(default=False),
-    language: str | None = Form(default=None, max_length=5),
-) -> dict:
-    """
-    Transcribe uploaded audio via OpenAI Whisper, then process as a chat message.
-
-    Accepts multipart form with:
-      - audio: audio file
-      - user_id: user UUID
-      - include_audio: whether to return TTS audio in response (default true)
-      - language: optional ISO-639-1 hint ("en" or "es") passed to Whisper to
-        improve accuracy on short/accented clips
-    """
-    _enforce_rate_limit(request)
-    _validate_uuid(user_id)
-    _enforce_user_rate_limit(user_id)
-
-    await _require_auth_for_user(request, user_id)
-
-    # Validate file type (strip codec params like ";codecs=opus")
-    allowed_types = {
-        "audio/webm", "audio/wav", "audio/mpeg", "audio/mp4",
-        "audio/ogg", "audio/x-m4a", "audio/mp3",
-    }
-    base_type = (audio.content_type or "").split(";")[0].strip().lower()
-    if base_type and base_type not in allowed_types:
-        raise HTTPException(
-            400,
-            f"Unsupported audio type: {audio.content_type}. "
-            f"Accepted: webm, wav, mp3, m4a, ogg",
-        )
-
-    # Read audio bytes (limit to 25MB — Whisper API max)
-    audio_bytes = await audio.read()
-    if len(audio_bytes) > 25 * 1024 * 1024:
-        raise HTTPException(400, "Audio file too large (max 25MB)")
-    if len(audio_bytes) == 0:
-        raise HTTPException(400, "Empty audio file")
-
-    try:
-        # 1. Transcribe with Whisper
-        transcript = await conversation_engine.transcribe_audio(
-            audio_bytes=audio_bytes,
-            filename=audio.filename or "audio.webm",
-            language=language if language in ("en", "es") else None,
-        )
-        logger.info("Transcribed audio for user %s: %s", user_id, transcript[:100])
-
-        # 1b. Filter Whisper hallucinations before sending to GPT
-        if _is_whisper_noise(transcript):
-            logger.info("Filtered Whisper noise for user %s: %s", user_id, transcript[:80])
-            raise HTTPException(
-                400,
-                "Could not understand the audio. Please try again "
-                "or switch to text input.",
-            )
-
-        # 2. Process transcribed text through the agent
-        result = await _run_agent_turn(
-            user_id,
-            transcript,
-            include_audio=include_audio,
-            silent=silent,
-            channel="voice",
-        )
-        result["transcript"] = transcript
-        return result
-
-    except (AIError, HTTPException):
-        raise  # already structured / typed
-    except Exception as exc:
-        rid = _request_id(request)
-        logger.error("[%s] Voice processing failed for user %s: %s", rid, user_id, exc, exc_info=True)
-        # Convert anything else to a typed AIError so the frontend can
-        # decide whether to retry, fall back to text, etc.
-        raise classify_exception(exc) from exc
-
-
-class TTSRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=4096)
-    lang: str = Field(default="en", max_length=5)
-
-
-@app.post("/api/ai/tts")
-async def ai_tts(body: TTSRequest, request: Request):
-    """Generate speech audio from text. Returns audio/mpeg blob."""
-    _enforce_rate_limit(request)
-
-    try:
-        audio_bytes = await conversation_engine.generate_speech(
-            body.text, lang=body.lang
-        )
-        from fastapi.responses import Response
-
-        return Response(content=audio_bytes, media_type="audio/mpeg")
-    except RuntimeError as exc:
-        logger.error("TTS RuntimeError: %s", exc)
-        raise classify_exception(exc) from exc
-    except httpx.HTTPStatusError as exc:
-        logger.error("TTS upstream error %s", exc.response.status_code)
-        raise classify_exception(exc) from exc
-    except Exception as exc:
-        logger.error("TTS error: %s", exc)
-        raise classify_exception(exc) from exc
-
-
-# ---------------------------------------------------------------------------
-# Whisper hallucination filter (common artifacts on silence / noise)
-# ---------------------------------------------------------------------------
-
-# Exact-match noise phrases (after punctuation removal + lowercase)
-_WHISPER_NOISE_PHRASES = {
-    "thank you", "thanks", "thank you for watching", "thanks for watching",
-    "thank you very much", "thank you so much", "thank you bye",
-    "thank you byebye", "thank you goodbye", "thanks bye",
-    "thanks for listening", "thanks for tuning in",
-    "subscribe", "like and subscribe", "please subscribe",
-    "music", "foreign", "applause", "laughter", "silence",
-    "bye", "byebye", "bye bye", "goodbye", "good bye",
-    "you", "the", "i", "a", "um", "uh", "oh", "hmm", "huh",
-    "gwynple", "asha", "welcome",
-    "okay", "ok", "so", "yeah", "yes", "no", "right",
-    "subtitles by", "subtitles", "captions",
-    "you know", "see you next time", "see you",
-    "thats all", "thats it", "the end",
-}
-
-# Words that are individually noise — if ALL words in transcript are noise, filter it
-_WHISPER_NOISE_WORDS = {
-    "thank", "thanks", "you", "bye", "byebye", "goodbye", "good",
-    "the", "a", "i", "um", "uh", "oh", "hmm", "huh", "ok", "okay",
-    "so", "yeah", "yes", "no", "right", "well", "and", "but",
-    "please", "welcome", "foreign", "music", "applause", "laughter",
-    "silence", "subscribe", "like", "see", "next", "time",
-    "very", "much", "for", "watching", "listening", "bye",
-}
-
-
-def _is_whisper_noise(text: str) -> bool:
-    """Return True if the transcription looks like Whisper hallucination."""
-    stripped = text.strip()
-    # Pure-number replies (e.g. "1", "2") are valid listing picks in the
-    # voice claim flow — never treat them as noise.
-    if stripped.isdigit():
-        return False
-    if len(stripped) < 3:
-        return True
-
-    # Remove punctuation for comparison
-    cleaned = re.sub(r"[^\w\s]", "", stripped).strip().lower()
-
-    # Exact match against known noise phrases
-    if cleaned in _WHISPER_NOISE_PHRASES:
-        return True
-
-    # Very short cleaned text
-    if len(cleaned) < 3:
-        return True
-
-    # All-noise-words check: if every word is a filler/noise word, filter it
-    words = cleaned.split()
-    if words and all(w in _WHISPER_NOISE_WORDS for w in words):
-        return True
-
-    # Repeated phrase detection (e.g. "thank you thank you thank you")
-    if words and len(set(words)) <= 2 and len(words) >= 3:
-        return True
-
-    # High ratio of non-ASCII chars suggests garbled output
-    ascii_chars = sum(1 for c in stripped if c.isascii())
-    if len(stripped) > 5 and ascii_chars / len(stripped) < 0.5:
-        return True
-
-    return False
-
-
-@app.post("/api/ai/transcribe")
-async def ai_transcribe(
-    request: Request,
-    audio: UploadFile = File(..., description="Audio file (webm, wav, mp3, m4a)"),
-    language: str | None = Form(default=None, max_length=5),
-) -> dict:
-    """
-    Transcription-only endpoint — Whisper STT without chat processing.
-
-    Use this when you only need the transcript text and will send it to
-    /api/ai/chat separately. ``language`` is an optional ISO-639-1 hint
-    ("en" or "es") that the frontend should send based on the UI language.
-    """
-    _enforce_rate_limit(request)
-
-    # Validate file type
-    allowed_types = {
-        "audio/webm", "audio/wav", "audio/mpeg", "audio/mp4",
-        "audio/ogg", "audio/x-m4a", "audio/mp3",
-    }
-    base_type = (audio.content_type or "").split(";")[0].strip().lower()
-    if base_type and base_type not in allowed_types:
-        raise HTTPException(
-            400,
-            f"Unsupported audio type: {audio.content_type}. "
-            f"Accepted: webm, wav, mp3, m4a, ogg",
-        )
-
-    audio_bytes = await audio.read()
-    if len(audio_bytes) > 25 * 1024 * 1024:
-        raise HTTPException(400, "Audio file too large (max 25MB)")
-    if len(audio_bytes) == 0:
-        raise HTTPException(400, "Empty audio file")
-
-    try:
-        transcript = await conversation_engine.transcribe_audio(
-            audio_bytes=audio_bytes,
-            filename=audio.filename or "audio.webm",
-            language=language if language in ("en", "es") else None,
-        )
-        logger.info("Transcribed (transcribe-only): %s", transcript[:100])
-
-        # Filter Whisper hallucinations
-        if _is_whisper_noise(transcript):
-            logger.info("Filtered Whisper noise: %s", transcript[:80])
-            return {"transcript": "", "filtered": True}
-
-        return {"transcript": transcript.strip(), "filtered": False}
-
-    except httpx.TimeoutException as exc:
-        raise classify_exception(exc) from exc
-    except RuntimeError as exc:
-        logger.error("Transcribe RuntimeError: %s", exc)
-        raise classify_exception(exc) from exc
-    except Exception as exc:
-        logger.error("Transcription error: %s", exc)
-        raise classify_exception(exc) from exc
-
-
-# ===================================================================
-#  ROLE-SPECIFIC DASHBOARD INSIGHTS
-# ===================================================================
-
-class AIInsightsRequest(BaseModel):
-    user_id: str = Field(min_length=1, max_length=128)
-    role_hint: str | None = Field(default=None, max_length=32)
-
-
-async def _resolve_user_role(user_id: str, role_hint: str | None) -> tuple[str, dict]:
-    """Resolve a user's effective dashboard role.
-
-    Returns (role, user_row). Role is one of:
-      admin, donor, dispatcher, recipient, volunteer, organizer, sponsor.
-    """
-    users = await supabase_get("users", {
-        "id": f"eq.{user_id}",
-        "select": (
-            "id,name,is_admin,community_role,"
-            "address,phone,avatar_url,"
-            "dietary_restrictions,sms_opt_in"
-        ),
-        "limit": "1",
-    })
-    user_row = users[0] if users else {}
-
-    if user_row.get("is_admin"):
-        return "admin", user_row
-
-    raw_role = (role_hint or user_row.get("community_role") or "recipient").lower()
-    allowed = {"admin", "donor", "dispatcher", "driver", "recipient", "volunteer", "organizer", "sponsor"}
-    if raw_role not in allowed:
-        raw_role = "recipient"
-    if raw_role == "driver":
-        raw_role = "dispatcher"
-    return raw_role, user_row
-
-
-async def _gather_recipient_data(user_id: str) -> dict:
-    now_iso = datetime.now(timezone.utc).isoformat()
-    today_iso = datetime.now(timezone.utc).date().isoformat()
-    pending_claims = await supabase_get("food_claims", {
-        "claimer_id": f"eq.{user_id}",
-        "status": "in.(pending,approved)",
-        "select": "id,status,created_at,quantity,food_id",
-        "order": "created_at.desc",
-        "limit": "10",
-    })
-    nearby_listings = await supabase_get("food_listings", {
-        "status": "in.(approved,active)",
-        "or": f"(expiry_date.is.null,expiry_date.gte.{today_iso})",
-        "select": "id,title,category,quantity,unit,expiry_date,pickup_by,location,image_url,created_at",
-        "order": "created_at.desc",
-        "limit": "12",
-    })
-    notifications = await supabase_get("notifications", {
-        "user_id": f"eq.{user_id}",
-        "read": "eq.false",
-        "select": "id,title,message,created_at",
-        "order": "created_at.desc",
-        "limit": "5",
-    })
-    return {
-        "pending_claims": pending_claims,
-        "nearby_listings": nearby_listings,
-        "unread_notifications": notifications,
-        "snapshot_at": now_iso,
-    }
-
-
-async def _gather_donor_data(user_id: str) -> dict:
-    now = datetime.now(timezone.utc)
-    my_listings = await supabase_get("food_listings", {
-        "user_id": f"eq.{user_id}",
-        "select": "id,title,status,quantity,unit,expiry_date,pickup_by,category,created_at",
-        "order": "created_at.desc",
-        "limit": "25",
-    })
-    # Claims received on the donor's listings (requires listing ids)
-    listing_ids = [str(item.get("id")) for item in my_listings if item.get("id") is not None]
-    claims_received = []
-    if listing_ids:
-        claims_received = await supabase_get("food_claims", {
-            "food_id": f"in.({','.join(listing_ids)})",
-            "select": "id,status,quantity,created_at,food_id,claimer_id",
-            "order": "created_at.desc",
-            "limit": "20",
-        })
-    return {
-        "my_listings": my_listings,
-        "claims_received": claims_received,
-        "snapshot_at": now.isoformat(),
-    }
-
-
-async def _gather_dispatcher_data(user_id: str) -> dict:
-    now_iso = datetime.now(timezone.utc).isoformat()
-    approved_claims = await supabase_get("food_claims", {
-        "status": "in.(approved,pending)",
-        "select": "id,status,quantity,created_at,food_id,claimer_id",
-        "order": "created_at.desc",
-        "limit": "30",
-    })
-    today_iso = datetime.now(timezone.utc).date().isoformat()
-    upcoming_events = await supabase_get("distribution_events", {
-        "select": "id,title,event_date,start_time,location,status,capacity,registered_count",
-        # Only surface future/today events so the AI doesn't narrate past events
-        # as "upcoming" when building dispatcher insights.
-        "event_date": f"gte.{today_iso}",
-        "order": "event_date.asc",
-        "limit": "10",
-    })
-    return {
-        "open_claims": approved_claims,
-        "upcoming_events": upcoming_events,
-        "snapshot_at": now_iso,
-    }
-
-
-async def _gather_admin_data(user_id: str) -> dict:
-    now_iso = datetime.now(timezone.utc).isoformat()
-    pending_listings = await supabase_get("food_listings", {
-        "status": "eq.pending",
-        "select": "id,title,created_at,user_id,category",
-        "order": "created_at.desc",
-        "limit": "20",
-    })
-    pending_broadcasts = await supabase_get("admin_broadcasts", {
-        "sent": "eq.false",
-        "select": "id,title,channel,created_at",
-        "order": "created_at.desc",
-        "limit": "10",
-    })
-    recent_feedback = await supabase_get("user_feedback", {
-        "select": "id,feedback_type,subject,message,status,priority,created_at",
-        "order": "created_at.desc",
-        "limit": "10",
-    })
-    return {
-        "pending_listings": pending_listings,
-        "pending_broadcasts": pending_broadcasts,
-        "recent_feedback": recent_feedback,
-        "snapshot_at": now_iso,
-    }
-
-
-def _is_empty(value: Any) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, str) and not value.strip():
-        return True
-    if isinstance(value, (list, tuple, dict)) and len(value) == 0:
-        return True
-    return False
-
-
-def _build_profile_gap_insights(role: str, user_row: dict) -> list[dict]:
-    """Deterministic insights that nudge the user to fill profile gaps.
-
-    Returned in priority order. These run alongside AI-generated insights
-    so we always surface critical missing fields regardless of model output.
-    """
-    gaps: list[dict] = []
-
-    has_name = not _is_empty(user_row.get("name"))
-    has_address = not _is_empty(user_row.get("address"))
-    has_phone = not _is_empty(user_row.get("phone"))
-    has_dietary = not _is_empty(user_row.get("dietary_restrictions"))
-    has_avatar = not _is_empty(user_row.get("avatar_url"))
-    has_role = not _is_empty(user_row.get("community_role"))
-    sms_opt_in = bool(user_row.get("sms_opt_in"))
-
-    # All profile-gap actions deep-link to the editable settings page,
-    # not the read-only /profile view.
-    profile_href = "/settings"
-
-    if not has_name:
-        gaps.append({
-            "id": "profile-name",
-            "icon": "id-card",
-            "title": "Add your name",
-            "message": "Donors and dispatchers see your name when you claim or coordinate pickups.",
-            "priority": "high",
-            "action": {"label": "Update profile", "href": profile_href},
-            "source": "profile_gap",
-        })
-
-    if role in ("recipient", "volunteer") and not has_dietary:
-        gaps.append({
-            "id": "profile-dietary",
-            "icon": "utensils",
-            "title": "Set your dietary needs",
-            "message": "Tell us about allergies or dietary restrictions so we can match you with safe food.",
-            "priority": "high",
-            "action": {"label": "Add dietary needs", "href": profile_href},
-            "source": "profile_gap",
-        })
-
-    if not has_address and role in ("recipient", "donor", "dispatcher", "volunteer"):
-        gaps.append({
-            "id": "profile-address",
-            "icon": "map-marker-alt",
-            "title": "Add your address",
-            "message": (
-                "We use your address to find food and pickups near you"
-                if role != "donor"
-                else "Your address helps recipients see where to pick up your donations."
-            ),
-            "priority": "high",
-            "action": {"label": "Add address", "href": profile_href},
-            "source": "profile_gap",
-        })
-
-    if not has_phone:
-        gaps.append({
-            "id": "profile-phone",
-            "icon": "phone",
-            "title": "Add a phone number",
-            "message": "Required for SMS pickup reminders and coordinating last-minute changes.",
-            "priority": "medium",
-            "action": {"label": "Add phone", "href": profile_href},
-            "source": "profile_gap",
-        })
-    elif not sms_opt_in:
-        gaps.append({
-            "id": "profile-sms-optin",
-            "icon": "sms",
-            "title": "Turn on SMS reminders",
-            "message": "Get pickup reminders and expiration alerts by text. You can opt out anytime.",
-            "priority": "low",
-            "action": {"label": "Enable SMS", "href": profile_href},
-            "source": "profile_gap",
-        })
-
-    if not has_role and role == "recipient":
-        gaps.append({
-            "id": "profile-role",
-            "icon": "user-tag",
-            "title": "Tell us how you help",
-            "message": "Choose donor, recipient, volunteer, or dispatcher so your dashboard fits your goals.",
-            "priority": "medium",
-            "action": {"label": "Choose role", "href": profile_href},
-            "source": "profile_gap",
-        })
-
-    if not has_avatar:
-        gaps.append({
-            "id": "profile-avatar",
-            "icon": "image",
-            "title": "Add a profile photo",
-            "message": "A friendly photo helps neighbors recognize you at pickups.",
-            "priority": "low",
-            "action": {"label": "Upload photo", "href": profile_href},
-            "source": "profile_gap",
-        })
-
-    return gaps
-
-
-def _profile_completion_pct(user_row: dict) -> int:
-    fields = [
-        user_row.get("name"),
-        user_row.get("address"),
-        user_row.get("phone"),
-        user_row.get("dietary_restrictions"),
-        user_row.get("avatar_url"),
-        user_row.get("community_role"),
-    ]
-    filled = sum(0 if _is_empty(v) else 1 for v in fields)
-    return int(round(100 * filled / len(fields)))
-
-
-def httpx_timedelta_hours(_hours: int):  # pragma: no cover - reserved
-    from datetime import timedelta
-    return timedelta(hours=_hours)
-
-
-_ROLE_SYSTEM_PROMPTS = {
-    "recipient": (
-        "You help a FOOD RECIPIENT on DoGoods spot the best food to claim now. "
-        "Use the listings provided. Prefer items expiring soon, fresh produce, "
-        "and matches to their pending claims. Keep tone warm and practical."
-    ),
-    "donor": (
-        "You help a FOOD DONOR on DoGoods keep their listings effective. "
-        "Flag items expiring within 48 hours, listings stuck in 'pending', "
-        "and unclaimed inventory. Suggest concrete actions like extending pickup, "
-        "marking distributed, or adjusting category. Tone: supportive coach."
-    ),
-    "dispatcher": (
-        "You help a DISPATCHER coordinate pickups. Surface unassigned approved "
-        "claims, distribution events with low registration, and suggest a "
-        "logical pickup order grouped by location. Tone: concise operator."
-    ),
-    "volunteer": (
-        "You help a VOLUNTEER find ways to contribute today: nearby pickups to "
-        "deliver and upcoming events that need help. Tone: motivating."
-    ),
-    "organizer": (
-        "You help a community ORGANIZER coordinate distributions and member "
-        "engagement. Highlight underperforming events and growth opportunities."
-    ),
-    "sponsor": (
-        "You help a SPONSOR see their community impact. Highlight quantities "
-        "distributed and notable stories. Tone: appreciative."
-    ),
-    "admin": (
-        "You are a supportive ADMIN coach on DoGoods. Mix encouragement with "
-        "operational nudges: queue of pending listings, unsent broadcasts, "
-        "recent feedback themes. Celebrate wins. Tone: warm, brief, energizing."
-    ),
-}
-
-_ROLE_GATHERERS = {
-    "recipient": _gather_recipient_data,
-    "donor": _gather_donor_data,
-    "dispatcher": _gather_dispatcher_data,
-    "volunteer": _gather_dispatcher_data,
-    "organizer": _gather_admin_data,
-    "sponsor": _gather_admin_data,
-    "admin": _gather_admin_data,
-}
-
-
-_INSIGHTS_JSON_INSTRUCTIONS = (
-    "Respond with STRICT JSON only, matching this schema:\n"
-    "{\n"
-    '  "headline": "short greeting headline, <= 80 chars",\n'
-    '  "insights": [\n'
-    "    {\n"
-    '      "id": "kebab-case slug",\n'
-    '      "icon": "fontawesome class without fa- prefix (e.g. clock, bell, route)",\n'
-    '      "title": "short title <= 60 chars",\n'
-    '      "message": "1-2 sentence explanation",\n'
-    '      "priority": "high|medium|low",\n'
-    '      "action": { "label": "<= 24 chars", "href": "/path" } or null\n'
-    "    }\n"
-    "  ]\n"
-    "}\n"
-    "Produce 2-5 insights. Order by priority. Use real data only — never invent records.\n"
-    "Use ONLY these exact href paths (no others): /find, /share, /dashboard, /donations, "
-    "/admin, /admin/users, /admin/broadcasts, /admin/distribution, /admin/feedback, "
-    "/admin/reports, /admin/messages, /admin/communities, /admin/verifications, "
-    "/near-me, /profile, /listings, /receipts, /notifications, /settings."
-)
-
-
-async def _call_openai_json(system_prompt: str, user_payload: str) -> dict:
-    """Call OpenAI chat completions in JSON-mode and return parsed dict.
-
-    Appends _INSIGHTS_JSON_INSTRUCTIONS to enforce the {headline, insights}
-    output schema required by the dashboard insights endpoint.
-    Retries once on 429 / 5xx before failing.
-    """
-    if not OPENAI_API_KEY:
-        return {"headline": "AI insights offline", "insights": []}
-
-    import asyncio
-    import json as _json
-    from backend.ai_engine import _get_http_client, OPENAI_BASE_URL, FOLLOWUP_MODEL
-    client = _get_http_client(30)
-    payload = {
-        "model": FOLLOWUP_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt + "\n\n" + _INSIGHTS_JSON_INSTRUCTIONS},
-            {"role": "user", "content": user_payload},
-        ],
-        "temperature": 0.5,
-        "max_tokens": 700,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    for attempt in range(3):
-        try:
-            resp = await client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            if resp.status_code in (429,) or resp.status_code >= 500:
-                if attempt < 2:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                resp.raise_for_status()
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            try:
-                parsed = _json.loads(content)
-            except Exception:
-                return {"headline": "Insights unavailable", "insights": []}
-            if not isinstance(parsed, dict):
-                return {"headline": "Insights unavailable", "insights": []}
-            insights = parsed.get("insights") or []
-            if not isinstance(insights, list):
-                insights = []
-            return {
-                "headline": str(parsed.get("headline") or "")[:200],
-                "insights": insights[:5],
-            }
-        except Exception as exc:
-            if attempt < 2:
-                await asyncio.sleep(2 ** attempt)
-            else:
-                logger.error("_call_openai_json failed after retries: %s", exc)
-    return {"headline": "Insights unavailable", "insights": []}
-
-
-async def _call_openai_raw_json(messages: list, max_tokens: int = 400) -> dict:
-    """Call OpenAI chat completions in JSON-mode with caller-supplied messages.
-
-    Unlike _call_openai_json, this does NOT append any fixed schema instructions —
-    the caller is responsible for the full prompt (system + user). Returns the raw
-    parsed JSON dict, or {} on error.
-    """
-    if not OPENAI_API_KEY:
-        return {}
-
-    import asyncio
-    import json as _json
-    from backend.ai_engine import _get_http_client, OPENAI_BASE_URL, FOLLOWUP_MODEL
-    client = _get_http_client(30)
-    payload = {
-        "model": FOLLOWUP_MODEL,
-        "messages": messages,
-        "temperature": 0.3,
-        "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    for attempt in range(3):
-        try:
-            resp = await client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            if resp.status_code in (429,) or resp.status_code >= 500:
-                if attempt < 2:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                resp.raise_for_status()
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            try:
-                return _json.loads(content)
-            except Exception:
-                return {}
-        except Exception as exc:
-            if attempt < 2:
-                await asyncio.sleep(2 ** attempt)
-            else:
-                logger.warning("_call_openai_raw_json failed: %s", exc)
-    return {}
-
-
-def _summarize_data_for_prompt(role: str, user_row: dict, data: dict) -> str:
-    """Compact human-readable summary of role-specific data for the prompt."""
-    name = user_row.get("name") or "there"
-    lines = [f"User: {name} (role={role})"]
-    # users.address is the correct plain-text column (no city/state columns exist).
-    address = (user_row.get("address") or "").strip()
-    if address:
-        lines.append(f"Location: {address}")
-
-    if role == "recipient":
-        listings = data.get("nearby_listings", [])
-        lines.append(f"Pending claims: {len(data.get('pending_claims', []))}")
-        lines.append(f"Unread notifications: {len(data.get('unread_notifications', []))}")
-        lines.append(f"Open listings nearby: {len(listings)}")
-        for item in listings[:8]:
-            lines.append(
-                f"- listing#{item.get('id')} '{item.get('title')}' "
-                f"category={item.get('category')} qty={item.get('quantity')}{item.get('unit') or ''} "
-                f"expires={item.get('expiry_date') or item.get('pickup_by') or 'n/a'}"
-            )
-    elif role == "donor":
-        listings = data.get("my_listings", [])
-        lines.append(f"Your listings: {len(listings)}")
-        lines.append(f"Claims received: {len(data.get('claims_received', []))}")
-        for item in listings[:10]:
-            lines.append(
-                f"- listing#{item.get('id')} '{item.get('title')}' status={item.get('status')} "
-                f"expires={item.get('expiry_date') or item.get('pickup_by') or 'n/a'} "
-                f"qty={item.get('quantity')}{item.get('unit') or ''}"
-            )
-    elif role in ("dispatcher", "volunteer"):
-        claims = data.get("open_claims", [])
-        events = data.get("upcoming_events", [])
-        lines.append(f"Open claims: {len(claims)}")
-        lines.append(f"Upcoming events: {len(events)}")
-        for item in claims[:10]:
-            lines.append(
-                f"- claim#{item.get('id')} status={item.get('status')} "
-                f"listing#{item.get('food_id')} qty={item.get('quantity')}"
-            )
-        for ev in events[:5]:
-            lines.append(
-                f"- event#{ev.get('id')} '{ev.get('title')}' date={ev.get('event_date')} start={ev.get('start_time')} "
-                f"capacity={ev.get('capacity')} registered={ev.get('registered_count')}"
-            )
-    else:  # admin / organizer / sponsor
-        lines.append(f"Pending listings: {len(data.get('pending_listings', []))}")
-        lines.append(f"Pending broadcasts: {len(data.get('pending_broadcasts', []))}")
-        lines.append(f"Recent feedback items: {len(data.get('recent_feedback', []))}")
-        for item in data.get("pending_listings", [])[:6]:
-            lines.append(f"- pending listing#{item.get('id')} '{item.get('title')}' cat={item.get('category')}")
-        for fb in data.get("recent_feedback", [])[:5]:
-            rating = fb.get("rating")
-            comment = (fb.get("comment") or "")[:120]
-            lines.append(f"- feedback rating={rating} '{comment}'")
-
-    return "\n".join(lines)
-
-
-@app.post("/api/ai/insights")
-async def ai_insights(body: AIInsightsRequest, request: Request) -> dict:
-    """Generate role-specific dashboard insights for a user."""
-    _enforce_rate_limit(request)
-    _validate_uuid(body.user_id)
-
-    await _require_auth_for_user(request, body.user_id)
-
-    try:
-        role, user_row = await _resolve_user_role(body.user_id, body.role_hint)
-        gather = _ROLE_GATHERERS.get(role, _gather_recipient_data)
-        data = await gather(body.user_id)
-
-        is_admin_role = role == "admin"
-        gap_insights = [] if is_admin_role else _build_profile_gap_insights(role, user_row)
-        completion_pct = None if is_admin_role else _profile_completion_pct(user_row)
-
-        system_prompt = _ROLE_SYSTEM_PROMPTS.get(role, _ROLE_SYSTEM_PROMPTS["recipient"])
-        summary = _summarize_data_for_prompt(role, user_row, data)
-        if is_admin_role:
-            summary += (
-                "\nDo NOT generate any insights about profile completion, profile fields, "
-                "or personal account setup — this user is a platform admin."
-            )
-        elif gap_insights:
-            gap_titles = ", ".join(g["title"] for g in gap_insights)
-            summary += (
-                f"\nProfile completion: {completion_pct}%.\n"
-                f"Profile gaps already surfaced separately (do NOT duplicate): {gap_titles}."
-            )
-        else:
-            summary += f"\nProfile completion: {completion_pct}% (no gaps)."
-
-        result = await _call_openai_json(system_prompt, summary)
-        ai_insights_list = result.get("insights") or []
-
-        # Normalize any legacy / hallucinated href paths to real frontend routes.
-        _HREF_ALIASES = {
-            "/find-food": "/find",
-            "/findfood": "/find",
-            "/share-food": "/share",
-            "/sharefood": "/share",
-            "/user-dashboard": "/dashboard",
-            "/userdashboard": "/dashboard",
-            "/donation-schedules": "/donations",
-            "/donationschedules": "/donations",
-            "/admin/user-feedback": "/admin/feedback",
-            "/admin/userfeedback": "/admin/feedback",
-            "/admin/user-management": "/admin/users",
-            "/user-feedback": "/admin/feedback",
-            "/feedback": "/admin/feedback",
-            "/admin/dashboard": "/admin",
-            "/my-listings": "/listings",
-            "/my-receipts": "/receipts",
-            # /profile is read-only; any "complete/update profile" action must
-            # go to the editable settings form instead.
-            "/profile": "/settings",
-            "/profile/edit": "/settings",
-            "/edit-profile": "/settings",
-            "/account": "/settings",
-        }
-        _ALLOWED_HREFS = {
-            "/find", "/share", "/dashboard", "/donations", "/admin", "/admin/users",
-            "/admin/broadcasts", "/admin/distribution", "/admin/feedback", "/admin/reports",
-            "/admin/messages", "/admin/communities", "/admin/verifications",
-            "/admin/settings", "/admin/impact", "/admin/attendees", "/admin/approval-codes",
-            "/admin/share-food", "/admin/impact-content",
-            "/near-me", "/profile", "/listings", "/receipts", "/notifications", "/settings",
-            "/recipes", "/sponsors", "/community", "/blog", "/contact", "/donate",
-        }
-        for ins in ai_insights_list:
-            if not isinstance(ins, dict):
-                continue
-            action = ins.get("action")
-            if not isinstance(action, dict):
-                continue
-            href = (action.get("href") or "").strip()
-            if not href:
-                ins["action"] = None
-                continue
-            # Strip query/hash for matching, keep absolute external URLs as-is.
-            if href.startswith(("http://", "https://")):
-                continue
-            base = href.split("?")[0].split("#")[0].rstrip("/") or "/"
-            base_lc = base.lower()
-            if base_lc in _HREF_ALIASES:
-                action["href"] = _HREF_ALIASES[base_lc] + href[len(base):]
-            elif base_lc not in _ALLOWED_HREFS:
-                # Unknown route — drop the action button rather than 404.
-                ins["action"] = None
-
-        # Drop AI insights that duplicate profile-gap ids/titles.
-        gap_keys = {g["id"] for g in gap_insights}
-        gap_titles_lc = {g["title"].lower() for g in gap_insights}
-        filtered_ai = [
-            ins for ins in ai_insights_list
-            if isinstance(ins, dict)
-            and ins.get("id") not in gap_keys
-            and str(ins.get("title", "")).lower() not in gap_titles_lc
-        ]
-
-        # Belt-and-suspenders: strip any profile-themed insight for admins.
-        if is_admin_role:
-            def _is_profile_themed(ins: dict) -> bool:
-                blob = " ".join(str(ins.get(k, "")) for k in ("id", "title", "message", "source")).lower()
-                return any(term in blob for term in ("profile", "complete your", "update your account"))
-            filtered_ai = [ins for ins in filtered_ai if not _is_profile_themed(ins)]
-
-        merged = gap_insights + filtered_ai
-        return {
-            "role": role,
-            "headline": result.get("headline") or "Here's what's happening today",
-            "insights": merged[:6],
-            "profile_completion": completion_pct,
-            "profile_gaps": [g["id"] for g in gap_insights],
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        rid = _request_id(request)
-        logger.exception("[%s] AI insights error: %s", rid, exc)
-        raise classify_exception(exc) from exc
-
-
-# ===================================================================
-#  VOICE + LOCATION FOOD SEARCH
-# ===================================================================
-
-class VoiceSearchRequest(BaseModel):
-    user_id: str = Field(min_length=1, max_length=128)
-    transcript: str = Field(min_length=1, max_length=500)
-    latitude: float | None = Field(default=None, ge=-90, le=90)
-    longitude: float | None = Field(default=None, ge=-180, le=180)
-    max_distance_km: float = Field(default=25.0, gt=0, le=500)
-    limit: int = Field(default=10, ge=1, le=50)
-
-
-_VOICE_SEARCH_FILTER_PROMPT = (
-    "You extract structured search filters from a spoken food-search request.\n"
-    "Return ONLY valid JSON matching this schema:\n"
-    "{\n"
-    '  "keywords": [string],         // 0-5 lowercased nouns to match against title/description\n'
-    '  "category": string | null,    // one of: produce, bakery, dairy, prepared, pantry, frozen, beverages, other, or null\n'
-    '  "dietary_tags": [string],     // e.g. ["vegetarian","vegan","halal","kosher","gluten-free"]\n'
-    '  "avoid_allergens": [string],  // e.g. ["peanuts","dairy","gluten"]\n'
-    '  "prefer_urgent": boolean,     // true if user wants soon-expiring food\n'
-    '  "max_distance_km": number | null  // override max distance if user specified one\n'
-    "}\n"
-    "Never invent specifics not in the request. Use empty arrays / null when unsure."
-)
-
-
-def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance between two GPS points in kilometers."""
-    import math
-    r = 6371.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
-
-
-def _hours_until(deadline_iso: str | None) -> float | None:
-    if not deadline_iso:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(deadline_iso).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        delta = dt - datetime.now(timezone.utc)
-        return max(0.0, delta.total_seconds() / 3600.0)
-    except (ValueError, TypeError):
-        return None
-
-
-def _urgency_score(hours: float | None) -> tuple[int, str]:
-    """Map hours-until-deadline to a 0..100 score and label."""
-    if hours is None:
-        return 25, "normal"
-    if hours <= 0:
-        return 100, "expired"
-    if hours < 6:
-        return 95, "critical"
-    if hours < 24:
-        return 80, "high"
-    if hours < 72:
-        return 55, "medium"
-    return 25, "normal"
-
-
-def _matches_filters(listing: dict, filters: dict) -> bool:
-    """Apply parsed voice filters in a forgiving way (any-match)."""
-    cat = (filters.get("category") or "").lower().strip()
-    if cat and (listing.get("category") or "").lower() != cat:
-        return False
-
-    avoid = [str(a).lower() for a in (filters.get("avoid_allergens") or [])]
-    if avoid:
-        allergens = [str(a).lower() for a in (listing.get("allergens") or [])]
-        if any(a in allergens for a in avoid):
-            return False
-
-    dietary = [str(d).lower() for d in (filters.get("dietary_tags") or [])]
-    if dietary:
-        tags = [str(t).lower() for t in (listing.get("dietary_tags") or [])]
-        if not any(d in tags for d in dietary):
-            return False
-
-    keywords = [str(k).lower() for k in (filters.get("keywords") or []) if str(k).strip()]
-    if keywords:
-        haystack = " ".join([
-            str(listing.get("title") or ""),
-            str(listing.get("description") or ""),
-            str(listing.get("category") or ""),
-        ]).lower()
-        if not any(k in haystack for k in keywords):
-            return False
-    return True
-
-
-async def _parse_voice_query(transcript: str) -> dict:
-    """Use the LLM to extract structured filters; fall back to plain-keyword search."""
-    fallback = {
-        "keywords": [w for w in transcript.lower().split() if len(w) > 3][:5],
-        "category": None,
-        "dietary_tags": [],
-        "avoid_allergens": [],
-        "prefer_urgent": "soon" in transcript.lower() or "urgent" in transcript.lower(),
-        "max_distance_km": None,
-    }
-    if not OPENAI_API_KEY:
-        return fallback
-    try:
-        # Use _call_openai_raw_json so only _VOICE_SEARCH_FILTER_PROMPT is in play —
-        # _call_openai_json appends _INSIGHTS_JSON_INSTRUCTIONS which would override
-        # the filter schema and make the LLM return {headline, insights} instead.
-        parsed = await _call_openai_raw_json(
-            [
-                {"role": "system", "content": _VOICE_SEARCH_FILTER_PROMPT},
-                {"role": "user", "content": transcript.strip()},
-            ],
-            max_tokens=200,
-        )
-        merged = {**fallback, **{k: v for k, v in parsed.items() if k in fallback}}
-        return merged
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("voice-search filter parse failed: %s", exc)
-        return fallback
-
-
-@app.post("/api/ai/voice-search")
-async def ai_voice_search(body: VoiceSearchRequest, request: Request) -> dict:
-    """GPS + voice-driven food search ranked by urgency and distance."""
-    _enforce_rate_limit(request)
-    _validate_uuid(body.user_id)
-
-    await _require_auth_for_user(request, body.user_id)
-
-    try:
-        filters = await _parse_voice_query(body.transcript)
-        max_distance = float(filters.get("max_distance_km") or body.max_distance_km)
-        prefer_urgent = bool(filters.get("prefer_urgent"))
-
-        today_iso = datetime.now(timezone.utc).date().isoformat()
-        listings = await supabase_get("food_listings", {
-            "select": (
-                "id,title,description,image_url,category,quantity,unit,status,"
-                "latitude,longitude,location,full_address,"
-                "expiry_date,pickup_by,created_at,"
-                "dietary_tags,allergens,urgency_level,donor_name"
-            ),
-            "status": "in.(approved,active)",
-            "or": f"(expiry_date.gte.{today_iso},expiry_date.is.null)",
-            "limit": "200",
-        })
-
-        results = []
-        for item in listings:
-            if not _matches_filters(item, filters):
-                continue
-
-            deadline = item.get("pickup_by") or item.get("expiry_date")
-            hours = _hours_until(deadline)
-            u_score, u_label = _urgency_score(hours)
-
-            lat = item.get("latitude")
-            lon = item.get("longitude")
-            distance_km: float | None = None
-            if (
-                body.latitude is not None
-                and body.longitude is not None
-                and isinstance(lat, (int, float))
-                and isinstance(lon, (int, float))
-            ):
-                distance_km = round(_haversine_km(body.latitude, body.longitude, float(lat), float(lon)), 2)
-                if distance_km > max_distance:
-                    continue
-
-            # Distance score: 100 when on top of you, 0 at max_distance.
-            if distance_km is None:
-                d_score = 35  # neutral when location unknown
-            else:
-                d_score = max(0, int(round(100 * (1 - min(distance_km, max_distance) / max_distance))))
-
-            urgency_weight = 0.7 if prefer_urgent else 0.55
-            combined = round(urgency_weight * u_score + (1 - urgency_weight) * d_score, 1)
-
-            results.append({
-                "id": item.get("id"),
-                "title": item.get("title"),
-                "description": (item.get("description") or "")[:240],
-                "image_url": item.get("image_url"),
-                "category": item.get("category"),
-                "quantity": item.get("quantity"),
-                "unit": item.get("unit"),
-                "location": item.get("location"),
-                "full_address": item.get("full_address"),
-                "latitude": item.get("latitude"),
-                "longitude": item.get("longitude"),
-                "donor_name": item.get("donor_name"),
-                "dietary_tags": item.get("dietary_tags") or [],
-                "allergens": item.get("allergens") or [],
-                "deadline": deadline,
-                "hours_until_deadline": round(hours, 1) if hours is not None else None,
-                "urgency_label": u_label,
-                "urgency_score": u_score,
-                "distance_km": distance_km,
-                "distance_score": d_score,
-                "combined_score": combined,
-            })
-
-        results.sort(key=lambda r: r["combined_score"], reverse=True)
-        top = results[: body.limit]
-
-        if not top:
-            headline = "No nearby listings matched that request."
-        else:
-            best = top[0]
-            bits = [f"{len(top)} match{'es' if len(top) != 1 else ''}"]
-            if best.get("distance_km") is not None:
-                bits.append(f"closest {best['distance_km']} km")
-            if best.get("hours_until_deadline") is not None:
-                bits.append(f"most urgent in {best['hours_until_deadline']}h")
-            headline = " · ".join(bits)
-
-        return {
-            "headline": headline,
-            "transcript": body.transcript,
-            "filters": filters,
-            "max_distance_km": max_distance,
-            "user_location": (
-                {"latitude": body.latitude, "longitude": body.longitude}
-                if body.latitude is not None and body.longitude is not None
-                else None
-            ),
-            "results": top,
-            "total_matched": len(results),
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        rid = _request_id(request)
-        logger.error("[%s] Voice search error: %s", rid, exc, exc_info=True)
-        raise classify_exception(exc) from exc
-
-
-# ===================================================================
-#  ROUTE (Mapbox Directions proxy for client-side rendering)
-# ===================================================================
-
-class RouteRequest(BaseModel):
-    origin_lat: float
-    origin_lng: float
-    dest_lat: float
-    dest_lng: float
-    profile: str = Field(default="driving", pattern="^(driving|walking|cycling)$")
-
-
-@app.post("/api/ai/route")
-async def ai_route(body: RouteRequest, request: Request) -> dict:
-    """Return a Mapbox Directions route (geometry + summary) for client rendering."""
-    _enforce_rate_limit(request)
-    from backend.tools import _get_mapbox_route
-    try:
-        result = await _get_mapbox_route(
-            origin_lng=body.origin_lng,
-            origin_lat=body.origin_lat,
-            dest_lng=body.dest_lng,
-            dest_lat=body.dest_lat,
-            profile=body.profile,
-        )
-        return result
-    except Exception as exc:
-        rid = _request_id(request)
-        logger.error("[%s] Route lookup failed: %s", rid, exc, exc_info=True)
-        raise classify_exception(exc) from exc
-
-
-# ===================================================================
-#  AI RECIPE GENERATOR  (household-aware, low-resource)
-# ===================================================================
-
-class RecipeRequest(BaseModel):
-    user_id: str = Field(min_length=1, max_length=128)
-    ingredients: list[str] | None = Field(default=None, max_length=40)
-    use_claimed: bool = True
-    low_resource: bool = True
-    household_size: int | None = Field(default=None, ge=1, le=20)
-    max_recipes: int = Field(default=3, ge=1, le=5)
-    dietary_overrides: list[str] | None = Field(default=None, max_length=10)
-    notes: str | None = Field(default=None, max_length=300)
-
-
-_RECIPE_SYSTEM_PROMPT = (
-    "You are a frugal home cook helping a household turn rescued/claimed food into meals.\n"
-    "You MUST respond with ONLY valid JSON matching this exact schema:\n"
-    "{\n"
-    '  "headline": "short single-sentence summary of the menu",\n'
-    '  "recipes": [\n'
-    "    {\n"
-    '      "title": "short dish name",\n'
-    '      "summary": "1-2 sentence pitch",\n'
-    '      "servings": integer,\n'
-    '      "time_minutes": integer,\n'
-    '      "difficulty": "easy|medium|hard",\n'
-    '      "cost_tier": "low|medium|high",\n'
-    '      "ingredients": [ { "name": "...", "quantity": "e.g. 1 cup", "optional": true|false } ],\n'
-    '      "steps": [ "step 1", "step 2", ... ],\n'
-    '      "equipment": [ "pan", "oven", ... ],\n'
-    '      "dietary_tags": [ "vegetarian", "halal", ... ],\n'
-    '      "uses_ingredients": [ "subset of user-provided ingredients actually used" ],\n'
-    '      "tips": "1 short pro-tip about substitutions or storage"\n'
-    "    }\n"
-    "  ]\n"
-    "}\n"
-    "Hard rules:\n"
-    "- Center each recipe on the provided ingredients; only add common pantry staples "
-    "(salt, pepper, oil, water, flour, sugar, common spices, onion, garlic) when needed.\n"
-    "- Respect dietary restrictions strictly.\n"
-    "- If low_resource is true: limit equipment to stovetop/microwave/one pot/oven only; "
-    "keep steps <= 8; keep total time <= 45 minutes; keep cost_tier = low.\n"
-    "- Scale servings to household_size when provided.\n"
-    "- Never invent ingredients the user does not have unless they are common staples.\n"
-    "- Output between 1 and max_recipes recipes; do not exceed it.\n"
-    "- Keep all strings concise; the entire response must fit in ~900 tokens."
-)
-
-
-async def _call_openai_freeform_json(
-    system_prompt: str,
-    user_payload: str,
-    max_tokens: int = 1100,
-    temperature: float = 0.6,
-) -> dict:
-    """Free-form JSON-mode chat call (not pinned to the insights schema).
-
-    Retries on 429 / 5xx with exponential backoff so transient rate-limit
-    spikes don't surface as hard errors on the recipes endpoint.
-    """
-    if not OPENAI_API_KEY:
-        raise HTTPException(503, "AI service not configured")
-
-    import asyncio
-    import json as _json
-    from backend.ai_engine import _get_http_client, OPENAI_BASE_URL, FOLLOWUP_MODEL
-    client = _get_http_client(45)
-    payload = {
-        "model": FOLLOWUP_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_payload},
-        ],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    for attempt in range(3):
-        try:
-            resp = await client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if attempt < 2:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                resp.raise_for_status()
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            try:
-                parsed = _json.loads(content)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Free-form JSON parse failed: %s", exc)
-                return {}
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception as exc:
-            if attempt < 2:
-                await asyncio.sleep(2 ** attempt)
-            else:
-                logger.error("_call_openai_freeform_json failed after retries: %s", exc)
-                raise
-    return {}
-
-
-async def _gather_claimed_ingredients(user_id: str, limit: int = 12) -> list[dict]:
-    """Pull the user's active claims joined with food_listings as ingredient hints."""
-    try:
-        rows = await supabase_get("food_claims", {
-            "select": (
-                "id,quantity,status,"
-                "food_listings(id,title,category,quantity,unit,expiry_date,pickup_by,dietary_tags,allergens)"
-            ),
-            "claimer_id": f"eq.{user_id}",
-            "status": "in.(pending,approved,scheduled)",
-            "limit": str(limit),
-        })
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to load claimed ingredients: %s", exc)
-        return []
-
-    out: list[dict] = []
-    for row in rows or []:
-        fl = (row or {}).get("food_listings") or {}
-        title = fl.get("title")
-        if not title:
-            continue
-        out.append({
-            "name": title,
-            "category": fl.get("category"),
-            "quantity": row.get("quantity") or fl.get("quantity"),
-            "unit": fl.get("unit"),
-            "dietary_tags": fl.get("dietary_tags") or [],
-            "allergens": fl.get("allergens") or [],
-            "deadline": fl.get("pickup_by") or fl.get("expiry_date"),
-        })
-    return out
-
-
-def _coerce_int(value, default=None):
-    """Best-effort integer coercion from numbers, '4', '4 people', '30-45 min'."""
-    if value is None or value == "":
-        return default
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, (int, float)):
-        try:
-            return int(value)
-        except (ValueError, TypeError):
-            return default
-    import re as _re
-    m = _re.search(r"-?\d+", str(value))
-    if m:
-        try:
-            return int(m.group(0))
-        except (ValueError, TypeError):
-            return default
-    return default
-
-
-def _normalize_recipe(raw: dict) -> dict | None:
-    """Coerce model output into a stable shape; drop obviously bad rows."""
-    if not isinstance(raw, dict):
-        return None
-    try:
-        title = str(raw.get("title") or raw.get("name") or "").strip()
-        if not title:
-            return None
-        ingredients_raw = raw.get("ingredients") or raw.get("items") or []
-        ingredients: list[dict] = []
-        for ing in ingredients_raw[:25]:
-            if isinstance(ing, dict):
-                name = str(ing.get("name") or ing.get("item") or "").strip()
-                if not name:
-                    continue
-                ingredients.append({
-                    "name": name[:80],
-                    "quantity": str(ing.get("quantity") or ing.get("amount") or "").strip()[:40],
-                    "optional": bool(ing.get("optional")),
-                })
-            elif isinstance(ing, str) and ing.strip():
-                ingredients.append({"name": ing.strip()[:80], "quantity": "", "optional": False})
-        # Steps can come back under several keys depending on model mood.
-        steps_raw = (
-            raw.get("steps")
-            or raw.get("instructions")
-            or raw.get("directions")
-            or raw.get("method")
-            or []
-        )
-        if isinstance(steps_raw, str):
-            # Sometimes returned as a single newline-delimited string.
-            steps_raw = [s for s in steps_raw.splitlines() if s.strip()]
-        steps = [str(s).strip()[:400] for s in steps_raw[:15] if str(s).strip()]
-        if not ingredients or not steps:
-            return None
-        return {
-            "title": title[:80],
-            "summary": str(raw.get("summary") or raw.get("description") or "").strip()[:240],
-            "servings": _coerce_int(raw.get("servings") or raw.get("serves")),
-            "time_minutes": _coerce_int(raw.get("time_minutes") or raw.get("time") or raw.get("total_time")),
-            "difficulty": str(raw.get("difficulty") or "easy").lower()[:10],
-            "cost_tier": str(raw.get("cost_tier") or "low").lower()[:10],
-            "ingredients": ingredients,
-            "steps": steps,
-            "equipment": [str(e).strip()[:40] for e in (raw.get("equipment") or [])[:8] if str(e).strip()],
-            "dietary_tags": [str(t).strip().lower()[:30] for t in (raw.get("dietary_tags") or [])[:8] if str(t).strip()],
-            "uses_ingredients": [str(u).strip()[:60] for u in (raw.get("uses_ingredients") or [])[:15] if str(u).strip()],
-            "tips": str(raw.get("tips") or raw.get("tip") or "").strip()[:240],
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Recipe normalization failed for one row: %s", exc)
-        return None
-
-
-@app.post("/api/ai/recipes")
-async def ai_recipes(body: RecipeRequest, request: Request) -> dict:
-    """Generate household-aware, low-resource recipes from claimed/available items."""
-    _enforce_rate_limit(request)
-    _validate_uuid(body.user_id)
-
-    await _require_auth_for_user(request, body.user_id)
-
-    # Profile context (dietary restrictions + allergies, community_role for household hint).
-    user_rows = await supabase_get("users", {
-        # Fetch both dietary_restrictions AND allergies — both are safety-critical
-        # for recipe generation. Missing allergies here would let the AI suggest
-        # nut-containing recipes to someone with a nut allergy.
-        "select": "id,name,community_role,dietary_restrictions,allergies",
-        "id": f"eq.{body.user_id}",
-        "limit": "1",
-    })
-    user_row = (user_rows or [{}])[0] if user_rows else {}
-
-    dietary: list[str] = []
-    raw_diet = user_row.get("dietary_restrictions")
-    if isinstance(raw_diet, list):
-        dietary.extend([str(d).strip() for d in raw_diet if str(d).strip()])
-    elif isinstance(raw_diet, str) and raw_diet.strip():
-        dietary.extend([p.strip() for p in raw_diet.split(",") if p.strip()])
-    # Always include allergies so the recipe AI never suggests food containing
-    # an ingredient the user is allergic to (e.g. nut allergy → no nut recipes).
-    raw_allergies = user_row.get("allergies")
-    if isinstance(raw_allergies, list):
-        dietary.extend([str(a).strip() for a in raw_allergies if str(a).strip()])
-    elif isinstance(raw_allergies, str) and raw_allergies.strip():
-        dietary.extend([p.strip() for p in raw_allergies.split(",") if p.strip()])
-    if body.dietary_overrides:
-        dietary.extend([str(d).strip() for d in body.dietary_overrides if str(d).strip()])
-    dietary = list(dict.fromkeys([d.lower() for d in dietary]))[:12]
-
-    # Ingredient list: explicit > claimed pickups.
-    explicit = [str(i).strip() for i in (body.ingredients or []) if str(i).strip()]
-    claimed: list[dict] = []
-    if body.use_claimed and not explicit:
-        claimed = await _gather_claimed_ingredients(body.user_id)
-
-    ingredient_names = explicit or [c["name"] for c in claimed]
-    if not ingredient_names:
-        return {
-            "headline": "Add some ingredients or claim food to get recipe suggestions.",
-            "recipes": [],
-            "source": "empty",
-            "household_size": body.household_size,
-            "dietary_restrictions": dietary,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-    household = body.household_size or 2
-    role = user_row.get("community_role") or "household"
-
-    payload_lines = [
-        f"household_size: {household}",
-        f"household_role: {role}",
-        f"low_resource: {body.low_resource}",
-        f"max_recipes: {body.max_recipes}",
-        f"dietary_restrictions: {dietary or 'none'}",
-        f"ingredients_available: {ingredient_names[:25]}",
-    ]
-    if claimed:
-        deadlines = [c.get("deadline") for c in claimed if c.get("deadline")]
-        if deadlines:
-            payload_lines.append(f"upcoming_pickup_deadlines: {deadlines[:5]}")
-    if body.notes:
-        payload_lines.append(f"notes_from_user: {body.notes[:280]}")
-
-    payload_lines.append(
-        "Return up to max_recipes recipes that use as many ingredients as possible, "
-        "scaled to household_size, honoring dietary_restrictions, and matching the "
-        "low_resource constraints when low_resource is true."
+# NOTE: Use Base imported from models; do not re-declare another Base here
+# JWT settings
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET or len(JWT_SECRET) < 16:
+    # Fail closed: refuse to start with a weak/missing JWT secret rather
+    # than fall back to a known literal that anyone reading the source
+    # could use to forge tokens.
+    raise RuntimeError(
+        "JWT_SECRET environment variable is required and must be at least "
+        "16 characters long."
     )
+JWT_ALGORITHM = "HS256"
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
+if not PUBLIC_BASE_URL:
+    raise RuntimeError("PUBLIC_BASE_URL environment variable is required")
 
+
+def get_public_base_url() -> str:
+    """Return the user-facing base URL configured in environment."""
+    return PUBLIC_BASE_URL.rstrip("/")
+
+
+@lru_cache(maxsize=4096)
+def _is_gitignored_path(relative_path: str) -> bool:
     try:
-        parsed = await _call_openai_freeform_json(
-            _RECIPE_SYSTEM_PROMPT,
-            "\n".join(payload_lines),
-            max_tokens=1200,
-            temperature=0.55,
+        completed = subprocess.run(
+            ["git", "-C", PROJECT_ROOT, "check-ignore", "-q", "--", relative_path],
+            capture_output=True,
+            check=False,
         )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        rid = _request_id(request)
-        logger.error("[%s] Recipe generation error: %s", rid, exc, exc_info=True)
-        raise classify_exception(exc) from exc
-
-    recipes_out: list[dict] = []
-    for r in (parsed.get("recipes") or [])[: body.max_recipes]:
-        try:
-            norm = _normalize_recipe(r)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Skipping malformed recipe: %s", exc)
-            continue
-        if norm:
-            recipes_out.append(norm)
-
-    headline = str(parsed.get("headline") or "").strip()[:200]
-    if not headline:
-        if recipes_out:
-            headline = f"{len(recipes_out)} recipe idea{'s' if len(recipes_out) != 1 else ''} for {household} serving{'s' if household != 1 else ''}."
-        else:
-            headline = "Couldn't build a recipe from those ingredients — try adjusting them."
-
-    return {
-        "headline": headline,
-        "recipes": recipes_out,
-        "source": "explicit" if explicit else ("claimed" if claimed else "empty"),
-        "ingredients_used": ingredient_names[:25],
-        "household_size": household,
-        "low_resource": body.low_resource,
-        "dietary_restrictions": dietary,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
+        return completed.returncode == 0
+    except OSError:
+        return False
 
 
-# ===================================================================
-#  NATURAL-LANGUAGE QUERY SYSTEM  (LLM function-calling → safe tools)
-# ===================================================================
-#
-# Maps free-form questions to a whitelist of read-only, parameterized
-# data-access "tools" executed against Supabase PostgREST. No raw SQL
-# is ever produced or executed by the LLM — that surface is removed.
-# Each tool is scoped to the authenticated user (admin gets a few extras).
-
-class QueryRequest(BaseModel):
-    user_id: str = Field(min_length=1, max_length=128)
-    question: str = Field(min_length=1, max_length=500)
-    max_steps: int = Field(default=3, ge=1, le=5)
-
-
-_QUERY_SYSTEM_PROMPT = (
-    "You are DoGoods' data assistant. Answer the user's question by calling "
-    "the smallest set of provided tools, then give a concise (<=120 word) "
-    "natural-language answer grounded in the tool results.\n"
-    "Rules:\n"
-    "- Never invent rows, counts, names, or IDs that did not come from a tool.\n"
-    "- Always call a tool before making factual claims about the user's data.\n"
-    "- If a tool returns no data, say so plainly.\n"
-    "- Prefer at most 2 tool calls; chain only when strictly necessary.\n"
-    "- When listing items, use short markdown bullets with the key fields.\n"
-    "- Never reveal another user's private data."
-)
-
-
-def _query_tool_specs(is_admin: bool) -> list[dict]:
-    """Return the OpenAI tools list available to this user."""
-    tools: list[dict] = [
-        {
-            "type": "function",
-            "function": {
-                "name": "search_food_listings",
-                "description": (
-                    "Search public food listings by free-text keywords and/or category. "
-                    "Returns at most max_results approved/active listings."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "keywords": {"type": "string", "description": "Optional space-separated terms to match title/description."},
-                        "category": {"type": "string", "description": "Optional category filter (produce, bakery, dairy, prepared, pantry, frozen, beverages, other)."},
-                        "dietary_tag": {"type": "string", "description": "Optional dietary tag (e.g. vegan, halal)."},
-                        "max_results": {"type": "integer", "minimum": 1, "maximum": 25, "default": 10},
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_my_claims",
-                "description": "List the current user's food claims with their food listing details.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "status": {"type": "string", "description": "pending|approved|scheduled|completed|cancelled|all", "default": "all"},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_my_listings",
-                "description": "List the current user's own food listings.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "status": {"type": "string", "description": "approved|pending|expired|all", "default": "all"},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_my_impact_summary",
-                "description": "Aggregate counts for the current user: listings, claims, totals by status.",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_my_profile",
-                "description": "Return the current user's sanitized profile (name, role, dietary, address city/state).",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_recent_recipes",
-                "description": "Read up to 5 active curated recipes from the recipes library.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 5, "default": 5},
-                    },
-                },
-            },
-        },
-    ]
-
-    if is_admin:
-        tools.extend([
-            {
-                "type": "function",
-                "function": {
-                    "name": "admin_count_users",
-                    "description": "Admin: count users, optionally filtered by community_role.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "community_role": {"type": "string", "description": "donor|recipient|volunteer|sponsor|admin"},
-                        },
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "admin_pending_claims",
-                    "description": "Admin: list pending food claims awaiting approval.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
-                        },
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "admin_failed_broadcasts",
-                    "description": "Admin: list recent failed broadcast deliveries.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
-                        },
-                    },
-                },
-            },
-        ])
-    return tools
-
-
-def _slim_listing(row: dict) -> dict:
-    from backend.tools import _extract_location_text
-    return {
-        "id": row.get("id"),
-        "title": row.get("title"),
-        "category": row.get("category"),
-        "quantity": row.get("quantity"),
-        "unit": row.get("unit"),
-        "status": row.get("status"),
-        # food_listings.location is JSONB (dict from frontend writes); always
-        # extract the human-readable address string via the helper.
-        "location": row.get("full_address") or _extract_location_text(row.get("location")),
-        "pickup_by": row.get("pickup_by"),
-        "expiry_date": row.get("expiry_date"),
-        "dietary_tags": row.get("dietary_tags") or [],
-    }
-
-
-async def _tool_search_food_listings(args: dict, _ctx: dict) -> dict:
-    keywords = (args.get("keywords") or "").strip()
-    category = (args.get("category") or "").strip().lower()
-    dietary_tag = (args.get("dietary_tag") or "").strip().lower()
-    max_results = max(1, min(25, int(args.get("max_results") or 10)))
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    params = {
-        "select": "id,title,description,category,quantity,unit,status,location,full_address,pickup_by,expiry_date,dietary_tags",
-        "status": "in.(approved,active)",
-        # Exclude listings whose expiry_date has passed; include unlabeled items
-        # (NULL expiry_date) which are non-perishable or pantry staples.
-        "or": f"(expiry_date.is.null,expiry_date.gte.{today_str})",
-        "limit": str(max_results),
-    }
-    if category:
-        params["category"] = f"eq.{category}"
-    if keywords:
-        safe = keywords.replace(",", " ").replace("*", "").strip()
-        if safe:
-            # Can't add a second or= key (Python dict single-value constraint).
-            # Wrap keyword filter in and(or(...)) so the expiry or= is preserved.
-            params["and"] = f"(or(title.ilike.*{safe}*,description.ilike.*{safe}*))"
-    if dietary_tag:
-        params["dietary_tags"] = f"cs.{{{dietary_tag}}}"
-
-    rows = await supabase_get("food_listings", params)
-    return {"count": len(rows or []), "results": [_slim_listing(r) for r in (rows or [])]}
-
-
-async def _tool_get_my_claims(args: dict, ctx: dict) -> dict:
-    status = (args.get("status") or "all").strip().lower()
-    limit = max(1, min(50, int(args.get("limit") or 20)))
-
-    params = {
-        "select": "id,status,quantity,created_at,pickup_by,food_listings(id,title,category,quantity,unit,pickup_by,expiry_date,location)",
-        "claimer_id": f"eq.{ctx['user_id']}",
-        "order": "created_at.desc",
-        "limit": str(limit),
-    }
-    if status and status != "all":
-        params["status"] = f"eq.{status}"
-    rows = await supabase_get("food_claims", params)
-    return {
-        "count": len(rows or []),
-        "claims": [
-            {
-                "id": r.get("id"),
-                "status": r.get("status"),
-                "quantity": r.get("quantity"),
-                "created_at": r.get("created_at"),
-                "pickup_by": r.get("pickup_by"),
-                "listing": _slim_listing((r or {}).get("food_listings") or {}),
-            }
-            for r in (rows or [])
-        ],
-    }
-
-
-async def _tool_get_my_listings(args: dict, ctx: dict) -> dict:
-    status = (args.get("status") or "all").strip().lower()
-    limit = max(1, min(50, int(args.get("limit") or 20)))
-
-    params = {
-        "select": "id,title,category,quantity,unit,status,location,full_address,pickup_by,expiry_date,dietary_tags,created_at",
-        "user_id": f"eq.{ctx['user_id']}",
-        "order": "created_at.desc",
-        "limit": str(limit),
-    }
-    if status and status != "all":
-        params["status"] = f"eq.{status}"
-    rows = await supabase_get("food_listings", params)
-    return {"count": len(rows or []), "listings": [_slim_listing(r) for r in (rows or [])]}
-
-
-async def _tool_get_my_impact_summary(_args: dict, ctx: dict) -> dict:
-    user_id = ctx["user_id"]
-    try:
-        listings = await supabase_get("food_listings", {
-            "select": "id,status",
-            "user_id": f"eq.{user_id}",
-            "limit": "1000",
-        })
-    except Exception:
-        listings = []
-    try:
-        claims = await supabase_get("food_claims", {
-            "select": "id,status",
-            "claimer_id": f"eq.{user_id}",
-            "limit": "1000",
-        })
-    except Exception:
-        claims = []
-
-    def _by_status(rows: list[dict]) -> dict:
-        out: dict[str, int] = {}
-        for r in rows or []:
-            key = (r or {}).get("status") or "unknown"
-            out[key] = out.get(key, 0) + 1
-        return out
-
-    return {
-        "listings_total": len(listings or []),
-        "listings_by_status": _by_status(listings),
-        "claims_total": len(claims or []),
-        "claims_by_status": _by_status(claims),
-    }
-
-
-async def _tool_get_my_profile(_args: dict, ctx: dict) -> dict:
-    rows = await supabase_get("users", {
-        # Use `address` (plain text) instead of `location` (legacy JSON column).
-        # `location` was null or a JSON blob for most users so queries like
-        # "what address do you have for me?" would return nothing.
-        "select": "id,name,community_role,address,dietary_restrictions,allergies,is_admin",
-        "id": f"eq.{ctx['user_id']}",
-        "limit": "1",
-    })
-    row = (rows or [{}])[0] if rows else {}
-    return {
-        "id": row.get("id"),
-        "name": row.get("name"),
-        "community_role": row.get("community_role"),
-        "address": row.get("address"),
-        "dietary_restrictions": row.get("dietary_restrictions") or [],
-        "allergies": row.get("allergies") or [],
-        "is_admin": bool(row.get("is_admin")),
-    }
-
-
-async def _tool_get_recent_recipes(args: dict, _ctx: dict) -> dict:
-    limit = max(1, min(5, int(args.get("limit") or 5)))
-    rows = await supabase_get("impact_recipes", {
-        "select": "id,title,description,prep_time_minutes,cook_time_minutes,servings,difficulty,youtube_url",
-        "is_active": "eq.true",
-        "order": "created_at.desc",
-        "limit": str(limit),
-    })
-    return {"count": len(rows or []), "recipes": rows or []}
-
-
-async def _tool_admin_count_users(args: dict, _ctx: dict) -> dict:
-    role = (args.get("community_role") or "").strip().lower()
-    params: dict[str, str] = {"select": "id", "limit": "5000"}
-    if role:
-        params["community_role"] = f"eq.{role}"
-    rows = await supabase_get("users", params)
-    return {"count": len(rows or []), "community_role": role or "all"}
-
-
-async def _tool_admin_pending_claims(args: dict, _ctx: dict) -> dict:
-    limit = max(1, min(50, int(args.get("limit") or 20)))
-    rows = await supabase_get("food_claims", {
-        "select": "id,status,quantity,created_at,claimer_id,food_listings(id,title,category)",
-        "status": "eq.pending",
-        "order": "created_at.desc",
-        "limit": str(limit),
-    })
-    return {"count": len(rows or []), "claims": rows or []}
-
-
-async def _tool_admin_failed_broadcasts(args: dict, _ctx: dict) -> dict:
-    limit = max(1, min(50, int(args.get("limit") or 20)))
-    try:
-        rows = await supabase_get("broadcast_deliveries", {
-            "select": "id,broadcast_id,channel,target,sent_at,delivered,error",
-            "delivered": "eq.false",
-            "order": "sent_at.desc",
-            "limit": str(limit),
-        })
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("admin_failed_broadcasts unavailable: %s", exc)
-        rows = []
-    return {"count": len(rows or []), "deliveries": rows or []}
-
-
-_QUERY_TOOL_REGISTRY = {
-    "search_food_listings": _tool_search_food_listings,
-    "get_my_claims": _tool_get_my_claims,
-    "get_my_listings": _tool_get_my_listings,
-    "get_my_impact_summary": _tool_get_my_impact_summary,
-    "get_my_profile": _tool_get_my_profile,
-    "get_recent_recipes": _tool_get_recent_recipes,
-    "admin_count_users": _tool_admin_count_users,
-    "admin_pending_claims": _tool_admin_pending_claims,
-    "admin_failed_broadcasts": _tool_admin_failed_broadcasts,
+# Global request input constraints for API routes.
+MAX_API_BODY_BYTES = 64 * 1024
+# Per-path overrides for multipart upload endpoints whose handlers enforce
+# their own size caps. Keep these slightly above the handler cap so we don't
+# pre-empt the handler's friendlier error message.
+UPLOAD_PATH_LIMITS = {
+    "/api/ai/voice": 26 * 1024 * 1024,        # handler caps at 25MB
+    "/api/ai/upload_image": 9 * 1024 * 1024,  # handler caps at 8MB
 }
 
-_ADMIN_TOOL_NAMES = {"admin_count_users", "admin_pending_claims", "admin_failed_broadcasts"}
+
+def _max_body_bytes_for(path: str) -> int:
+    return UPLOAD_PATH_LIMITS.get(path.rstrip("/"), MAX_API_BODY_BYTES)
 
 
-async def _run_query_agent(question: str, user_id: str, is_admin: bool, max_steps: int) -> dict:
-    """Drive the OpenAI function-calling loop over the safe tool registry."""
-    if not OPENAI_API_KEY:
-        raise HTTPException(503, "AI service not configured")
+MAX_QUERY_STRING_BYTES = 2048
+MAX_QUERY_PARAM_NAME_CHARS = 64
+MAX_QUERY_PARAM_VALUE_CHARS = 512
+MAX_JSON_STRING_CHARS = 5000
+MAX_JSON_KEY_CHARS = 128
+MAX_JSON_OBJECT_KEYS = 200
+MAX_JSON_ARRAY_ITEMS = 500
+MAX_JSON_NESTING_DEPTH = 20
 
-    from backend.ai_engine import _get_http_client, OPENAI_BASE_URL, FOLLOWUP_MODEL
-    client = _get_http_client(45)
 
-    tools = _query_tool_specs(is_admin)
-    messages: list[dict] = [
-        {"role": "system", "content": _QUERY_SYSTEM_PROMPT},
-        {"role": "user", "content": question},
-    ]
-    trace: list[dict] = []
+def _contains_disallowed_control_chars(value: str) -> bool:
+    for ch in value:
+        code = ord(ch)
+        if (code < 32 and ch not in {"\n", "\r", "\t"}) or code == 127:
+            return True
+    return False
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
 
-    import asyncio as _asyncio
-    import json as _json
-    ctx = {"user_id": user_id, "is_admin": is_admin}
+def _sanitize_text(value: str, *, max_chars: int, label: str) -> str:
+    if len(value) > max_chars:
+        raise HTTPException(status_code=413, detail=f"{label} is too large")
+    if _contains_disallowed_control_chars(value):
+        raise HTTPException(status_code=400, detail=f"{label} contains invalid characters")
+    return value.strip()
 
-    for step in range(max_steps):
-        payload = {
-            "model": FOLLOWUP_MODEL,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
-            "temperature": 0.2,
-            "max_tokens": 600,
-        }
-        for attempt in range(3):
-            resp = await client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            if (resp.status_code == 429 or resp.status_code >= 500) and attempt < 2:
-                await _asyncio.sleep(2 ** attempt)
-                continue
-            resp.raise_for_status()
-            break
-        choice = resp.json()["choices"][0]
-        msg = choice.get("message", {}) or {}
-        tool_calls = msg.get("tool_calls") or []
 
-        if not tool_calls:
-            answer = (msg.get("content") or "").strip()
-            return {"answer": answer, "tool_trace": trace, "steps": step}
+def _sanitize_json_payload(value: Any, depth: int = 0) -> Any:
+    if depth > MAX_JSON_NESTING_DEPTH:
+        raise HTTPException(status_code=400, detail="JSON payload is too deeply nested")
 
-        messages.append({
-            "role": "assistant",
-            "content": msg.get("content"),
-            "tool_calls": tool_calls,
-        })
+    if isinstance(value, dict):
+        if len(value) > MAX_JSON_OBJECT_KEYS:
+            raise HTTPException(status_code=413, detail="JSON object has too many fields")
+        sanitized: Dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise HTTPException(status_code=400, detail="JSON object keys must be strings")
+            clean_key = _sanitize_text(key, max_chars=MAX_JSON_KEY_CHARS, label="JSON field name")
+            sanitized[clean_key] = _sanitize_json_payload(item, depth + 1)
+        return sanitized
 
-        for call in tool_calls:
-            fn = (call.get("function") or {})
-            name = fn.get("name") or ""
-            try:
-                args = _json.loads(fn.get("arguments") or "{}")
-            except Exception:
-                args = {}
+    if isinstance(value, list):
+        if len(value) > MAX_JSON_ARRAY_ITEMS:
+            raise HTTPException(status_code=413, detail="JSON array is too large")
+        return [_sanitize_json_payload(item, depth + 1) for item in value]
 
-            handler = _QUERY_TOOL_REGISTRY.get(name)
-            if not handler:
-                tool_result: dict = {"error": f"Unknown tool: {name}"}
-            elif name in _ADMIN_TOOL_NAMES and not is_admin:
-                tool_result = {"error": "Forbidden: admin tool"}
-            else:
+    if isinstance(value, str):
+        return _sanitize_text(value, max_chars=MAX_JSON_STRING_CHARS, label="JSON field value")
+
+    # JSON scalar values allowed as-is.
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+
+    raise HTTPException(status_code=400, detail="Unsupported JSON value")
+
+
+def _validate_query_params(request: Request) -> None:
+    if len(request.url.query) > MAX_QUERY_STRING_BYTES:
+        raise HTTPException(status_code=413, detail="Query string is too large")
+
+    for key, value in request.query_params.multi_items():
+        _sanitize_text(key, max_chars=MAX_QUERY_PARAM_NAME_CHARS, label="Query parameter name")
+        _sanitize_text(value, max_chars=MAX_QUERY_PARAM_VALUE_CHARS, label="Query parameter value")
+
+
+async def _set_request_body(request: Request, body: bytes) -> None:
+    async def receive() -> dict:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request._receive = receive
+
+
+@app.middleware("http")
+async def sanitize_api_input(request: Request, call_next):
+    """Validate and sanitize user-provided API input before endpoint handlers run."""
+    path = request.url.path.lower()
+
+    # Starlette's BaseHTTPMiddleware does not translate HTTPException raised
+    # inside the middleware into the normal FastAPI exception handlers — it
+    # surfaces as a 500. Catch them here and return a proper JSONResponse.
+    try:
+        if path.startswith("/api"):
+            _validate_query_params(request)
+
+            max_body_bytes = _max_body_bytes_for(path)
+
+            content_length = request.headers.get("content-length")
+            if content_length:
                 try:
-                    tool_result = await handler(args, ctx)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("query tool '%s' failed: %s", name, exc)
-                    tool_result = {"error": "Tool execution failed"}
+                    if int(content_length) > max_body_bytes:
+                        raise HTTPException(status_code=413, detail="Request body is too large")
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid Content-Length header")
 
-            trace.append({"tool": name, "arguments": args, "result_preview": _preview(tool_result)})
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call.get("id"),
-                "name": name,
-                "content": _json.dumps(tool_result)[:4000],
-            })
+            if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+                body = await request.body()
+                if len(body) > max_body_bytes:
+                    raise HTTPException(status_code=413, detail="Request body is too large")
 
-    # Hit max_steps without a final answer — ask for a summary using collected tool data.
-    fallback_payload = {
-        "model": FOLLOWUP_MODEL,
-        "messages": messages + [{
-            "role": "user",
-            "content": "Summarize the findings above in <= 120 words. Do not call more tools.",
-        }],
-        "temperature": 0.2,
-        "max_tokens": 400,
-    }
-    for attempt in range(3):
-        resp = await client.post(
-            f"{OPENAI_BASE_URL}/chat/completions",
-            headers=headers,
-            json=fallback_payload,
-        )
-        if (resp.status_code == 429 or resp.status_code >= 500) and attempt < 2:
-            await _asyncio.sleep(2 ** attempt)
-            continue
-        resp.raise_for_status()
-        break
-    answer = (resp.json()["choices"][0]["message"].get("content") or "").strip()
-    return {"answer": answer, "tool_trace": trace, "steps": max_steps}
+                if body:
+                    content_type = request.headers.get("content-type", "").lower()
 
+                    if "application/json" in content_type:
+                        try:
+                            parsed = json.loads(body.decode("utf-8"))
+                        except UnicodeDecodeError:
+                            raise HTTPException(status_code=400, detail="Request body must be valid UTF-8")
+                        except json.JSONDecodeError:
+                            raise HTTPException(status_code=400, detail="Malformed JSON request body")
 
-def _preview(value, max_chars: int = 280) -> str:
-    import json as _json
-    try:
-        s = _json.dumps(value, default=str)
-    except Exception:
-        s = str(value)
-    return s[:max_chars] + ("…" if len(s) > max_chars else "")
+                        sanitized_payload = _sanitize_json_payload(parsed)
+                        sanitized_body = json.dumps(sanitized_payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                        await _set_request_body(request, sanitized_body)
+                    elif "application/x-www-form-urlencoded" in content_type:
+                        try:
+                            body.decode("utf-8")
+                        except UnicodeDecodeError:
+                            raise HTTPException(status_code=400, detail="Request body must be valid UTF-8")
+                        # We consumed the body via request.body(); put it back so
+                        # downstream form parsers can read it.
+                        await _set_request_body(request, body)
+                    else:
+                        # multipart/form-data, application/octet-stream, etc.
+                        # We've already consumed the body; re-inject it so the
+                        # endpoint's UploadFile / Form parsers can read it.
+                        await _set_request_body(request, body)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    return await call_next(request)
 
 
-# ===================================================================
-#  BULK LISTINGS + VISION LISTING  (photo / CSV uploads from chat UI)
-# ===================================================================
+# Login rate limiting: max 5 attempts per 10-minute window.
+LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 5
+LOGIN_RATE_LIMIT_WINDOW = timedelta(minutes=10)
+login_attempts_by_key: Dict[str, List[datetime]] = {}
+login_attempts_lock = Lock()
 
-_VALID_FOOD_CATEGORIES = {
-    "produce", "bakery", "dairy", "pantry", "meat", "prepared", "other",
-}
-_DEFAULT_FOOD_CATEGORY = "other"
-_MAX_BULK_LISTINGS = 100
+# Signup rate limiting: max 3 attempts per 30-minute window.
+SIGNUP_RATE_LIMIT_MAX_ATTEMPTS = 3
+SIGNUP_RATE_LIMIT_WINDOW = timedelta(minutes=30)
+signup_attempts_by_ip: Dict[str, List[datetime]] = {}
+signup_attempts_lock = Lock()
 
-
-class BulkListingItem(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
-    quantity: float = Field(gt=0, le=100000)
-    unit: str = Field(min_length=1, max_length=40)
-    category: str = Field(min_length=1, max_length=40)
-    description: Optional[str] = Field(default=None, max_length=2000)
-    expiry_date: Optional[str] = Field(default=None, max_length=40)
-    location: Optional[str] = Field(default=None, max_length=200)
-    community_id: Optional[str] = Field(default=None, max_length=64)
-    dietary_tags: Optional[List[str]] = None
-    allergens: Optional[List[str]] = None
-    image_url: Optional[str] = Field(default=None, max_length=2000)
+# Password reset flow rate limiting.
+FORGOT_PASSWORD_RATE_LIMIT_MAX_ATTEMPTS = 5
+RESET_PASSWORD_RATE_LIMIT_MAX_ATTEMPTS = 5
+PASSWORD_RESET_RATE_LIMIT_WINDOW = timedelta(minutes=30)
+forgot_password_attempts_by_key: Dict[str, List[datetime]] = {}
+reset_password_attempts_by_key: Dict[str, List[datetime]] = {}
+password_reset_attempts_lock = Lock()
 
 
-class BulkListingsRequest(BaseModel):
-    user_id: str = Field(min_length=1, max_length=128)
-    listings: List[BulkListingItem] = Field(min_length=1, max_length=_MAX_BULK_LISTINGS)
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP extraction with proxy header fallback."""
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
 
 
-def _normalize_listing_row(
-    item: BulkListingItem,
-    user_id: str,
-    donor: dict | None = None,
-) -> dict:
-    """Map a validated BulkListingItem into a Supabase food_listings row."""
-    category = (item.category or "").strip().lower()
-    if category not in _VALID_FOOD_CATEGORIES:
-        category = _DEFAULT_FOOD_CATEGORY
-    row: dict = {
-        "user_id": user_id,
-        "title": item.title.strip()[:200],
-        "quantity": float(item.quantity),
-        "unit": item.unit.strip()[:40],
-        "category": category,
-        "listing_type": "donation",
-        # Match the manual Share Food flow after admin approval so recipients
-        # see AI photo listings in Find Food and dashboard insights.
-        "status": "approved",
-    }
-    if item.description:
-        row["description"] = item.description.strip()[:2000]
-    if item.expiry_date:
-        # Normalize to YYYY-MM-DD before writing. The AI (enrich-listings or
-        # vision-listing) may supply a full ISO datetime ('2026-06-15T00:00:00')
-        # which PostgreSQL's date column would reject. Matches the normalization
-        # applied in _create_food_listing.
-        from backend.tools import _normalize_expiry_date as _ned
-        _exp = _ned(item.expiry_date.strip())
-        if _exp:
-            row["expiry_date"] = _exp
-    if item.location:
-        loc_s = item.location.strip()[:200]
-        row["location"] = loc_s
-        # full_address powers address line on search cards + map pin popover.
-        # Keep it in sync with location so bulk/photo listings render the same
-        # as manually-posted ones (mirrors _create_food_listing logic).
-        row["full_address"] = loc_s
-    if item.dietary_tags:
-        row["dietary_tags"] = [str(t).strip()[:40] for t in item.dietary_tags if str(t).strip()][:20]
-    if item.allergens:
-        row["allergens"] = [str(t).strip()[:40] for t in item.allergens if str(t).strip()][:20]
-    if item.image_url:
-        _url = item.image_url.strip()
-        # Only store http/https URLs — reject javascript:, data:, file:, etc.
-        if _url.startswith(("http://", "https://")):
-            row["image_url"] = _url[:2000]
-    if item.community_id:
-        # Trust the explicit override (e.g. from the photo preview UI) over
-        # the donor's saved community_id default.
-        cid = str(item.community_id).strip()
-        if cid:
-            row["community_id"] = cid[:64]
-    return apply_donor_defaults_to_listing(row, donor)
+def _login_rate_limit_key(request: Request, email: Optional[str]) -> str:
+    normalized_email = (email or "").strip().lower()
+    ip = _client_ip(request)
+    if normalized_email:
+        return f"email:{normalized_email}|ip:{ip}"
+    return f"ip:{ip}"
 
 
-# ---- AI gap-fill for parsed CSV / vision drafts ------------------------------
-_ENRICH_LISTINGS_PROMPT = (
-    "You help donors clean up bulk food-listing rows before they are published. "
-    "For each row, FILL ONLY MISSING OR EMPTY OPTIONAL FIELDS. NEVER overwrite a "
-    "field the user already provided.\n"
-    "Allowed optional fields you may add: description (<=200 chars, neutral tone), "
-    "dietary_tags (lowercase strings like 'vegetarian','vegan','gluten-free','halal','kosher'), "
-    "allergens (lowercase strings like 'nuts','dairy','gluten','eggs','soy','shellfish'), "
-    "expiry_date (ISO 'YYYY-MM-DD' guessed conservatively from category if absent).\n"
-    "You MAY also correct an obviously-wrong category to one of "
-    "['produce','bakery','dairy','pantry','meat','prepared','other'] — but ONLY if "
-    "the existing value is missing or 'other'. Never invent allergens you cannot "
-    "infer from the title/description.\n"
-    "Output STRICT JSON: {\"rows\":[{...same fields..., \"_filled\":[\"field1\",...]}], "
-    "\"summary\":\"short human sentence in the requested language\"}.\n"
-    "Echo every input row, in order. Keep the user's title, quantity, and unit "
-    "EXACTLY as given. Do NOT add image_url."
-)
+def enforce_login_rate_limit(request: Request, email: Optional[str]) -> None:
+    """Allow up to LOGIN_RATE_LIMIT_MAX_ATTEMPTS login attempts in LOGIN_RATE_LIMIT_WINDOW."""
+    now = datetime.utcnow()
+    cutoff = now - LOGIN_RATE_LIMIT_WINDOW
+    key = _login_rate_limit_key(request, email)
+
+    with login_attempts_lock:
+        attempts = [ts for ts in login_attempts_by_key.get(key, []) if ts > cutoff]
+
+        if len(attempts) >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS:
+            retry_after_seconds = int((attempts[0] + LOGIN_RATE_LIMIT_WINDOW - now).total_seconds())
+            if retry_after_seconds < 1:
+                retry_after_seconds = 1
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Too many login attempts. "
+                    f"Please try again in about {retry_after_seconds // 60 + (1 if retry_after_seconds % 60 else 0)} minute(s)."
+                )
+            )
+
+        attempts.append(now)
+        login_attempts_by_key[key] = attempts
 
 
-class EnrichListingsRequest(BaseModel):
-    user_id: str = Field(min_length=1, max_length=128)
-    rows: List[BulkListingItem] = Field(min_length=1, max_length=_MAX_BULK_LISTINGS)
-    language: Optional[str] = Field(default="en", max_length=8)
+def enforce_signup_rate_limit(request: Request) -> None:
+    """Allow up to SIGNUP_RATE_LIMIT_MAX_ATTEMPTS signup attempts in SIGNUP_RATE_LIMIT_WINDOW."""
+    now = datetime.utcnow()
+    cutoff = now - SIGNUP_RATE_LIMIT_WINDOW
+    ip = _client_ip(request)
+
+    with signup_attempts_lock:
+        attempts = [ts for ts in signup_attempts_by_ip.get(ip, []) if ts > cutoff]
+
+        if len(attempts) >= SIGNUP_RATE_LIMIT_MAX_ATTEMPTS:
+            retry_after_seconds = int((attempts[0] + SIGNUP_RATE_LIMIT_WINDOW - now).total_seconds())
+            if retry_after_seconds < 1:
+                retry_after_seconds = 1
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Too many signup attempts. "
+                    f"Please try again in about {retry_after_seconds // 60 + (1 if retry_after_seconds % 60 else 0)} minute(s)."
+                )
+            )
+
+        attempts.append(now)
+        signup_attempts_by_ip[ip] = attempts
 
 
-def _row_for_enrich_prompt(item: BulkListingItem) -> dict:
-    """Compact dict the model sees — drops empty fields so it knows what to fill."""
-    out: dict = {
-        "title": item.title,
-        "quantity": item.quantity,
-        "unit": item.unit,
-        "category": item.category,
-    }
-    if item.description:
-        out["description"] = item.description
-    if item.expiry_date:
-        out["expiry_date"] = item.expiry_date
-    if item.location:
-        out["location"] = item.location
-    if item.dietary_tags:
-        out["dietary_tags"] = list(item.dietary_tags)
-    if item.allergens:
-        out["allergens"] = list(item.allergens)
-    return out
+def _ip_email_key(request: Request, email: Optional[str]) -> str:
+    ip = _client_ip(request)
+    email_part = (email or "").strip().lower()
+    return f"ip:{ip}|email:{email_part or '-'}"
 
 
-@app.post("/api/ai/enrich-listings")
-async def ai_enrich_listings(body: EnrichListingsRequest, request: Request) -> dict:
-    """
-    Have the model fill in missing optional fields (description, dietary_tags,
-    allergens, expiry_date, weak category) on parsed listing rows so the user
-    sees a complete preview before confirming the bulk insert.
+def _enforce_attempt_rate_limit(
+    attempts_store: Dict[str, List[datetime]],
+    max_attempts: int,
+    request: Request,
+    email: Optional[str],
+    action_label: str,
+) -> None:
+    now = datetime.utcnow()
+    cutoff = now - PASSWORD_RESET_RATE_LIMIT_WINDOW
+    key = _ip_email_key(request, email)
 
-    Never overwrites user-provided values. If the AI service is unavailable,
-    returns the original rows unchanged with a fallback summary.
+    with password_reset_attempts_lock:
+        attempts = [ts for ts in attempts_store.get(key, []) if ts > cutoff]
+        if len(attempts) >= max_attempts:
+            retry_after_seconds = int((attempts[0] + PASSWORD_RESET_RATE_LIMIT_WINDOW - now).total_seconds())
+            if retry_after_seconds < 1:
+                retry_after_seconds = 1
+            retry_minutes = retry_after_seconds // 60 + (1 if retry_after_seconds % 60 else 0)
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many {action_label} attempts. Please try again in about {retry_minutes} minute(s).",
+            )
 
-    Returns: { rows: [...], summary: str, filled: [{index, fields:[...]}] }
-    """
-    _enforce_rate_limit(request)
-    _validate_uuid(body.user_id)
-    await _require_auth_for_user(request, body.user_id)
-    originals = [item.model_dump() for item in body.rows]
-    fallback = {
-        "rows": originals,
-        "summary": "AI gap-fill unavailable — rows returned unchanged.",
-        "filled": [],
-    }
-    if not OPENAI_API_KEY:
-        return fallback
+        attempts.append(now)
+        attempts_store[key] = attempts
 
-    import json as _json
-    compact = [_row_for_enrich_prompt(item) for item in body.rows]
-    language = (body.language or "en").lower()[:2]
-    user_msg = (
-        f"Language for summary: {language}.\n"
-        f"Rows to review (JSON array):\n{_json.dumps(compact, ensure_ascii=False)}"
+
+def enforce_forgot_password_rate_limit(request: Request, email: Optional[str]) -> None:
+    _enforce_attempt_rate_limit(
+        forgot_password_attempts_by_key,
+        FORGOT_PASSWORD_RATE_LIMIT_MAX_ATTEMPTS,
+        request,
+        email,
+        "password reset request",
     )
 
-    from backend.ai_engine import _get_http_client, OPENAI_BASE_URL, FOLLOWUP_MODEL
-    client = _get_http_client(45)
-    payload = {
-        "model": FOLLOWUP_MODEL,
-        "messages": [
-            {"role": "system", "content": _ENRICH_LISTINGS_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 2200,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    import asyncio as _asyncio
-    try:
-        data = None
-        for attempt in range(3):
-            resp = await client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            if (resp.status_code == 429 or resp.status_code >= 500) and attempt < 2:
-                await _asyncio.sleep(2 ** attempt)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            break
-        if data is None:
-            return fallback
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("enrich-listings OpenAI call failed: %s", exc)
-        return fallback
 
-    content_str = (data.get("choices") or [{}])[0].get("message", {}).get("content") or "{}"
+def enforce_reset_password_rate_limit(request: Request, email: Optional[str]) -> None:
+    _enforce_attempt_rate_limit(
+        reset_password_attempts_by_key,
+        RESET_PASSWORD_RATE_LIMIT_MAX_ATTEMPTS,
+        request,
+        email,
+        "password reset",
+    )
+
+# -----------------------------
+# Serialization helpers
+# -----------------------------
+
+def serialize_user(user: Optional[User]) -> Optional[dict]:
+    """Return a safe, minimal representation of a User for client responses."""
+    if not user:
+        return None
     try:
-        parsed = _json.loads(content_str)
-        ai_rows = parsed.get("rows") or []
-        summary = str(parsed.get("summary") or "").strip()[:400]
-        if not isinstance(ai_rows, list):
-            ai_rows = []
+        return {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "role": user.role.value if getattr(user, "role", None) else None,
+            "phone": getattr(user, "phone", None),
+            "address": getattr(user, "address", None),
+            "coords_lat": getattr(user, "coords_lat", None),
+            "coords_lng": getattr(user, "coords_lng", None),
+            "created_at": user.created_at.isoformat() if getattr(user, "created_at", None) else None,
+            # Trust signals
+            "trust_score": getattr(user, "trust_score", 50),
+            "verified_by_aglf": getattr(user, "verified_by_aglf", False),
+            "school_partner": getattr(user, "school_partner", False),
+            "partner_badge": getattr(user, "partner_badge", None),
+            "partner_since": user.partner_since.isoformat() if getattr(user, "partner_since", None) else None,
+            "last_active": user.last_active.isoformat() if getattr(user, "last_active", None) else None,
+        }
     except Exception:
-        ai_rows = []
-        summary = ""
+        # Best-effort fallback to avoid breaking responses
+        return {"id": getattr(user, "id", None), "name": getattr(user, "name", None)}
 
-    # Merge AI suggestions onto the originals, NEVER overwriting user values.
-    merged: List[dict] = []
-    filled_log: List[dict] = []
-    for idx, original in enumerate(originals):
-        ai_row = ai_rows[idx] if idx < len(ai_rows) and isinstance(ai_rows[idx], dict) else {}
-        out = dict(original)
-        added_fields: List[str] = []
 
-        # description / expiry_date / location — only if missing
-        for f in ("description", "expiry_date", "location"):
-            if not out.get(f) and ai_row.get(f):
-                val = str(ai_row[f]).strip()
-                if val:
-                    if f == "expiry_date":
-                        # Normalize AI-supplied date to YYYY-MM-DD so the row
-                        # survives PostgreSQL's date column type check.
-                        from backend.tools import _normalize_expiry_date as _ned2
-                        norm_date = _ned2(val)
-                        if norm_date:
-                            out[f] = norm_date
-                            added_fields.append(f)
-                    else:
-                        cap = 2000 if f == "description" else 200
-                        out[f] = val[:cap]
-                        added_fields.append(f)
-
-        # dietary_tags / allergens — only if absent or empty
-        for f in ("dietary_tags", "allergens"):
-            existing = out.get(f) or []
-            if (not existing or len(existing) == 0):
-                ai_val = ai_row.get(f) or []
-                if isinstance(ai_val, list) and ai_val:
-                    clean = [str(t).strip().lower()[:40] for t in ai_val if str(t).strip()][:10]
-                    if clean:
-                        out[f] = clean
-                        added_fields.append(f)
-
-        # category — only escalate from 'other' / missing
-        cur_cat = (out.get("category") or "").strip().lower()
-        ai_cat = (ai_row.get("category") or "").strip().lower()
-        if ai_cat in _VALID_FOOD_CATEGORIES and cur_cat in ("", "other") and ai_cat != cur_cat:
-            out["category"] = ai_cat
-            added_fields.append("category")
-
-        merged.append(out)
-        if added_fields:
-            filled_log.append({"index": idx, "fields": added_fields})
-
-    if not summary:
-        n_rows = len(filled_log)
-        if language == "es":
-            summary = (
-                f"Rellené {n_rows} fila(s) con datos faltantes." if n_rows
-                else "No encontré huecos que rellenar."
-            )
+def serialize_listing(item: FoodResource, include_donor: bool = True, include_donor_contact: bool = False) -> dict:
+    """Return a safe, client-friendly listing dict. Converts enums/datetimes and includes donor if available."""
+    # Only include full donor details if listing is claimed, otherwise just include basic info
+    donor_payload = None
+    if include_donor and getattr(item, "donor", None):
+        if include_donor_contact or item.status == 'claimed':
+            donor_payload = serialize_user(item.donor)
         else:
-            summary = (
-                f"Filled gaps on {n_rows} row(s)." if n_rows
-                else "No gaps to fill — your rows look complete."
-            )
-
-    return {"rows": merged, "summary": summary, "filled": filled_log}
-
-
-@app.post("/api/ai/bulk-listings")
-async def ai_bulk_listings(body: BulkListingsRequest, request: Request) -> dict:
-    """
-    Create one or more food_listings rows from a vetted JSON payload
-    (used by the chat UI's photo + CSV upload flow).
-
-    Returns: { created: int, failed: int, ids: [uuid], errors: [{index, error}] }
-    """
-    _enforce_rate_limit(request)
-    _validate_uuid(body.user_id)
-    await _require_auth_for_user(request, body.user_id)
-    donor = await fetch_donor_listing_defaults(body.user_id)
-    # Geocode each row's own pickup address so it gets an accurate map pin
-    # instead of always inheriting the donor's home coords. Falls back to the
-    # donor defaults (applied in _normalize_listing_row) when a row has no
-    # address or geocoding fails. Cache so a batch sharing an address hits
-    # Mapbox once.
-    from backend.tools import _forward_geocode
-    geocode_cache: dict[str, tuple | None] = {}
-    created_ids: List[str] = []
-    errors: List[dict] = []
-    for idx, item in enumerate(body.listings):
+            # For non-claimed listings, only include donor ID, not contact info
+            donor_payload = {"id": item.donor.id} if item.donor else None
+    
+    # Enum helpers
+    def ev(v):
         try:
-            addr = str(item.location or "").strip()
-            pre_coords = None
-            if addr:
-                if addr not in geocode_cache:
-                    geocode_cache[addr] = await _forward_geocode(addr)
-                pre_coords = geocode_cache[addr]
-            row = _normalize_listing_row(item, body.user_id, donor=donor)
-            # Geocode BEFORE donor defaults so a failed geocode doesn't leave
-            # the donor's home pin on a row with its own pickup address.
-            if pre_coords:
-                row["latitude"], row["longitude"] = pre_coords
-            elif addr:
-                # Row had its own address but geocoding failed — strip any
-                # donor coords inherited by apply_donor_defaults_to_listing.
-                row.pop("latitude", None)
-                row.pop("longitude", None)
-            result = await supabase_post("food_listings", row)
-            if isinstance(result, list) and result:
-                rid = result[0].get("id")
-                if rid:
-                    created_ids.append(str(rid))
-                    continue
-            errors.append({"index": idx, "error": "no row returned"})
-        except Exception as exc:  # noqa: BLE001
-            errors.append({"index": idx, "error": str(exc)[:200]})
-    return {
-        "created": len(created_ids),
-        "failed": len(errors),
-        "ids": created_ids,
-        "errors": errors,
-    }
+            # If it's already an enum, get its value
+            if hasattr(v, 'value'):
+                return v.value
+            # If it's a string, return as-is (might be enum value already stored as string)
+            if isinstance(v, str):
+                return v
+            return v if v is not None else None
+        except Exception:
+            # Already a string or unexpected type
+            return v
 
-
-_VISION_LISTING_PROMPT = (
-    "You are a food-donation listing assistant. Look at the attached photo and "
-    "extract a single food-listing draft as STRICT JSON with EXACTLY these keys:\n"
-    "{\n"
-    "  \"title\": string (<=80 chars, plain product name),\n"
-    "  \"description\": string (<=240 chars, what you see + condition),\n"
-    "  \"category\": one of ['produce','bakery','dairy','pantry','meat','prepared','other'],\n"
-    "  \"quantity\": number (your best estimate, >0),\n"
-    "  \"unit\": string (e.g. 'items','kg','lbs','loaves','servings','boxes'),\n"
-    "  \"dietary_tags\": string[] (e.g. ['vegetarian','vegan','gluten-free'] or []),\n"
-    "  \"allergens\": string[] (e.g. ['nuts','dairy','gluten'] or []),\n"
-    "  \"confidence\": number 0..1\n"
-    "}\n"
-    "Rules: if the image is not food, return confidence=0 and title=''. "
-    "Never invent allergens you cannot see. Output JSON only — no prose."
-)
-
-
-@app.post("/api/ai/vision-listing")
-async def ai_vision_listing(
-    request: Request,
-    user_id: str = Form(..., min_length=1, max_length=128),
-    image: UploadFile = File(..., description="Photo of the food item (jpg/png/webp)"),
-) -> dict:
-    """
-    Send a photo to GPT-4-class vision and return a draft food_listings row
-    for the chat UI to preview + confirm before insert.
-
-    Returns: { draft: {...listing fields...}, confidence: float, raw: string }
-    """
-    _enforce_rate_limit(request)
-    _validate_uuid(user_id)
-    await _require_auth_for_user(request, user_id)
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured")
-
-    raw = await image.read()
-    if not raw:
-        raise HTTPException(status_code=400, detail="Empty image upload")
-    if len(raw) > 8 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Image too large (max 8 MB)")
-
-    content_type = (image.content_type or "image/jpeg").split(";")[0].strip().lower()
-    if not content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File is not an image")
-
-    import base64 as _b64
-    b64 = _b64.b64encode(raw).decode("ascii")
-    data_url = f"data:{content_type};base64,{b64}"
-
-    from backend.ai_engine import _get_http_client, OPENAI_BASE_URL, FOLLOWUP_MODEL
-    client = _get_http_client(45)
-    payload = {
-        "model": FOLLOWUP_MODEL,
-        "messages": [
-            {"role": "system", "content": _VISION_LISTING_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Extract the listing JSON for this photo."},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            },
-        ],
-        "temperature": 0.2,
-        "max_tokens": 500,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    import asyncio as _asyncio
-    try:
-        for attempt in range(3):
-            resp = await client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            if (resp.status_code == 429 or resp.status_code >= 500) and attempt < 2:
-                await _asyncio.sleep(2 ** attempt)
-                continue
-            resp.raise_for_status()
-            break
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("vision-listing OpenAI call failed")
-        raise HTTPException(status_code=502, detail=f"Vision call failed: {exc}") from exc
-
-    data = resp.json()
-    content_str = (data.get("choices") or [{}])[0].get("message", {}).get("content") or "{}"
-    import json as _json
-    try:
-        parsed = _json.loads(content_str)
-        if not isinstance(parsed, dict):
-            parsed = {}
-    except Exception:
-        parsed = {}
-
-    confidence = parsed.get("confidence")
-    try:
-        confidence_val = float(confidence) if confidence is not None else 0.0
-    except (TypeError, ValueError):
-        confidence_val = 0.0
-
-    category = str(parsed.get("category") or "").strip().lower()
-    if category not in _VALID_FOOD_CATEGORIES:
-        category = _DEFAULT_FOOD_CATEGORY
-
-    quantity_raw = parsed.get("quantity")
-    try:
-        quantity_val = float(quantity_raw) if quantity_raw is not None else 1.0
-        if quantity_val <= 0:
-            quantity_val = 1.0
-    except (TypeError, ValueError):
-        quantity_val = 1.0
-
-    def _str_list(v):
-        if isinstance(v, list):
-            return [str(x).strip() for x in v if str(x).strip()][:10]
-        return []
-
-    draft = {
-        "title": str(parsed.get("title") or "").strip()[:200],
-        "description": str(parsed.get("description") or "").strip()[:2000],
-        "category": category,
-        "quantity": quantity_val,
-        "unit": str(parsed.get("unit") or "items").strip()[:40] or "items",
-        "dietary_tags": _str_list(parsed.get("dietary_tags")),
-        "allergens": _str_list(parsed.get("allergens")),
-    }
-
-    # Pre-fill address / community / expiry so the photo flow lands a
-    # complete listing instead of one missing pickup + freshness fields.
-    # The Vision call itself only inspects the photo; these defaults come
-    # from the donor's profile + a category-based expiry heuristic so the
-    # user just confirms instead of typing them all in.
-    try:
-        donor = await fetch_donor_listing_defaults(user_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("vision-listing: donor lookup failed for %s: %s", user_id, exc)
-        donor = {}
-    if donor:
-        donor_addr = str(donor.get("address") or "").strip()
-        if donor_addr:
-            draft["location"] = donor_addr[:200]
-        if donor.get("community_id"):
-            draft["community_id"] = str(donor["community_id"])
-
-    # Suggest a sensible expiry the user can override before confirming.
-    try:
-        from backend.tools import _suggested_expiry_for_category
-        draft["expiry_date"] = _suggested_expiry_for_category(category)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("vision-listing: expiry suggestion failed: %s", exc)
+    # Parse images JSON column to a Python list (best effort)
+    images_list = []
+    raw_images = getattr(item, "images", None)
+    if raw_images:
+        if isinstance(raw_images, list):
+            images_list = [str(x) for x in raw_images if isinstance(x, (str, bytes))]
+        else:
+            try:
+                parsed_imgs = json.loads(raw_images)
+                if isinstance(parsed_imgs, list):
+                    images_list = [str(x) for x in parsed_imgs if isinstance(x, str)]
+            except Exception:
+                images_list = []
 
     return {
-        "draft": draft,
-        "confidence": confidence_val,
-        "raw": content_str[:2000],
+        "id": item.id,
+        "donor_id": getattr(item, "donor_id", None),
+        "recipient_id": getattr(item, "recipient_id", None),
+        "title": getattr(item, "title", None),
+        "description": getattr(item, "description", None),
+        "category": ev(getattr(item, "category", None)),
+        "qty": getattr(item, "qty", None),
+        "unit": getattr(item, "unit", None),
+        "perishability": ev(getattr(item, "perishability", None)),
+        "expiration_date": item.expiration_date.isoformat() if getattr(item, "expiration_date", None) else None,
+        "date_label_type": getattr(item, "date_label_type", None),
+        "address": getattr(item, "address", None),
+        "coords_lat": getattr(item, "coords_lat", None),
+        "coords_lng": getattr(item, "coords_lng", None),
+        "pickup_window_start": item.pickup_window_start.isoformat() if getattr(item, "pickup_window_start", None) else None,
+        "pickup_window_end": item.pickup_window_end.isoformat() if getattr(item, "pickup_window_end", None) else None,
+        "status": getattr(item, "status", None),
+        "claimed_at": item.claimed_at.isoformat() if getattr(item, "claimed_at", None) else None,
+        "urgency_score": getattr(item, "urgency_score", 0) or 0,
+        "created_at": item.created_at.isoformat() if getattr(item, "created_at", None) else None,
+        "updated_at": item.updated_at.isoformat() if getattr(item, "updated_at", None) else None,
+        "verification_status": ev(getattr(item, "verification_status", None)),
+        "is_refrigerated": getattr(item, "is_refrigerated", False) or False,
+        "is_frozen": getattr(item, "is_frozen", False) or False,
+        "safety_checklist_passed": getattr(item, "safety_checklist_passed", False) or False,
+        "packaging_condition": getattr(item, "packaging_condition", "unknown"),
+        "allergens": getattr(item, "allergens", None),
+        "contamination_warning": getattr(item, "contamination_warning", None),
+        "dietary_tags": getattr(item, "dietary_tags", None),
+        "ingredients_list": getattr(item, "ingredients_list", None),
+        "images": images_list,
+        "donor": donor_payload,
     }
 
-
-@app.post("/api/ai/query")
-async def ai_query(body: QueryRequest, request: Request) -> dict:
-    """Natural-language Q&A grounded in safe Supabase tool calls."""
-    _enforce_rate_limit(request)
-    _validate_uuid(body.user_id)
-
-    await _require_auth_for_user(request, body.user_id)
-
-    # Resolve admin flag from DB (never trust client claims).
-    user_rows = await supabase_get("users", {
-        "select": "id,is_admin",
-        "id": f"eq.{body.user_id}",
-        "limit": "1",
-    })
-    is_admin = bool(((user_rows or [{}])[0] or {}).get("is_admin"))
-
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
-        result = await _run_query_agent(
-            question=body.question.strip(),
-            user_id=body.user_id,
-            is_admin=is_admin,
-            max_steps=body.max_steps,
-        )
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+def verify_admin(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Verify user is authenticated and has admin role"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user or user.role != UserRole.ADMIN:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
+        return user
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
     except HTTPException:
         raise
-    except Exception as exc:
-        rid = _request_id(request)
-        logger.error("[%s] AI query failed: %s", rid, exc, exc_info=True)
-        raise classify_exception(exc) from exc
+    except Exception:
+        raise HTTPException(status_code=500, detail="Authorization error")
 
-    return {
-        "question": body.question,
-        "answer": result.get("answer") or "I couldn't find an answer for that.",
-        "tool_trace": result.get("tool_trace") or [],
-        "steps": result.get("steps") or 0,
-        "is_admin": is_admin,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
 
+import os
+HTML_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+def get_html_content(filename):
+    filepath = os.path.join(HTML_DIR, filename)
+    with open(filepath, 'r', encoding='utf-8') as f:
+        return f.read()
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_landing():
+    return get_html_content("landing.html")
+
+@app.get("/index.html", response_class=HTMLResponse)
+async def serve_index():
+    return get_html_content("index.html")
+
+@app.get("/privacy.html", response_class=HTMLResponse)
+async def serve_privacy():
+    return get_html_content("privacy.html")
+
+@app.get("/dispatch.html", response_class=HTMLResponse)
+async def serve_dispatch():
+    return get_html_content("dispatch.html")
+
+@app.get("/cookies.html", response_class=HTMLResponse)
+async def serve_cookies():
+    return get_html_content("cookies.html")
+
+@app.get("/terms.html", response_class=HTMLResponse)
+async def serve_terms():
+    return get_html_content("terms.html")
+
+@app.get("/impactStory.html", response_class=HTMLResponse)
+async def serve_impact_story():
+    return get_html_content("impactStory.html")
+
+@app.get("/admin-referrals.html", response_class=HTMLResponse)
+async def serve_admin_referrals():
+    return get_html_content("admin-referrals.html")
 
 @app.get("/health")
-async def health() -> dict:
-    ai_ok = bool(OPENAI_API_KEY)
-    db_ok = bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)
-    all_ok = ai_ok and db_ok
-    metrics = _upstream_metrics.snapshot()
-    return {
-        "status": "ok" if all_ok else "degraded",
-        "ai_configured": ai_ok,
-        "database_configured": db_ok,
-        "circuit_state": _circuit.state.value,
-        "upstream": metrics,
-        "error_rate_pct": metrics["error_rate_pct"],
-        "error_rate_ok": metrics["within_threshold"],
-    }
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.now()}
+
+# -----------------------------
+# User profile helper endpoints
+# -----------------------------
+
+@app.get("/api/user/me")
+async def get_me(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        return {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "role": user.role.value if user.role else None,
+            "phone": user.phone,
+            "address": user.address,
+            "coords_lat": user.coords_lat,
+            "coords_lng": user.coords_lng,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+            "dietary_restrictions": user.dietary_restrictions,
+            "allergies": user.allergies,
+            "household_size": user.household_size,
+            "preferred_categories": user.preferred_categories,
+            "special_needs": user.special_needs
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/ai/reset-circuit")
-async def reset_circuit(request: Request) -> dict:
-    """Admin-only endpoint: clear the OpenAI circuit breaker so normal traffic
-    resumes immediately instead of waiting for the cooldown timeout.
+@app.get("/api/user/profile")
+@app.get("/user/profile")
+async def get_user_profile(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Backward-compatible profile read endpoint used by frontend and some deployments.
 
-    Requires the ADMIN_RESET_TOKEN env var to be set; callers must supply it
-    as a Bearer token so the endpoint cannot be abused publicly.
+    Includes both /api/user/profile and /user/profile to tolerate proxies that strip /api.
     """
-    reset_token = os.getenv("ADMIN_RESET_TOKEN", "")
-    if reset_token:
-        auth_header = request.headers.get("Authorization", "")
-        provided = auth_header.removeprefix("Bearer ").strip()
-        if provided != reset_token:
-            raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
 
-    prev_state = _circuit.state.value
-    _circuit.record_success()  # forces state → CLOSED and resets failure_count
-    logger.info("Circuit breaker manually reset via /api/ai/reset-circuit (was %s)", prev_state)
-    return {
-        "ok": True,
-        "previous_state": prev_state,
-        "current_state": _circuit.state.value,
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        return {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "role": user.role.value if user.role else None,
+            "phone": user.phone,
+            "address": user.address,
+            "coords_lat": user.coords_lat,
+            "coords_lng": user.coords_lng,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+            "dietary_restrictions": user.dietary_restrictions,
+            "allergies": user.allergies,
+            "household_size": user.household_size,
+            "preferred_categories": user.preferred_categories,
+            "special_needs": user.special_needs,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/user/phone")
+async def update_phone(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        body = await request.json()
+        phone = (body or {}).get("phone") if isinstance(body, dict) else None
+        if not phone or not isinstance(phone, str) or len(phone.strip()) < 7:
+            raise HTTPException(status_code=422, detail="Please provide a valid phone number")
+        phone = phone.strip()
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        user.phone = phone
+        db.add(user)
+        db.commit()
+        return {"success": True, "phone": phone}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/user/profile")
+async def update_profile(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        body = await request.json()
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if 'name' in body:
+            user.name = body['name']
+        if 'email' in body:
+            user.email = body['email']
+        if 'phone' in body:
+            user.phone = body['phone']
+        if 'address' in body:
+            user.address = body['address']
+        
+        # Dietary needs and preferences
+        if 'dietary_restrictions' in body:
+            user.dietary_restrictions = body['dietary_restrictions']
+        if 'allergies' in body:
+            user.allergies = body['allergies']
+        if 'household_size' in body:
+            user.household_size = body['household_size']
+        if 'preferred_categories' in body:
+            user.preferred_categories = body['preferred_categories']
+        if 'special_needs' in body:
+            user.special_needs = body['special_needs']
+        
+        # Allow role switching between donor, recipient, driver (but not admin/dispatcher)
+        if 'role' in body:
+            new_role = body['role']
+            allowed_roles = ['donor', 'recipient', 'driver', 'volunteer']
+            if new_role in allowed_roles:
+                user.role = UserRole(new_role)
+        
+        db.commit()
+        db.refresh(user)
+        
+        return {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "phone": user.phone,
+            "address": user.address,
+            "role": user.role.value if user.role else None,
+            "dietary_restrictions": user.dietary_restrictions,
+            "allergies": user.allergies,
+            "household_size": user.household_size,
+            "preferred_categories": user.preferred_categories,
+            "special_needs": user.special_needs
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/user/change-password")
+async def change_password(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        body = await request.json()
+        current_password = body.get('current_password')
+        new_password = body.get('new_password')
+        
+        if not current_password or not new_password:
+            raise HTTPException(status_code=400, detail="Current and new passwords required")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Verify current password
+        if not pwd_context.verify(current_password, user.password_hash):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+        
+        # Update password
+        user.password_hash = pwd_context.hash(new_password)
+        db.commit()
+        
+        return {"success": True, "message": "Password changed successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/make-admin")
+async def make_user_admin(request: Request, db: Session = Depends(get_db)):
+    """Make a user an admin by email - temporary endpoint for setup"""
+    try:
+        body = await request.json()
+        email = body.get('email')
+        secret = body.get('secret')
+
+        # Fail-closed: if ADMIN_SECRET is not configured, the endpoint is
+        # disabled. Previously this fell back to a hardcoded literal which,
+        # in any environment that hadn't set the env var, allowed anyone
+        # who read the source to escalate to admin.
+        admin_secret = os.getenv('ADMIN_SECRET')
+        if not admin_secret or len(admin_secret) < 16:
+            raise HTTPException(
+                status_code=503,
+                detail="Admin bootstrap endpoint disabled (ADMIN_SECRET not configured).",
+            )
+        if not secret or not hmac.compare_digest(str(secret), admin_secret):
+            raise HTTPException(status_code=403, detail="Invalid secret")
+        
+        if not email:
+            raise HTTPException(status_code=400, detail="Email required")
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user.role = UserRole.ADMIN
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": f"User {user.name} ({user.email}) is now an admin"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Mount AI router (DoGoods AI assistant — Nouri)
+from backend.ai.routes import router as ai_router, start_background_jobs as ai_start_jobs, stop_background_jobs as ai_stop_jobs
+app.include_router(ai_router)
+
+# Create tables
+@app.on_event("startup")
+async def startup_event():
+    # Ensure tables exist
+    Base.metadata.create_all(bind=engine)
+    # Recover any listings stuck in 'pending_confirmation' from a previous
+    # process. The confirmation code lives only in the in-memory
+    # pending_confirmations dict, which is wiped on restart, so those
+    # listings would otherwise be unclaimable AND unreleasable until the
+    # donor manually deletes them. Reset them so other recipients can claim.
+    try:
+        recovery_db = SessionLocal()
+        try:
+            recovered = (
+                recovery_db.query(FoodResource)
+                .filter(FoodResource.status == "pending_confirmation")
+                .update(
+                    {
+                        FoodResource.status: "available",
+                        FoodResource.recipient_id: None,
+                        FoodResource.claimed_at: None,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            recovery_db.commit()
+            if recovered:
+                print(f"\u23f0 Released {recovered} stale 'pending_confirmation' listings on startup")
+        finally:
+            recovery_db.close()
+    except Exception as _recover_exc:
+        print(f"Stale-claim recovery skipped: {_recover_exc}")
+    # Start AI background reminder loop
+    try:
+        await ai_start_jobs()
+    except Exception as _ai_exc:
+        print(f"AI background jobs failed to start: {_ai_exc}")
+    # MySQL column additions (best-effort, ignore if already exists)
+    try:
+        with engine.connect() as conn:
+            # Add missing columns if they don't exist
+            try:
+                conn.execute(text("ALTER TABLE food_resources ADD COLUMN recipient_id INT NULL"))
+            except Exception:
+                pass  # Column already exists
+            try:
+                conn.execute(text("ALTER TABLE food_resources ADD COLUMN claimed_at DATETIME NULL"))
+            except Exception:
+                pass  # Column already exists
+            
+            # Create favorite_locations table if it doesn't exist
+            try:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS favorite_locations (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        user_id INT NOT NULL,
+                        name VARCHAR(255) NOT NULL,
+                        address VARCHAR(500),
+                        coords_lat FLOAT,
+                        coords_lng FLOAT,
+                        location_type VARCHAR(50) DEFAULT 'general',
+                        donor_id INT NULL,
+                        center_id INT NULL,
+                        notes TEXT,
+                        tags TEXT,
+                        visit_count INT DEFAULT 0,
+                        last_visited DATETIME NULL,
+                        notify_new_listings BOOLEAN DEFAULT FALSE,
+                        notification_radius_km FLOAT DEFAULT 5.0,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                        FOREIGN KEY (donor_id) REFERENCES users(id) ON DELETE SET NULL,
+                        FOREIGN KEY (center_id) REFERENCES distribution_centers(id) ON DELETE SET NULL,
+                        INDEX idx_user_id (user_id),
+                        INDEX idx_donor_id (donor_id),
+                        INDEX idx_center_id (center_id),
+                        INDEX idx_location_type (location_type),
+                        INDEX idx_is_active (is_active)
+                    )
+                """))
+                print("✅ favorite_locations table created/verified")
+            except Exception as e:
+                print(f"Note: favorite_locations table migration: {e}")
+                pass  # Table likely already exists
+            
+            conn.commit()
+    except Exception as e:
+        try:
+            print(f"Startup migration warning: {e}")
+        except Exception:
+            pass
+
+@app.get("/api/dbtest")
+async def db_test(admin_user: "User" = Depends(verify_admin)):
+    """Health probe for the database connection (admin-only).
+
+    Previously this endpoint was public and returned the raw exception
+    string, which leaked schema names, driver internals, and sometimes
+    connection URIs. It is now gated behind ``verify_admin`` and returns
+    only a boolean plus a redacted error code so ops tooling can still
+    detect outages without exposing surface area to unauthenticated
+    scrapers.
+
+    :param admin_user: injected by ``verify_admin``; unused directly but
+        FastAPI evaluates the dependency first, which rejects
+        non-admin callers before we touch the DB.
+    """
+    del admin_user  # dependency side-effect only
+    db = None
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        return {"success": True, "message": "Database connection successful"}
+    except Exception as exc:
+        print(f"dbtest failed: {exc!r}")
+        return {"success": False, "error": "connection_failed"}
+    finally:
+        if db is not None:
+            db.close()
+
+
+@app.get("/api/listings/get")
+def get_listings(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_security)
+):
+    """
+    Returns ALL food resources for authenticated users to filter on frontend.
+    - Recipients see: all available + their claimed listings
+    - Donors see: all their listings (available, claimed, expired)
+    - Unauthenticated: only available listings
+    """
+    payload = None
+    if credentials is not None:
+        try:
+            payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        except jwt.ExpiredSignatureError:
+            print("JWT token expired")
+            raise HTTPException(status_code=401, detail="Invalid token")
+        except jwt.InvalidTokenError as e:
+            print(f"JWT token invalid: {e}")
+            raise HTTPException(status_code=401, detail="Invalid token")
+        except Exception as e:
+            print(f"JWT decode error: {e}")
+            raise HTTPException(status_code=401, detail="Invalid token")
+    try:
+        user_id = None
+        user_role = None
+        
+        # Use decoded JWT payload if provided
+        if payload is not None:
+            user_id = str(payload.get("sub")) if payload else None
+            user_role = str(payload.get("role") or "").lower() if payload else None
+
+        # Return ALL listings - let frontend filter
+        # This allows proper filtering for donors to see expired/claimed items
+        listings = (
+            db.query(FoodResource)
+            .order_by(FoodResource.created_at.desc())
+            .limit(limit)
+        ).all()
+
+        def _to_timestamp(value):
+            if not value:
+                return None
+            try:
+                ts = datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp()
+                return ts
+            except Exception:
+                return None
+
+        def _effective_status(serialized_listing):
+            raw_status = str(serialized_listing.get('status') or '').lower()
+            if raw_status and raw_status != 'available':
+                return raw_status
+
+            deadlines = [
+                _to_timestamp(serialized_listing.get('pickup_window_end')),
+                _to_timestamp(serialized_listing.get('expiration_date')),
+            ]
+            deadlines = [d for d in deadlines if d is not None]
+
+            if deadlines and min(deadlines) <= datetime.now().timestamp():
+                return 'expired'
+
+            return raw_status or 'available'
+
+        # Serialize listings and apply role-aware visibility rules.
+        result = []
+        for listing in listings:
+            try:
+                serialized = serialize_listing(listing, include_donor=True, include_donor_contact=False)
+
+                effective_status = _effective_status(serialized)
+                serialized['status'] = effective_status
+
+                if user_role == 'recipient':
+                    recipient_id = serialized.get('recipient_id')
+                    is_claimed = effective_status in ('claimed', 'pending_confirmation')
+                    is_mine = user_id is not None and recipient_id is not None and str(recipient_id) == str(user_id)
+
+                    # Recipients may only see available listings and listings claimed by themselves.
+                    if not (effective_status == 'available' or (is_claimed and is_mine)):
+                        continue
+
+                result.append(serialized)
+            except Exception as e:
+                print(f"Error serializing listing {listing.id}: {e}")
+                continue
+
+        return result
+    except Exception as e:
+        # Inline logging for easier diagnostics in environments without log collection
+        try:
+            print(f"/api/listings/get error: {e}")
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Failed to fetch listings")
+
+@app.delete("/api/listings/get/{listing_id}")
+async def delete_listing(listing_id: int, db: Session = Depends(get_db), credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Delete a listing. Donor who created it or admin can delete."""
+    try:
+        item = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+        if not item:
+            raise HTTPException(status_code=404, detail="Listing not found")
+
+        # Authorization: donor who created it or admin can delete
+        try:
+            payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = str(payload.get("sub")) if payload else None
+            if not user_id:
+                raise HTTPException(status_code=401, detail="Your session is missing or expired. Please sign in to continue.")
+            
+            # Check if user is the owner or an admin
+            user = db.query(User).filter(User.id == user_id).first()
+            if not user:
+                raise HTTPException(status_code=401, detail="User not found")
+            
+            is_owner = str(item.donor_id) == user_id
+            role_value = user.role.value if hasattr(user.role, "value") else str(user.role or "")
+            is_admin = role_value.lower() == UserRole.ADMIN.value
+            
+            if not (is_owner or is_admin):
+                raise HTTPException(status_code=403, detail="Not authorized to delete this listing")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=401, detail="Your session is missing or expired. Please sign in to continue.")
+
+        # Clear dependent rows that reference this listing to avoid MySQL
+        # FK integrity errors. Use raw SQL so this is independent of which
+        # ORM models happen to be imported. Nullable FKs are nulled out;
+        # non-nullable FKs (pickup_reminders.listing_id) require deleting.
+        from sqlalchemy import text as _sql_text
+        try:
+            db.execute(_sql_text("UPDATE consumption_logs SET food_resource_id = NULL WHERE food_resource_id = :lid"), {"lid": listing_id})
+        except Exception as dep_err:
+            print(f"delete_listing: failed to null consumption_logs for {listing_id}: {dep_err}")
+        try:
+            db.execute(_sql_text("UPDATE safety_reports SET listing_id = NULL WHERE listing_id = :lid"), {"lid": listing_id})
+        except Exception as dep_err:
+            print(f"delete_listing: failed to null safety_reports for {listing_id}: {dep_err}")
+        try:
+            db.execute(_sql_text("UPDATE ai_broadcasts SET food_resource_id = NULL WHERE food_resource_id = :lid"), {"lid": listing_id})
+        except Exception as dep_err:
+            print(f"delete_listing: failed to null ai_broadcasts for {listing_id}: {dep_err}")
+        try:
+            db.execute(_sql_text("DELETE FROM pickup_reminders WHERE listing_id = :lid"), {"lid": listing_id})
+        except Exception as dep_err:
+            print(f"delete_listing: failed to delete pickup_reminders for {listing_id}: {dep_err}")
+
+        db.delete(item)
+        db.commit()
+
+        return {"success": True, "message": "Listing deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"DELETE /api/listings/get/{listing_id} error: {e}")
+        traceback.print_exc()
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/listings/recommended")
+async def get_recommended_listings(
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """
+    Get personalized food recommendations based on user's dietary needs and preferences.
+    Filters out allergens and prioritizes preferred categories.
+    """
+    try:
+        # Decode JWT to get user
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Parse dietary preferences
+        import json
+        
+        dietary_restrictions = []
+        allergies = []
+        preferred_categories = []
+        
+        try:
+            if user.dietary_restrictions:
+                dietary_restrictions = json.loads(user.dietary_restrictions) if isinstance(user.dietary_restrictions, str) else user.dietary_restrictions
+        except:
+            pass
+            
+        try:
+            if user.allergies:
+                allergies = json.loads(user.allergies) if isinstance(user.allergies, str) else user.allergies
+        except:
+            pass
+            
+        try:
+            if user.preferred_categories:
+                preferred_categories = json.loads(user.preferred_categories) if isinstance(user.preferred_categories, str) else user.preferred_categories
+        except:
+            pass
+        
+        # Get all available listings
+        listings = db.query(FoodResource).filter(FoodResource.status == "available").all()
+        
+        # Score each listing based on dietary compatibility
+        scored_listings = []
+        for listing in listings:
+            score = 0
+            skip = False
+            
+            # Load mock data to check dietary_info and allergens
+            # In real app, this would be stored in database
+            # For now, we'll use basic category matching
+            
+            # Preferred category bonus (high priority)
+            if listing.category and listing.category.value in preferred_categories:
+                score += 50
+            
+            # Dietary restrictions matching
+            # Check listing description/title for keywords
+            listing_text = (listing.title or '').lower() + ' ' + (listing.description or '').lower()
+            
+            for restriction in dietary_restrictions:
+                restriction_lower = restriction.lower()
+                if restriction_lower == 'vegetarian':
+                    # Avoid meat keywords
+                    if any(word in listing_text for word in ['meat', 'chicken', 'beef', 'pork', 'fish', 'salmon']):
+                        score -= 30
+                    if any(word in listing_text for word in ['vegetarian', 'vegan', 'veggie', 'produce', 'fruit']):
+                        score += 20
+                elif restriction_lower == 'vegan':
+                    if any(word in listing_text for word in ['vegan', 'plant-based']):
+                        score += 30
+                    if any(word in listing_text for word in ['dairy', 'cheese', 'milk', 'egg', 'meat', 'chicken', 'fish']):
+                        score -= 40
+                elif restriction_lower == 'gluten-free':
+                    if 'gluten' in listing_text or 'bread' in listing_text or 'pasta' in listing_text:
+                        score -= 20
+                    if 'gluten-free' in listing_text:
+                        score += 25
+                elif restriction_lower == 'halal':
+                    if 'halal' in listing_text:
+                        score += 30
+                    if 'pork' in listing_text:
+                        skip = True
+                elif restriction_lower == 'kosher':
+                    if 'kosher' in listing_text:
+                        score += 30
+                    if 'pork' in listing_text or 'shellfish' in listing_text:
+                        skip = True
+            
+            # Allergy filtering (critical - skip if allergen present)
+            for allergy in allergies:
+                allergy_lower = allergy.lower()
+                # Check for common allergen keywords
+                if allergy_lower in ['peanuts', 'tree nuts', 'nuts']:
+                    if any(word in listing_text for word in ['peanut', 'almond', 'walnut', 'cashew', 'nut']):
+                        skip = True
+                        break
+                elif allergy_lower in ['dairy', 'milk']:
+                    if any(word in listing_text for word in ['dairy', 'milk', 'cheese', 'yogurt', 'cream']):
+                        skip = True
+                        break
+                elif allergy_lower in ['eggs', 'egg']:
+                    if 'egg' in listing_text:
+                        skip = True
+                        break
+                elif allergy_lower == 'soy':
+                    if 'soy' in listing_text or 'tofu' in listing_text:
+                        skip = True
+                        break
+                elif allergy_lower in ['wheat/gluten', 'wheat', 'gluten']:
+                    if any(word in listing_text for word in ['wheat', 'gluten', 'bread', 'pasta']):
+                        skip = True
+                        break
+                elif allergy_lower in ['fish', 'shellfish', 'seafood']:
+                    if any(word in listing_text for word in ['fish', 'salmon', 'tuna', 'shellfish', 'shrimp', 'crab', 'lobster']):
+                        skip = True
+                        break
+            
+            if not skip:
+                # Household size matching (bonus for appropriate quantities)
+                household_size = user.household_size or 1
+                if listing.qty:
+                    # Ideal portion: 1-3 servings per person
+                    ideal_qty = household_size * 2
+                    qty_diff = abs(listing.qty - ideal_qty)
+                    if qty_diff < 5:
+                        score += 10
+                
+                # Proximity bonus (if user has location)
+                if user.coords_lat and user.coords_lng and listing.coords_lat and listing.coords_lng:
+                    # Simple distance calculation (rough approximation)
+                    import math
+                    lat_diff = user.coords_lat - listing.coords_lat
+                    lng_diff = user.coords_lng - listing.coords_lng
+                    distance = math.sqrt(lat_diff**2 + lng_diff**2) * 69  # Rough miles
+                    
+                    if distance < 2:
+                        score += 30
+                    elif distance < 5:
+                        score += 20
+                    elif distance < 10:
+                        score += 10
+                
+                # Freshness/urgency bonus
+                if listing.perishability and listing.perishability.value == 'high':
+                    score += 5  # Slight bonus for fresh food
+                
+                scored_listings.append({
+                    'listing': listing,
+                    'score': score
+                })
+        
+        # Sort by score (highest first)
+        scored_listings.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Return top recommendations
+        top_listings = [item['listing'] for item in scored_listings[:20]]
+        
+        # Ensure donor relationship is loaded
+        for listing in top_listings:
+            _ = listing.donor
+        
+        return {
+            'listings': top_listings,
+            'user_preferences': {
+                'dietary_restrictions': dietary_restrictions,
+                'allergies': allergies,
+                'preferred_categories': preferred_categories,
+                'household_size': user.household_size
+            },
+            'total_matches': len(scored_listings)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in recommended listings: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/listings/get/{listing_id}")
+async def update_listing(listing_id: int, request: Request, db: Session = Depends(get_db), credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Update a listing's editable fields. Attempts server-side geocoding if address is provided and coords missing."""
+    try:
+        item = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+        if not item:
+            raise HTTPException(status_code=404, detail="Listing not found")
+
+        # Authorization: only the donor who created the listing can edit
+        try:
+            payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = str(payload.get("sub")) if payload else None
+            if not user_id or str(item.donor_id) != user_id:
+                raise HTTPException(status_code=403, detail="Not authorized to edit this listing")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=401, detail="Your session is missing or expired. Please sign in to continue.")
+
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        # Track whether address changed
+        address_changed = False
+        title = body.get('title') if 'title' in body else None
+        desc = body.get('desc') if 'desc' in body else None
+        category_val = body.get('category') if 'category' in body else None
+        qty = body.get('qty') if 'qty' in body else None
+        unit = body.get('unit') if 'unit' in body else None
+        perishability_val = body.get('perishability') if 'perishability' in body else None
+        pickup_start_provided = 'pickup_start' in body
+        pickup_end_provided = 'pickup_end' in body
+        expiration_date_provided = 'expiration_date' in body
+        recipient_id_provided = 'recipient_id' in body
+        pickup_start = body.get('pickup_start') if pickup_start_provided else None
+        pickup_end = body.get('pickup_end') if pickup_end_provided else None
+        expiration_date = body.get('expiration_date') if expiration_date_provided else None
+        status = body.get('status') if 'status' in body else None
+        recipient_id = body.get('recipient_id') if recipient_id_provided else None
+        address = body.get('address') if 'address' in body else None
+
+        if title is not None:
+            item.title = title
+        if desc is not None:
+            item.description = desc
+        if category_val is not None:
+            try:
+                item.category = category_val
+            except Exception:
+                pass
+        if qty is not None:
+            try:
+                item.qty = float(qty)
+            except Exception:
+                pass
+        if unit is not None:
+            item.unit = unit
+        if perishability_val is not None:
+            try:
+                item.perishability = perishability_val
+            except Exception:
+                pass
+        if pickup_start_provided:
+            item.pickup_window_start = pickup_start
+        if pickup_end_provided:
+            item.pickup_window_end = pickup_end
+        if expiration_date_provided:
+            item.expiration_date = expiration_date
+        if status is not None:
+            item.status = status
+        if recipient_id_provided:
+            item.recipient_id = recipient_id
+        if address is not None and address != item.address:
+            item.address = address
+            address_changed = True
+
+        # Optional images update: accept a list of URL strings or a JSON
+        # string. Apply the same validation as create.
+        if 'images' in body:
+            raw_imgs = body.get('images')
+            try:
+                if isinstance(raw_imgs, str):
+                    raw_imgs = json.loads(raw_imgs)
+            except Exception:
+                raw_imgs = None
+            if isinstance(raw_imgs, list):
+                cleaned = []
+                for u in raw_imgs:
+                    if not isinstance(u, str):
+                        continue
+                    s = u.strip()
+                    if not s or len(s) > 1024:
+                        continue
+                    if not (s.startswith("/uploads/") or s.startswith("http://") or s.startswith("https://")):
+                        continue
+                    cleaned.append(s)
+                    if len(cleaned) >= 8:
+                        break
+                item.images = json.dumps(cleaned) if cleaned else None
+            elif raw_imgs is None or raw_imgs == [] or raw_imgs == "":
+                item.images = None
+
+        # If coords missing or address changed, attempt geocoding
+        try:
+            if (item.coords_lat is None or item.coords_lng is None or address_changed) and item.address:
+                MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
+                if MAPBOX_TOKEN:
+                    from urllib.parse import quote as urlquote
+                    import httpx
+                    geocode_url = "https://api.mapbox.com/geocoding/v5/mapbox.places/{}.json".format(urlquote(item.address))
+                    params = {"access_token": MAPBOX_TOKEN, "limit": 1, "type": "address"}
+                    with httpx.Client(timeout=10.0) as client:
+                        resp = client.get(geocode_url, params=params)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            features = data.get("features") or []
+                            if len(features) > 0:
+                                center = features[0].get("center")
+                                if center and len(center) >= 2:
+                                    item.coords_lng = float(center[0])
+                                    item.coords_lat = float(center[1])
+        except Exception as ge:
+            try:
+                print(f"Geocoding error for address {item.address}: {ge}")
+            except Exception:
+                pass
+
+        item.updated_at = datetime.utcnow()
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+
+        return {"success": True, "listing": serialize_listing(item)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/user/create")
+async def create_user(payload: UserRegisterRequest, request: Request, db: Session = Depends(get_db)):
+    try:    
+        enforce_signup_rate_limit(request)
+
+        email = payload.email
+        password = payload.password
+        referral_code = payload.referral_code
+        try:
+            role = UserRole(payload.role)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid role")
+
+        # Check for existing user
+        existing_user = db.query(User).filter(User.email == email).first()
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Email already registered")
+        
+        # Validate referral code if provided
+        referrer_id = None
+        if referral_code:
+            referrer = db.query(User).filter(User.referral_code == referral_code).first()
+            if not referrer:
+                raise HTTPException(status_code=400, detail="Invalid referral code")
+            referrer_id = referrer.id
+        
+        # Generate unique referral code for new user
+        new_referral_code = generate_referral_code()
+        while db.query(User).filter(User.referral_code == new_referral_code).first():
+            new_referral_code = generate_referral_code()
+        
+        # Create new user
+        user = User(
+            email=email, 
+            name=payload.name,
+            password_hash=pwd_context.hash(password), 
+            role=role,
+            referral_code=new_referral_code,
+            referred_by_code=referral_code if referrer_id else None,
+            created_at=datetime.utcnow()
+        )
+        
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        
+        return {"success": True, "message": "Account created successfully", "referral_code": new_referral_code}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/user/login")
+async def login_user(payload: UserLoginRequest, request: Request, db: Session = Depends(get_db)):
+    try:
+        email = payload.email
+        password = payload.password
+
+        enforce_login_rate_limit(request, email)
+
+        print("Login attempt received")
+        
+        if not email or not password:
+            print("Missing email or password")
+            raise HTTPException(status_code=400, detail="Email and password are required")
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            print(f"User not found: {email}")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        print(f"User found: {user.id}, verifying password...")
+        if not pwd_context.verify(password, user.password_hash):
+            print("Password verification failed")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        print("Password verified successfully")
+        # Create token with 24 hour expiration
+        now = datetime.utcnow()
+        payload = {
+            "sub": str(user.id),
+            "name": user.name,
+            "role": user.role.value,
+            "iat": now,
+            "exp": now + timedelta(hours=24)
+        }
+        token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+        print(f"✅ Generated token for user {user.id} ({user.email}), expires in 24 hours")
+        return {"success": True, "token": token}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Login error: {e}")
+        raise HTTPException(status_code=500, detail="Login failed")
+
+# Store for password reset codes
+password_reset_codes = {}
+
+@app.post("/api/user/forgot-password")
+async def forgot_password(payload: ForgotPasswordRequest, request: Request, db: Session = Depends(get_db)):
+    """Send password reset code to user's email"""
+    try:
+        email = payload.email
+
+        enforce_forgot_password_rate_limit(request, email)
+        
+        if not email:
+            raise HTTPException(status_code=400, detail="Email is required")
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            # Don't reveal if email exists
+            return {"success": True, "message": "If the email exists, a reset code has been sent"}
+        
+        # Generate 6-digit code
+        reset_code = generate_reset_code(6)
+        
+        # Store code with expiration
+        password_reset_codes[email] = {
+            'code': reset_code,
+            'expires_at': datetime.utcnow() + timedelta(minutes=15)
+        }
+        
+        send_reset_email(email, reset_code, user.name or "there")
+        
+        return {"success": True, "message": "Reset code sent"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Forgot password error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/user/reset-password")
+async def reset_password(payload: ResetPasswordRequest, request: Request, db: Session = Depends(get_db)):
+    """Reset user password with verification code"""
+    try:
+        email = payload.email
+        code = payload.code
+        new_password = payload.new_password
+
+        enforce_reset_password_rate_limit(request, email)
+        
+        if not email or not code or not new_password:
+            raise HTTPException(status_code=400, detail="Missing required fields")
+        
+        # Check if code exists
+        if email not in password_reset_codes:
+            raise HTTPException(status_code=400, detail="Invalid or expired reset code")
+        
+        stored = password_reset_codes[email]
+        
+        # Verify code
+        if stored['code'] != code:
+            raise HTTPException(status_code=400, detail="Invalid reset code")
+        
+        # Check expiration
+        if datetime.utcnow() > stored['expires_at']:
+            del password_reset_codes[email]
+            raise HTTPException(status_code=400, detail="Reset code expired")
+        
+        # Update password
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user.password_hash = pwd_context.hash(new_password)
+        db.commit()
+        
+        # Clean up code
+        del password_reset_codes[email]
+        
+        return {"success": True, "message": "Password reset successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Reset password error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/user/referrals")
+async def get_user_referrals(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Get user's referral stats"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Generate referral code if user doesn't have one
+        if not user.referral_code:
+            new_code = generate_referral_code()
+            while db.query(User).filter(User.referral_code == new_code).first():
+                new_code = generate_referral_code()
+            user.referral_code = new_code
+            db.commit()
+            db.refresh(user)
+        
+        # Count referrals using referred_by_code field
+        referral_count = db.query(User).filter(User.referred_by_code == user.referral_code).count()
+        
+        return {
+            "referral_code": user.referral_code,
+            "referral_count": referral_count
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/referral/validate")
+async def validate_referral_code(request: Request, db: Session = Depends(get_db)):
+    """Validate a referral code in real-time"""
+    try:
+        body = await request.json()
+        code = body.get('code', '').strip().upper()
+        
+        if not code:
+            return {"valid": False, "referrer_name": None}
+        
+        if len(code) < 6:
+            return {"valid": False, "referrer_name": None}
+        
+        user = db.query(User).filter(User.referral_code == code).first()
+        if not user:
+            return {"valid": False, "referrer_name": None}
+        
+        return {"valid": True, "referrer_name": user.name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error validating referral code: {e}")
+        return {"valid": False, "referrer_name": None}
+
+@app.get("/api/admin/referrals")
+async def get_referral_analytics(admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    """Get referral analytics for admin (Admin only)"""
+    try:
+        # Get all users with their referral data
+        users = db.query(User).all()
+        
+        referral_stats = []
+        for user in users:
+            # Count how many people this user referred
+            referral_count = 0
+            referred_users = []
+            if user.referral_code:
+                referral_count = db.query(User).filter(User.referred_by_code == user.referral_code).count()
+            
+            # Get the actual referred users for recent referrals display
+            if user.referral_code:
+                referred_users = db.query(User).filter(User.referred_by_code == user.referral_code).all()
+            
+            referral_stats.append({
+                "id": user.id,
+                "name": user.name,
+                "email": user.email,
+                "referral_code": user.referral_code,
+                "referral_count": referral_count,
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+                "referred_users": [{
+                    "id": ru.id,
+                    "name": ru.name,
+                    "email": ru.email,
+                    "created_at": ru.created_at.isoformat() if ru.created_at else None
+                } for ru in referred_users]
+            })
+        
+        return referral_stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/stats")
+async def get_admin_stats(admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    """Get admin dashboard aggregate stats from the primary database."""
+    try:
+        total_users = db.query(User).count()
+        total_listings = db.query(FoodResource).count()
+        total_schedules = db.query(DonationSchedule).count()
+        active_tasks = db.query(DonationReminder).filter(
+            DonationReminder.status.in_([ReminderStatus.PENDING, ReminderStatus.SENT])
+        ).count()
+
+        return {
+            "users": total_users,
+            "listings": total_listings,
+            "schedules": total_schedules,
+            "tasks": active_tasks,
+            "connected": True,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/public/stats")
+@app.get("/public/stats")
+async def get_public_stats(response: Response, db: Session = Depends(get_db)):
+    """Lightweight, cache-friendly impact totals for the public landing page."""
+    fallback = {
+        "pounds_donated_lbs": 85000,
+        "families_helped": 2500,
+        "claimed_listings": 0,
+        "updated_at": None,
     }
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
+    try:
+        normalized_unit = func.lower(func.coalesce(FoodResource.unit, ""))
+        pounds_expr = case(
+            (FoodResource.est_weight_kg.isnot(None), FoodResource.est_weight_kg * 2.20462),
+            (normalized_unit.in_(["lb", "lbs", "pound", "pounds"]), FoodResource.qty),
+            else_=FoodResource.qty * 0.5,
+        )
 
-if __name__ == "__main__":
-    import uvicorn
+        totals = db.query(
+            func.count(FoodResource.id).label("claimed_listings"),
+            func.coalesce(func.sum(pounds_expr), 0.0).label("pounds_donated_lbs"),
+            func.count(func.distinct(FoodResource.recipient_id)).label("families_helped"),
+            func.max(FoodResource.claimed_at).label("updated_at"),
+        ).filter(
+            FoodResource.status == "claimed"
+        ).first()
 
-    uvicorn.run(
-        "backend.app:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
+        pounds_donated = int(round(float(totals.pounds_donated_lbs or 0)))
+        families_helped = int(totals.families_helped or 0)
+
+        response.headers["Cache-Control"] = "public, max-age=1800"
+        return {
+            "pounds_donated_lbs": max(0, pounds_donated),
+            "families_helped": max(0, families_helped),
+            "claimed_listings": int(totals.claimed_listings or 0),
+            "updated_at": totals.updated_at.isoformat() if totals.updated_at else None,
+        }
+    except Exception:
+        response.headers["Cache-Control"] = "public, max-age=300"
+        return fallback
+
+# Store for pending confirmations
+pending_confirmations = {}
+
+def generate_reset_code(length: int = 6) -> str:
+    """Generate a random numeric code for SMS confirmation"""
+    return ''.join(secrets.choice(string.digits) for _ in range(length))
+
+def generate_referral_code() -> str:
+    """Generate a unique referral code"""
+    alphabet = string.ascii_uppercase + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(8))
+
+def send_sms(phone: str, message: str) -> bool:
+    """Send SMS using Twilio API with fallback to console logging"""
+    try:
+        # Check if Twilio credentials are configured
+        if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+            print(f"⚠️  Twilio not configured. SMS to {phone}: {message}")
+            return False
+        
+        # Initialize Twilio client
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        
+        # Format phone number (ensure it starts with +)
+        formatted_phone = phone.strip()
+        if not formatted_phone.startswith('+'):
+            # Assume US number if no country code
+            formatted_phone = '+1' + formatted_phone.replace('-', '').replace('(', '').replace(')', '').replace(' ', '').replace('.', '')
+        
+        # Send SMS
+        message_obj = client.messages.create(
+            body=message,
+            from_=TWILIO_PHONE_NUMBER,
+            to=formatted_phone
+        )
+        
+        print(f"✅ SMS sent successfully to {formatted_phone} (SID: {message_obj.sid})")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Failed to send SMS to {phone}: {str(e)}")
+        # Log to console as fallback
+        print(f"📱 SMS to {phone}: {message}")
+        return False
+
+def auto_release_claim(listing_id: int):
+    """Auto-release a claim if not confirmed within time limit"""
+    db = None
+    try:
+        db = SessionLocal()
+        if listing_id in pending_confirmations:
+            item = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+            if item and item.status == "pending_confirmation":
+                item.status = "available"
+                item.recipient_id = None
+                item.claimed_at = None
+                db.commit()
+                print(f"\u23f0 Auto-released listing {listing_id} due to timeout")
+            del pending_confirmations[listing_id]
+    except Exception as e:
+        print(f"Error in auto_release_claim: {e}")
+        if db is not None:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+# ============================================
+# DISTRIBUTION CENTER ENDPOINTS
+# ============================================
+
+@app.get("/api/centers", response_model=List[DistributionCenterResponse])
+async def get_distribution_centers(db: Session = Depends(get_db)):
+    """Get all distribution centers"""
+    try:
+        centers = db.query(DistributionCenter).all()
+        return centers
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/centers")
+async def create_distribution_center(request: Request, admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    """Create a new distribution center (Admin only)"""
+    try:
+        body = await request.json()
+        center = DistributionCenter(
+            owner_id=admin_user.id,
+            name=body.get('name'),
+            description=body.get('description'),
+            address=body.get('address'),
+            coords_lat=body.get('coords_lat'),
+            coords_lng=body.get('coords_lng'),
+            phone=body.get('phone'),
+            hours=body.get('hours'),
+            created_at=datetime.utcnow()
+        )
+        db.add(center)
+        db.commit()
+        db.refresh(center)
+        return {"success": True, "center": center}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/centers/{center_id}")
+async def update_distribution_center(center_id: int, request: Request, admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    """Update a distribution center (Admin only)"""
+    try:
+        center = db.query(DistributionCenter).filter(DistributionCenter.id == center_id).first()
+        if not center:
+            raise HTTPException(status_code=404, detail="Center not found")
+        
+        body = await request.json()
+        
+        # Update fields if provided
+        if 'name' in body:
+            center.name = body['name']
+        if 'description' in body:
+            center.description = body['description']
+        if 'address' in body:
+            center.address = body['address']
+        if 'coords_lat' in body:
+            center.coords_lat = body['coords_lat']
+        if 'coords_lng' in body:
+            center.coords_lng = body['coords_lng']
+        if 'phone' in body:
+            center.phone = body['phone']
+        if 'hours' in body:
+            center.hours = body['hours']
+        if 'is_active' in body:
+            center.is_active = body['is_active']
+        
+        db.commit()
+        db.refresh(center)
+        return {"success": True, "center": center}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Update center error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/centers/{center_id}")
+async def delete_distribution_center(center_id: int, admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    """Delete a distribution center and its inventory (Admin only)"""
+    try:
+        center = db.query(DistributionCenter).filter(DistributionCenter.id == center_id).first()
+        if not center:
+            raise HTTPException(status_code=404, detail="Center not found")
+        
+        # Delete associated inventory first
+        db.query(CenterInventory).filter(CenterInventory.center_id == center_id).delete()
+        
+        # Delete the center
+        db.delete(center)
+        db.commit()
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Delete center error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/centers/{center_id}", response_model=DistributionCenterWithInventory)
+async def get_distribution_center(center_id: int, db: Session = Depends(get_db)):
+    """Get a specific distribution center with inventory"""
+    try:
+        center = db.query(DistributionCenter).filter(
+            DistributionCenter.id == center_id
+        ).first()
+        
+        if not center:
+            raise HTTPException(status_code=404, detail="Distribution center not found")
+        
+        return center
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/centers/{center_id}/inventory", response_model=List[CenterInventoryResponse])
+async def get_center_inventory(center_id: int, db: Session = Depends(get_db)):
+    """Get inventory for a specific distribution center"""
+    try:
+        center = db.query(DistributionCenter).filter(
+            DistributionCenter.id == center_id
+        ).first()
+        
+        if not center:
+            raise HTTPException(status_code=404, detail="Distribution center not found")
+        
+        inventory = db.query(CenterInventory).filter(
+            CenterInventory.center_id == center_id
+        ).all()
+        
+        return inventory
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Support both legacy and canonical claim routes.
+@app.patch("/api/listings/get/{listing_id}")
+@app.post("/api/listings/claim/{listing_id}")
+async def claim_listing(listing_id: int, db: Session = Depends(get_db), credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Claim a listing with SMS confirmation requirement."""
+    try:
+        # Authorization first — no point hitting the DB without a valid user.
+        try:
+            payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = str(payload.get("sub")) if payload else None
+            if not user_id:
+                raise HTTPException(status_code=401, detail="Invalid token")
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        uid_int = int(user_id)
+        now = datetime.utcnow()
+
+        # Atomic claim: only one concurrent caller can transition
+        # 'available' -> 'pending_confirmation'. Prevents the read-then-
+        # update race that previously let two users both win the same
+        # listing.
+        updated = (
+            db.query(FoodResource)
+            .filter(
+                FoodResource.id == listing_id,
+                FoodResource.status == "available",
+                FoodResource.donor_id != uid_int,
+            )
+            .update(
+                {
+                    FoodResource.status: "pending_confirmation",
+                    FoodResource.recipient_id: uid_int,
+                    FoodResource.claimed_at: now,
+                },
+                synchronize_session=False,
+            )
+        )
+        if not updated:
+            item = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+            db.rollback()
+            if not item:
+                raise HTTPException(status_code=404, detail="Listing not found")
+            if item.donor_id == uid_int:
+                raise HTTPException(status_code=400, detail="You cannot claim your own listing")
+            raise HTTPException(status_code=400, detail="Listing is not available")
+
+        item = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+
+        # Get user details (claimant must have a phone for SMS confirmation).
+        claimant = db.query(User).filter(User.id == uid_int).first()
+        if not claimant or not claimant.phone:
+            # Roll back the claim so the listing goes back to 'available'.
+            (
+                db.query(FoodResource)
+                .filter(FoodResource.id == listing_id, FoodResource.recipient_id == uid_int)
+                .update(
+                    {
+                        FoodResource.status: "available",
+                        FoodResource.recipient_id: None,
+                        FoodResource.claimed_at: None,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            db.commit()
+            raise HTTPException(status_code=400, detail="Phone number required")
+
+        donor = db.query(User).filter(User.id == item.donor_id).first()
+        
+        # Generate confirmation code
+        confirmation_code = generate_reset_code(4)
+
+        # Store confirmation code (the listing was already moved to
+        # pending_confirmation by the atomic update above).
+        pending_confirmations[listing_id] = {
+            'code': confirmation_code,
+            'recipient_id': uid_int,
+            'expires_at': datetime.utcnow() + timedelta(minutes=5)
+        }
+        
+        # Send SMS to recipient
+        recipient_msg = f"You claimed '{item.title}'. Reply with code {confirmation_code} within 5 minutes to confirm. Address: {item.address}"
+        send_sms(claimant.phone, recipient_msg)
+        
+        # Send SMS to donor if they have a phone
+        if donor and donor.phone:
+            donor_msg = f"Your listing '{item.title}' was claimed by {claimant.name}. Waiting for confirmation."
+            send_sms(donor.phone, donor_msg)
+        
+        # Set auto-release timer
+        timer = Timer(300.0, auto_release_claim, args=[listing_id])  # 5 minutes
+        timer.start()
+        
+        return {
+            "success": True, 
+            "message": "Claim initiated. Check your phone for confirmation code.",
+            "listing": serialize_listing(item)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/listings/confirm/{listing_id}")
+async def confirm_claim(listing_id: int, request: Request, db: Session = Depends(get_db), credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Confirm a claim with SMS code."""
+    try:
+        body = await request.json()
+        code = body.get('code', '').strip()
+        
+        if not code:
+            raise HTTPException(status_code=400, detail="Confirmation code required")
+        
+        # Check if confirmation is pending
+        if listing_id not in pending_confirmations:
+            raise HTTPException(status_code=400, detail="No pending confirmation for this listing")
+        
+        confirmation = pending_confirmations[listing_id]
+        
+        # Check if code matches
+        if confirmation['code'] != code:
+            raise HTTPException(status_code=400, detail="Invalid confirmation code")
+        
+        # Check if expired
+        if datetime.utcnow() > confirmation['expires_at']:
+            del pending_confirmations[listing_id]
+            raise HTTPException(status_code=400, detail="Confirmation code expired")
+        
+        # Verify user authorization
+        try:
+            payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+            if user_id != confirmation['recipient_id']:
+                raise HTTPException(status_code=403, detail="Not authorized")
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        # Update listing status to claimed
+        item = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+        if not item:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        
+        item.status = "claimed"
+        db.commit()
+        
+        # Clean up confirmation
+        del pending_confirmations[listing_id]
+        
+        # Get user details for notification
+        claimant = db.query(User).filter(User.id == user_id).first()
+        donor = db.query(User).filter(User.id == item.donor_id).first()
+        
+        # Send confirmation SMS to both parties
+        if claimant and claimant.phone:
+            msg = f"Claim confirmed! You can now pick up '{item.title}' at {item.address}. Contact donor: {donor.phone if donor and donor.phone else 'N/A'}"
+            send_sms(claimant.phone, msg)
+        
+        if donor and donor.phone:
+            msg = f"Claim confirmed! {claimant.name if claimant else 'Recipient'} will pick up '{item.title}'. Contact: {claimant.phone if claimant and claimant.phone else 'N/A'}"
+            send_sms(donor.phone, msg)
+        
+        return {
+            "success": True,
+            "message": "Claim confirmed successfully",
+            "listing": serialize_listing(item)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/listings/{listing_id}/verify-before")
+async def verify_before_pickup(
+    listing_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Upload before-pickup verification photo"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        body = await request.json()
+        photo_data = body.get('photo')
+        notes = body.get('notes', '')
+        
+        if not photo_data:
+            raise HTTPException(status_code=400, detail="Photo data required")
+        
+        listing = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+        if not listing:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        
+        # Verify user is the recipient
+        if listing.recipient_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        # Update listing
+        listing.before_photo = photo_data
+        listing.before_verified_at = datetime.utcnow()
+        listing.verification_status = "before_verified"
+        if notes:
+            listing.pickup_notes = notes
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": "Before-pickup photo uploaded successfully",
+            "verification_status": listing.verification_status
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/listings/{listing_id}/verify-after")
+async def verify_after_pickup(
+    listing_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Upload after-pickup verification photo and complete verification"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        body = await request.json()
+        photo_data = body.get('photo')
+        notes = body.get('notes', '')
+        
+        if not photo_data:
+            raise HTTPException(status_code=400, detail="Photo data required")
+        
+        listing = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+        if not listing:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        
+        # Verify user is the recipient
+        if listing.recipient_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        # Update listing
+        listing.after_photo = photo_data
+        listing.after_verified_at = datetime.utcnow()
+        listing.verification_status = "completed"
+        listing.status = "completed"
+        if notes:
+            listing.pickup_notes = (listing.pickup_notes or '') + "\n" + notes
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": "Pickup completed and verified successfully",
+            "verification_status": listing.verification_status
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/listings/{listing_id}/verification")
+async def get_verification_status(
+    listing_id: int,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Get verification status and photos for a listing"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        listing = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+        if not listing:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        
+        # Only donor or recipient can see verification
+        if listing.donor_id != user_id and listing.recipient_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        return {
+            "verification_status": listing.verification_status,
+            "before_photo": listing.before_photo,
+            "after_photo": listing.after_photo,
+            "before_verified_at": listing.before_verified_at.isoformat() if listing.before_verified_at else None,
+            "after_verified_at": listing.after_verified_at.isoformat() if listing.after_verified_at else None,
+            "pickup_notes": listing.pickup_notes
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/user/send-verification-email")
+async def send_verification_email(
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Send verification email to user"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Generate verification token (valid for 24 hours)
+        verification_token = jwt.encode(
+            {
+                "sub": str(user.id),
+                "email": user.email,
+                "purpose": "email_verification",
+                "exp": datetime.utcnow() + timedelta(hours=24)
+            },
+            JWT_SECRET,
+            algorithm=JWT_ALGORITHM
+        )
+        
+        base_url = get_public_base_url()
+        encoded_token = quote(verification_token, safe="")
+        verification_link = f"{base_url}/verify-email?token={encoded_token}"
+        send_verification_email_message(user.email, user.name or "there", verification_link)
+
+        return {
+            "success": True,
+            "message": "Verification email sent successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/verify-email")
+async def verify_email_endpoint(token: str, db: Session = Depends(get_db)):
+    """Verify email with token from link"""
+    try:
+        # Decode token
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        
+        if payload.get("purpose") != "email_verification":
+            raise HTTPException(status_code=400, detail="Invalid verification token")
+        
+        user_id = int(payload.get("sub"))
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Mark email as verified
+        user.email_verified = True
+        
+        # Update trust score
+        current_score = getattr(user, 'trust_score', 50)
+        user.trust_score = min(100, current_score + 5)
+        
+        db.commit()
+        
+        # Return HTML page with success message
+        return HTMLResponse(content="""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Email Verified - DoGoods</title>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    min-height: 100vh;
+                    margin: 0;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                }
+                .container {
+                    background: white;
+                    padding: 3rem;
+                    border-radius: 1rem;
+                    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                    text-align: center;
+                    max-width: 500px;
+                }
+                .icon {
+                    font-size: 4rem;
+                    margin-bottom: 1rem;
+                }
+                h1 {
+                    color: #2d3748;
+                    margin: 0 0 1rem 0;
+                }
+                p {
+                    color: #4a5568;
+                    margin-bottom: 2rem;
+                }
+                .button {
+                    display: inline-block;
+                    padding: 0.75rem 2rem;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 0.5rem;
+                    font-weight: 600;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="icon">✅</div>
+                <h1>Email Verified!</h1>
+                <p>Your email has been successfully verified. Your trust score has increased by 5 points!</p>
+                <a href="/" class="button">Return to DoGoods</a>
+            </div>
+        </body>
+        </html>
+        """, status_code=200)
+        
+    except jwt.ExpiredSignatureError:
+        return HTMLResponse(content="""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Link Expired - DoGoods</title>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    min-height: 100vh;
+                    margin: 0;
+                    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                }
+                .container {
+                    background: white;
+                    padding: 3rem;
+                    border-radius: 1rem;
+                    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                    text-align: center;
+                    max-width: 500px;
+                }
+                .icon {
+                    font-size: 4rem;
+                    margin-bottom: 1rem;
+                }
+                h1 {
+                    color: #2d3748;
+                    margin: 0 0 1rem 0;
+                }
+                p {
+                    color: #4a5568;
+                    margin-bottom: 2rem;
+                }
+                .button {
+                    display: inline-block;
+                    padding: 0.75rem 2rem;
+                    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 0.5rem;
+                    font-weight: 600;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="icon">⏰</div>
+                <h1>Link Expired</h1>
+                <p>This verification link has expired. Please request a new verification email from your account settings.</p>
+                <a href="/" class="button">Return to DoGoods</a>
+            </div>
+        </body>
+        </html>
+        """, status_code=400)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+
+# ============================================================================
+# SAFETY AND TRUST ENDPOINTS
+# ============================================================================
+
+@app.get("/api/user/trust-score")
+async def get_trust_score(
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Get user's trust score and verification status"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        return {
+            "trust_score": getattr(user, 'trust_score', 50),
+            "verification_status": {
+                "verified": getattr(user, 'email_verified', False) and getattr(user, 'phone_verified', False),
+                "email_verified": getattr(user, 'email_verified', False),
+                "phone_verified": getattr(user, 'phone_verified', False),
+                "id_verified": getattr(user, 'id_verified', False),
+                "address_verified": getattr(user, 'address_verified', False)
+            },
+            "stats": {
+                "completed_exchanges": getattr(user, 'completed_exchanges', 0),
+                "positive_feedback": getattr(user, 'positive_feedback', 0),
+                "negative_feedback": getattr(user, 'negative_feedback', 0),
+                "verified_pickups": getattr(user, 'verified_pickups', 0)
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/safety/report")
+async def submit_safety_report(
+    request: Request,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Submit a safety report"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        data = await request.json()
+        report_type = data.get('type')
+        description = data.get('description')
+        listing_id = data.get('listingId')
+        evidence = data.get('evidence')
+        
+        if not report_type or not description:
+            raise HTTPException(status_code=400, detail="Missing required fields")
+        
+        # Note: SafetyReport table exists and should work
+        try:
+            # Convert string to enum
+            report_type_enum = ReportType[report_type.upper().replace(' ', '_')] if report_type.upper().replace(' ', '_') in ReportType.__members__ else ReportType.OTHER
+            
+            new_report = SafetyReport(
+                reporter_id=user_id,
+                report_type=report_type_enum,
+                description=description,
+                listing_id=int(listing_id) if listing_id else None,
+                evidence=evidence
+            )
+            
+            db.add(new_report)
+            db.commit()
+            db.refresh(new_report)
+            
+            return {
+                "success": True,
+                "message": "Report submitted successfully",
+                "report_id": new_report.id
+            }
+        except Exception as inner_e:
+            db.rollback()
+            # If table doesn't exist yet, log the report attempt
+            print(f"Safety report error: {str(inner_e)}")
+            print(f"Safety report logged: {report_type} by user {user_id}")
+            return {
+                "success": True,
+                "message": "Report received and will be reviewed"
+            }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/user/update-trust-score")
+async def update_trust_score(
+    request: Request,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Update user trust score (internal use or admin)"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        data = await request.json()
+        action = data.get('action')  # 'completed_exchange', 'positive_feedback', 'verified_pickup', etc.
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Update based on action
+        trust_increase = 0
+        if action == 'completed_exchange':
+            user.completed_exchanges = getattr(user, 'completed_exchanges', 0) + 1
+            trust_increase = 2
+        elif action == 'positive_feedback':
+            user.positive_feedback = getattr(user, 'positive_feedback', 0) + 1
+            trust_increase = 3
+        elif action == 'verified_pickup':
+            user.verified_pickups = getattr(user, 'verified_pickups', 0) + 1
+            trust_increase = 5
+        elif action == 'email_verified':
+            user.email_verified = True
+            trust_increase = 5
+        elif action == 'phone_verified':
+            user.phone_verified = True
+            trust_increase = 5
+        
+        # Update trust score (cap at 100)
+        current_score = getattr(user, 'trust_score', 50)
+        user.trust_score = min(100, current_score + trust_increase)
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "new_trust_score": user.trust_score,
+            "increase": trust_increase
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/listings/create")
+async def create_listing(donor_id: int, title: str, desc: str, category: FoodCategory, qty: float, unit: str, perishability: PerishabilityLevel, address: str,  pickup_start: str, pickup_end: str, est_w: float = 0, images: Optional[str] = None, db: Session = Depends(get_db), credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_security)):
+    """
+    Create a FoodResource and attempt server-side geocoding using Mapbox when an address is provided
+    and coords are not supplied. Returns the created listing as JSON.
+
+    `images` may be a JSON-encoded array of URL strings (e.g. paths returned by
+    /api/ai/upload_image) to attach as listing photos.
+
+    SECURITY: the authoritative donor_id is taken from the JWT (Authorization
+    header). The legacy `donor_id` URL parameter is kept for backward
+    compatibility but is IGNORED when a valid token is present — otherwise a
+    stale `localStorage.current_user` on the client could cause a listing to
+    be attributed to the wrong user (and surface that user's profile address
+    on the listing card).
+    """
+    try:
+        # Resolve the authenticated donor from the JWT. Fall back to the URL
+        # parameter only if no token was supplied (legacy callers); never
+        # silently trust a client-supplied id when auth context disagrees.
+        authed_donor_id: Optional[int] = None
+        if credentials and getattr(credentials, "credentials", None):
+            try:
+                payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+                sub = payload.get("sub") if isinstance(payload, dict) else None
+                if sub is not None:
+                    authed_donor_id = int(sub)
+            except Exception:
+                raise HTTPException(status_code=401, detail="Your session is missing or expired. Please sign in to continue.")
+
+        if authed_donor_id is not None:
+            if int(donor_id) != authed_donor_id:
+                try:
+                    print(f"[create_listing] overriding client donor_id={donor_id} with authenticated id={authed_donor_id}")
+                except Exception:
+                    pass
+            donor_id = authed_donor_id
+
+        # Enforce that donor has a phone number on file
+        donor = db.query(User).filter(User.id == int(donor_id)).first()
+        if not donor:
+            raise HTTPException(status_code=404, detail="Donor not found")
+        if not donor.phone or len(str(donor.phone).strip()) < 7:
+            raise HTTPException(status_code=400, detail="A valid phone number is required to create a listing")
+
+        # Validate and normalize the optional images parameter. We store a
+        # JSON-encoded array of URL strings; reject anything else to avoid
+        # storing arbitrary blobs (or huge data URLs) on the listing row.
+        images_json = None
+        if images:
+            try:
+                parsed = json.loads(images) if isinstance(images, str) else images
+            except Exception:
+                raise HTTPException(status_code=400, detail="images must be a JSON array of URL strings")
+            if not isinstance(parsed, list):
+                raise HTTPException(status_code=400, detail="images must be a JSON array of URL strings")
+            cleaned = []
+            for u in parsed:
+                if not isinstance(u, str):
+                    continue
+                s = u.strip()
+                if not s:
+                    continue
+                # Only accept relative /uploads/... paths or http(s) URLs.
+                if not (s.startswith("/uploads/") or s.startswith("http://") or s.startswith("https://")):
+                    continue
+                if len(s) > 1024:
+                    continue
+                cleaned.append(s)
+                if len(cleaned) >= 8:
+                    break
+            images_json = json.dumps(cleaned) if cleaned else None
+
+        item = FoodResource(
+            donor_id=donor_id,
+            title=title,
+            description=desc,
+            category=category,
+            qty=qty,
+            unit=unit,
+            perishability=perishability,
+            pickup_window_start=pickup_start,
+            pickup_window_end=pickup_end,
+            address=address,
+            images=images_json,
+            created_at=datetime.utcnow()
+        )
+
+        # If coords are missing and address provided, attempt Mapbox geocoding
+        try:
+            if (item.coords_lat is None or item.coords_lng is None) and item.address:
+                MAPBOX_TOKEN = os.getenv('MAPBOX_TOKEN')
+                if MAPBOX_TOKEN:
+                    from urllib.parse import quote as urlquote
+                    import httpx
+                    geocode_url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{urlquote(item.address)}.json"
+                    params = {"access_token": MAPBOX_TOKEN, "limit": 1}
+                    with httpx.Client(timeout=10.0) as client:
+                        resp = client.get(geocode_url, params=params)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            features = data.get('features') or []
+                            if len(features) > 0:
+                                center = features[0].get('center')
+                                if center and len(center) >= 2:
+                                    # Mapbox returns [lng, lat]
+                                    item.coords_lng = float(center[0])
+                                    item.coords_lat = float(center[1])
+                else:
+                    # No MAPBOX token configured - skip geocoding
+                    pass
+        except Exception as ge:
+            # Don't fail the request if geocoding fails; log and continue
+            try:
+                print(f"Geocoding error for address {item.address}: {ge}")
+            except Exception:
+                pass
+
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        # Return the created item
+        return {"success": True, "listing": serialize_listing(item)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/listings/user-details/{listing_id}")
+async def get_user_details(
+    listing_id: int,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """
+    Return the counterparty contact info for a claimed listing:
+    - If requester is the recipient who claimed the listing, return the donor's name/phone.
+    - If requester is the donor who created the listing, return the recipient's name/phone.
+    """
+    try:
+        try:
+            payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_role = str(payload.get("role") or "").lower() if payload else None
+            user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        except Exception:
+            raise HTTPException(status_code=401, detail="Your session is missing or expired. Please sign in to continue.")
+
+        if user_role not in ("donor", "recipient"):
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        listing = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+        if not listing:
+            raise HTTPException(status_code=404, detail="Listing not found")
+
+        # Recipient can only see donor for listings they claimed
+        if user_role == "recipient":
+            if listing.recipient_id is None or listing.recipient_id != user_id:
+                raise HTTPException(status_code=403, detail="Not authorized for this listing")
+            donor = db.query(User).filter(User.id == listing.donor_id).first()
+            if not donor:
+                # Return empty contact gracefully if donor record is missing
+                return {"name": "", "phone": ""}
+            return {"name": donor.name or "", "phone": donor.phone or ""}
+
+        # Donor can only see recipient for their own listing
+        if listing.donor_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized for this listing")
+        # If not yet claimed or recipient missing, return empty contact gracefully
+        if listing.recipient_id is None:
+            return {"name": "", "phone": ""}
+        recipient = db.query(User).filter(User.id == listing.recipient_id).first()
+        if not recipient:
+            return {"name": "", "phone": ""}
+        return {"name": recipient.name or "", "phone": recipient.phone or ""}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        try:
+            print(f"/api/listings/user-details error: {e}")
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Failed to fetch user details")   
+
+
+
+# Food Safety Checklist Endpoints
+@app.post("/api/food/safety-check")
+async def submit_safety_check(
+    listing_id: int,
+    storage_temperature: Optional[float] = None,
+    is_refrigerated: bool = False,
+    is_frozen: bool = False,
+    packaging_condition: str = 'good',
+    safety_score: int = 0,
+    safety_notes: Optional[str] = None,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """
+    Submit a food safety checklist for a listing.
+    Only the donor who created the listing can submit safety checks.
+    """
+    try:
+        # Verify user
+        try:
+            payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        except Exception:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
+        # Get the listing
+        listing = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+        if not listing:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        
+        # Verify the user is the donor
+        if listing.donor_id != user_id:
+            raise HTTPException(status_code=403, detail="Only the donor can submit safety checks")
+        
+        # Validate safety score
+        if safety_score < 0 or safety_score > 100:
+            raise HTTPException(status_code=400, detail="Safety score must be between 0 and 100")
+        
+        # Validate packaging condition
+        valid_conditions = ['excellent', 'good', 'fair', 'poor']
+        if packaging_condition not in valid_conditions:
+            raise HTTPException(status_code=400, detail=f"Invalid packaging condition. Must be one of: {', '.join(valid_conditions)}")
+        
+        # Update listing with safety information
+        listing.storage_temperature = storage_temperature
+        listing.is_refrigerated = is_refrigerated
+        listing.is_frozen = is_frozen
+        listing.packaging_condition = packaging_condition
+        listing.safety_score = safety_score
+        listing.safety_notes = safety_notes
+        listing.safety_last_checked = datetime.utcnow()
+        
+        # Mark as passed if score >= 60 and packaging is not poor
+        listing.safety_checklist_passed = (safety_score >= 60 and packaging_condition != 'poor')
+        
+        db.commit()
+        db.refresh(listing)
+        
+        return {
+            "success": True,
+            "message": "Safety checklist submitted successfully",
+            "listing": serialize_listing(listing),
+            "safety_passed": listing.safety_checklist_passed
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/food/{listing_id}/safety-status")
+async def get_safety_status(
+    listing_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Get the food safety status for a listing.
+    Public endpoint - anyone can view safety information.
+    """
+    try:
+        listing = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+        if not listing:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        
+        return {
+            "listing_id": listing.id,
+            "safety_checklist_passed": listing.safety_checklist_passed or False,
+            "safety_score": listing.safety_score or 0,
+            "storage_temperature": listing.storage_temperature,
+            "is_refrigerated": listing.is_refrigerated or False,
+            "is_frozen": listing.is_frozen or False,
+            "packaging_condition": listing.packaging_condition or 'unknown',
+            "safety_notes": listing.safety_notes,
+            "safety_last_checked": listing.safety_last_checked.isoformat() if listing.safety_last_checked else None
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/food/{listing_id}/safety-update")
+async def update_safety_info(
+    listing_id: int,
+    storage_temperature: Optional[float] = None,
+    is_refrigerated: Optional[bool] = None,
+    is_frozen: Optional[bool] = None,
+    packaging_condition: Optional[str] = None,
+    safety_notes: Optional[str] = None,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """
+    Update partial safety information for a listing.
+    Only the donor can update safety information.
+    """
+    try:
+        # Verify user
+        try:
+            payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        except Exception:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
+        # Get the listing
+        listing = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+        if not listing:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        
+        # Verify the user is the donor
+        if listing.donor_id != user_id:
+            raise HTTPException(status_code=403, detail="Only the donor can update safety information")
+        
+        # Update only provided fields
+        if storage_temperature is not None:
+            listing.storage_temperature = storage_temperature
+        if is_refrigerated is not None:
+            listing.is_refrigerated = is_refrigerated
+        if is_frozen is not None:
+            listing.is_frozen = is_frozen
+        if packaging_condition is not None:
+            valid_conditions = ['excellent', 'good', 'fair', 'poor']
+            if packaging_condition not in valid_conditions:
+                raise HTTPException(status_code=400, detail=f"Invalid packaging condition. Must be one of: {', '.join(valid_conditions)}")
+            listing.packaging_condition = packaging_condition
+        if safety_notes is not None:
+            listing.safety_notes = safety_notes
+        
+        # Update last checked timestamp
+        listing.safety_last_checked = datetime.utcnow()
+        
+        db.commit()
+        db.refresh(listing)
+        
+        return {
+            "success": True,
+            "message": "Safety information updated successfully",
+            "listing": serialize_listing(listing)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Pickup Reminder Endpoints
+@app.get("/api/pickup-reminders/list")
+async def get_pickup_reminders(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get all pickup reminders for the authenticated user"""
+    try:
+        from backend.models import PickupReminder
+        
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        reminders = db.query(PickupReminder).filter(
+            PickupReminder.user_id == user_id
+        ).order_by(PickupReminder.scheduled_time).all()
+        
+        # Enhance with listing details
+        reminder_list = []
+        for reminder in reminders:
+            listing = db.query(FoodResource).filter(FoodResource.id == reminder.listing_id).first()
+            reminder_list.append({
+                "id": reminder.id,
+                "listing_id": reminder.listing_id,
+                "listing_title": listing.title if listing else "Unknown",
+                "location": listing.address if listing else None,
+                "scheduled_time": reminder.scheduled_time.isoformat() if reminder.scheduled_time else None,
+                "reminder_sent_at": reminder.reminder_sent_at.isoformat() if reminder.reminder_sent_at else None,
+                "status": reminder.status.value if reminder.status else "scheduled",
+                "sms_sent": reminder.sms_sent,
+                "email_sent": reminder.email_sent,
+                "snooze_count": reminder.snooze_count,
+                "snoozed_until": reminder.snoozed_until.isoformat() if reminder.snoozed_until else None
+            })
+        
+        return {"success": True, "reminders": reminder_list}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/pickup-reminders/settings")
+async def get_reminder_settings(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get reminder settings for the authenticated user"""
+    try:
+        from backend.models import ReminderSettings
+        
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        settings = db.query(ReminderSettings).filter(
+            ReminderSettings.user_id == user_id
+        ).first()
+        
+        if not settings:
+            # Create default settings
+            settings = ReminderSettings(
+                user_id=user_id,
+                enabled=True,
+                advance_notice_hours=2.0,
+                sms_enabled=True,
+                email_enabled=False,
+                auto_reminder=True
+            )
+            db.add(settings)
+            db.commit()
+            db.refresh(settings)
+        
+        return {
+            "success": True,
+            "settings": {
+                "enabled": settings.enabled,
+                "advance_notice_hours": settings.advance_notice_hours,
+                "sms_enabled": settings.sms_enabled,
+                "email_enabled": settings.email_enabled,
+                "auto_reminder": settings.auto_reminder
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/pickup-reminders/settings")
+async def update_reminder_settings(
+    enabled: bool = True,
+    advance_notice_hours: float = 2.0,
+    sms_enabled: bool = True,
+    email_enabled: bool = False,
+    auto_reminder: bool = True,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Update reminder settings for the authenticated user"""
+    try:
+        from backend.models import ReminderSettings
+        
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        settings = db.query(ReminderSettings).filter(
+            ReminderSettings.user_id == user_id
+        ).first()
+        
+        if not settings:
+            settings = ReminderSettings(user_id=user_id)
+            db.add(settings)
+        
+        settings.enabled = enabled
+        settings.advance_notice_hours = advance_notice_hours
+        settings.sms_enabled = sms_enabled
+        settings.email_enabled = email_enabled
+        settings.auto_reminder = auto_reminder
+        settings.updated_at = datetime.utcnow()
+        
+        db.commit()
+        
+        return {"success": True, "message": "Settings updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/pickup-reminders/schedule")
+async def schedule_pickup_reminder(
+    listing_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Schedule a pickup reminder for a listing"""
+    try:
+        from backend.models import PickupReminder, ReminderSettings, PickupReminderStatus
+        
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        # Get the listing
+        listing = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+        if not listing:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        
+        # Verify user claimed this listing
+        if listing.recipient_id != user_id:
+            raise HTTPException(status_code=403, detail="You haven't claimed this listing")
+        
+        # Check if reminder already exists
+        existing = db.query(PickupReminder).filter(
+            PickupReminder.listing_id == listing_id,
+            PickupReminder.user_id == user_id,
+            PickupReminder.status.in_([PickupReminderStatus.SCHEDULED, PickupReminderStatus.SNOOZED])
+        ).first()
+        
+        if existing:
+            raise HTTPException(status_code=400, detail="Reminder already scheduled for this listing")
+        
+        # Get user settings
+        settings = db.query(ReminderSettings).filter(
+            ReminderSettings.user_id == user_id
+        ).first()
+        
+        if not settings:
+            settings = ReminderSettings(user_id=user_id)
+            db.add(settings)
+            db.commit()
+            db.refresh(settings)
+        
+        # Calculate reminder time (advance_notice_hours before pickup)
+        from datetime import timedelta
+        pickup_time = listing.pickup_window_start
+        reminder_time = pickup_time - timedelta(hours=settings.advance_notice_hours)
+        
+        # Create reminder
+        reminder = PickupReminder(
+            user_id=user_id,
+            listing_id=listing_id,
+            scheduled_time=reminder_time,
+            status=PickupReminderStatus.SCHEDULED
+        )
+        
+        db.add(reminder)
+        db.commit()
+        db.refresh(reminder)
+        
+        return {
+            "success": True,
+            "message": "Reminder scheduled successfully",
+            "reminder_id": reminder.id,
+            "scheduled_time": reminder_time.isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/pickup-reminders/{reminder_id}/cancel")
+async def cancel_pickup_reminder(
+    reminder_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Cancel a scheduled pickup reminder"""
+    try:
+        from backend.models import PickupReminder, PickupReminderStatus
+        
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        reminder = db.query(PickupReminder).filter(
+            PickupReminder.id == reminder_id,
+            PickupReminder.user_id == user_id
+        ).first()
+        
+        if not reminder:
+            raise HTTPException(status_code=404, detail="Reminder not found")
+        
+        reminder.status = PickupReminderStatus.CANCELLED
+        reminder.updated_at = datetime.utcnow()
+        
+        db.commit()
+        
+        return {"success": True, "message": "Reminder cancelled"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/pickup-reminders/{reminder_id}/snooze")
+async def snooze_pickup_reminder(
+    reminder_id: int,
+    minutes: int = 30,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Snooze a pickup reminder"""
+    try:
+        from backend.models import PickupReminder, PickupReminderStatus
+        from datetime import timedelta
+        
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        reminder = db.query(PickupReminder).filter(
+            PickupReminder.id == reminder_id,
+            PickupReminder.user_id == user_id
+        ).first()
+        
+        if not reminder:
+            raise HTTPException(status_code=404, detail="Reminder not found")
+        
+        # Calculate snooze time
+        snooze_until = datetime.utcnow() + timedelta(minutes=minutes)
+        
+        reminder.status = PickupReminderStatus.SNOOZED
+        reminder.snoozed_until = snooze_until
+        reminder.snooze_count += 1
+        reminder.updated_at = datetime.utcnow()
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": f"Reminder snoozed for {minutes} minutes",
+            "snoozed_until": snooze_until.isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Referral System Endpoints
+@app.get("/api/referrals/stats")
+async def get_referral_stats(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get referral statistics for admin"""
+    try:
+        user = verify_token(credentials.credentials, db)
+        
+        # Check if user is admin
+        if user.role != UserRole.ADMIN:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
+        # Get all users with referral codes
+        users_with_referrals = db.query(User).filter(User.referred_by_code.isnot(None)).all()
+        
+        # Build referral tree
+        referral_data = []
+        for user_item in users_with_referrals:
+            referrer = db.query(User).filter(User.referral_code == user_item.referred_by_code).first()
+            referral_data.append({
+                "id": user_item.id,
+                "name": user_item.name,
+                "email": user_item.email,
+                "role": user_item.role.value,
+                "referral_code": user_item.referral_code,
+                "referred_by_code": user_item.referred_by_code,
+                "referrer_name": referrer.name if referrer else "Unknown",
+                "referrer_email": referrer.email if referrer else "Unknown",
+                "created_at": user_item.created_at.isoformat() if user_item.created_at else None
+            })
+        
+        # Count total referrals per user
+        referral_counts = {}
+        all_users = db.query(User).filter(User.referral_code.isnot(None)).all()
+        for user_item in all_users:
+            count = db.query(User).filter(User.referred_by_code == user_item.referral_code).count()
+            if count > 0:
+                referral_counts[user_item.referral_code] = {
+                    "referrer_id": user_item.id,
+                    "referrer_name": user_item.name,
+                    "referrer_email": user_item.email,
+                    "referrer_role": user_item.role.value,
+                    "total_referrals": count
+                }
+        
+        return {
+            "success": True,
+            "total_referred_users": len(referral_data),
+            "referral_details": referral_data,
+            "top_referrers": dict(sorted(referral_counts.items(), key=lambda x: x[1]['total_referrals'], reverse=True))
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/referrals/user/{user_id}")
+async def get_user_referrals(
+    user_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get all users referred by a specific user"""
+    try:
+        user = verify_token(credentials.credentials, db)
+        
+        # Check if user is admin or the user themselves
+        if user.role != UserRole.ADMIN and user.id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Get the user's referral code
+        target_user = db.query(User).filter(User.id == user_id).first()
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if not target_user.referral_code:
+            # Generate one if missing
+            new_code = generate_referral_code()
+            while db.query(User).filter(User.referral_code == new_code).first():
+                new_code = generate_referral_code()
+            target_user.referral_code = new_code
+            db.add(target_user)
+            db.commit()
+        
+        # Get all users referred by this code
+        referred_users = db.query(User).filter(User.referred_by_code == target_user.referral_code).all()
+        
+        return {
+            "success": True,
+            "referral_code": target_user.referral_code,
+            "referred_users": [
+                {
+                    "id": u.id,
+                    "name": u.name,
+                    "email": u.email,
+                    "role": u.role.value,
+                    "created_at": u.created_at.isoformat() if u.created_at else None
+                }
+                for u in referred_users
+            ],
+            "total_referrals": len(referred_users)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/user/referral-code")
+async def get_my_referral_code(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get current user's referral code"""
+    try:
+        user = verify_token(credentials.credentials, db)
+        
+        # Generate referral code if user doesn't have one
+        if not user.referral_code:
+            new_code = generate_referral_code()
+            while db.query(User).filter(User.referral_code == new_code).first():
+                new_code = generate_referral_code()
+            
+            user.referral_code = new_code
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        
+        return {
+            "success": True,
+            "referral_code": user.referral_code,
+            "referral_link": f"https://dogoods.store/register?ref={user.referral_code}"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# MESSAGING ENDPOINTS
+# ============================================
+
+@app.post("/api/messages/send")
+async def send_message(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Send a message to admin or reply as admin"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        body = await request.json()
+        content = body.get('content', '').strip()
+        conversation_id = body.get('conversation_id')
+        
+        if not content:
+            raise HTTPException(status_code=400, detail="Message content required")
+        
+        # If no conversation_id provided, create one based on user_id
+        if not conversation_id:
+            conversation_id = f"user_{user_id}"
+        
+        is_from_admin = user.role == UserRole.ADMIN
+        
+        message = Message(
+            sender_id=user_id,
+            conversation_id=conversation_id,
+            content=content,
+            is_from_admin=is_from_admin,
+            is_read=False,
+            created_at=datetime.utcnow()
+        )
+        
+        db.add(message)
+        db.commit()
+        db.refresh(message)
+        
+        return {
+            "success": True,
+            "message": {
+                "id": message.id,
+                "sender_id": message.sender_id,
+                "sender_name": user.name,
+                "conversation_id": message.conversation_id,
+                "content": message.content,
+                "is_from_admin": message.is_from_admin,
+                "is_read": message.is_read,
+                "created_at": message.created_at.isoformat()
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/messages/conversations")
+async def get_conversations(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Get all conversations (admin only) or user's conversation"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if user.role == UserRole.ADMIN:
+            # Admin sees all conversations
+            conversations = db.query(Message.conversation_id).distinct().all()
+            conversation_list = []
+            
+            for (conv_id,) in conversations:
+                # Get latest message and unread count for each conversation
+                latest_msg = db.query(Message).filter(
+                    Message.conversation_id == conv_id
+                ).order_by(Message.created_at.desc()).first()
+                
+                unread_count = db.query(Message).filter(
+                    Message.conversation_id == conv_id,
+                    Message.is_from_admin == False,
+                    Message.is_read == False
+                ).count()
+                
+                # Get user info from conversation_id
+                user_id_from_conv = conv_id.replace("user_", "")
+                conv_user = db.query(User).filter(User.id == int(user_id_from_conv)).first() if user_id_from_conv.isdigit() else None
+                
+                conversation_list.append({
+                    "conversation_id": conv_id,
+                    "user_name": conv_user.name if conv_user else "Unknown",
+                    "user_id": conv_user.id if conv_user else None,
+                    "latest_message": latest_msg.content if latest_msg else "",
+                    "latest_message_time": latest_msg.created_at.isoformat() if latest_msg else None,
+                    "unread_count": unread_count,
+                    "is_from_admin": latest_msg.is_from_admin if latest_msg else False
+                })
+            
+            # Sort by latest message time
+            conversation_list.sort(key=lambda x: x['latest_message_time'] or '', reverse=True)
+            return conversation_list
+        else:
+            # Regular user sees only their conversation
+            conversation_id = f"user_{user_id}"
+            messages = db.query(Message).filter(
+                Message.conversation_id == conversation_id
+            ).order_by(Message.created_at.desc()).limit(1).all()
+            
+            if messages:
+                latest_msg = messages[0]
+                unread_count = db.query(Message).filter(
+                    Message.conversation_id == conversation_id,
+                    Message.is_from_admin == True,
+                    Message.is_read == False
+                ).count()
+                
+                return [{
+                    "conversation_id": conversation_id,
+                    "user_name": "Admin Support",
+                    "latest_message": latest_msg.content,
+                    "latest_message_time": latest_msg.created_at.isoformat(),
+                    "unread_count": unread_count,
+                    "is_from_admin": latest_msg.is_from_admin
+                }]
+            return []
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/messages/{conversation_id}")
+async def get_messages(conversation_id: str, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Get all messages in a conversation"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Check authorization
+        if user.role != UserRole.ADMIN and conversation_id != f"user_{user_id}":
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        messages = db.query(Message).filter(
+            Message.conversation_id == conversation_id
+        ).order_by(Message.created_at.asc()).all()
+        
+        # Mark messages as read
+        if user.role == UserRole.ADMIN:
+            # Admin reading user messages
+            for msg in messages:
+                if not msg.is_from_admin and not msg.is_read:
+                    msg.is_read = True
+        else:
+            # User reading admin messages
+            for msg in messages:
+                if msg.is_from_admin and not msg.is_read:
+                    msg.is_read = True
+        
+        db.commit()
+        
+        result = []
+        for msg in messages:
+            sender = db.query(User).filter(User.id == msg.sender_id).first()
+            result.append({
+                "id": msg.id,
+                "sender_id": msg.sender_id,
+                "sender_name": sender.name if sender else "Unknown",
+                "content": msg.content,
+                "is_from_admin": msg.is_from_admin,
+                "is_read": msg.is_read,
+                "created_at": msg.created_at.isoformat()
+            })
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# DONATION SCHEDULE & REMINDER ENDPOINTS
+# ============================================
+
+@app.post("/api/schedules/donations")
+async def create_donation_schedule(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Create a recurring donation schedule"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user or user.role != UserRole.DONOR:
+            raise HTTPException(status_code=403, detail="Only donors can create donation schedules")
+        
+        body = await request.json()
+        
+        # Calculate next donation date based on frequency
+        next_date = calculate_next_donation_date(
+            body.get('frequency'),
+            body.get('day_of_week'),
+            body.get('day_of_month'),
+            body.get('time_of_day', '09:00'),
+            body.get('custom_interval_days')
+        )
+        
+        schedule = DonationSchedule(
+            user_id=user_id,
+            title=body.get('title'),
+            description=body.get('description'),
+            category=FoodCategory[body.get('category').upper()],
+            estimated_quantity=float(body.get('estimated_quantity', 0)),
+            unit=body.get('unit', 'items'),
+            perishability=PerishabilityLevel[body.get('perishability', 'MEDIUM').upper()] if body.get('perishability') else None,
+            frequency=RecurrenceFrequency[body.get('frequency').upper()],
+            day_of_week=body.get('day_of_week'),
+            day_of_month=body.get('day_of_month'),
+            time_of_day=body.get('time_of_day', '09:00'),
+            custom_interval_days=body.get('custom_interval_days'),
+            start_date=datetime.fromisoformat(body.get('start_date')) if body.get('start_date') else datetime.utcnow(),
+            end_date=datetime.fromisoformat(body.get('end_date')) if body.get('end_date') else None,
+            next_donation_date=next_date,
+            send_reminders=body.get('send_reminders', True),
+            reminder_hours_before=body.get('reminder_hours_before', 24)
+        )
+        
+        db.add(schedule)
+        db.commit()
+        db.refresh(schedule)
+        
+        # Create first reminder if enabled
+        if schedule.send_reminders:
+            create_reminder_for_schedule(db, schedule)
+        
+        return {
+            "id": schedule.id,
+            "title": schedule.title,
+            "frequency": schedule.frequency.value,
+            "next_donation_date": schedule.next_donation_date.isoformat(),
+            "is_active": schedule.is_active
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/schedules/donations")
+async def get_donation_schedules(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Get all donation schedules for the current user"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        schedules = db.query(DonationSchedule).filter(DonationSchedule.user_id == user_id).order_by(DonationSchedule.next_donation_date).all()
+        
+        result = []
+        for schedule in schedules:
+            result.append({
+                "id": schedule.id,
+                "title": schedule.title,
+                "description": schedule.description,
+                "category": schedule.category.value,
+                "estimated_quantity": schedule.estimated_quantity,
+                "unit": schedule.unit,
+                "perishability": schedule.perishability.value if schedule.perishability else None,
+                "frequency": schedule.frequency.value,
+                "day_of_week": schedule.day_of_week,
+                "day_of_month": schedule.day_of_month,
+                "time_of_day": schedule.time_of_day,
+                "next_donation_date": schedule.next_donation_date.isoformat() if schedule.next_donation_date else None,
+                "last_donation_date": schedule.last_donation_date.isoformat() if schedule.last_donation_date else None,
+                "is_active": schedule.is_active,
+                "send_reminders": schedule.send_reminders,
+                "reminder_hours_before": schedule.reminder_hours_before,
+                "created_at": schedule.created_at.isoformat()
+            })
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/schedules/donations/{schedule_id}")
+async def update_donation_schedule(schedule_id: int, request: Request, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Update a donation schedule"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        schedule = db.query(DonationSchedule).filter(DonationSchedule.id == schedule_id, DonationSchedule.user_id == user_id).first()
+        if not schedule:
+            raise HTTPException(status_code=404, detail="Schedule not found")
+        
+        body = await request.json()
+        
+        # Update fields
+        if 'title' in body:
+            schedule.title = body['title']
+        if 'description' in body:
+            schedule.description = body['description']
+        if 'category' in body:
+            schedule.category = FoodCategory[body['category'].upper()]
+        if 'estimated_quantity' in body:
+            schedule.estimated_quantity = float(body['estimated_quantity'])
+        if 'unit' in body:
+            schedule.unit = body['unit']
+        if 'is_active' in body:
+            schedule.is_active = body['is_active']
+        if 'send_reminders' in body:
+            schedule.send_reminders = body['send_reminders']
+        if 'reminder_hours_before' in body:
+            schedule.reminder_hours_before = body['reminder_hours_before']
+        
+        # Recalculate next donation date if frequency changed
+        if any(key in body for key in ['frequency', 'day_of_week', 'day_of_month', 'time_of_day', 'custom_interval_days']):
+            if 'frequency' in body:
+                schedule.frequency = RecurrenceFrequency[body['frequency'].upper()]
+            if 'day_of_week' in body:
+                schedule.day_of_week = body['day_of_week']
+            if 'day_of_month' in body:
+                schedule.day_of_month = body['day_of_month']
+            if 'time_of_day' in body:
+                schedule.time_of_day = body['time_of_day']
+            if 'custom_interval_days' in body:
+                schedule.custom_interval_days = body['custom_interval_days']
+            
+            schedule.next_donation_date = calculate_next_donation_date(
+                schedule.frequency.value,
+                schedule.day_of_week,
+                schedule.day_of_month,
+                schedule.time_of_day,
+                schedule.custom_interval_days
+            )
+        
+        db.commit()
+        db.refresh(schedule)
+        
+        return {"success": True, "schedule": {"id": schedule.id, "next_donation_date": schedule.next_donation_date.isoformat()}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/schedules/donations/{schedule_id}")
+async def delete_donation_schedule(schedule_id: int, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Delete a donation schedule"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        schedule = db.query(DonationSchedule).filter(DonationSchedule.id == schedule_id, DonationSchedule.user_id == user_id).first()
+        if not schedule:
+            raise HTTPException(status_code=404, detail="Schedule not found")
+        
+        db.delete(schedule)
+        db.commit()
+        
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/reminders")
+async def get_reminders(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Get all pending reminders for the current user"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        reminders = db.query(DonationReminder).filter(
+            DonationReminder.user_id == user_id,
+            DonationReminder.status.in_([ReminderStatus.PENDING, ReminderStatus.SENT])
+        ).order_by(DonationReminder.scheduled_for).all()
+        
+        result = []
+        for reminder in reminders:
+            result.append({
+                "id": reminder.id,
+                "schedule_id": reminder.schedule_id,
+                "title": reminder.title,
+                "message": reminder.message,
+                "scheduled_for": reminder.scheduled_for.isoformat(),
+                "donation_date": reminder.donation_date.isoformat(),
+                "status": reminder.status.value,
+                "sent_at": reminder.sent_at.isoformat() if reminder.sent_at else None
+            })
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/reminders/{reminder_id}/dismiss")
+async def dismiss_reminder(reminder_id: int, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Dismiss a reminder"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        reminder = db.query(DonationReminder).filter(DonationReminder.id == reminder_id, DonationReminder.user_id == user_id).first()
+        if not reminder:
+            raise HTTPException(status_code=404, detail="Reminder not found")
+        
+        reminder.status = ReminderStatus.DISMISSED
+        reminder.dismissed_at = datetime.utcnow()
+        db.commit()
+        
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/reminders/{reminder_id}/complete")
+async def complete_reminder(reminder_id: int, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Mark a reminder as completed and update the schedule"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        reminder = db.query(DonationReminder).filter(DonationReminder.id == reminder_id, DonationReminder.user_id == user_id).first()
+        if not reminder:
+            raise HTTPException(status_code=404, detail="Reminder not found")
+        
+        reminder.status = ReminderStatus.COMPLETED
+        reminder.completed_at = datetime.utcnow()
+        
+        # Update schedule's last donation date and calculate next
+        schedule = db.query(DonationSchedule).filter(DonationSchedule.id == reminder.schedule_id).first()
+        if schedule:
+            schedule.last_donation_date = reminder.donation_date
+            schedule.next_donation_date = calculate_next_donation_date(
+                schedule.frequency.value,
+                schedule.day_of_week,
+                schedule.day_of_month,
+                schedule.time_of_day,
+                schedule.custom_interval_days,
+                from_date=reminder.donation_date
+            )
+            
+            # Create next reminder
+            if schedule.send_reminders and schedule.is_active:
+                create_reminder_for_schedule(db, schedule)
+        
+        db.commit()
+        
+        return {"success": True, "next_donation_date": schedule.next_donation_date.isoformat() if schedule else None}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Helper functions for schedule calculations
+def calculate_next_donation_date(frequency, day_of_week=None, day_of_month=None, time_of_day='09:00', custom_interval_days=None, from_date=None):
+    """Calculate the next donation date based on frequency"""
+    base_date = from_date if from_date else datetime.utcnow()
+    hour, minute = map(int, time_of_day.split(':'))
+    
+    if frequency == 'daily' or frequency == RecurrenceFrequency.DAILY.value:
+        next_date = base_date + timedelta(days=1)
+    elif frequency == 'weekly' or frequency == RecurrenceFrequency.WEEKLY.value:
+        # Calculate days until next occurrence
+        current_day = base_date.weekday()
+        if day_of_week is None:
+            day_of_week = current_day
+        
+        days_ahead = day_of_week - current_day
+        # If we're on the same day or past it, schedule for next week
+        if days_ahead <= 0:
+            days_ahead += 7
+        next_date = base_date + timedelta(days=days_ahead)
+    elif frequency == 'biweekly' or frequency == RecurrenceFrequency.BIWEEKLY.value:
+        # Calculate days until next occurrence (2 weeks)
+        current_day = base_date.weekday()
+        if day_of_week is None:
+            day_of_week = current_day
+        
+        days_ahead = day_of_week - current_day
+        # If we're on the same day or past it, schedule for 2 weeks from now
+        if days_ahead <= 0:
+            days_ahead += 14
+        next_date = base_date + timedelta(days=days_ahead)
+    elif frequency == 'monthly' or frequency == RecurrenceFrequency.MONTHLY.value:
+        # Handle month boundaries and invalid days
+        target_day = day_of_month if day_of_month else 1
+        
+        # Start with next month
+        if base_date.month == 12:
+            next_month = 1
+            next_year = base_date.year + 1
+        else:
+            next_month = base_date.month + 1
+            next_year = base_date.year
+        
+        # Handle days that don't exist in target month (e.g., Feb 30)
+        max_day_in_month = 31
+        if next_month in [4, 6, 9, 11]:
+            max_day_in_month = 30
+        elif next_month == 2:
+            # Check for leap year
+            is_leap = (next_year % 4 == 0 and next_year % 100 != 0) or (next_year % 400 == 0)
+            max_day_in_month = 29 if is_leap else 28
+        
+        safe_day = min(target_day, max_day_in_month)
+        next_date = base_date.replace(year=next_year, month=next_month, day=safe_day)
+        
+        # If we somehow ended up in the past, move to next month
+        if next_date <= base_date:
+            if next_date.month == 12:
+                next_date = next_date.replace(year=next_date.year + 1, month=1, day=safe_day)
+            else:
+                next_month = next_date.month + 1
+                # Recalculate safe day for the new month
+                if next_month in [4, 6, 9, 11]:
+                    max_day_in_month = 30
+                elif next_month == 2:
+                    is_leap = (next_date.year % 4 == 0 and next_date.year % 100 != 0) or (next_date.year % 400 == 0)
+                    max_day_in_month = 29 if is_leap else 28
+                else:
+                    max_day_in_month = 31
+                safe_day = min(target_day, max_day_in_month)
+                next_date = next_date.replace(month=next_month, day=safe_day)
+    elif frequency == 'custom' or frequency == RecurrenceFrequency.CUSTOM.value:
+        interval = custom_interval_days or 7
+        next_date = base_date + timedelta(days=interval)
+    else:
+        # Default to weekly
+        next_date = base_date + timedelta(days=7)
+    
+    return next_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+def create_reminder_for_schedule(db: Session, schedule: DonationSchedule):
+    """Create a reminder for an upcoming donation"""
+    if not schedule.next_donation_date or not schedule.send_reminders:
+        return
+    
+    scheduled_for = schedule.next_donation_date - timedelta(hours=schedule.reminder_hours_before)
+    
+    # Don't create reminder if it's in the past
+    if scheduled_for < datetime.utcnow():
+        return
+    
+    reminder = DonationReminder(
+        schedule_id=schedule.id,
+        user_id=schedule.user_id,
+        title=f"Donation Reminder: {schedule.title}",
+        message=f"You have a scheduled donation of {schedule.estimated_quantity} {schedule.unit} of {schedule.category.value} coming up.",
+        scheduled_for=scheduled_for,
+        donation_date=schedule.next_donation_date
     )
+    
+    db.add(reminder)
+    db.commit()
+
+
+# -----------------------------
+# Feedback System Endpoints
+# -----------------------------
+
+@app.post("/api/feedback/submit")
+async def submit_feedback(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Submit user feedback, error report, or feature request (auth optional)"""
+    try:
+        data = await request.json()
+        
+        # Try to get user if authenticated
+        user_id = None
+        try:
+            auth_header = request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1]
+                payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+                user_id = payload.get("sub")
+        except:
+            pass  # Anonymous feedback is allowed
+        
+        # Validate feedback type
+        feedback_type = data.get("type", "general")
+        if feedback_type not in ["bug", "feature_request", "general", "error_report", "improvement"]:
+            feedback_type = "general"
+        
+        # Create feedback record
+        feedback = Feedback(
+            user_id=user_id,
+            type=FeedbackType[feedback_type.upper()],
+            subject=data.get("subject", "User Feedback"),
+            message=data.get("message", ""),
+            url=data.get("url"),
+            user_agent=data.get("userAgent"),
+            screenshot=data.get("screenshot"),
+            error_stack=data.get("errorStack"),
+            email=data.get("email"),
+            status=FeedbackStatus.NEW
+        )
+        
+        db.add(feedback)
+        db.commit()
+        db.refresh(feedback)
+        
+        return {
+            "success": True,
+            "message": "Thank you for your feedback!",
+            "feedback_id": feedback.id
+        }
+        
+    except Exception as e:
+        print(f"Error submitting feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/feedback/list")
+async def list_feedback(
+    status: Optional[str] = None,
+    type: Optional[str] = None,
+    limit: int = 50,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """List all feedback (admin only)"""
+    try:
+        # Verify admin
+        token = credentials.credentials
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = payload.get("sub")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user or user.role != UserRole.ADMIN:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
+        # Build query
+        query = db.query(Feedback)
+        
+        if status:
+            query = query.filter(Feedback.status == FeedbackStatus[status.upper()])
+        
+        if type:
+            query = query.filter(Feedback.type == FeedbackType[type.upper()])
+        
+        feedback_list = query.order_by(Feedback.created_at.desc()).limit(limit).all()
+        
+        return {
+            "success": True,
+            "feedback": [
+                {
+                    "id": f.id,
+                    "user_id": f.user_id,
+                    "type": f.type.value,
+                    "subject": f.subject,
+                    "message": f.message,
+                    "url": f.url,
+                    "status": f.status.value,
+                    "email": f.email,
+                    "created_at": f.created_at.isoformat(),
+                    "has_screenshot": bool(f.screenshot),
+                    "screenshot": f.screenshot if f.screenshot else None,
+                    "has_error_stack": bool(f.error_stack),
+                    "error_stack": f.error_stack if f.error_stack else None
+                }
+                for f in feedback_list
+            ]
+        }
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error listing feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/feedback/{feedback_id}/status")
+async def update_feedback_status(
+    feedback_id: int,
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Update feedback status (admin only)"""
+    try:
+        # Verify admin
+        token = credentials.credentials
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = payload.get("sub")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user or user.role != UserRole.ADMIN:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
+        data = await request.json()
+        new_status = data.get("status")
+        admin_notes = data.get("admin_notes")
+        
+        feedback = db.query(Feedback).filter(Feedback.id == feedback_id).first()
+        if not feedback:
+            raise HTTPException(status_code=404, detail="Feedback not found")
+        
+        if new_status:
+            feedback.status = FeedbackStatus[new_status.upper()]
+        
+        if admin_notes:
+            feedback.admin_notes = admin_notes
+        
+        feedback.updated_at = datetime.utcnow()
+        db.commit()
+        
+        return {"success": True, "message": "Feedback updated"}
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error updating feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# -----------------------------
+# Donor Impact Statistics
+# -----------------------------
+
+@app.get("/api/donor/impact")
+async def get_donor_impact(
+    timeframe: str = "all",
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get donor's personal impact statistics"""
+    try:
+        token = credentials.credentials
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = payload.get("sub")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Calculate date range based on timeframe
+        from datetime import datetime, timedelta
+        now = datetime.utcnow()
+        start_date = None
+        
+        if timeframe == "week":
+            start_date = now - timedelta(days=7)
+        elif timeframe == "month":
+            start_date = now - timedelta(days=30)
+        elif timeframe == "year":
+            start_date = now - timedelta(days=365)
+        # else: all time (no filter)
+        
+        # Query donations
+        query = db.query(FoodResource).filter(FoodResource.donor_id == user_id)
+        if start_date:
+            query = query.filter(FoodResource.created_at >= start_date)
+        
+        all_donations = query.all()
+        claimed_donations = query.filter(FoodResource.status == "claimed").all()
+        active_donations = query.filter(FoodResource.status == "available").all()
+        
+        # Calculate statistics
+        total_donations = len(all_donations)
+        claimed_count = len(claimed_donations)
+        active_count = len(active_donations)
+        
+        # Calculate total pounds
+        total_pounds = sum([d.qty if d.unit == 'lbs' else d.est_weight_kg * 2.20462 if d.est_weight_kg else d.qty * 0.5 
+                           for d in claimed_donations])
+        
+        # Estimate meals (assuming 1 lb = 3.5 meals on average)
+        meals_provided = int(total_pounds * 3.5)
+        
+        # Estimate people helped (assuming 1 person = 13 meals on average)
+        people_helped = max(1, int(meals_provided / 13)) if meals_provided > 0 else 0
+        
+        # Environmental impact calculations
+        co2_saved = int(total_pounds * 1.7)  # ~1.7 lbs CO2 per lb of food saved
+        water_saved = int(total_pounds * 23.8)  # ~23.8 gallons per lb of food
+        money_saved = int(total_pounds * 8.10)  # ~$8.10 per lb retail value
+        
+        # Calculate impact score (0-100)
+        impact_score = min(100, int((
+            total_donations * 2 +
+            meals_provided * 0.05 +
+            people_helped * 0.5 +
+            (100 if total_donations >= 50 else 0)
+        ) * 0.8))
+        
+        # Calculate streak (simplified - would need actual tracking)
+        streak_days = 0
+        if total_donations > 0:
+            recent_donations = db.query(FoodResource).filter(
+                FoodResource.donor_id == user_id,
+                FoodResource.created_at >= now - timedelta(days=30)
+            ).order_by(FoodResource.created_at.desc()).all()
+            
+            if recent_donations:
+                # Simple streak calculation
+                last_donation_date = recent_donations[0].created_at
+                days_since_last = (now - last_donation_date).days
+                if days_since_last <= 7:
+                    streak_days = min(30, len([d for d in recent_donations if (now - d.created_at).days <= 30]))
+        
+        # Get recent donations for display
+        recent_donations = db.query(FoodResource).filter(
+            FoodResource.donor_id == user_id,
+            FoodResource.status == "claimed"
+        ).order_by(FoodResource.claimed_at.desc()).limit(5).all()
+        
+        recent_donations_list = []
+        for donation in recent_donations:
+            recipient = db.query(User).filter(User.id == donation.recipient_id).first() if donation.recipient_id else None
+            recent_donations_list.append({
+                "id": donation.id,
+                "title": donation.title,
+                "qty": donation.qty,
+                "unit": donation.unit,
+                "claimed_by": recipient.name if recipient else "Anonymous",
+                "claimed_at": donation.claimed_at.isoformat() if donation.claimed_at else donation.created_at.isoformat(),
+                "meals_provided": int((donation.qty if donation.unit == 'lbs' else donation.qty * 0.5) * 3.5)
+            })
+        
+        return {
+            "success": True,
+            "stats": {
+                "total_donations": total_donations,
+                "total_pounds": int(total_pounds),
+                "meals_provided": meals_provided,
+                "people_helped": people_helped,
+                "co2_saved": co2_saved,
+                "water_saved": water_saved,
+                "money_saved_recipients": money_saved,
+                "active_listings": active_count,
+                "claimed_listings": claimed_count,
+                "impact_score": impact_score,
+                "streak_days": streak_days,
+                "badges_earned": min(5, total_donations // 10)
+            },
+            "recent_donations": recent_donations_list
+        }
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error fetching donor impact: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================================================
+# FAVORITES / BOOKMARKS ENDPOINTS
+# =====================================================
+
+@app.get("/api/favorites")
+async def get_favorites(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Get all favorite locations for the authenticated user"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        favorites = db.query(FavoriteLocation).filter(
+            FavoriteLocation.user_id == user_id,
+            FavoriteLocation.is_active == True
+        ).order_by(FavoriteLocation.visit_count.desc(), FavoriteLocation.created_at.desc()).all()
+        
+        result = []
+        for fav in favorites:
+            fav_data = {
+                "id": fav.id,
+                "name": fav.name,
+                "address": fav.address,
+                "coords_lat": fav.coords_lat,
+                "coords_lng": fav.coords_lng,
+                "location_type": fav.location_type,
+                "notes": fav.notes,
+                "tags": fav.tags,
+                "visit_count": fav.visit_count,
+                "last_visited": fav.last_visited.isoformat() if fav.last_visited else None,
+                "notify_new_listings": fav.notify_new_listings,
+                "notification_radius_km": fav.notification_radius_km,
+                "created_at": fav.created_at.isoformat(),
+                "updated_at": fav.updated_at.isoformat()
+            }
+            
+            # Add donor details if it's a donor favorite
+            if fav.location_type == 'donor' and fav.donor_id:
+                donor = db.query(User).filter(User.id == fav.donor_id).first()
+                if donor:
+                    fav_data["donor"] = {
+                        "id": donor.id,
+                        "name": donor.name,
+                        "trust_score": donor.trust_score
+                    }
+            
+            # Add center details if it's a distribution center favorite
+            elif fav.location_type == 'distribution_center' and fav.center_id:
+                center = db.query(DistributionCenter).filter(DistributionCenter.id == fav.center_id).first()
+                if center:
+                    fav_data["center"] = {
+                        "id": center.id,
+                        "name": center.name,
+                        "hours": getattr(center, 'hours', None)
+                    }
+            
+            result.append(fav_data)
+        
+        return result
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error fetching favorites: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/favorites")
+async def add_favorite(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Add a new favorite location for the authenticated user"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        body = await request.json()
+
+        # Donors cannot favorite their own listings.
+        if body.get('location_type') == 'donor':
+            donor_id = body.get('donor_id')
+            if donor_id is None and body.get('location_id') is not None:
+                try:
+                    listing_id = int(body.get('location_id'))
+                    item = db.query(FoodResource).filter(FoodResource.id == listing_id).first()
+                    donor_id = item.donor_id if item else None
+                except Exception:
+                    donor_id = None
+
+            if donor_id is not None and str(donor_id) == str(user_id):
+                raise HTTPException(status_code=400, detail="You cannot favorite your own listing")
+        
+        # Validate required fields
+        if not body.get('name') or not body.get('address'):
+            raise HTTPException(status_code=400, detail="Name and address are required")
+        
+        # Check for duplicates based on location type and reference ID
+        existing = None
+        if body.get('donor_id'):
+            existing = db.query(FavoriteLocation).filter(
+                FavoriteLocation.user_id == user_id,
+                FavoriteLocation.donor_id == body.get('donor_id'),
+                FavoriteLocation.is_active == True
+            ).first()
+        elif body.get('center_id'):
+            existing = db.query(FavoriteLocation).filter(
+                FavoriteLocation.user_id == user_id,
+                FavoriteLocation.center_id == body.get('center_id'),
+                FavoriteLocation.is_active == True
+            ).first()
+        else:
+            # For general locations, check by coordinates proximity (within 50 meters)
+            favorites = db.query(FavoriteLocation).filter(
+                FavoriteLocation.user_id == user_id,
+                FavoriteLocation.location_type == 'general',
+                FavoriteLocation.is_active == True
+            ).all()
+            
+            for fav in favorites:
+                # Simple distance check (approximate)
+                lat_diff = abs(fav.coords_lat - body.get('coords_lat', 0))
+                lng_diff = abs(fav.coords_lng - body.get('coords_lng', 0))
+                if lat_diff < 0.0005 and lng_diff < 0.0005:  # ~50 meters
+                    existing = fav
+                    break
+        
+        if existing:
+            return {"success": False, "message": "This location is already in your favorites", "favorite_id": existing.id}
+        
+        # Create new favorite
+        favorite = FavoriteLocation(
+            user_id=user_id,
+            name=body.get('name'),
+            address=body.get('address'),
+            coords_lat=body.get('coords_lat'),
+            coords_lng=body.get('coords_lng'),
+            location_type=body.get('location_type', 'general'),
+            donor_id=body.get('donor_id'),
+            center_id=body.get('center_id'),
+            notes=body.get('notes', ''),
+            tags=body.get('tags'),
+            notify_new_listings=body.get('notify_new_listings', False),
+            notification_radius_km=body.get('notification_radius_km', 5.0),
+            created_at=datetime.utcnow()
+        )
+        
+        db.add(favorite)
+        db.commit()
+        db.refresh(favorite)
+        
+        return {
+            "success": True,
+            "message": "Location added to favorites",
+            "favorite_id": favorite.id,
+            "favorite": {
+                "id": favorite.id,
+                "name": favorite.name,
+                "address": favorite.address,
+                "location_type": favorite.location_type
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error adding favorite: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/favorites/{favorite_id}")
+async def update_favorite(favorite_id: int, request: Request, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Update a favorite location (notes, tags, notifications)"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        body = await request.json()
+        
+        favorite = db.query(FavoriteLocation).filter(
+            FavoriteLocation.id == favorite_id,
+            FavoriteLocation.user_id == user_id
+        ).first()
+        
+        if not favorite:
+            raise HTTPException(status_code=404, detail="Favorite not found")
+        
+        # Update allowed fields
+        if 'name' in body:
+            favorite.name = body['name']
+        if 'notes' in body:
+            favorite.notes = body['notes']
+        if 'tags' in body:
+            favorite.tags = body['tags']
+        if 'notify_new_listings' in body:
+            favorite.notify_new_listings = body['notify_new_listings']
+        if 'notification_radius_km' in body:
+            favorite.notification_radius_km = body['notification_radius_km']
+        
+        favorite.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(favorite)
+        
+        return {
+            "success": True,
+            "message": "Favorite updated successfully",
+            "favorite": {
+                "id": favorite.id,
+                "name": favorite.name,
+                "notes": favorite.notes,
+                "tags": favorite.tags,
+                "notify_new_listings": favorite.notify_new_listings
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error updating favorite: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/favorites/{favorite_id}/visit")
+async def record_visit(favorite_id: int, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Record a visit to a favorite location"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        favorite = db.query(FavoriteLocation).filter(
+            FavoriteLocation.id == favorite_id,
+            FavoriteLocation.user_id == user_id
+        ).first()
+        
+        if not favorite:
+            raise HTTPException(status_code=404, detail="Favorite not found")
+        
+        favorite.visit_count += 1
+        favorite.last_visited = datetime.utcnow()
+        favorite.updated_at = datetime.utcnow()
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "visit_count": favorite.visit_count,
+            "last_visited": favorite.last_visited.isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error recording visit: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/favorites/{favorite_id}")
+async def remove_favorite(favorite_id: int, credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Remove a favorite location (soft delete)"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        favorite = db.query(FavoriteLocation).filter(
+            FavoriteLocation.id == favorite_id,
+            FavoriteLocation.user_id == user_id
+        ).first()
+        
+        if not favorite:
+            raise HTTPException(status_code=404, detail="Favorite not found")
+        
+        # Soft delete
+        favorite.is_active = False
+        favorite.updated_at = datetime.utcnow()
+        db.commit()
+        
+        return {"success": True, "message": "Favorite removed"}
+        
+    except HTTPException:
+        raise
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error removing favorite: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================================================
+# ADMIN: TRUST BADGE MANAGEMENT
+# =====================================================
+
+@app.put("/api/admin/users/{user_id}/trust-badges")
+async def update_user_trust_badges(
+    user_id: int,
+    request: Request,
+    admin_user: User = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    """Admin endpoint to assign/update trust badges for users"""
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        body = await request.json()
+        
+        # Update trust badge fields
+        if 'verified_by_aglf' in body:
+            user.verified_by_aglf = body['verified_by_aglf']
+        if 'school_partner' in body:
+            user.school_partner = body['school_partner']
+        if 'partner_badge' in body:
+            user.partner_badge = body['partner_badge']
+        if 'partner_since' in body and body['partner_since']:
+            user.partner_since = datetime.fromisoformat(body['partner_since'].replace('Z', '+00:00'))
+        
+        # Set partner_since if becoming a partner for the first time
+        if (user.verified_by_aglf or user.school_partner) and not user.partner_since:
+            user.partner_since = datetime.utcnow()
+        
+        db.commit()
+        db.refresh(user)
+        
+        return serialize_user(user)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating trust badges: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/admin/centers/{center_id}/trust-badges")
+async def update_center_trust_badges(
+    center_id: int,
+    request: Request,
+    admin_user: User = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    """Admin endpoint to assign/update trust badges for distribution centers"""
+    try:
+        center = db.query(DistributionCenter).filter(DistributionCenter.id == center_id).first()
+        if not center:
+            raise HTTPException(status_code=404, detail="Center not found")
+        
+        body = await request.json()
+        
+        # Update trust badge fields
+        if 'verified_by_aglf' in body:
+            center.verified_by_aglf = body['verified_by_aglf']
+        if 'school_partner' in body:
+            center.school_partner = body['school_partner']
+        if 'partner_badge' in body:
+            center.partner_badge = body['partner_badge']
+        if 'partner_since' in body and body['partner_since']:
+            center.partner_since = datetime.fromisoformat(body['partner_since'].replace('Z', '+00:00'))
+        
+        # Set partner_since if becoming a partner for the first time
+        if (center.verified_by_aglf or center.school_partner) and not center.partner_since:
+            center.partner_since = datetime.utcnow()
+        
+        # Update last_updated timestamp
+        center.last_updated = datetime.utcnow()
+        
+        db.commit()
+        db.refresh(center)
+        
+        return {
+            "id": center.id,
+            "name": center.name,
+            "verified_by_aglf": center.verified_by_aglf,
+            "school_partner": center.school_partner,
+            "partner_badge": center.partner_badge,
+            "partner_since": center.partner_since.isoformat() if center.partner_since else None,
+            "last_updated": center.last_updated.isoformat() if center.last_updated else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating center trust badges: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/users/{user_id}/activity")
+async def update_user_activity(
+    user_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Update user's last_active timestamp (called automatically by frontend)"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        requesting_user_id = int(payload.get("sub"))
+        
+        # Users can only update their own activity
+        if requesting_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Cannot update other users' activity")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user.last_active = datetime.utcnow()
+        db.commit()
+        
+        return {"success": True, "last_active": user.last_active.isoformat()}
+        
+    except HTTPException:
+        raise
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error updating user activity: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# SMART NOTIFICATIONS
+# ============================================================================
+
+@app.get("/api/notification-preferences")
+async def get_notification_preferences(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get user's notification preferences"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Parse JSON string if needed
+        if user.notification_preferences:
+            if isinstance(user.notification_preferences, str):
+                prefs = json.loads(user.notification_preferences)
+            else:
+                prefs = user.notification_preferences
+        else:
+            prefs = {
+                "enabled": False,
+                "maxDistance": 2,
+                "categories": [],
+                "dietaryTags": [],
+                "favoriteLocations": [],
+                "quietHours": {"start": "22:00", "end": "08:00"},
+                "maxPerDay": 3,
+                "urgencyOnly": False
+            }
+        
+        return prefs
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error getting notification preferences: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/notification-preferences")
+async def update_notification_preferences(
+    preferences: dict,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Update user's notification preferences"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Store as JSON string
+        user.notification_preferences = json.dumps(preferences)
+        db.commit()
+        
+        return {"success": True, "preferences": preferences}
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        db.rollback()
+        print(f"Error updating notification preferences: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/notification-behavior")
+async def get_notification_behavior(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get learned behavior data for AI notification filtering"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Parse JSON string if needed
+        if user.notification_behavior:
+            if isinstance(user.notification_behavior, str):
+                behavior = json.loads(user.notification_behavior)
+            else:
+                behavior = user.notification_behavior
+        else:
+            behavior = {
+                "clickedCategories": {},
+                "ignoredCategories": {},
+                "clickedTimes": [],
+                "preferredDistance": 2,
+                "responseRate": 0
+            }
+        
+        return behavior
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error getting notification behavior: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/notification-sent")
+async def track_notification_sent(
+    notification: dict,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Track that a notification was sent (for learning)"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        # Store notification history
+        # In production, you'd want a dedicated notifications table
+        # For now, we'll just return success
+        
+        return {"success": True}
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error tracking notification: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/notification-clicked")
+async def track_notification_clicked(
+    click_data: dict,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Track that a notification was clicked (for AI learning)"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Parse behavior data
+        if user.notification_behavior:
+            if isinstance(user.notification_behavior, str):
+                behavior = json.loads(user.notification_behavior)
+            else:
+                behavior = user.notification_behavior
+        else:
+            behavior = {
+                "clickedCategories": {},
+                "ignoredCategories": {},
+                "clickedTimes": [],
+                "preferredDistance": 2,
+                "responseRate": 0
+            }
+        
+        category = click_data.get("category")
+        if category:
+            behavior["clickedCategories"][category] = behavior["clickedCategories"].get(category, 0) + 1
+        
+        # Add click time for pattern analysis
+        behavior["clickedTimes"].append(click_data.get("clicked_at"))
+        
+        # Calculate response rate
+        total_sent = sum(behavior["clickedCategories"].values()) + sum(behavior["ignoredCategories"].values())
+        total_clicked = sum(behavior["clickedCategories"].values())
+        if total_sent > 0:
+            behavior["responseRate"] = total_clicked / total_sent
+        
+        # Store as JSON string
+        user.notification_behavior = json.dumps(behavior)
+        db.commit()
+        
+        return {"success": True, "behavior": behavior}
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        db.rollback()
+        print(f"Error tracking notification click: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/listings/recent")
+async def get_recent_listings(
+    minutes: int = 30,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get listings created in the last N minutes (for notification checking)"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        # Calculate time threshold
+        time_threshold = datetime.utcnow() - timedelta(minutes=minutes)
+        
+        # Get recent listings
+        listings = db.query(FoodResource).filter(
+            FoodResource.created_at >= time_threshold,
+            FoodResource.available == True
+        ).all()
+        
+        # Serialize listings
+        result = []
+        for listing in listings:
+            item = serialize_listing(listing)
+            
+            # Calculate distance (would need user location)
+            # For now, use a placeholder
+            item["distance"] = 1.5
+            
+            # Calculate hours until expiry
+            if listing.expiration_date:
+                hours_left = (listing.expiration_date - datetime.utcnow()).total_seconds() / 3600
+                item["hours_until_expiry"] = max(0, hours_left)
+            
+            result.append(item)
+        
+        return result
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error getting recent listings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sms-consent")
+async def get_sms_consent(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get user's SMS consent status and preferences"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Parse notification types
+        notification_types = []
+        if user.sms_notification_types:
+            if isinstance(user.sms_notification_types, str):
+                notification_types = json.loads(user.sms_notification_types)
+            else:
+                notification_types = user.sms_notification_types
+        
+        return {
+            "consent_given": user.sms_consent_given or False,
+            "consent_date": user.sms_consent_date.isoformat() if user.sms_consent_date else None,
+            "notification_types": notification_types,
+            "opt_out_date": user.sms_opt_out_date.isoformat() if user.sms_opt_out_date else None,
+            "phone": user.phone,
+            "phone_verified": user.phone_verified or False
+        }
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error getting SMS consent: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/sms-consent")
+async def update_sms_consent(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Update user's SMS consent and notification preferences"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+        
+        consent_data = await request.json()
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get client IP for compliance logging
+        client_ip = request.client.host
+        
+        # Update consent status
+        consent_given = consent_data.get("consent_given", False)
+        notification_types = consent_data.get("notification_types", [])
+        
+        if consent_given:
+            # User is opting IN
+            user.sms_consent_given = True
+            user.sms_consent_date = datetime.utcnow()
+            user.sms_consent_ip = client_ip
+            user.sms_opt_out_date = None  # Clear any previous opt-out
+            user.sms_notification_types = json.dumps(notification_types)
+        else:
+            # User is opting OUT
+            user.sms_consent_given = False
+            user.sms_opt_out_date = datetime.utcnow()
+            user.sms_notification_types = json.dumps([])  # Clear notification types
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "consent_given": user.sms_consent_given,
+            "consent_date": user.sms_consent_date.isoformat() if user.sms_consent_date else None,
+            "notification_types": notification_types if consent_given else [],
+            "message": "SMS preferences updated successfully"
+        }
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        db.rollback()
+        print(f"Error updating SMS consent: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Stop AI background jobs on shutdown
+@app.on_event("shutdown")
+async def shutdown_event():
+    try:
+        await ai_stop_jobs()
+    except Exception as _ai_exc:
+        print(f"AI shutdown error: {_ai_exc}")
+
+# Mount static files at the end to allow API routes to take precedence
+# /uploads serves user-uploaded photos (chat attachments, listing images)
+# from a writable directory outside the source tree.
+_UPLOADS_DIR = os.path.join(PROJECT_ROOT, "uploads")
+os.makedirs(_UPLOADS_DIR, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=_UPLOADS_DIR), name="uploads")
+app.mount("/", StaticFiles(directory=PROJECT_ROOT, html=True), name="root")
+
+
 

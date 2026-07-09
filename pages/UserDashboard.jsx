@@ -39,6 +39,10 @@ function UserDashboard() {
         () => ({ ...(authUser || {}), community_role: freshRole ?? authUser?.community_role ?? null }),
         [authUser, freshRole]
     );
+    const role = String(user?.community_role || '').toLowerCase();
+    const isDonor = role === 'donor';
+    const isRecipient = role === 'recipient';
+    const isOrganizer = role === 'organizer';
 
     React.useEffect(() => {
         let cancelled = false;
@@ -68,11 +72,13 @@ function UserDashboard() {
 
     React.useEffect(() => {
         let isMounted = true;
-        if (authUser?.id) {
+        if (authUser?.id && isRecipient) {
             fetchReceipts(() => isMounted);
+        } else {
+            setReceiptsLoading(false);
         }
         return () => { isMounted = false; };
-    }, [authUser?.id]);
+    }, [authUser?.id, isRecipient]);
 
     const fetchReceipts = async (isStillMounted = () => true) => {
         try {
@@ -145,11 +151,6 @@ function UserDashboard() {
 
     // Quick actions tailored to community_role so the dashboard actually
     // changes when the user switches between donor / recipient / organizer.
-    const role = String(user?.community_role || '').toLowerCase();
-    const isDonor = role === 'donor';
-    const isRecipient = role === 'recipient';
-    const isOrganizer = role === 'organizer';
-
     const quickActions = isDonor
         ? [
             { title: 'Share Food', description: 'Post surplus food for the community', icon: 'fa-plus', path: '/share', color: 'bg-[#2CABE3]' },
@@ -293,8 +294,8 @@ function UserDashboard() {
             {/* Natural-language Query Panel */}
             <AIQueryPanel className="mb-8" />
 
-            {/* Food Receipts Section — recipient/organizer/default; hidden for donors */}
-            {!isDonor && (
+            {/* Food Receipts Section — recipients only */}
+            {isRecipient && (
             <div className="mb-8" role="region" aria-label="Food Claim Receipts">
                 <h2 className="text-2xl font-bold text-gray-900 mb-6">Your Food Receipts</h2>
                 

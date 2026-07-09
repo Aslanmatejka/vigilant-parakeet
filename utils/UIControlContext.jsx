@@ -27,11 +27,77 @@ const MODAL_TARGET_ROUTES = {
   sms_consent: '/settings',
 }
 
+/** Maps navigate_ui target names (backend/ai/tools.py) to React Router paths. */
+const NAV_TARGET_ROUTES = {
+  list: '/find',
+  create: '/share',
+  'bulk-create': '/share',
+  dashboard: '/dashboard',
+  dispatch: '/admin/distribution',
+  admin: '/admin',
+  driver: '/admin',
+  schedule: '/donations',
+  partners: '/featured',
+  'food-rescue': '/find',
+  'meal-planning': '/recipes',
+  'ai-matching': '/find',
+  routes: '/find',
+  emergency: '/contact',
+  nutrition: '/recipes',
+  consumption: '/dashboard',
+  filters: '/find',
+  favorites: '/find',
+}
+
+/**
+ * The AI navigate_ui tool returns action ∈ {open, close, toggle} + target.
+ * Legacy ui_action uses {navigate, open_modal, open_map, …}. Normalize here.
+ */
+function normalizeNavigateDirective(directive) {
+  if (!directive?.action) return directive
+  const act = String(directive.action).toLowerCase()
+  if (!['open', 'close', 'toggle'].includes(act)) return directive
+
+  const target = directive.target
+    ? String(directive.target).replace(/_/g, '-')
+    : null
+
+  if (act === 'open') {
+    if (!target) return directive
+    if (target === 'map') return { ...directive, action: 'open_map' }
+    if (target === 'chat') return { ...directive, action: 'open_assistant' }
+    if (target === 'voice') return { ...directive, action: 'expand_assistant' }
+    if (MODAL_TARGET_ROUTES[target]) {
+      return { ...directive, action: 'open_modal', target }
+    }
+    const route = NAV_TARGET_ROUTES[target]
+    if (route) return { ...directive, action: 'navigate', path: route, target }
+  }
+
+  if (act === 'close') {
+    if (target === 'chat') return { ...directive, action: 'close_assistant' }
+    if (target && MODAL_TARGET_ROUTES[target]) {
+      return { ...directive, action: 'close_modal', target }
+    }
+    return { ...directive, action: 'navigate', path: '/find' }
+  }
+
+  if (act === 'toggle' && target) {
+    if (MODAL_TARGET_ROUTES[target]) {
+      return { ...directive, action: 'toggle_modal', target }
+    }
+    const route = NAV_TARGET_ROUTES[target]
+    if (route) return { ...directive, action: 'navigate', path: route, target }
+  }
+
+  return directive
+}
+
 function buildUIDirective(entry) {
   if (!entry) return null
   const base = entry.result && typeof entry.result === 'object' ? entry.result : entry
-  const ok = entry.ok !== false && base.ok !== false && !base.error
-  return {
+  const ok = entry.ok !== false && base.ok !== false && base.success !== false && !base.error
+  const directive = {
     ok,
     action: base.action || entry.action,
     path: base.path || entry.path,
@@ -40,6 +106,7 @@ function buildUIDirective(entry) {
     target_id: base.target_id || entry.target_id,
     lang: base.lang || entry.lang,
   }
+  return normalizeNavigateDirective(directive)
 }
 
 export function UIControlProvider({ children, navigate }) {
@@ -64,16 +131,24 @@ export function UIControlProvider({ children, navigate }) {
     return false
   }, [])
 
+  /** After navigating away, collapse the chat so the destination page is visible. */
+  const minimizeAssistantForNavigation = useCallback(() => {
+    callHandler('setAssistantExpanded', false)
+    callHandler('setAssistantOpen', false)
+  }, [callHandler])
+
   /** Run a single ui_action directive returned by the backend tool. */
   const executeUIAction = useCallback((directive) => {
-    if (!directive || directive.ok === false || !directive.action) return false
-    const { action } = directive
+    const normalized = normalizeNavigateDirective(directive)
+    if (!normalized || normalized.ok === false || !normalized.action) return false
+    const { action } = normalized
 
     switch (action) {
       case 'navigate': {
-        const path = directive.path || directive.target
+        const path = normalized.path || normalized.target
         if (path && typeof navigate === 'function') {
           navigate(path.startsWith('/') ? path : `/${path}`)
+          minimizeAssistantForNavigation()
           return true
         }
         return false
@@ -81,10 +156,11 @@ export function UIControlProvider({ children, navigate }) {
 
       case 'open_modal':
       case 'toggle_modal': {
-        const target = String(directive.target || '').replace(/_/g, '-')
-        const route = MODAL_TARGET_ROUTES[target] || MODAL_TARGET_ROUTES[directive.target]
+        const target = String(normalized.target || '').replace(/_/g, '-')
+        const route = MODAL_TARGET_ROUTES[target] || MODAL_TARGET_ROUTES[normalized.target]
         if (route && typeof navigate === 'function') {
           navigate(route)
+          minimizeAssistantForNavigation()
           return true
         }
         return false
@@ -106,14 +182,15 @@ export function UIControlProvider({ children, navigate }) {
       case 'open_map': {
         if (typeof navigate === 'function') {
           navigate('/find')
+          minimizeAssistantForNavigation()
           return true
         }
         return false
       }
 
       case 'open_listing': {
-        if (directive.listing_id && typeof navigate === 'function') {
-          navigate(`/find#listing=${encodeURIComponent(directive.listing_id)}`)
+        if (normalized.listing_id && typeof navigate === 'function') {
+          navigate(`/find#listing=${encodeURIComponent(normalized.listing_id)}`)
           return true
         }
         return false
@@ -135,9 +212,9 @@ export function UIControlProvider({ children, navigate }) {
         } catch { return false }
 
       case 'focus': {
-        if (!directive.target_id) return false
+        if (!normalized.target_id) return false
         try {
-          const el = document.querySelector(`[data-ai-id="${directive.target_id}"]`)
+          const el = document.querySelector(`[data-ai-id="${normalized.target_id}"]`)
           if (el) {
             el.scrollIntoView({ behavior: 'smooth', block: 'center' })
             if (typeof el.focus === 'function') el.focus()
@@ -148,13 +225,13 @@ export function UIControlProvider({ children, navigate }) {
       }
 
       case 'set_language':
-        return callHandler('setLanguage', directive.lang)
+        return callHandler('setLanguage', normalized.lang)
 
       default:
         console.warn('Unknown ui_action:', action)
         return false
     }
-  }, [navigate, callHandler])
+  }, [navigate, callHandler, minimizeAssistantForNavigation])
 
   /** Run every ui_action / navigate_ui found in a tool_results array. */
   const executeUIActionsFromToolResults = useCallback((toolResults) => {
@@ -164,7 +241,8 @@ export function UIControlProvider({ children, navigate }) {
       if (!entry?.tool) continue
       if (entry.tool !== 'ui_action' && entry.tool !== 'navigate_ui') continue
       const directive = buildUIDirective(entry)
-      if (directive && executeUIAction(directive)) count += 1
+      const executed = directive && executeUIAction(directive)
+      if (executed) count += 1
     }
     return count
   }, [executeUIAction])

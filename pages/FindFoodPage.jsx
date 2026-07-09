@@ -5,7 +5,6 @@ import Input from "../components/common/Input";
 import FoodCard from "../components/food/FoodCard";
 import FoodMap from "../components/common/FoodMap";
 import { useFoodListings } from "../utils/hooks/useSupabase";
-import { useEffectiveLocation } from "../utils/hooks/useLocation";
 import { useAuthContext } from "../utils/AuthContext";
 import UrgencyService from "../utils/urgencyService";
 import supabase from "../utils/supabaseClient";
@@ -31,17 +30,9 @@ const CATEGORY_LABELS = {
     other: 'Other',
 };
 
-const RADIUS_OPTIONS = [
-    { value: '5', label: '5 km' },
-    { value: '10', label: '10 km' },
-    { value: '25', label: '25 km' },
-    { value: '50', label: '50 km' },
-    { value: '100', label: '100 km' },
-];
-
 const SORT_OPTIONS = [
     { value: 'urgency', label: 'Expiring soon' },
-    { value: 'distance', label: 'Nearest', requiresGps: true },
+    { value: 'distance', label: 'Nearest' },
     { value: 'newest', label: 'Newest' },
 ];
 
@@ -89,13 +80,16 @@ function FindFoodPage({ initialCategory }) {
     const { isAuthenticated, user } = useAuthContext();
     
     const { listings: foods, loading: foodsLoading, error: foodsError, fetchListings } = useFoodListings({ status: ['approved', 'active'] });
-    const { 
-        location: currentLocation, 
-        loading: geoLoading, 
-        error: geoError, 
-        enableLocation: enableGeolocation,
-        source: locationSource,
-    } = useEffectiveLocation();
+
+    const profileLocation = useMemo(() => {
+        const lat = user?.latitude;
+        const lng = user?.longitude;
+        if (lat == null || lng == null) return null;
+        const nLat = Number(lat);
+        const nLng = Number(lng);
+        if (!Number.isFinite(nLat) || !Number.isFinite(nLng)) return null;
+        return { latitude: nLat, longitude: nLng };
+    }, [user?.latitude, user?.longitude]);
     
     const [searchTerm, setSearchTerm] = useState('');
     const debouncedSearch = useDebouncedValue(searchTerm, 250);
@@ -104,7 +98,6 @@ function FindFoodPage({ initialCategory }) {
     const [communityNames, setCommunityNames] = useState({});
     const [filters, setFilters] = useState({
         category: initialCategory || '',
-        radius: '25',
         sortBy: 'urgency',
         community: ''
     });
@@ -199,7 +192,6 @@ function FindFoodPage({ initialCategory }) {
         setSearchTerm('');
         setFilters({
             category: '',
-            radius: '25',
             sortBy: 'urgency',
             community: ''
         });
@@ -261,60 +253,28 @@ function FindFoodPage({ initialCategory }) {
         // Requests have been removed from the platform.
         result = result.filter(food => food.listing_type === 'donation');
 
-        // Location-based filtering — ONLY apply when the user explicitly
-        // granted GPS permission. Profile-coordinate fallback must NOT silently
-        // filter listings, because users viewing from outside the Bay Area (or
-        // whose profile address hasn't been geocoded) would see an almost-empty
-        // list while the map still shows all 17+ pins.
-        if (currentLocation && filters.radius && locationSource === 'gps') {
-            const maxDistance = parseInt(filters.radius);
-            // Separate items with and without coordinates
-            const withCoords = [];
-            const withoutCoords = [];
-            result.forEach(food => {
-                const lat = food.latitude ?? food.location?.latitude;
-                const lng = food.longitude ?? food.location?.longitude;
-                if (lat != null && lng != null && !Number.isNaN(Number(lat)) && !Number.isNaN(Number(lng))) {
-                    withCoords.push({ ...food, _lat: lat, _lng: lng });
-                } else {
-                    withoutCoords.push(food);
-                }
-            });
-
-            const nearby = withCoords.filter(food => {
-                const distance = calculateDistance(
-                    currentLocation.latitude,
-                    currentLocation.longitude,
-                    food._lat,
-                    food._lng
-                );
-                food.distance = distance;
-                return distance <= maxDistance;
-            });
-
-            // Sort nearby by distance, then append items without coordinates
-            nearby.sort((a, b) => (a.distance || 0) - (b.distance || 0));
-            const filtered = [...nearby, ...withoutCoords];
-
-            // Safety fallback: if radius filtering removed ALL results but there
-            // are listings available, show everything so users never see a blank
-            // page due to being outside the default radius (e.g. testing from
-            // outside the Bay Area, or listings clustered in one area).
-            result = filtered.length > 0 ? filtered : result;
-        }
-
         // Apply sorting based on selected option
         if (filters.sortBy === 'urgency') {
-            // Sort by urgency (most urgent first)
             result = UrgencyService.sortByUrgency(result);
-        } else if (filters.sortBy === 'distance' && currentLocation) {
-            // Already sorted by distance above
+        } else if (filters.sortBy === 'distance' && profileLocation) {
+            result = result.map(food => {
+                const lat = food.latitude ?? food.location?.latitude;
+                const lng = food.longitude ?? food.location?.longitude;
+                if (lat == null || lng == null) return { ...food, distance: Infinity };
+                const distance = calculateDistance(
+                    profileLocation.latitude,
+                    profileLocation.longitude,
+                    Number(lat),
+                    Number(lng)
+                );
+                return { ...food, distance };
+            }).sort((a, b) => (a.distance || Infinity) - (b.distance || Infinity));
         } else if (filters.sortBy === 'newest') {
             result.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
         }
 
         return result;
-    }, [foods, debouncedSearch, filters, currentLocation, locationSource]);
+    }, [foods, debouncedSearch, filters, profileLocation]);
 
     // Count of listings whose urgency is critical or high — surfaced in the
     // listings header so the user sees "3 expiring soon" at a glance.
@@ -334,7 +294,6 @@ function FindFoodPage({ initialCategory }) {
     const emptyReason = [
         filters.category && (CATEGORY_LABELS[filters.category] || filters.category),
         debouncedSearch.trim() && `matching "${debouncedSearch.trim()}"`,
-        locationSource === 'gps' && currentLocation && `within ${filters.radius} km`,
     ].filter(Boolean).join(' · ');
 
     const skeletonGrid = (
@@ -473,8 +432,7 @@ function FindFoodPage({ initialCategory }) {
                         </select>
                     </div>
 
-                    {/* Sort + radius pill row — surfaces controls that were
-                        previously locked into state with no UI. */}
+                    {/* Sort pill row */}
                     <div className="flex flex-wrap items-center gap-2">
                         <label className="inline-flex items-center gap-1.5 text-xs text-gray-500 bg-white border border-gray-200 rounded-full pl-3 pr-1 py-1">
                             <i className="fas fa-sort-amount-down text-gray-400" aria-hidden="true" />
@@ -487,41 +445,12 @@ function FindFoodPage({ initialCategory }) {
                                 className="bg-transparent text-sm text-gray-700 focus:outline-none pr-1 py-1 cursor-pointer"
                             >
                                 {SORT_OPTIONS.map(opt => (
-                                    <option
-                                        key={opt.value}
-                                        value={opt.value}
-                                        disabled={opt.requiresGps && locationSource !== 'gps'}
-                                    >
+                                    <option key={opt.value} value={opt.value}>
                                         {opt.label}
                                     </option>
                                 ))}
                             </select>
                         </label>
-                        <label className={`inline-flex items-center gap-1.5 text-xs text-gray-500 bg-white border border-gray-200 rounded-full pl-3 pr-1 py-1 ${locationSource !== 'gps' ? 'opacity-60' : ''}`}>
-                            <i className="fas fa-location-crosshairs text-gray-400" aria-hidden="true" />
-                            <span>Within</span>
-                            <select
-                                name="radius"
-                                value={filters.radius}
-                                onChange={handleFilterChange}
-                                disabled={locationSource !== 'gps'}
-                                aria-label="Distance radius"
-                                className="bg-transparent text-sm text-gray-700 focus:outline-none pr-1 py-1 cursor-pointer disabled:cursor-not-allowed"
-                            >
-                                {RADIUS_OPTIONS.map(opt => (
-                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                ))}
-                            </select>
-                        </label>
-                        {locationSource === 'gps' && currentLocation && (
-                            <span
-                                className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 border border-emerald-200 px-3 py-1 text-xs font-medium text-emerald-700"
-                                title="Distance and 'Nearest' sort are using your current location"
-                            >
-                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" aria-hidden="true" />
-                                Using your location
-                            </span>
-                        )}
                         {activeFilterCount > 0 && (
                             <button
                                 type="button"
@@ -565,33 +494,6 @@ function FindFoodPage({ initialCategory }) {
                         </div>
                     )}
 
-                    {/* Soft prompt to enable GPS — only shown when the user
-                        is not already on GPS. Keeps distance/radius controls
-                        meaningful without nagging granted users. */}
-                    {locationSource !== 'gps' && (
-                        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs sm:text-sm text-amber-900 flex items-center gap-3">
-                            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-600" aria-hidden="true">
-                                <i className="fas fa-location-arrow" />
-                            </span>
-                            <div className="flex-1 leading-snug">
-                                <span className="font-semibold">See food near you.</span>
-                                <span className="ml-1 text-amber-800">
-                                    {geoError
-                                        ? 'Location access is blocked — re-enable it in your browser.'
-                                        : 'Share your location to sort by nearest and filter by distance.'}
-                                </span>
-                            </div>
-                            <button
-                                type="button"
-                                onClick={enableGeolocation}
-                                disabled={geoLoading}
-                                className="shrink-0 inline-flex items-center gap-1.5 rounded-full bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                                <i className="fas fa-location-crosshairs text-[10px]" aria-hidden="true" />
-                                {geoLoading ? 'Locating…' : 'Use my location'}
-                            </button>
-                        </div>
-                    )}
                 </div>
                 <div className="mt-4 sm:mt-12">
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
@@ -656,15 +558,6 @@ function FindFoodPage({ initialCategory }) {
                                                     className="inline-flex items-center gap-1.5 rounded-full bg-white border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
                                                 >
                                                     Show all categories
-                                                </button>
-                                            )}
-                                            {locationSource === 'gps' && Number(filters.radius) < 100 && (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setFilters(prev => ({ ...prev, radius: '100' }))}
-                                                    className="inline-flex items-center gap-1.5 rounded-full bg-white border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                                                >
-                                                    Widen to 100 km
                                                 </button>
                                             )}
                                             {debouncedSearch.trim() && (

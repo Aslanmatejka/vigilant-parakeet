@@ -65,7 +65,13 @@ const renderLogin = () => {
 describe('LoginPage', () => {
   test('renders sign in heading', () => {
     renderLogin();
-    expect(screen.getByText('Sign in to your account')).toBeInTheDocument();
+    // Heading text is split across a gradient <span> ("account"), so use
+    // a text matcher function that flattens the h2 content.
+    expect(
+      screen.getByRole('heading', {
+        name: (name) => /sign in to your\s+account/i.test(name),
+      }),
+    ).toBeInTheDocument();
   });
 
   test('renders email and password fields', () => {

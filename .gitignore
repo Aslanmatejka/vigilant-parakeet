@@ -9,6 +9,14 @@ yarn-error.log*
 __pycache__/
 *.pyc
 
+# Local SQLite dev databases (backend falls back to these when
+# DATABASE_URL isn't set; never commit them — they may contain real
+# user rows from local testing).
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # Live voice test artifacts (regenerated each run)
 backend/tests/voice_artifacts/*.mp3
 

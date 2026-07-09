@@ -1,0 +1,3064 @@
+"""Unified natural conversation flow detection and per-turn reminders."""
+from __future__ import annotations
+
+import difflib
+import re
+from typing import Literal, Optional
+
+FlowKind = Literal["idle", "posting", "claiming", "finding", "requesting"]
+
+_PHOTO_URL_RE = re.compile(
+    r"(?:^|\s)image:\s*\S+|/uploads/ai/\S+",
+    re.IGNORECASE,
+)
+
+_DISTRESS_TRIGGERS = (
+    "hungry", "hunger", "starving", "nothing to eat", "no food", "need food",
+    "hambre", "sin comida", "tengo hambre",
+)
+
+_SHARE_TRIGGERS = (
+    "share food", "share some", "donate", "giving away", "give away",
+    "post a listing", "post listing", "list my", "i have extra",
+    "leftover", "left over", "to donate", "want to share",
+    "post it", "publish it", "ready to post",
+    "compartir comida", "compartir", "donar", "publicar",
+    "tengo extra", "sobra comida",
+)
+
+_REQUEST_TRIGGERS = (
+    "food request", "request food", "post a request", "post food request",
+    "ask for food", "solicitar comida", "pedir comida", "publicar solicitud",
+)
+
+_CLAIM_TRIGGERS = (
+    "claim", "reserve", "i'll take", "ill take", "i will take",
+    "grab it", "lock it in", "that one", "number ", "#",
+    "the bread", "the kale", "loaf", "loaves",
+    "reclamar", "reservar", "lo tomo", "esa",
+)
+
+_FIND_TRIGGERS = (
+    "find food", "food near", "near me", "what's available", "whats available",
+    "show me food", "nearby", "looking for food", "available food",
+    "what food is available", "show available", "any food available",
+    "food available", "search for food", "new food", "more food",
+    "buscar comida", "cerca", "busco comida",
+)
+
+_CLEAR_SHORT_REPLIES: frozenset[str] = frozenset({
+    "yes", "y", "yeah", "yep", "ok", "okay", "sure", "no", "n", "si", "sí",
+    "thanks", "thank you", "gracias", "hi", "hello", "hey", "hola",
+    "1", "2", "3", "4", "5", "#1", "#2", "#3", "#4", "#5",
+})
+
+_GREETINGS: frozenset[str] = frozenset({"hi", "hello", "hey", "hola"})
+
+
+def _history_blob(history: list | None, message: str, limit: int = 12) -> str:
+    hist = history or []
+    parts = [(m.get("message") or "") for m in hist[-limit:]]
+    parts.append(message or "")
+    return "\n".join(parts)
+
+
+def _is_distress(message: str) -> bool:
+    t = (message or "").lower()
+    if any(k in t for k in (
+        "request food", "food request", "post a request", "solicitar comida",
+    )):
+        return False
+    if any(k in t for k in _DISTRESS_TRIGGERS):
+        return True
+    if "food" in t and any(k in t for k in (
+        "need", "hungry", "starving", "family", "kids", "children",
+    )):
+        return True
+    return False
+
+
+def _search_awaiting_pick(history: list | None) -> bool:
+    """True when the last assistant turn is presenting search results to pick from."""
+    last = _last_assistant_text(history)
+    if not last:
+        return False
+    if any(k in last for k in _CLAIM_SUCCESS_MARKERS):
+        return False
+    return any(k in last for k in (
+        "here's what's", "here are", "near you", "close to you", "which one",
+        "works for you", "found ", "pick a number", "pick one", "number below",
+        "opciones", "cerca de ti", "elige un número", "elige un numero",
+    ))
+
+
+def _recent_search_context(history: list | None) -> bool:
+    """True when search results were shown recently in the thread."""
+    if _search_awaiting_pick(history):
+        return True
+    blob_l = _history_blob(history, "", 8).lower()
+    return any(k in blob_l for k in (
+        "here's what's", "here are", "near you", "close to you", "which one",
+        "works for you", "found ", "opciones", "cerca de ti", "numbered",
+    ))
+
+
+def _looks_like_listing_pick(message: str) -> bool:
+    t = (message or "").strip().lower()
+    if t in ("both", "all", "all of them", "both of them"):
+        return True
+    if re.fullmatch(r"#?\d{1,2}", t):
+        return True
+    if re.search(r"#\d", t):
+        return True
+    nums = re.findall(r"\d+", t)
+    if len(nums) >= 2:
+        return True
+    if len(nums) == 1 and any(s in t for s in ("and", "&", "both")):
+        return True
+    return False
+
+
+def _looks_like_multi_option_pick(message: str) -> bool:
+    """True when user references 2+ listing numbers or says 'both'."""
+    t = (message or "").strip().lower()
+    if "both" in t:
+        return True
+    if _looks_like_food_quantity_spec(message):
+        return False
+    nums = [int(n) for n in re.findall(r"\d+", t)]
+    if len(nums) < 2:
+        return False
+    if any(n > 15 for n in nums):
+        return False
+    if re.search(r"\b(\d|#)\s*(and|&|,|y)\s*(\d|#)", t):
+        return True
+    if len(nums) >= 2 and not any(w in _FOOD_WORDS for w in _tokenize_words(message)):
+        return True
+    return False
+
+
+def _looks_like_food_quantity_spec(message: str) -> bool:
+    """True when user names foods with amounts, e.g. '10 potatoes, 3 tomatoes'."""
+    if not re.search(r"\d+", message or ""):
+        return False
+    return any(w in _FOOD_WORDS for w in _tokenize_words(message))
+
+
+def is_posting_flow(message: str, history: list | None = None) -> bool:
+    """True when the user is sharing/donating food (donor listing flow)."""
+    if _is_distress(message):
+        return False
+    if _looks_like_listing_pick(message) and _recent_search_context(history):
+        return False
+    t = (message or "").lower()
+    if any(k in t for k in _SHARE_TRIGGERS):
+        return True
+    if not history:
+        return False
+    for msg in reversed(history[-10:]):
+        role = msg.get("role")
+        text = (msg.get("message") or "").lower()
+        if role == "assistant" and any(k in text for k in (
+            "what food and how much", "quick photo", "snap a photo",
+            "snap a quick photo", "which school", "which community",
+            "list under", "go under", "post it?", "ready to post",
+            "best by", "best-by", "when does it expire", "expire",
+            "qué comida", "foto rápida", "comunidad", "escuela",
+            "¿listo para publicar", "¿publico", "vence", "caduca",
+        )):
+            return True
+        if role == "user" and any(k in text for k in (
+            "i have", "i've got", "got some", "loaf", "loaves", "tengo",
+        )):
+            if not any(k in text for k in _DISTRESS_TRIGGERS):
+                return True
+    return False
+
+
+def is_request_flow(message: str, history: list | None = None) -> bool:
+    t = (message or "").lower()
+    if any(k in t for k in _REQUEST_TRIGGERS):
+        if not is_posting_flow(message, history):
+            return True
+    if history:
+        for msg in reversed(history[-8:]):
+            text = (msg.get("message") or "").lower()
+            if msg.get("role") == "assistant" and any(k in text for k in (
+                "food request", "what do you need", "household size",
+                "solicitud de comida", "qué necesitas",
+            )):
+                return True
+    return False
+
+
+def is_finding_flow(message: str, history: list | None = None) -> bool:
+    if _is_distress(message):
+        return True
+    t = (message or "").lower()
+    if any(k in t for k in _FIND_TRIGGERS):
+        return True
+    words = _tokenize_words(message)
+    if any(w in _FOOD_WORDS for w in words):
+        if any(k in t for k in (
+            "want", "need", "find", "get", "looking for", "search",
+            "busco", "quiero", "necesito", "hay",
+        )):
+            return True
+    return False
+
+
+def is_claiming_flow(message: str, history: list | None = None) -> bool:
+    if is_posting_flow(message, history):
+        return False
+    t = (message or "").lower()
+    if any(k in t for k in _CLAIM_TRIGGERS):
+        return True
+    if not _assistant_expects_flow_reply(history):
+        return False
+    return _looks_like_listing_pick(message)
+
+
+def _assistant_expects_flow_reply(history: list | None) -> bool:
+    """True when the last assistant turn is mid-flow and awaiting a specific answer."""
+    if not history:
+        return False
+    for msg in reversed(history[-4:]):
+        if msg.get("role") == "assistant":
+            text = (msg.get("message") or "").lower()
+            return any(k in text for k in (
+                "which one", "how many", "confirm", "photo", "community",
+                "ready to post", "did you mean", "which number", "pickup or",
+                "which community", "snap a", "post it", "lock it",
+                "lock it in", "want me to", "picking up",
+                "¿cuál", "¿cuánt", "foto", "comunidad", "confirmar", "quisiste decir",
+            ))
+    return False
+
+
+_CLAIM_QTY_ASK_MARKERS = (
+    "how many do you want", "how many would you like", "how many of the",
+    "how many loaves", "how many units", "how many cans", "how many can you",
+    "how much do you want", "how much would you like",
+    "cuántos quieres", "cuántas quieres", "cuantos quieres", "cuantas quieres",
+    "nice choice", "good pick", "great choice", "buena elección",
+)
+
+_CLAIM_SUCCESS_MARKERS = (
+    "claimed", "reclamado", "reserved for you", "reservado para ti",
+    "pickup at", "recogida en", "all set", "you're set", "you are set",
+    "already claimed", "ya reclamaste", "already reserved",
+    "got it claimed", "listo — reclamado",
+)
+
+_CLAIM_INTAKE_MARKERS = _CLAIM_QTY_ASK_MARKERS + (
+    "which one", "which listing", "which number", "which would you",
+    "pick a number", "pick one", "works for you", "sounds good",
+    "¿cuál", "cual te gustaría", "elige un número", "elige un numero",
+)
+
+
+def _last_assistant_text(history: list | None, limit: int = 8) -> str:
+    if not history:
+        return ""
+    for msg in reversed(history[-limit:]):
+        if msg.get("role") == "assistant":
+            return (msg.get("message") or "").lower()
+    return ""
+
+
+def _claim_intake_open(message: str, history: list | None) -> bool:
+    """True only when a claim pick/qty flow is open and not yet completed."""
+    if not history:
+        return False
+    if _is_distress(message) or is_finding_flow(message, history):
+        return False
+    if _user_wants_fresh_search(message):
+        return False
+    if _assistant_awaiting_quantity(history):
+        return True
+
+    last_asst = _last_assistant_text(history)
+    if not last_asst:
+        return False
+    if any(k in last_asst for k in _CLAIM_SUCCESS_MARKERS):
+        return False
+    if not any(k in last_asst for k in _CLAIM_INTAKE_MARKERS):
+        return False
+    return _recent_search_context(history)
+
+
+# Back-compat alias used in tests / older imports
+def _in_active_claim_conversation(message: str, history: list | None) -> bool:
+    return _claim_intake_open(message, history)
+
+
+def _user_asking_availability(message: str) -> bool:
+    """True when the user asks how much/many is left — not a claim qty answer."""
+    t = (message or "").strip().lower()
+    if not t:
+        return False
+    if not any(k in t for k in (
+        "how much", "how many", "how many left", "how much left",
+        "is left", "are left", "remaining", "still available", "still left",
+        "cuánto queda", "cuantos quedan", "cuántos quedan", "cuanta queda",
+        "cuántas quedan", "disponible", "queda",
+    )):
+        return False
+    if _extract_claim_intent(message).get("quantity") is not None:
+        return False
+    if any(k in t for k in (
+        "do you want", "should i claim", "want to claim", "how many do you",
+        "how much do you",
+    )):
+        return False
+    return True
+
+
+def detect_conversation_flow(message: str, history: list | None = None) -> FlowKind:
+    """Pick the dominant active conversation flow for this turn."""
+    t = (message or "").strip().lower()
+    if t in _GREETINGS:
+        return "idle"
+    if is_posting_flow(message, history):
+        return "posting"
+    if _user_asking_availability(message):
+        return "finding"
+    if is_finding_flow(message, history):
+        return "finding"
+    if _claim_intake_open(message, history):
+        return "claiming"
+    if t in _CLEAR_SHORT_REPLIES and len(t.split()) <= 3:
+        if not _assistant_expects_flow_reply(history):
+            if _looks_like_listing_pick(message) and _search_awaiting_pick(history):
+                pass  # e.g. "1" or "#2" after search results — claiming, not idle
+            else:
+                return "idle"
+    if _looks_like_multi_option_pick(message) and (
+        _assistant_expects_flow_reply(history) or _search_awaiting_pick(history)
+    ):
+        return "claiming"
+    if _looks_like_listing_pick(message) and (
+        _assistant_expects_flow_reply(history) or _search_awaiting_pick(history)
+    ):
+        return "claiming"
+
+    if is_claiming_flow(message, history):
+        return "claiming"
+    if is_request_flow(message, history):
+        return "requesting"
+    return "idle"
+
+
+def _natural_rhythm(lang: str) -> str:
+    if lang == "es":
+        return (
+            "CONVERSACIÓN NATURAL (este turno):\n"
+            "• Habla como un humano servicial — no como un formulario.\n"
+            "• UNA pregunta por mensaje; reconoce la respuesta anterior en "
+            "1–4 palabras ('Entendido.', 'Perfecto.') antes de la siguiente.\n"
+            "• No repitas preguntas ya respondidas en este hilo.\n"
+            "• Tras completar una acción: una frase con el resultado, luego "
+            "como máximo UN siguiente paso opcional."
+        )
+    return (
+        "NATURAL CONVERSATION (this turn):\n"
+        "• Talk like a helpful human — not a form or FAQ.\n"
+        "• ONE question per message; acknowledge their last answer briefly "
+        "('Got it.', 'Perfect.') before the next question.\n"
+        "• Never re-ask for info they already gave in this thread.\n"
+        "• After completing an action: one sentence on what happened, then "
+        "at most ONE optional next step."
+    )
+
+
+def posting_flow_state(message: str, history: list | None) -> dict:
+    """Structured posting-step state for reminders, logging, and tool guards."""
+    blob = _history_blob(history, message)
+    blob_l = blob.lower()
+    community_asked = any(p in blob_l for p in (
+        "which community", "which school", "community should",
+        "under which", "go under", "comunidad", "escuela",
+    ))
+    # has_photo is scoped to the CURRENT posting flow so a photo the
+    # donor already used for a previously-posted listing doesn't count
+    # toward this one. Otherwise a second, photo-less listing would
+    # silently reuse the earlier photo (or slip past the photo guard).
+    boundary = _current_posting_boundary_index(history)
+    scoped_hist = (history or [])[boundary:] if boundary else (history or [])
+    scoped_blob = _history_blob(scoped_hist, message)
+    scoped_blob_l = scoped_blob.lower()
+    has_photo = bool(_PHOTO_URL_RE.search(scoped_blob))
+    photo_asked = any(p in scoped_blob_l for p in (
+        "photo", "picture", "snap a", "upload a", "foto", "imagen",
+    ))
+    photo_declined = any(p in scoped_blob_l for p in (
+        "no photo", "skip photo", "without a photo", "without photo",
+        "no picture", "sin foto", "no foto", "skip the photo",
+        "don't have a photo", "dont have a photo", "no thanks",
+        "skip it", "maybe later", "not this time",
+    ))
+    post_summary_offered = any(p in blob_l for p in (
+        "ready to post", "post it?", "shall i post", "want me to post",
+        "go ahead and post", "¿listo para publicar", "¿publico",
+        "publish it?", "post this?", "sound good to post",
+    ))
+    expiry_asked = any(p in blob_l for p in (
+        "expire", "expiry", "best by", "best-by", "use by", "how fresh",
+        "how long", "when was it made", "good until", "best before",
+        "vence", "caduca", "fecha de vencimiento", "cuándo vence",
+    ))
+    expiry_provided = bool(re.search(r"\d{4}-\d{2}-\d{2}", blob)) or bool(
+        _extract_expiry_from_text(blob)
+    )
+    awaiting_photo = photo_asked and not has_photo and not photo_declined
+    return {
+        "has_photo": has_photo,
+        "photo_asked": photo_asked,
+        "photo_declined": photo_declined,
+        "awaiting_photo": awaiting_photo,
+        "community_asked": community_asked,
+        "community_confirmed": _community_was_confirmed(history),
+        "post_summary_offered": post_summary_offered,
+        "expiry_asked": expiry_asked,
+        "expiry_provided": expiry_provided,
+    }
+
+
+def _extract_expiry_from_text(text: str) -> Optional[str]:
+    """Parse YYYY-MM-DD or common spoken dates from chat text."""
+    if not text:
+        return None
+    m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+    if m:
+        return m.group(1)
+    m = re.search(
+        r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b",
+        text,
+    )
+    if m:
+        from backend.tools import _normalize_expiry_date
+        return _normalize_expiry_date(m.group(0))
+    blob = text.lower()
+    if any(k in blob for k in ("today", "tonight", "hoy", "esta noche")):
+        from datetime import date
+        return date.today().isoformat()
+    if any(k in blob for k in ("tomorrow", "mañana")):
+        from datetime import date, timedelta
+        return (date.today() + timedelta(days=1)).isoformat()
+    return None
+
+
+def _assistant_last_asked_kind(history: list | None) -> str | None:
+    """What the most recent assistant turn was asking about."""
+    if not history:
+        return None
+    for msg in reversed(history[-8:]):
+        if msg.get("role") != "assistant":
+            continue
+        text = (msg.get("message") or "").lower()
+        if any(k in text for k in (
+            "ready to post", "post it?", "shall i post", "want me to post",
+            "go ahead and post", "publish it?", "post this?", "sound good to post",
+            "¿listo para publicar", "¿publico", "¿publicamos",
+        )):
+            return "post_confirm"
+        if any(k in text for k in (
+            "expire", "expiry", "best by", "best-by", "use by", "how fresh",
+            "how long", "when was it made", "good until", "vence", "caduca",
+        )):
+            return "expiry"
+        if any(k in text for k in (
+            "photo", "picture", "snap a", "upload a", "attach a", "foto", "imagen",
+        )):
+            return "photo"
+        if any(k in text for k in (
+            "which community", "which school", "community should", "go under",
+            "comunidad", "escuela", "list under",
+        )):
+            return "community"
+        if any(k in text for k in (
+            "how many", "how much", "what food", "qué comida", "cuánt",
+        )):
+            return "food_qty"
+        return None
+    return None
+
+
+def _community_was_confirmed(history: list | None) -> bool:
+    """True once the donor explicitly picked or confirmed a community."""
+    if not history:
+        return False
+    for i, msg in enumerate(history):
+        if msg.get("role") != "assistant":
+            continue
+        text = (msg.get("message") or "").lower()
+        if not any(k in text for k in (
+            "community", "school", "comunidad", "escuela", "go under", "list under",
+        )):
+            continue
+        for j in range(i + 1, len(history)):
+            if history[j].get("role") == "assistant":
+                break
+            if history[j].get("role") != "user":
+                continue
+            u = (history[j].get("message") or "").strip()
+            ul = u.lower()
+            if _is_affirmative_post_confirm(u):
+                return True
+            if len(ul) >= 3 and ul not in {
+                "yes", "y", "yeah", "yep", "ok", "okay", "sure", "si", "sí",
+            }:
+                return True
+    return False
+
+
+def _is_short_affirmative(message: str) -> bool:
+    t = (message or "").strip().lower()
+    if not t:
+        return False
+    if t in {"yes", "y", "yeah", "yep", "ok", "okay", "sure", "si", "sí", "yup"}:
+        return True
+    return len(t.split()) <= 2 and _is_affirmative_post_confirm(message)
+
+
+_COMMUNITY_IN_MSG_RE = re.compile(
+    r"(?:community|neighborhood)\s*(?:to|is|=|:)?\s*['\"]?([a-z0-9][a-z0-9\s\-]{2,40})['\"]?",
+    re.I,
+)
+
+_COMMUNITY_QUESTION_MARKERS = (
+    "which community", "which school", "community should", "go under",
+    "list under", "comunidad", "escuela", "school district",
+)
+
+_COMMUNITY_FROM_USER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:list|put|post)\s+(?:this|it)\s+under\s+(.+?)(?:\?|\.|$)",
+        re.I,
+    ),
+    re.compile(
+        r"(?:use|pick|choose|want|put\s+it\s+under)\s+(.+?)\s+instead",
+        re.I,
+    ),
+    re.compile(
+        r"instead\s+(?:of\s+[^,.!?]{0,60}?\s+)?(?:use\s+)?(.+?)(?:\?|\.|$)",
+        re.I,
+    ),
+    re.compile(
+        r"(?:different|another|other)\s+(?:community|school|one)"
+        r"(?:\s+please)?[:\s—-]+(.+?)(?:\?|\.|$)",
+        re.I,
+    ),
+    re.compile(
+        r"(?:not\s+that\s+one|no)\s*[,—-]?\s*(?:use\s+)?(.+?)(?:\?|\.|$)",
+        re.I,
+    ),
+    re.compile(
+        r"(?:under|list\s+under|go\s+under)\s+(.+?)(?:\?|\.|$)",
+        re.I,
+    ),
+    _COMMUNITY_IN_MSG_RE,
+)
+
+_COMMUNITY_FROM_ASSISTANT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:go|list|post)\s+under\s+(.+?)\??(?:\s|$)",
+        re.I,
+    ),
+    re.compile(
+        r"which community(?:/school)?(?: should|\s+should)[^\n?]*[—:-]\s*(.+?)\??(?:\s|$)",
+        re.I,
+    ),
+    re.compile(
+        r"should this go under\s+(.+?)\??(?:\s|$)",
+        re.I,
+    ),
+    re.compile(
+        r"list under\s+(.+?)\??(?:\s|$)",
+        re.I,
+    ),
+)
+
+
+def _clean_community_phrase(text: str) -> str | None:
+    """Normalize a raw community phrase from chat text."""
+    name = (text or "").strip().strip('"').strip("'").strip()
+    name = re.sub(r"\s+", " ", name)
+    name = re.sub(
+        r"^(?:the|a|an|please|thanks|thank you|yes|yeah|sure|ok|okay)\s+",
+        "",
+        name,
+        flags=re.I,
+    )
+    name = re.sub(
+        r"\s+(?:please|thanks|thank you|instead|not that one)\.?$",
+        "",
+        name,
+        flags=re.I,
+    ).strip(" .,;:-—")
+    if len(name) < 3:
+        return None
+    if name.lower() in {"yes", "no", "ok", "okay", "sure", "si", "sí", "y", "n"}:
+        return None
+    return name
+
+
+def _extract_community_name_from_text(text: str) -> str | None:
+    """Pull a community/school name from a single message."""
+    if not text:
+        return None
+    for pat in _COMMUNITY_FROM_USER_PATTERNS:
+        m = pat.search(text)
+        if m:
+            cleaned = _clean_community_phrase(m.group(1))
+            if cleaned:
+                return cleaned
+    # Bare name when the whole message is short (e.g. "Do Good Warehouse").
+    stripped = text.strip()
+    if 3 <= len(stripped) <= 80 and stripped.count("\n") == 0:
+        lower = stripped.lower()
+        if lower not in {"yes", "no", "ok", "okay", "sure", "si", "sí"}:
+            if not any(k in lower for k in (
+                "photo", "expire", "expiry", "post it", "ready to post",
+                "how many", "what food",
+            )):
+                cleaned = _clean_community_phrase(stripped)
+                if cleaned and len(cleaned.split()) <= 8:
+                    return cleaned
+    return None
+
+
+def _extract_community_name_from_assistant_question(text: str) -> str | None:
+    """Parse the community name the assistant proposed in a question."""
+    if not text:
+        return None
+    for pat in _COMMUNITY_FROM_ASSISTANT_PATTERNS:
+        m = pat.search(text)
+        if m:
+            cleaned = _clean_community_phrase(m.group(1))
+            if cleaned:
+                return cleaned
+    return None
+
+
+def _communities_from_history(history: list | None) -> list[dict]:
+    """Communities returned by get_active_communities earlier in the thread."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    if not history:
+        return out
+    for msg in history:
+        meta = msg.get("metadata") or {}
+        for action in meta.get("actions") or []:
+            if str(action.get("tool") or "") != "get_active_communities":
+                continue
+            for row in action.get("communities") or []:
+                name = str(row.get("name") or "").strip()
+                cid = str(row.get("id") or "").strip()
+                key = name.lower()
+                if name and key not in seen:
+                    seen.add(key)
+                    out.append({"id": cid, "name": name})
+    return out
+
+
+def _match_community_in_catalog(
+    query: str,
+    catalog: list[dict],
+) -> dict | None:
+    """Fuzzy-match a user phrase against a list of {id, name} communities."""
+    if not query or not catalog:
+        return None
+
+    q_raw = query.strip()
+    num_m = re.fullmatch(r"#?(\d{1,2})", q_raw.lower())
+    if num_m:
+        idx = int(num_m.group(1)) - 1
+        if 0 <= idx < len(catalog):
+            return catalog[idx]
+
+    q = _clean_community_phrase(query)
+    if not q:
+        return None
+    q_lower = q.lower()
+    q_tokens = set(re.findall(r"[a-z0-9]+", q_lower))
+
+    best_row: dict | None = None
+    best_score = 0.0
+    for row in catalog:
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        n_lower = name.lower()
+        n_tokens = set(re.findall(r"[a-z0-9]+", n_lower))
+        if q_lower == n_lower:
+            score = 1.0
+        elif q_lower in n_lower or n_lower in q_lower:
+            score = 0.92
+        else:
+            score = difflib.SequenceMatcher(None, q_lower, n_lower).ratio()
+            if q_tokens and n_tokens:
+                overlap = len(q_tokens & n_tokens) / max(len(q_tokens), len(n_tokens))
+                score = max(score, overlap)
+        if score > best_score:
+            best_score = score
+            best_row = row
+    if best_row and best_score >= 0.55:
+        return best_row
+    return None
+
+
+def _latest_community_exchange(
+    history: list | None,
+    message: str = "",
+) -> tuple[str | None, str | None]:
+    """Return (assistant_question, user_reply) for the latest community step."""
+    if not history:
+        reply = (message or "").strip() or None
+        return None, reply
+
+    q_idx: int | None = None
+    for i in range(len(history) - 1, -1, -1):
+        if history[i].get("role") != "assistant":
+            continue
+        text = (history[i].get("message") or "").lower()
+        if any(k in text for k in _COMMUNITY_QUESTION_MARKERS):
+            q_idx = i
+            break
+
+    if q_idx is None:
+        if message and _extract_community_name_from_text(message):
+            return None, message.strip()
+        return None, None
+
+    assistant_q = history[q_idx].get("message") or ""
+    user_reply: str | None = None
+    for j in range(q_idx + 1, len(history)):
+        role = history[j].get("role")
+        if role == "assistant":
+            break
+        if role == "user" and not user_reply:
+            user_reply = (history[j].get("message") or "").strip() or None
+
+    if message and (message or "").strip():
+        if _assistant_last_asked_kind(history) == "community":
+            user_reply = message.strip()
+    return assistant_q, user_reply
+
+
+def _extract_community_name_from_history(
+    history: list | None,
+    message: str = "",
+) -> str | None:
+    """Best-effort community name from an in-progress share conversation.
+
+    Prefers the donor's latest reply after a community question over the
+    assistant's earlier suggestion — critical when they pick a different
+    school than the profile default.
+    """
+    assistant_q, user_reply = _latest_community_exchange(history, message)
+
+    if user_reply:
+        from_user = _extract_community_name_from_text(user_reply)
+        if from_user:
+            return from_user
+        if _is_affirmative_post_confirm(user_reply) and assistant_q:
+            from_assistant = _extract_community_name_from_assistant_question(assistant_q)
+            if from_assistant:
+                return from_assistant
+
+    if assistant_q:
+        from_assistant = _extract_community_name_from_assistant_question(assistant_q)
+        if from_assistant:
+            return from_assistant
+
+    blob = _history_blob(history, message, limit=16)
+    for pat in (
+        r"Community:\s*([^\n\.,]{3,80})",
+        r"list(?:\s+this)?\s+under[:\s—-]+([^\n\?\.]{3,80})",
+    ):
+        m = re.search(pat, blob, re.IGNORECASE)
+        if m:
+            cleaned = _clean_community_phrase(m.group(1))
+            if cleaned:
+                return cleaned
+    return None
+
+
+def _resolve_community_from_thread(
+    history: list | None,
+    message: str,
+    args: dict,
+) -> dict:
+    """Fill community_name / community_id from chat + prior community lists."""
+    out = dict(args or {})
+    catalog = _communities_from_history(history)
+
+    candidates: list[str] = []
+    if out.get("community_name"):
+        candidates.append(str(out["community_name"]))
+    extracted = _extract_community_name_from_history(history, message)
+    if extracted:
+        candidates.append(extracted)
+    from_msg = _extract_community_name_from_text(message or "")
+    if from_msg:
+        candidates.append(from_msg)
+
+    for raw in candidates:
+        if catalog:
+            hit = _match_community_in_catalog(raw, catalog)
+            if hit:
+                out["community_name"] = hit["name"]
+                if hit.get("id"):
+                    out["community_id"] = hit["id"]
+                return out
+        cleaned = _clean_community_phrase(raw)
+        if cleaned:
+            out["community_name"] = cleaned
+            return out
+    return out
+
+
+# Assistant lines that mark a completed post — anything before this is
+# from a previous listing and must NOT leak into the current post's args.
+# Markers are deliberately specific (they only fit Nouri's success
+# template) so a casual mention like "have you posted before?" doesn't
+# false-trigger the boundary.
+_POST_SUCCESS_MARKERS: tuple[str, ...] = (
+    "posted!", "posted your", "listing posted", "published!",
+    "published your", "your listing is live", "listing is live",
+    "listing #", "listing is up", "just posted your", "just shared your",
+    "publicado tu", "publicado la", "publicada tu", "listado publicado",
+    "listing created", "created listing", "created your listing",
+    "done!", "done —", "done -", "all set!", "all set —", "all set -",
+    "shared!", "shared your", "successfully posted", "is now live",
+    "now live", "went live", "donation is live", "is up under",
+    "listo!", "listo —", "ya está publicado", "ya esta publicado",
+)
+
+
+def _current_posting_boundary_index(history: list | None) -> int:
+    """Index of the first history entry that belongs to the *current*
+    posting flow.
+
+    We scan from the end backwards looking for the most recent assistant
+    "Posted!" / "Listing #…" success marker. Everything at that index and
+    earlier is finished — a photo, allergen, or expiry mentioned before
+    that marker belongs to a *previous* listing and must not bleed into
+    the current one. Returns 0 when no marker is found (fresh session).
+    """
+    if not history:
+        return 0
+    for idx in range(len(history) - 1, -1, -1):
+        msg = history[idx]
+        if msg.get("role") != "assistant":
+            continue
+        text = str(msg.get("message") or "").lower()
+        if any(marker in text for marker in _POST_SUCCESS_MARKERS):
+            return idx + 1
+    return 0
+
+
+def _extract_photo_url_from_history(
+    history: list | None,
+    message: str = "",
+) -> str | None:
+    """Pull the most recent uploaded photo URL from chat history.
+
+    Note: this is deliberately unscoped — used by 'add a photo to an
+    existing listing' intent where the whole thread is fair game. For
+    the *current posting* flow use
+    ``_extract_photo_url_for_current_posting`` which respects the flow
+    boundary.
+    """
+    blob = _history_blob(history, message, limit=16)
+    for pat in (
+        r"image:\s*(https?://\S+)",
+        r"image:\s*(/uploads/\S+)",
+        r"(https?://\S+\.(?:jpg|jpeg|png|webp|gif)(?:\?\S*)?)",
+    ):
+        matches = re.findall(pat, blob, re.IGNORECASE)
+        if matches:
+            url = matches[-1].strip().rstrip(").,]")
+            if url.startswith(("http://", "https://", "/")):
+                return url
+    return None
+
+
+def _extract_photo_url_for_current_posting(
+    history: list | None,
+    message: str = "",
+) -> str | None:
+    """Return a photo URL that belongs to the CURRENT posting flow only.
+
+    A photo attached before the most recent "Posted!" success marker
+    belongs to a completed listing and must not be reused for the next
+    post. This is the fix for the classic bug where Nouri silently
+    reuses the previous listing's photo on a brand-new listing that
+    the donor never attached one to.
+    """
+    hist = history or []
+    boundary = _current_posting_boundary_index(hist)
+    scoped = hist[boundary:] if boundary else hist
+    return _extract_photo_url_from_history(scoped, message)
+
+
+def enrich_post_food_listing_args(
+    args: dict,
+    message: str,
+    history: list | None,
+) -> dict:
+    """Fill community_confirmed and community_name from thread context."""
+    out = dict(args or {})
+    state = posting_flow_state(message, history)
+    desc = str(out.get("description") or "")
+    if not out.get("community_name"):
+        m = re.search(r"Community:\s*([^\n\.,]+)", desc, re.IGNORECASE)
+        if m:
+            out["community_name"] = m.group(1).strip()
+    out = _resolve_community_from_thread(history, message, out)
+    if state["community_confirmed"] or (
+        _is_affirmative_post_confirm(message)
+        and _assistant_last_asked_kind(history) in {"community", "post_confirm"}
+    ):
+        out["community_confirmed"] = True
+    elif _extract_community_name_from_text(message or ""):
+        # Donor named a specific community this turn — treat as confirmed.
+        out["community_confirmed"] = True
+
+    # Photo: ONLY attach URLs from the CURRENT posting flow. The model
+    # often replays images[] from a prior listing in full chat context —
+    # never trust model-passed images/image_url without scoped validation.
+    out.pop("image_url", None)
+    if state["photo_declined"]:
+        out.pop("images", None)
+    else:
+        photo_url = _extract_photo_url_for_current_posting(history, message)
+        if photo_url:
+            out["images"] = [photo_url]
+        else:
+            out.pop("images", None)
+
+    exp = (
+        out.get("expiration_date")
+        or out.get("expiry_date")
+        or _extract_expiry_from_text(message or "")
+        or _extract_expiry_from_text(_history_blob(history, message, limit=12))
+    )
+    if exp:
+        out["expiration_date"] = exp
+        out["expiry_date"] = exp
+    # Allergens + dietary tags — donor may have mentioned them in prose
+    # ('contains peanuts', 'it's vegan') without the model routing them
+    # into the structured args. Advisory only — never overwrites what the
+    # model already set. See backend/ai/allergens.py.
+    try:
+        from backend.ai.allergens import enrich_post_listing_allergen_args
+        out = enrich_post_listing_allergen_args(out, message, history)
+    except Exception:  # pragma: no cover — allergen layer is advisory
+        pass
+    return out
+
+
+def posting_tool_block_reason(
+    message: str,
+    history: list | None,
+    fn_args: dict | None = None,
+) -> str | None:
+    """Return a block message if post_food_listing is premature."""
+    if not is_posting_flow(message, history):
+        return None
+    state = posting_flow_state(message, history)
+    last_asked = _assistant_last_asked_kind(history)
+    args = fn_args or {}
+
+    community_confirmed = bool(args.get("community_confirmed")) or state["community_confirmed"]
+    if not community_confirmed:
+        return (
+            "Ask which community/school this listing goes under and get explicit "
+            "confirmation ('yes, that one') before posting. Pass community_name "
+            "and community_confirmed=true only after they confirm."
+        )
+
+    has_expiry = bool(
+        args.get("expiration_date")
+        or args.get("expiry_date")
+        or state["expiry_provided"]
+    )
+    if not has_expiry:
+        return (
+            "Ask when the food expires or its best-by date before posting. "
+            "Map their answer to expiration_date (YYYY-MM-DD). Do not guess silently."
+        )
+
+    if not state["photo_asked"] and not state["has_photo"]:
+        return (
+            "Ask for a photo once before calling post_food_listing "
+            "(the donor may decline)."
+        )
+
+    if state["awaiting_photo"]:
+        if last_asked == "photo" and _is_short_affirmative(message):
+            return (
+                "The donor said yes/ok but no photo URL is in the chat yet. "
+                "Ask them to upload/attach the photo in chat, or say 'skip photo' "
+                "to continue without one. Do NOT call post_food_listing yet."
+            )
+        if not state["has_photo"] and not state["photo_declined"]:
+            return (
+                "Still waiting for a photo upload (image: … URL in chat) or an "
+                "explicit 'no photo' / 'skip photo' before posting."
+            )
+
+    if _is_affirmative_post_confirm(message) and not state["post_summary_offered"]:
+        if last_asked != "post_confirm":
+            return (
+                "Give a one-sentence summary (food, qty, community, address, "
+                "photo yes/no) and ask 'Ready to post?' before calling "
+                "post_food_listing. A bare 'yes' is not enough."
+            )
+
+    return None
+
+
+def build_posting_step_reminder(
+    message: str,
+    history: list | None,
+    lang: str = "en",
+) -> str | None:
+    """Contextual posting nudge — not a numbered script."""
+    if not is_posting_flow(message, history):
+        return None
+
+    state = posting_flow_state(message, history)
+    last_asked = _assistant_last_asked_kind(history)
+
+    if lang == "es":
+        if not state["community_confirmed"]:
+            return (
+                "Sugerencia: pregunta bajo qué escuela o comunidad va el "
+                "listado y espera un 'sí' claro antes de seguir. Frase "
+                "libre, no un guion."
+            )
+        if not state["expiry_provided"]:
+            if not state["expiry_asked"]:
+                return (
+                    "Sugerencia: incluye una pregunta sobre vencimiento / "
+                    "fecha límite en tu próxima respuesta. Pásalo como "
+                    "expiration_date en YYYY-MM-DD."
+                )
+            return (
+                "Sugerencia: todavía no dieron la fecha — espera y "
+                "mapéala a expiration_date (YYYY-MM-DD)."
+            )
+        if state["awaiting_photo"] and last_asked == "photo" and _is_short_affirmative(message):
+            return (
+                "Sugerencia: dijeron sí pero aún no hay foto adjunta. "
+                "No publiques. Pide que suban la foto o pregúntales si "
+                "prefieren seguir sin ella."
+            )
+        if state["awaiting_photo"]:
+            return (
+                "Sugerencia: espera a que suban la foto o digan 'sin foto' "
+                "antes de resumir o publicar."
+            )
+        if not state["photo_asked"]:
+            return (
+                "Sugerencia: pregunta por foto una vez (pueden decir que "
+                "no), luego un resumen breve y '¿listo para publicar?'."
+            )
+        if not state["post_summary_offered"]:
+            return (
+                "Sugerencia: da un resumen de una frase y obtén un 'sí / "
+                "publícalo' explícito antes de llamar post_food_listing."
+            )
+        if last_asked == "post_confirm" and _is_affirmative_post_confirm(message):
+            return "Confirmaron — llama post_food_listing ahora."
+        return (
+            "Sugerencia: conversacional — una pregunta por turno, un "
+            "reconocimiento cálido, luego lo que siga naturalmente."
+        )
+
+    if not state["community_confirmed"]:
+        return (
+            "Nudge: ask which school or community this goes under, and "
+            "wait for a clear yes before moving on. Phrase it however "
+            "sounds natural — this is not a fixed script."
+        )
+    if not state["expiry_provided"]:
+        if not state["expiry_asked"]:
+            return (
+                "Nudge: work an expiry / best-by question into your next "
+                "reply. Pass expiration_date as YYYY-MM-DD when posting."
+            )
+        return (
+            "Nudge: they haven't given the expiry yet — wait for it and "
+            "map it to expiration_date (YYYY-MM-DD)."
+        )
+    if state["awaiting_photo"] and last_asked == "photo" and _is_short_affirmative(message):
+        return (
+            "Nudge: they said 'yes/ok' but no photo is attached yet. "
+            "Don't post. Warmly ask them to upload it, or offer to "
+            "continue without one."
+        )
+    if state["awaiting_photo"]:
+        return (
+            "Nudge: waiting on either a photo upload or an explicit "
+            "'no photo' before summarizing / posting."
+        )
+    if not state["photo_asked"]:
+        return (
+            "Nudge: ask about a photo once (declining is fine), then give "
+            "a short summary and check 'Ready to post?'."
+        )
+    if not state["post_summary_offered"]:
+        return (
+            "Nudge: give a one-sentence summary and get an explicit "
+            "'yes / post it' before calling post_food_listing."
+        )
+    if last_asked == "post_confirm" and _is_affirmative_post_confirm(message):
+        return "They confirmed — call post_food_listing now."
+    return (
+        "Nudge: keep it conversational — one question per turn, warm "
+        "quick ack, then the next natural thing."
+    )
+
+
+def _is_affirmative_post_confirm(message: str) -> bool:
+    t = (message or "").strip().lower()
+    if not t:
+        return False
+    keys = (
+        "yes", "post it", "go ahead", "confirm", "publish", "use that",
+        "that one", "sounds good", "do it", "sí", "si ", "publicalo",
+    )
+    return any(k in t for k in keys)
+
+
+def _posting_checklist(message: str, history: list | None, lang: str) -> str:
+    """Legacy checklist — prefer build_posting_step_reminder for live turns."""
+    contextual = build_posting_step_reminder(message, history, lang=lang)
+    if contextual:
+        return contextual
+    state = posting_flow_state(message, history)
+    if lang == "es":
+        return "Flujo de publicación activo — una pregunta por turno."
+    return "Active posting flow — one question per turn."
+
+
+def _claim_checklist(lang: str) -> str:
+    if lang == "es":
+        return (
+            "Estás ayudando a reclamar comida — habla con calidez, no como formulario.\n"
+            "• Si acaban de elegir: pregunta cuántos quieren de ESE listing.\n"
+            "• Si ya dijeron cantidad: llama claim_listing ahora y confirma el resultado.\n"
+            "• Si falla: explica el error; no vuelvas a buscar sin que lo pidan."
+        )
+    return (
+        "You're helping them claim food — warm and conversational, not a form.\n"
+        "• If they just picked a listing: ask how many they want from that one.\n"
+        "• If they already gave a quantity: call claim_listing now and confirm the result.\n"
+        "• If it fails: explain the error clearly — don't re-search unless they ask."
+    )
+
+
+def _assistant_awaiting_quantity(history: list | None) -> bool:
+    """True only when the assistant asked a claim-intake quantity question."""
+    if not history:
+        return False
+    for msg in reversed(history[-4:]):
+        if msg.get("role") == "assistant":
+            text = (msg.get("message") or "").lower()
+            if _user_asking_availability(text):
+                return False
+            return any(k in text for k in _CLAIM_QTY_ASK_MARKERS)
+    return False
+
+
+def _quantity_step_complete(history: list | None, message: str) -> bool:
+    """True after the user answered a how-many question."""
+    if not _assistant_awaiting_quantity(history):
+        return False
+    t = (message or "").strip().lower()
+    if re.fullmatch(r"\d{1,3}", t):
+        return True
+    if t in ("all", "all of them", "the whole thing", "everything", "todo", "todos"):
+        return True
+    if re.search(r"\b\d+\b", t) and not _looks_like_multi_option_pick(message):
+        return True
+    return False
+
+
+def _user_just_picked_listing(message: str, history: list | None) -> bool:
+    """True when the user selects one listing from search results this turn.
+
+    Returns False when the user already gave a quantity in the same message
+    ("claim 2 oranges") so the how-many block doesn't misfire.
+    """
+    if _looks_like_multi_option_pick(message):
+        return False
+    if not _recent_search_context(history):
+        return False
+    if _assistant_awaiting_quantity(history):
+        return False
+    if _quantity_step_complete(history, message):
+        return False
+
+    # Message already contains a claim intent WITH a quantity → no "how many" needed.
+    intent = _extract_claim_intent(message)
+    if intent.get("quantity") is not None:
+        return False
+
+    t = (message or "").strip().lower()
+    if _looks_like_listing_pick(message):
+        return True
+    if any(k in t for k in _CLAIM_TRIGGERS):
+        return True
+    words = _tokenize_words(message)
+    if len(words) <= 2 and any(w in _FOOD_WORDS for w in words):
+        return True
+    return False
+
+
+def build_claim_quantity_reminder(
+    message: str,
+    history: list | None,
+    lang: str = "en",
+) -> str | None:
+    """After a listing pick, require a how-many question before claim_listing.
+
+    The exact phrasing is adapted to the food's *real-world* form: bulk
+    foods (beans, rice) get 'a bag / a few pounds', canned goods get
+    'how many cans', countable produce gets 'how many'. Falls back to
+    the generic prompt when we can't infer a food kind.
+    """
+    flow = detect_conversation_flow(message, history)
+    if flow != "claiming":
+        return None
+    if not _user_just_picked_listing(message, history):
+        return None
+
+    try:
+        from backend.ai.world_model import detect_food_kind  # local import; no hard dep
+        entry = detect_food_kind(message)
+        if not entry and history:
+            for msg in reversed(history[-8:]):
+                if msg.get("role") != "user":
+                    continue
+                entry = detect_food_kind(msg.get("message") or "")
+                if entry:
+                    break
+    except Exception:  # pragma: no cover — defensive
+        entry = None
+
+    if entry:
+        if lang == "es":
+            return (
+                f"El usuario eligió un listado de '{entry['food']}' "
+                f"(tipo {entry['kind']}). Pregunta con unidades reales: "
+                f"{entry['es_question']} No llames claim_listing todavía."
+            )
+        return (
+            f"They picked a listing for '{entry['food']}' "
+            f"({entry['kind']} item). Ask in real-world units: "
+            f"{entry['en_question']} Do not call claim_listing yet."
+        )
+
+    if lang == "es":
+        return (
+            "El usuario eligió un listado. Pregunta SOLO: '¿Cuántos quieres?' "
+            "Cita cuántos hay disponibles. No llames claim_listing todavía."
+        )
+    return (
+        "They picked a listing. Ask ONLY one warm question: how many they want. "
+        "Mention what's available. Do not call claim_listing yet."
+    )
+
+
+def _finding_checklist(message: str, history: list | None, lang: str) -> str:
+    blob_l = _history_blob(history, message, 8).lower()
+    searched = any(k in blob_l for k in (
+        "found ", "near you", "here's what's", "opciones", "cerca de ti",
+    ))
+    if lang == "es":
+        if not searched or _is_distress(message):
+            return (
+                "FLUJO ACTIVO — BUSCAR COMIDA:\n"
+                "Reconoce con calidez, llama search_food_near_user EN ESTE turno. "
+                "NO repitas la lista en texto — las tarjetas abajo muestran las "
+                "opciones. UNA frase + 'Elige un número abajo'."
+            )
+        return (
+            "FLUJO ACTIVO — ELEGIR COMIDA:\n"
+            "El usuario elige de la lista. UNA pregunta: confirmar cuál listing (#). "
+            "Después de elegir, pregunta cuántos quieren de ESE listing antes de "
+            "claim_listing. Nunca sumes cantidades de listings con el mismo nombre."
+        )
+    if not searched or _is_distress(message):
+        return (
+            "ACTIVE FLOW — FIND FOOD:\n"
+            "Acknowledge warmly, call search_food_near_user THIS turn. "
+            "Do NOT repeat the full list in prose — cards below show options. "
+            "ONE warm sentence + 'Pick a number below'."
+        )
+    return (
+        "ACTIVE FLOW — PICK FOOD:\n"
+        "User is choosing from search results. ONE question: confirm which "
+        "listing (#). After they pick, ask how many they want from THAT listing "
+        "before claim_listing. Never sum quantities across listings with the same title."
+    )
+
+
+def _request_checklist(lang: str) -> str:
+    if lang == "es":
+        return (
+            "FLUJO ACTIVO — SOLICITUD EXPLÍCITA (solo si el usuario pidió publicar "
+            "una solicitud):\n"
+            "Primero confirma que quieren una solicitud; si solo buscan comida, "
+            "usa search_food_near_user en su lugar."
+        )
+    return (
+        "ACTIVE FLOW — EXPLICIT REQUEST (only if user asked to post a request):\n"
+        "First confirm they want a request posted; if they're just looking for food, "
+        "use search_food_near_user instead."
+    )
+
+
+def natural_rhythm_prompt(lang: str = "en") -> str:
+    """Universal conversational rhythm — safe to inject on any multi-turn chat."""
+    return _natural_rhythm(lang)
+
+
+def build_turn_reminder(
+    message: str,
+    history: list | None,
+    lang: str = "en",
+    user_id: str = "",
+) -> tuple[Optional[str], FlowKind]:
+    """Build per-turn natural-flow injection and return (prompt, flow_kind)."""
+    flow = detect_conversation_flow(message, history)
+    if flow == "idle":
+        return None, flow
+
+    parts = [_natural_rhythm(lang)]
+    if flow == "posting":
+        parts.append(_posting_checklist(message, history, lang))
+    elif flow == "claiming":
+        parts.append(_claim_checklist(lang))
+    elif flow == "finding":
+        parts.append(_finding_checklist(message, history, lang))
+        avail = build_availability_answer_reminder(
+            message, history, lang=lang, user_id=user_id,
+        )
+        if avail:
+            parts.append(avail)
+    elif flow == "requesting":
+        parts.append(_request_checklist(lang))
+
+    return "\n\n".join(parts), flow
+
+
+def build_fresh_search_after_claim_reminder(
+    message: str,
+    history: list | None,
+    lang: str = "en",
+) -> str | None:
+    """After a completed claim, nudge a fresh search when user wants more food."""
+    if not is_finding_flow(message, history):
+        return None
+    last = _last_assistant_text(history)
+    if not last or not any(k in last for k in _CLAIM_SUCCESS_MARKERS):
+        return None
+    if lang == "es":
+        return (
+            "RECLAMO ANTERIOR COMPLETADO: el usuario quiere más comida. "
+            "Llama search_food_near_user EN ESTE turno. No digas que hay un "
+            "reclamo en progreso ni pidas confirmar el anterior."
+        )
+    return (
+        "PRIOR CLAIM COMPLETE: the user wants available food now. "
+        "Call search_food_near_user THIS turn. Do NOT say a claim is in "
+        "progress or ask them to finish the previous one."
+    )
+
+
+def build_last_search_snapshot_reminder(
+    user_id: str,
+    lang: str = "en",
+) -> str | None:
+    """Inject the last search results so the model can see listing qty/titles."""
+    listings = get_last_search_listings(user_id)
+    if not listings:
+        return None
+    lines: list[str] = []
+    for row in listings[:12]:
+        idx = row.get("display_index") or "?"
+        title = row.get("title") or "Unknown"
+        qty = row.get("quantity")
+        unit = (row.get("unit") or "").strip()
+        lid = row.get("id") or ""
+        if qty is not None:
+            qty_str = f"{qty} {unit}".strip()
+        else:
+            qty_str = "quantity unknown"
+        lines.append(f"  #{idx}: {title} — {qty_str} available (listing_id={lid})")
+    if lang == "es":
+        header = (
+            "LISTADOS VISIBLES (última búsqueda — el usuario los ve como tarjetas):\n"
+            "Usa estos números y cantidades para responder preguntas de disponibilidad."
+        )
+    else:
+        header = (
+            "VISIBLE LISTINGS (last search — user sees these as cards below):\n"
+            "Use these numbers and quantities when answering availability questions. "
+            "If a claim completed since this search, run search_food_near_user again "
+            "before quoting quantities."
+        )
+    return header + "\n" + "\n".join(lines)
+
+
+def build_availability_answer_reminder(
+    message: str,
+    history: list | None,
+    lang: str = "en",
+    user_id: str = "",
+) -> str | None:
+    """When user asks how much/many is left, answer from search cache — don't claim."""
+    if not _user_asking_availability(message):
+        return None
+    listings = get_last_search_listings(user_id) if user_id else []
+    hint = _mentioned_food_hint_from_message(message)
+    if hint and listings:
+        matches = [
+            row for row in listings
+            if hint in str(row.get("title") or "").lower()
+            or hint in {
+                w for w in re.findall(r"[a-z']+", str(row.get("title") or "").lower())
+            }
+        ]
+        if matches:
+            row = matches[0]
+            qty = row.get("quantity")
+            unit = (row.get("unit") or "").strip()
+            title = row.get("title") or hint
+            idx = row.get("display_index") or "?"
+            qty_str = f"{qty} {unit}".strip() if qty is not None else "an unknown amount"
+            if lang == "es":
+                return (
+                    f"PREGUNTA DE DISPONIBILIDAD: responde SOLO con el número — "
+                    f"#{idx} {title} tiene {qty_str} disponible. "
+                    "NO llames claim_listing. NO pidas disculpas por confusión."
+                )
+            return (
+                f"AVAILABILITY QUESTION: answer with the number ONLY — "
+                f"#{idx} {title} has {qty_str} available. "
+                "Do NOT call claim_listing. Do NOT apologize for confusion."
+            )
+    if lang == "es":
+        return (
+            "PREGUNTA DE DISPONIBILIDAD: lee las cantidades de los listados "
+            "visibles arriba y responde con el número exacto. NO reclames nada "
+            "en este turno. Si acabas de reclamar algo o las cantidades pueden "
+            "haber cambiado, llama search_food_near_user de nuevo primero."
+        )
+    return (
+        "AVAILABILITY QUESTION: read quantities from the visible listings above "
+        "and answer with the exact number. Do NOT claim anything this turn. "
+        "If a claim just completed or quantities may have changed, call "
+        "search_food_near_user again first for live numbers."
+    )
+
+
+# Back-compat alias used by tests
+def posting_flow_reminder(
+    message: str, history: list | None, lang: str = "en",
+) -> str | None:
+    prompt, flow = build_turn_reminder(message, history, lang)
+    return prompt if flow == "posting" else None
+
+
+# ---------------------------------------------------------------------------
+# Typo / unclear-input detection — ask user to confirm before acting
+# ---------------------------------------------------------------------------
+
+_KNOWN_TYPOS: dict[str, str] = {
+    "iam": "I am", "im": "I'm", "ive": "I've", "idk": "I don't know",
+    "bred": "bread", "brad": "bread", "appels": "apples", "aplles": "apples",
+    "banans": "bananas", "bananss": "bananas", "doughter": "daughter",
+    "desparate": "desperate", "desparat": "desperate", "alergin": "allergic",
+    "alergic": "allergic", "vigan": "vegan", "veagn": "vegan", "hambre": "hungry",
+    "hungy": "hungry", "starvingg": "starving", "comunity": "community",
+    "communtiy": "community", "adress": "address", "addres": "address",
+    "pickup": "pickup", "picup": "pickup", "loav": "loaf", "loafs": "loaves",
+    "clame": "claim", "clam": "claim", "reclamar": "claim", "pubish": "publish",
+    "postt": "post", "shre": "share", "donte": "donate",
+}
+
+_FOOD_WORDS: frozenset[str] = frozenset({
+    "bread", "apple", "apples", "banana", "bananas", "milk", "eggs", "rice",
+    "pasta", "soup", "salad", "vegetables", "produce", "chicken", "beef",
+    "fish", "cheese", "yogurt", "cereal", "beans", "tomatoes", "potatoes",
+    "onions", "carrots", "lettuce", "kale", "berries", "fruit", "snacks",
+    "loaf", "loaves", "tray", "trays", "box", "boxes", "bag", "bags",
+    "orange", "oranges", "milk", "butter", "cream", "juice", "water",
+    "spinach", "broccoli", "cabbage", "corn", "peas", "lentils", "oats",
+    "flour", "sugar", "honey", "jam", "nuts", "almonds", "peanut", "peanuts",
+})
+
+# Common words that must never be flagged as garbled (e.g. "hungry" ends in -ngry).
+_SAFE_WORDS: frozenset[str] = frozenset({
+    "hungry", "food", "need", "some", "near", "help", "share", "find", "want",
+    "have", "extra", "family", "please", "thanks", "hello", "today", "tomorrow",
+    "pickup", "delivery", "community", "school", "address", "photo", "claim",
+    "bread", "apples", "bananas", "hungry", "starving", "daughter", "desperate",
+})
+
+
+def _tokenize_words(message: str) -> list[str]:
+    return re.findall(r"[a-zA-Z#']+", (message or "").lower())
+
+
+def _is_garbled_token(word: str) -> bool:
+    w = re.sub(r"[^a-z]", "", word.lower())
+    if len(w) < 4 or w in _SAFE_WORDS:
+        return False
+    if re.search(r"(.)\1{2,}", w):
+        return True
+    # Treat y as vowel — avoids false positives on hungry, berry, etc.
+    if re.search(r"[^aeiouy]{4,}", w):
+        return True
+    return False
+
+
+def _fuzzy_food_typo(word: str) -> str | None:
+    w = re.sub(r"[^a-z]", "", word.lower())
+    if len(w) < 4 or w in _FOOD_WORDS or w in _KNOWN_TYPOS:
+        return None
+    matches = difflib.get_close_matches(w, sorted(_FOOD_WORDS), n=1, cutoff=0.78)
+    if matches and matches[0] != w:
+        return matches[0]
+    return None
+
+
+def assess_input_clarity(message: str, history: list | None = None) -> dict:
+    """Return clarity signals for typo / misread confirmation."""
+    text = (message or "").strip()
+    t_lower = text.lower()
+    flow = detect_conversation_flow(message, history)
+    in_flow = flow != "idle"
+
+    if not text or len(text) > 280:
+        return {"unclear": False, "typo_hits": [], "flow": flow}
+
+    if t_lower in _CLEAR_SHORT_REPLIES or re.fullmatch(r"#?\d{1,2}", t_lower):
+        return {"unclear": False, "typo_hits": [], "flow": flow}
+
+    typo_hits: list[dict] = []
+    for word in _tokenize_words(text):
+        clean = re.sub(r"[^a-z]", "", word.lower())
+        if not clean:
+            continue
+        if clean in _KNOWN_TYPOS:
+            typo_hits.append({"token": word, "guess": _KNOWN_TYPOS[clean]})
+            continue
+        guess = _fuzzy_food_typo(word)
+        if guess:
+            typo_hits.append({"token": word, "guess": guess})
+            continue
+        if _is_garbled_token(word):
+            typo_hits.append({"token": word, "guess": None})
+
+    # Only unclear when we have a concrete typo guess OR truly garbled unknown token
+    actionable = [h for h in typo_hits if h.get("guess") or (
+        h.get("guess") is None
+        and re.sub(r"[^a-z]", "", h["token"].lower()) not in _SAFE_WORDS
+    )]
+    unclear = bool(actionable) or (
+        in_flow and len(text.split()) == 1 and _is_garbled_token(text)
+    )
+    return {"unclear": unclear, "typo_hits": actionable, "flow": flow}
+
+
+def build_typo_confirm_reminder(
+    message: str,
+    history: list | None,
+    lang: str = "en",
+) -> str | None:
+    """Per-turn injection when input may be mistyped — confirm before acting."""
+    assessment = assess_input_clarity(message, history)
+    if not assessment["unclear"]:
+        return None
+
+    hits = assessment["typo_hits"]
+    guesses = [f"'{h['token']}' → '{h['guess']}'" for h in hits if h.get("guess")]
+    guess_line = ", ".join(guesses[:3]) if guesses else ""
+    is_distress = _is_distress(message) or assessment.get("flow") == "finding"
+
+    if lang == "es":
+        base = (
+            "POSIBLE ERROR DE ESCRITURA (este turno):\n"
+        )
+        if is_distress:
+            base += (
+                "Confirma el typo en UNA frase breve al inicio ('¿Quisiste decir …?'), "
+                "pero si expresan hambre real, llama search_food_near_user EN ESTE turno "
+                "igual — no los hagas esperar.\n"
+            )
+        else:
+            base += (
+                "NO publiques, reclames ni cambies datos hasta confirmar.\n"
+            )
+        base += (
+            "Pregunta con calidez: '¿Quisiste decir …?' Cita sus palabras y tu "
+            "mejor interpretación."
+        )
+        if guess_line:
+            base += f"\nPosibles correcciones: {guess_line}."
+        return base
+
+    base = "POSSIBLE MISSPELLING / UNCLEAR INPUT (this turn):\n"
+    if is_distress:
+        base += (
+            "Open with ONE brief spelling check ('Just to make sure — did you mean …?') "
+            "if you see a typo, but if they express real hunger still call "
+            "search_food_near_user THIS turn — do not delay help.\n"
+        )
+    else:
+        base += (
+            "Do NOT call write tools (post, claim, update) until they confirm.\n"
+            "Ask ONE warm confirmation: 'Just to make sure I caught that — did you mean …?'\n"
+        )
+    base += (
+        "Quote their words and your best guess. If still unsure, ask them "
+        "to rephrase briefly."
+    )
+    if guess_line:
+        base += f"\nLikely fixes: {guess_line}."
+    return base
+
+
+def build_ambiguous_pick_reminder(
+    message: str,
+    history: list | None,
+    lang: str = "en",
+) -> str | None:
+    """When user picks multiple listings at once, confirm intent."""
+    if not _looks_like_multi_option_pick(message) and "both" not in (message or "").lower():
+        return None
+    if not (_assistant_expects_flow_reply(history) or _recent_search_context(history)):
+        return None
+    if lang == "es":
+        return (
+            "SELECCIÓN AMBIGUA (este turno):\n"
+            "El usuario mencionó más de una opción. Pregunta UNA cosa: "
+            "'¿Quisiste decir #1, #2, o ambos?' antes de reclamar."
+        )
+    return (
+        "AMBIGUOUS PICK (this turn):\n"
+        "The user referenced multiple options. Ask ONE warm question: "
+        "'Just to confirm — did you mean #1, #2, or both?' before claiming."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Last search cache + claim_listing id resolution (display # → UUID)
+# ---------------------------------------------------------------------------
+
+_last_search_by_user: dict[str, list[dict]] = {}
+_last_donor_listings_by_user: dict[str, list[dict]] = {}
+_last_write_action_by_user: dict[str, dict] = {}
+
+
+def set_last_search_listings(user_id: str, listings: list[dict]) -> None:
+    _last_search_by_user[str(user_id)] = list(listings or [])
+
+
+def get_last_search_listings(user_id: str) -> list[dict]:
+    return _last_search_by_user.get(str(user_id), [])
+
+
+def update_last_search_listing_after_claim(
+    user_id: str,
+    listing_id: str,
+    remaining: Optional[float] = None,
+    *,
+    fully_claimed: bool = False,
+) -> None:
+    """Keep the search cache in sync after a claim so qty answers stay accurate."""
+    uid = str(user_id or "")
+    lid = str(listing_id or "")
+    if not uid or not lid:
+        return
+    rows = list(_last_search_by_user.get(uid) or [])
+    if not rows:
+        return
+    updated: list[dict] = []
+    for row in rows:
+        if str(row.get("id") or "") != lid:
+            updated.append(row)
+            continue
+        if fully_claimed or (remaining is not None and remaining <= 0):
+            continue
+        copy = dict(row)
+        if remaining is not None:
+            copy["quantity"] = remaining
+        updated.append(copy)
+    for i, row in enumerate(updated, start=1):
+        row["display_index"] = i
+    _last_search_by_user[uid] = updated
+
+
+def clear_last_search_listings(user_id: str) -> None:
+    _last_search_by_user.pop(str(user_id or ""), None)
+
+
+def set_last_donor_listings(user_id: str, listings: list[dict]) -> None:
+    rows = []
+    for i, row in enumerate(listings or [], start=1):
+        copy = dict(row)
+        copy.setdefault("display_index", i)
+        rows.append(copy)
+    _last_donor_listings_by_user[str(user_id)] = rows
+
+
+def get_last_donor_listings(user_id: str) -> list[dict]:
+    return _last_donor_listings_by_user.get(str(user_id), [])
+
+
+# ---------------------------------------------------------------------------
+# Repeat-last-action — "and to this too" / "same for #2"
+# ---------------------------------------------------------------------------
+
+REPEATABLE_WRITE_TOOLS: frozenset[str] = frozenset({
+    "update_food_listing",
+    "update_listing",
+    "edit_listing",
+    "deactivate_listing",
+    "delete_listing",
+    "claim_listing",
+    "claim_food",
+    "attach_photos_to_listing",
+})
+
+AUTO_REPEAT_TOOLS: frozenset[str] = frozenset({
+    "update_food_listing",
+    "update_listing",
+    "edit_listing",
+    "deactivate_listing",
+    "claim_listing",
+    "claim_food",
+    "attach_photos_to_listing",
+})
+
+_REPEAT_FOLLOWUP_KEYS = (
+    "and to this too", "and this too", "this one too", "that one too",
+    "and that too", "do the same", "same for", "same thing", "apply to",
+    "also for", "also to", "for this one too", "for that one too",
+    "and for ", "y tambien", "y también", "tambien para", "también para",
+    "lo mismo para", "igual para", "haz lo mismo", "same community",
+    "same change", "do that too", "that too",
+)
+
+_REPEAT_FOLLOWUP_RE = re.compile(
+    r"(?:"
+    r"and\s+(?:to\s+)?(?:this|that)(?:\s+one)?\s+too|"
+    r"(?:this|that)\s+one\s+too|"
+    r"same\s+(?:for|thing|change|community)|"
+    r"do\s+(?:the\s+)?same|"
+    r"also\s+(?:for|to|apply)|"
+    r"apply\s+(?:that|it|this)\s+to|"
+    r"and\s+(?:for\s+)?#?\d{1,2}|"
+    r"y\s+tambi[eé]n|tambi[eé]n\s+(?:para|a)|"
+    r"lo\s+mismo\s+para|igual\s+para"
+    r")",
+    re.I,
+)
+
+
+def set_last_write_action(
+    user_id: str,
+    tool: str,
+    args: dict,
+    result: dict | None = None,
+) -> None:
+    """Remember the last successful write so 'and this too' can replay it."""
+    if tool not in REPEATABLE_WRITE_TOOLS:
+        return
+    template = {
+        k: v for k, v in (args or {}).items()
+        if k not in {"user_id", "confirmed", "_resolve_error", "_bulk_delete_count"}
+        and v is not None
+    }
+    template.pop("listing_id", None)
+    template.pop("listing_ids", None)
+    template.pop("title_lookup", None)
+    listing_id = None
+    if isinstance(result, dict):
+        listing_id = result.get("listing_id")
+    listing_id = listing_id or (args or {}).get("listing_id")
+    _last_write_action_by_user[str(user_id)] = {
+        "tool": tool,
+        "args": template,
+        "listing_id": str(listing_id) if listing_id else None,
+    }
+
+
+def get_last_write_action(user_id: str) -> dict | None:
+    return _last_write_action_by_user.get(str(user_id))
+
+
+def _recent_write_in_history(history: list | None) -> bool:
+    if not history:
+        return False
+    write_words = (
+        "updated", "posted", "deleted", "claimed", "removed", "changed",
+        "actualizado", "publicado", "eliminado", "reclamado", "cambiado",
+    )
+    for msg in reversed(history[-6:]):
+        if msg.get("role") != "assistant":
+            continue
+        text = (msg.get("message") or "").lower()
+        if any(w in text for w in write_words):
+            return True
+    return False
+
+
+def is_repeat_followup(message: str, history: list | None = None) -> bool:
+    """True when the user wants the same action applied to another target."""
+    t = (message or "").strip().lower()
+    if not t:
+        return False
+    if any(k in t for k in _REPEAT_FOLLOWUP_KEYS):
+        return True
+    if _REPEAT_FOLLOWUP_RE.search(t):
+        return True
+    if re.search(r"\b(?:and|also)\s+.+\s+too\b", t):
+        return True
+    if re.search(r"\b\w+\s+one\s+too\b", t):
+        return True
+    if len(t.split()) <= 5 and _recent_write_in_history(history):
+        if re.search(r"#?\d{1,2}", t) or any(w in t for w in ("this", "that", "too", "also", "same")):
+            return True
+    return False
+
+
+def _resolve_repeat_target_listing(
+    message: str,
+    history: list | None,
+    user_id: str,
+    exclude_listing_id: str | None = None,
+) -> Optional[str]:
+    """Pick a listing id for 'and this too' — must differ from exclude."""
+    exclude = str(exclude_listing_id or "").strip()
+
+    picked = _resolve_update_listing_from_message(message, history, user_id)
+    if picked and picked != exclude:
+        return picked
+
+    current = (message or "").strip().lower()
+    for msg in reversed(history or []):
+        if msg.get("role") != "user":
+            continue
+        text = (msg.get("message") or "").strip()
+        if text.lower() == current:
+            continue
+        picked = _resolve_update_listing_from_message(text, history, user_id)
+        if picked and picked != exclude:
+            return picked
+        if text:
+            break
+
+    blob = _history_blob(history, message, limit=6).lower()
+    for row in get_last_donor_listings(user_id):
+        lid = str(row.get("id") or "")
+        if not lid or lid == exclude:
+            continue
+        title = str(row.get("title") or "").lower()
+        if title and len(title) >= 3 and title in blob:
+            return lid
+
+    for row in get_last_search_listings(user_id):
+        lid = str(row.get("id") or "")
+        if not lid or lid == exclude:
+            continue
+        title = str(row.get("title") or "").lower()
+        if title and len(title) >= 3 and title in blob:
+            return lid
+
+    return None
+
+
+def enrich_repeat_write_action(
+    tool_name: str,
+    args: dict,
+    message: str,
+    history: list | None,
+    user_id: str,
+) -> dict:
+    """Replay the last write action's fields onto a new target listing."""
+    if tool_name not in REPEATABLE_WRITE_TOOLS:
+        return dict(args or {})
+    if not is_repeat_followup(message, history):
+        return dict(args or {})
+
+    last = get_last_write_action(user_id)
+    if not last:
+        return dict(args or {})
+
+    canonical = {
+        "update_listing": "update_food_listing",
+        "edit_listing": "update_food_listing",
+        "claim_food": "claim_listing",
+    }
+    last_tool = canonical.get(last.get("tool"), last.get("tool"))
+    this_tool = canonical.get(tool_name, tool_name)
+    if last_tool != this_tool:
+        return dict(args or {})
+
+    out = dict(args or {})
+    for key, val in (last.get("args") or {}).items():
+        if val is not None and out.get(key) is None:
+            out[key] = val
+
+    exclude = last.get("listing_id")
+    if this_tool in {"update_food_listing", "deactivate_listing", "delete_listing"}:
+        if not out.get("listing_id"):
+            target = _resolve_repeat_target_listing(
+                message, history, user_id, exclude_listing_id=exclude,
+            )
+            if target:
+                out["listing_id"] = target
+        elif str(out.get("listing_id")) == str(exclude):
+            target = _resolve_repeat_target_listing(
+                message, history, user_id, exclude_listing_id=exclude,
+            )
+            if target:
+                out["listing_id"] = target
+
+    if this_tool in {"claim_listing", "claim_food"} and not out.get("listing_id"):
+        target = _resolve_repeat_target_listing(
+            message, history, user_id, exclude_listing_id=exclude,
+        )
+        if target:
+            out["listing_id"] = target
+
+    return out
+
+
+def build_repeat_action_reminder(
+    message: str,
+    history: list | None,
+    user_id: str,
+    lang: str = "en",
+) -> str | None:
+    """Nudge the model to call a write tool, not text-only success."""
+    if not is_repeat_followup(message, history):
+        return None
+    last = get_last_write_action(user_id)
+    if not last:
+        return None
+
+    fields = ", ".join(sorted((last.get("args") or {}).keys())[:6]) or "same fields"
+    if lang == "es":
+        return (
+            "REPETIR ACCIÓN (este turno — CRÍTICO):\n"
+            "El usuario quiere la MISMA acción en OTRO listado/objetivo. "
+            f"Última acción: {last.get('tool')} ({fields}). "
+            "Llama esa herramienta ESTE turno con un listing_id DIFERENTE. "
+            "NO digas que ya está hecho sin un resultado de herramienta exitoso."
+        )
+    return (
+        "REPEAT ACTION (this turn — CRITICAL):\n"
+        "The user wants the SAME change on a DIFFERENT listing/target. "
+        f"Last action: {last.get('tool')} ({fields}). "
+        "Call that tool THIS turn with a different listing_id. "
+        "Do NOT say it is done without a successful tool result."
+    )
+
+
+def resolve_listing_id_from_search(
+    raw_id,
+    user_id: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """Map display index (1-N) or UUID string to a listing id."""
+    listings = get_last_search_listings(user_id)
+    if raw_id is None:
+        return None, "missing listing_id"
+    s = str(raw_id).strip()
+    if re.match(r"^[0-9a-f-]{36}$", s, re.I):
+        return s, None
+    try:
+        idx = int(s)
+    except (TypeError, ValueError):
+        return None, (
+            f"Invalid listing_id {raw_id!r}. Use the list number 1–{len(listings)} "
+            "from the search cards, or the food name."
+        )
+    if idx < 1 or idx > len(listings):
+        return None, (
+            f"List number {idx} is out of range (1–{len(listings)}). "
+            "Run search_food_near_user again."
+        )
+    resolved = listings[idx - 1].get("id")
+    if not resolved:
+        return None, "Could not resolve listing from search index."
+    return str(resolved), None
+
+
+def resolve_donor_listing_id(
+    raw_id,
+    user_id: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """Map display index, full UUID, or truncated UUID to a donor listing id."""
+    listings = get_last_donor_listings(user_id)
+    if raw_id is None:
+        return None, "missing listing_id"
+    s = str(raw_id).strip()
+    if re.match(r"^[0-9a-f-]{36}$", s, re.I):
+        return s, None
+    if re.fullmatch(r"#?\d{1,2}", s):
+        idx = int(s.lstrip("#"))
+        if 1 <= idx <= len(listings):
+            lid = listings[idx - 1].get("id")
+            if lid:
+                return str(lid), None
+        return None, (
+            f"List number {idx} is out of range (1–{len(listings)}). "
+            "Call get_user_listings again."
+        )
+    if re.match(r"^[0-9a-f-]{8,}$", s, re.I):
+        prefix = s.lower()
+        matches = [
+            str(row["id"])
+            for row in listings
+            if str(row.get("id") or "").lower().startswith(prefix)
+        ]
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return None, (
+                "That listing id is ambiguous — ask which number from their list "
+                "(1, 2, 3…) and retry with that number or the full id."
+            )
+    return None, (
+        f"Invalid listing_id {raw_id!r}. Use the list number 1–{len(listings)} "
+        "from get_user_listings, or the food title."
+    )
+
+
+_EDIT_LISTING_TRIGGERS = (
+    "edit listing", "edit my listing", "update listing", "update my listing",
+    "change listing", "change my listing", "rename", "change to", "change it to",
+    "make it", "set quantity", "increase quantity", "decrease quantity",
+    "editar", "actualizar", "cambiar", "renombrar",
+)
+
+_RENAME_TO_RE = re.compile(
+    r"(?:change|rename|update|edit|switch|make)\s+(?:it|this|the listing)?\s*"
+    r"(?:to|as)\s+['\"]?([a-z0-9][a-z0-9\s\-]{1,40})['\"]?",
+    re.I,
+)
+_COMMUNITY_IN_DESC_RE = re.compile(r"community\s*:\s*([^.;,\n]+)", re.I)
+_EXPIRY_IN_DESC_RE = re.compile(
+    r"(?:expiry|expiration|best\s*by|expires?)\s*:\s*(\d{4}-\d{2}-\d{2})",
+    re.I,
+)
+_EXPIRY_IN_MSG_RE = re.compile(
+    r"(?:expiry|expiration|best\s*by|expires?(?:\s+on)?)\s*(?:to|is|=|:)?\s*"
+    r"(\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+    re.I,
+)
+
+
+def _donor_listing_row(user_id: str, listing_id: str) -> Optional[dict]:
+    lid = str(listing_id or "").strip()
+    if not lid:
+        return None
+    for row in get_last_donor_listings(user_id):
+        if str(row.get("id") or "") == lid:
+            return row
+    return None
+
+
+def _looks_like_listing_edit(message: str) -> bool:
+    t = (message or "").lower()
+    return any(k in t for k in _EDIT_LISTING_TRIGGERS)
+
+
+def _extract_update_quantity(message: str) -> Optional[float]:
+    t = (message or "").strip().lower()
+    if not t:
+        return None
+    m = re.search(
+        r"(?:quantity|qty|amount|servings?|portions?)\s*(?:to|is|=|:)?\s*(\d{1,4}(?:\.\d+)?)",
+        t,
+    )
+    if m:
+        return float(m.group(1))
+    m = re.search(
+        r"(?:change|set|update|make)\s+(?:the\s+)?(?:quantity|qty|amount|servings?)\s+"
+        r"(?:to|as)\s+(\d{1,4}(?:\.\d+)?)",
+        t,
+    )
+    if m:
+        return float(m.group(1))
+    if _looks_like_listing_edit(t):
+        m = re.search(r"\b(\d{1,4}(?:\.\d+)?)\b", t)
+        if m and not re.search(r"\b#?\d{1,2}\b", t):
+            return float(m.group(1))
+    return None
+
+
+def _extract_rename_title(message: str) -> Optional[str]:
+    t = (message or "").strip()
+    if not t:
+        return None
+    m = _RENAME_TO_RE.search(t)
+    if m:
+        candidate = m.group(1).strip(" .,!?:;\"'")
+        if candidate and len(candidate) >= 2:
+            return candidate[:200]
+    return None
+
+
+def _resolve_update_listing_from_message(
+    message: str,
+    history: list | None,
+    user_id: str,
+) -> Optional[str]:
+    """Pick donor listing id from '#2', display index, title, or a food-noun.
+
+    Robust to partial titles: 'update oranges add a photo' resolves to a
+    'Fresh Oranges' listing via token overlap once the exact-title match
+    misses.
+    """
+    blob = _history_blob(history, message, limit=12)
+    text = (message or "").strip()
+    listings = get_last_donor_listings(user_id)
+    if not listings:
+        return None
+
+    m = re.search(r"(?:listing\s*)?#(\d{1,2})\b", text, re.I)
+    if not m:
+        m = re.search(r"\b(?:edit|update|change|delete|remove|deactivate)\s+#?(\d{1,2})\b", text, re.I)
+    if m:
+        idx = int(m.group(1))
+        if 1 <= idx <= len(listings):
+            lid = listings[idx - 1].get("id")
+            if lid:
+                return str(lid)
+
+    if re.fullmatch(r"#?\d{1,2}", text.strip()):
+        resolved, err = resolve_donor_listing_id(text.strip(), user_id)
+        if resolved and not err:
+            return resolved
+
+    lower_blob = blob.lower()
+    for row in listings:
+        title = str(row.get("title") or "").strip()
+        if title and len(title) >= 3 and title.lower() in lower_blob:
+            lid = row.get("id")
+            if lid:
+                return str(lid)
+
+    # Token-overlap fallback: 'update oranges add a photo' finds Fresh Oranges.
+    blob_tokens = set(re.findall(r"[a-z']+", lower_blob))
+    # Discard common connector words so the overlap is meaningful.
+    stop = {
+        "add", "a", "an", "the", "to", "my", "our", "photo", "picture", "image",
+        "new", "update", "edit", "change", "please", "delete", "remove", "of",
+        "for", "and", "with", "put", "attach", "upload",
+    }
+    blob_food_tokens = blob_tokens - stop
+    if blob_food_tokens:
+        best_id: Optional[str] = None
+        best_score = 0.0
+        for row in listings:
+            title = str(row.get("title") or "").strip().lower()
+            if not title:
+                continue
+            title_tokens = set(re.findall(r"[a-z']+", title))
+            if not title_tokens:
+                continue
+            overlap = len(title_tokens & blob_food_tokens)
+            if overlap == 0:
+                continue
+            score = overlap / max(len(title_tokens), 1)
+            if score > best_score:
+                best_score = score
+                lid = row.get("id")
+                if lid:
+                    best_id = str(lid)
+        if best_id and best_score >= 0.4:
+            return best_id
+    return None
+
+
+def _unwrap_listing_metadata_from_args(args: dict) -> dict:
+    """Move Community:/Expiry: blobs out of description into real tool fields."""
+    out = dict(args or {})
+    desc = str(out.get("description") or "").strip()
+    if desc:
+        comm_m = _COMMUNITY_IN_DESC_RE.search(desc)
+        if comm_m and not out.get("community_name") and not out.get("community_id"):
+            out["community_name"] = comm_m.group(1).strip()
+        exp_m = _EXPIRY_IN_DESC_RE.search(desc)
+        if exp_m and not out.get("expiry_date"):
+            out["expiry_date"] = exp_m.group(1).strip()
+
+        cleaned = desc
+        cleaned = _COMMUNITY_IN_DESC_RE.sub("", cleaned)
+        cleaned = _EXPIRY_IN_DESC_RE.sub("", cleaned)
+        cleaned = re.sub(r"\s*[.;,\-–—]+\s*", " ", cleaned).strip(" .,;:-")
+        if not cleaned or len(cleaned) < 3:
+            out.pop("description", None)
+        elif cleaned != desc:
+            out["description"] = cleaned
+
+    return out
+
+
+def _extract_update_fields_from_message(message: str) -> dict:
+    """Pull structured edit values from natural language."""
+    out: dict = {}
+    text = (message or "").strip()
+    if not text:
+        return out
+
+    comm_m = _COMMUNITY_IN_MSG_RE.search(text)
+    if comm_m:
+        out["community_name"] = comm_m.group(1).strip(" .,;")
+
+    exp_m = _EXPIRY_IN_MSG_RE.search(text)
+    if exp_m:
+        raw = exp_m.group(1).strip()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            out["expiry_date"] = raw
+        else:
+            from backend.tools import _normalize_expiry_date
+            resolved = _normalize_expiry_date(raw)
+            if resolved:
+                out["expiry_date"] = resolved
+
+    return out
+
+
+_PHOTO_ADD_INTENT_PATTERNS = (
+    r"\badd(?:ing|s)?\s+(?:a|an|another|one\s+more|new)?\s*photo\b",
+    r"\badd(?:ing|s)?\s+(?:a|an|another|one\s+more|new)?\s*picture\b",
+    r"\badd(?:ing|s)?\s+(?:a|an|another|one\s+more|new)?\s*image\b",
+    r"\battach(?:ing|es)?\s+(?:a|an|another|new)?\s*(?:photo|picture|image)\b",
+    r"\bupload(?:ing|s)?\s+(?:a|an|another|new)?\s*(?:photo|picture|image)\b",
+    r"\bput\s+(?:a|an|another|new)?\s*(?:photo|picture|image)\b",
+    r"\bnew\s+(?:photo|picture|image)\b",
+    r"\bmore\s+(?:photos|pictures|images)\b",
+    r"\bagregar\s+(?:una?|otra|nueva)?\s*(?:foto|imagen)\b",
+    r"\badjuntar\s+(?:una?|otra|nueva)?\s*(?:foto|imagen)\b",
+    r"\bsubir\s+(?:una?|otra|nueva)?\s*(?:foto|imagen)\b",
+    r"\bponer\s+(?:una?|otra|nueva)?\s*(?:foto|imagen)\b",
+    r"\bnueva\s+(?:foto|imagen)\b",
+)
+
+_PHOTO_ADD_INTENT_RE = re.compile("|".join(_PHOTO_ADD_INTENT_PATTERNS), re.IGNORECASE)
+
+
+def _mentions_photo_add(text: str) -> bool:
+    return bool(_PHOTO_ADD_INTENT_RE.search(text or ""))
+
+
+def _resolve_donor_listing_by_food_token(
+    message: str,
+    history: list | None,
+    user_id: str,
+) -> Optional[str]:
+    """Fuzzy match donor listings by any food-noun overlap with the message.
+
+    Complements `_resolve_update_listing_from_message` (which needs the full
+    title to appear in the blob) for cases like 'update oranges add a photo'
+    where the donor referenced the food by a single word.
+    """
+    uid = str(user_id or "").strip()
+    if not uid:
+        return None
+    listings = get_last_donor_listings(uid)
+    if not listings:
+        return None
+    blob = _history_blob(history, message, limit=8).lower()
+    if not blob:
+        return None
+    blob_tokens = set(re.findall(r"[a-z']+", blob))
+    best_id: Optional[str] = None
+    best_score = 0.0
+    for row in listings:
+        title = str(row.get("title") or "").strip().lower()
+        if not title:
+            continue
+        title_tokens = set(re.findall(r"[a-z']+", title))
+        if not title_tokens:
+            continue
+        overlap = len(title_tokens & blob_tokens)
+        if overlap == 0:
+            continue
+        score = overlap / max(len(title_tokens), 1)
+        # Also bump when the whole title matches literally.
+        if title in blob:
+            score = max(score, 1.0)
+        if score > best_score:
+            best_score = score
+            lid = row.get("id")
+            if lid:
+                best_id = str(lid)
+    if best_id and best_score >= 0.4:
+        return best_id
+    return None
+
+
+def donor_photo_add_intent(
+    message: str,
+    history: list | None,
+    user_id: str,
+) -> Optional[dict]:
+    """Detect 'update <listing> add a photo' style requests.
+
+    Returns a dict with `listing_id` (best-resolved), `has_photo_url` (bool),
+    and `photo_url` (str | None). Returns None when the message is not
+    actually a photo-add intent for one of the user's own listings.
+    """
+    text = (message or "").strip()
+    if not text or not _mentions_photo_add(text):
+        return None
+
+    uid = str(user_id or "").strip()
+    listing_id: Optional[str] = None
+    if uid:
+        listing_id = _resolve_update_listing_from_message(message, history, uid)
+        if not listing_id:
+            listing_id = _resolve_donor_listing_by_food_token(
+                message, history, uid,
+            )
+        if not listing_id:
+            # Fall back to the last write action (most recent posted listing).
+            recent = get_last_write_action(uid)
+            if isinstance(recent, dict):
+                cand = recent.get("listing_id") or recent.get("args", {}).get("listing_id")
+                if cand:
+                    listing_id = str(cand)
+        if not listing_id:
+            # Final fallback: if the donor only has one listing, use it.
+            listings = get_last_donor_listings(uid)
+            if len(listings) == 1:
+                only = listings[0].get("id")
+                if only:
+                    listing_id = str(only)
+
+    photo_url = _extract_photo_url_from_history(history, message)
+    return {
+        "listing_id": listing_id,
+        "photo_url": photo_url,
+        "has_photo_url": bool(photo_url),
+    }
+
+
+def update_photo_intent_block_reason(
+    tool_name: str,
+    args: dict | None,
+    message: str,
+    history: list | None,
+    user_id: str,
+) -> str | None:
+    """Redirect update_food_listing → attach_photos_to_listing on photo intent.
+
+    The update tool has a legacy single `image_url` field but the AI should
+    prefer `attach_photos_to_listing` so we preserve any existing images.
+    Also handles the case where the user says 'add a photo' but hasn't
+    actually attached one yet — the model must ask, not fabricate.
+    """
+    if tool_name not in {"update_food_listing", "update_listing", "edit_listing"}:
+        return None
+    intent = donor_photo_add_intent(message, history, user_id)
+    if not intent:
+        return None
+    args = args or {}
+    if not intent.get("has_photo_url") and not args.get("image_url"):
+        target = intent.get("listing_id") or "the listing"
+        return (
+            "The donor asked to add a photo but no image URL is in the chat "
+            f"yet. Ask them to upload the photo now (it will appear as an "
+            f"'image: /uploads/…' line), then call attach_photos_to_listing "
+            f"with listing_id={target} and the new URL. Do NOT call "
+            "update_food_listing for a photo add."
+        )
+    # Photo is available → route to attach_photos_to_listing.
+    target = intent.get("listing_id") or "the listing"
+    url = intent.get("photo_url") or args.get("image_url") or "the uploaded URL"
+    return (
+        "For adding photos to an existing listing, call "
+        f"attach_photos_to_listing with listing_id={target} and images=[{url!r}] "
+        "instead of update_food_listing. That keeps existing photos "
+        "and de-dups new ones."
+    )
+
+
+def _normalize_update_food_listing_args(
+    args: dict,
+    message: str,
+    user_id: str,
+) -> dict:
+    """Fix common model mistakes: title_lookup vs new title, stale title field."""
+    out = dict(args or {})
+    out = _unwrap_listing_metadata_from_args(out)
+    for key, val in _extract_update_fields_from_message(message).items():
+        out.setdefault(key, val)
+    uid = str(user_id or "").strip()
+    if not uid:
+        return out
+
+    if not out.get("listing_id"):
+        picked = _resolve_update_listing_from_message(message, None, uid)
+        if picked:
+            out["listing_id"] = picked
+
+    listing_id = str(out.get("listing_id") or "").strip()
+    row = _donor_listing_row(uid, listing_id) if listing_id else None
+    current_title = str((row or {}).get("title") or "").strip()
+    title_lookup = str(out.get("title_lookup") or "").strip()
+    new_title = str(out.get("title") or "").strip()
+
+    rename_from_msg = _extract_rename_title(message)
+    if rename_from_msg:
+        out["title"] = rename_from_msg
+        new_title = rename_from_msg
+
+    if listing_id and title_lookup:
+        tl = title_lookup.lower()
+        cur = current_title.lower()
+        if cur and tl != cur and tl not in cur:
+            if not new_title or new_title.lower() == cur:
+                out["title"] = title_lookup
+                new_title = title_lookup
+        out.pop("title_lookup", None)
+    elif listing_id:
+        out.pop("title_lookup", None)
+
+    if listing_id and new_title and current_title:
+        if new_title.lower() == current_title.lower():
+            out.pop("title", None)
+
+    if out.get("quantity") is None:
+        qty = _extract_update_quantity(message)
+        if qty is not None and qty > 0:
+            out["quantity"] = qty
+
+    return out
+
+
+def _wants_delete_duplicates(message: str, history: list | None) -> bool:
+    blob = _history_blob(history, message, limit=12).lower()
+    keys = (
+        "delete all duplicate", "delete the duplicate", "remove duplicate",
+        "remove all duplicate", "delete duplicates", "remove duplicates",
+        "delete all of them", "delete them all", "remove them all",
+        "eliminar duplicados", "borrar duplicados", "elimina duplicados",
+        "borra duplicados", "quitar duplicados",
+    )
+    if any(k in blob for k in keys):
+        return True
+    if re.search(r"\b\d{1,3}\s+duplicate", blob):
+        return True
+    return "duplicate" in blob and any(
+        k in blob for k in (
+            "delete all", "remove all", "delete them", "remove them",
+            "yes delete", "confirm delete", "yes, confirm", "eliminar todo",
+            "borrar todo", "sí, confirmar", "si confirmar",
+        )
+    )
+
+
+def enrich_donor_listing_tool_args(
+    tool_name: str,
+    args: dict,
+    message: str,
+    history: list | None,
+    user_id: str,
+) -> dict:
+    """Resolve listing_id for delete / deactivate / update donor tools."""
+    out = enrich_repeat_write_action(tool_name, args, message, history, user_id)
+    uid = str(user_id or out.get("user_id") or "").strip()
+    if not uid:
+        return out
+
+    raw_lid = out.get("listing_id")
+    title = out.get("title")
+
+    # Bulk duplicate cleanup takes priority over single-listing delete.
+    if tool_name == "delete_listing" and not out.get("listing_ids") and (
+        out.get("delete_duplicates")
+        or _wants_delete_duplicates(message, history)
+    ):
+        out["delete_duplicates"] = True
+        out.pop("listing_id", None)
+        from backend.tools import duplicate_listing_ids_to_remove
+
+        donor_rows = get_last_donor_listings(uid)
+        filter_title = out.get("title")
+        remove_ids, meta = duplicate_listing_ids_to_remove(
+            donor_rows, title=filter_title,
+        )
+        if remove_ids:
+            out["listing_ids"] = remove_ids
+            out["_bulk_delete_count"] = meta.get("to_delete", len(remove_ids))
+        elif not out.get("_resolve_error"):
+            out["_resolve_error"] = (
+                "No duplicate listings found to delete. Call get_user_listings first."
+            )
+    elif raw_lid is not None and str(raw_lid).strip():
+        resolved, err = resolve_donor_listing_id(raw_lid, uid)
+        if resolved:
+            out["listing_id"] = resolved
+        elif err and not title:
+            out["_resolve_error"] = err
+
+    if tool_name != "delete_listing" or not out.get("listing_ids"):
+        if not out.get("listing_id") and not title and not out.get("listing_ids"):
+            blob = _history_blob(history, message, limit=10).lower()
+            for row in get_last_donor_listings(uid):
+                t = str(row.get("title") or "").lower()
+                if t and len(t) >= 3 and t in blob:
+                    out["listing_id"] = str(row["id"])
+                    if tool_name not in {"update_food_listing", "update_listing", "edit_listing"}:
+                        out.setdefault("title", row.get("title"))
+                    break
+
+    if tool_name in {"update_food_listing", "update_listing", "edit_listing"}:
+        out = _normalize_update_food_listing_args(out, message, uid)
+        if not out.get("listing_id"):
+            picked = _resolve_update_listing_from_message(message, history, uid)
+            if picked:
+                out["listing_id"] = picked
+
+    if tool_name == "delete_listing":
+        if _is_affirmative_post_confirm(message) or any(
+            k in (message or "").lower()
+            for k in ("delete it", "remove it", "yes delete", "erase it", "elimínalo")
+        ):
+            out["confirmed"] = True
+
+    return out
+
+
+def _extract_quantity_from_message(message: str) -> Optional[int]:
+    t = (message or "").strip().lower()
+    if not t:
+        return None
+    if re.fullmatch(r"\d{1,3}", t):
+        return int(t)
+    m = re.search(r"\b(\d{1,3})\b", t)
+    if m and not _looks_like_multi_option_pick(message):
+        return int(m.group(1))
+    return None
+
+
+# Words the user glues onto a food noun that we should ignore when
+# matching listings (`2 loaves of bread` → match on "bread").
+_QTY_UNIT_WORDS: frozenset[str] = frozenset({
+    "loaf", "loaves", "tray", "trays", "box", "boxes", "bag", "bags",
+    "bunch", "bunches", "piece", "pieces", "pack", "packs", "packet",
+    "packets", "carton", "cartons", "can", "cans", "jar", "jars",
+    "container", "containers", "bottle", "bottles", "pound", "pounds",
+    "lb", "lbs", "kg", "kilo", "kilos", "gram", "grams",
+    "cup", "cups", "unit", "units", "portion", "portions", "serving",
+    "servings", "slice", "slices", "of", "the",
+})
+
+_CLAIM_INTENT_RE = re.compile(
+    r"^\s*(?:i(?:'|)?\s*(?:ll|will)\s*take|i\s*want|i\s*need|i\s*would\s*like|"
+    r"claim|reserve|grab|take|reclamar|reservar|quiero|"
+    r"pedir|tomo|lo\s*tomo)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_claim_intent(message: str) -> dict:
+    """Parse quantity and food hint from an initial claim message.
+
+    Handles patterns like:
+      - "claim 2 oranges"          → {qty: 2, title_hint: "oranges"}
+      - "I'll take 3 loaves of bread" → {qty: 3, title_hint: "bread"}
+      - "reserve the apples"       → {title_hint: "apples"}
+      - "2 oranges please"         → {qty: 2, title_hint: "oranges"}
+      - "1 and 2"                  → {} (multi-pick, handled elsewhere)
+    """
+    out: dict = {}
+    text = (message or "").strip()
+    if not text or _looks_like_multi_option_pick(text):
+        return out
+    if _looks_like_food_quantity_spec(text):
+        # Multi-food orders belong to the batch-order path.
+        nums = re.findall(r"\d+", text)
+        if len(nums) >= 2:
+            return out
+
+    t_lower = text.lower()
+    has_claim_verb = bool(_CLAIM_INTENT_RE.search(text)) or any(
+        k in t_lower for k in _CLAIM_TRIGGERS
+    )
+
+    m = re.search(
+        r"\b(\d{1,3})\s+((?:[a-zA-Z][a-zA-Z']*\s*){1,5})",
+        text,
+    )
+    if m:
+        try:
+            qty = int(m.group(1))
+        except (TypeError, ValueError):
+            qty = None
+        raw_words = re.findall(r"[a-zA-Z']+", m.group(2).lower())
+        food_words = [w for w in raw_words if w not in _QTY_UNIT_WORDS]
+        food_hit = next((w for w in food_words if w in _FOOD_WORDS), None)
+        if qty is not None and 0 < qty <= 300 and food_hit:
+            out["quantity"] = qty
+            out["title_hint"] = food_hit
+            return out
+        if qty is not None and 0 < qty <= 300 and has_claim_verb and food_words:
+            out["quantity"] = qty
+            out["title_hint"] = food_words[-1]
+            return out
+
+    if has_claim_verb:
+        qty = _extract_quantity_from_message(text)
+        if qty is not None:
+            out["quantity"] = qty
+        food_words = [
+            w for w in re.findall(r"[a-zA-Z']+", t_lower)
+            if w in _FOOD_WORDS
+        ]
+        if food_words:
+            out["title_hint"] = food_words[-1]
+
+    return out
+
+
+def _resolve_listing_id_by_title_hint(
+    title_hint: str,
+    user_id: str,
+) -> Optional[str]:
+    """Match a food word against titles in the last search cache.
+
+    Uses substring + fuzzy match so 'oranges' finds 'Fresh Oranges' or
+    'Orange bag'. Returns the listing id when a confident match exists.
+    """
+    hint = (title_hint or "").strip().lower()
+    if not hint:
+        return None
+    listings = get_last_search_listings(user_id)
+    if not listings:
+        return None
+
+    best_id: Optional[str] = None
+    best_score = 0.0
+    for row in listings:
+        title = str(row.get("title") or "").strip().lower()
+        if not title:
+            continue
+        title_tokens = set(re.findall(r"[a-z']+", title))
+        if hint in title_tokens or hint in title:
+            score = 0.95
+        else:
+            score = difflib.SequenceMatcher(None, hint, title).ratio()
+            for tok in title_tokens:
+                score = max(score, difflib.SequenceMatcher(None, hint, tok).ratio())
+        if score > best_score:
+            best_score = score
+            lid = row.get("id")
+            if lid:
+                best_id = str(lid)
+    if best_id and best_score >= 0.72:
+        return best_id
+    return None
+
+
+def _last_search_food_titles(user_id: str) -> list[str]:
+    """Titles from the last search cache (used for pivot detection)."""
+    return [
+        str(row.get("title") or "").strip().lower()
+        for row in get_last_search_listings(user_id)
+        if row.get("title")
+    ]
+
+
+def _mentioned_food_hint_from_message(message: str) -> Optional[str]:
+    """Best-guess food noun the user just referenced."""
+    intent = _extract_claim_intent(message)
+    if intent.get("title_hint"):
+        return intent["title_hint"]
+    words = [w for w in re.findall(r"[a-zA-Z']+", (message or "").lower())]
+    for w in words:
+        if w in _FOOD_WORDS:
+            return w
+    return None
+
+
+def _user_pivoted_claim_target(
+    message: str,
+    history: list | None,
+    user_id: str = "",
+) -> bool:
+    """Detect when the user switches to a different listing mid-claim.
+
+    Triggers on either an explicit pivot phrase ('actually', 'instead',
+    'wait, I want ...') OR a different index / food than what was already
+    picked in this thread. Lets the search / claim flow reset gracefully
+    instead of forcing the user through the previous claim.
+    """
+    t = (message or "").strip().lower()
+    if not t:
+        return False
+
+    pivot_phrases = (
+        "actually", "instead", "wait", "on second thought", "change my mind",
+        "changed my mind", "nope", "never mind", "nevermind", "cancel that",
+        "hold on", "scratch that", "un momento", "espera", "mejor",
+        "en realidad", "cambié de opinión", "cambio de opinion",
+    )
+    if any(p in t for p in pivot_phrases):
+        return True
+
+    intent = _extract_claim_intent(message)
+    new_title = intent.get("title_hint")
+    if not new_title and _looks_like_listing_pick(message):
+        # numeric pick — see if it's different from what was picked before
+        nums = re.findall(r"\d+", t)
+        current_idx = None
+        if nums:
+            try:
+                current_idx = int(nums[0])
+            except (TypeError, ValueError):
+                current_idx = None
+        if current_idx is not None and history:
+            for msg in reversed(history[-6:]):
+                if msg.get("role") != "user":
+                    continue
+                prev = (msg.get("message") or "").strip().lower()
+                prev_nums = re.findall(r"\d+", prev)
+                if prev_nums:
+                    try:
+                        prev_idx = int(prev_nums[0])
+                    except (TypeError, ValueError):
+                        prev_idx = None
+                    if prev_idx is not None and prev_idx != current_idx:
+                        return True
+                    break
+
+    if new_title and history:
+        # If the previous user turn mentioned a different food word, pivot.
+        for msg in reversed(history[-6:]):
+            if msg.get("role") != "user":
+                continue
+            prev_hint = _mentioned_food_hint_from_message(
+                msg.get("message") or "",
+            )
+            if prev_hint and prev_hint != new_title:
+                return True
+            break
+
+    return False
+
+
+def build_claim_execute_reminder(
+    message: str,
+    history: list | None,
+    lang: str = "en",
+) -> str | None:
+    """After quantity is known, nudge the model to claim immediately."""
+    if detect_conversation_flow(message, history) != "claiming":
+        return None
+    if not _quantity_step_complete(history, message):
+        return None
+    if lang == "es":
+        return (
+            "RECLAMAR AHORA (este turno):\n"
+            "Ya tienen listing y cantidad. Llama claim_listing en este turno "
+            "con el listing que eligieron y la cantidad. Luego confirma con "
+            "calidez (dirección de recogida si la tienes). No pidas más confirmación."
+        )
+    return (
+        "CLAIM NOW (this turn):\n"
+        "They picked a listing and gave a quantity. Call claim_listing this turn "
+        "with that listing and quantity, then reply warmly with pickup details. "
+        "Do not ask another confirmation question first."
+    )
+
+
+def _last_listing_pick_from_history(
+    history: list | None,
+    user_id: str,
+) -> Optional[str]:
+    """Find the most recent single listing pick in chat history."""
+    listings = get_last_search_listings(user_id)
+    if not listings or not history:
+        return None
+    for msg in reversed(history):
+        if msg.get("role") != "user":
+            continue
+        text = (msg.get("message") or "").strip()
+        if not text or _looks_like_multi_option_pick(text):
+            continue
+        if not (_looks_like_listing_pick(text) or any(
+            k in text.lower() for k in _CLAIM_TRIGGERS
+        )):
+            continue
+        raw = text.lstrip("#").strip()
+        if re.fullmatch(r"\d{1,2}", raw):
+            resolved, err = resolve_listing_id_from_search(int(raw), user_id)
+            if resolved and not err:
+                return resolved
+        for idx, row in enumerate(listings, start=1):
+            title = str(row.get("title") or "").lower()
+            if title and title in text.lower():
+                lid = row.get("id")
+                if lid:
+                    return str(lid)
+    return None
+
+
+def enrich_claim_listing_args(
+    args: dict,
+    message: str,
+    history: list | None,
+    user_id: str,
+) -> dict:
+    """Resolve display index → UUID and attach quantity when inferable.
+
+    Supports one-shot claim messages ("claim 2 oranges") by parsing the
+    intent up front and reconciling with the last search cache before
+    falling back to earlier picks in history.
+    """
+    out = enrich_repeat_write_action("claim_listing", args, message, history, user_id)
+    uid = str(user_id or out.get("user_id") or "")
+
+    intent = _extract_claim_intent(message)
+
+    resolved, err = resolve_listing_id_from_search(out.get("listing_id"), uid)
+    if resolved:
+        out["listing_id"] = resolved
+        out["_resolved_from_index"] = str(args.get("listing_id")) != resolved
+    if err:
+        out["_resolve_error"] = err
+
+    if (not out.get("listing_id") or out.get("_resolve_error")) and intent.get("title_hint"):
+        picked = _resolve_listing_id_by_title_hint(intent["title_hint"], uid)
+        if picked:
+            out["listing_id"] = picked
+            out.pop("_resolve_error", None)
+            out["_resolved_from_title"] = True
+        elif get_last_search_listings(uid):
+            out["_no_matching_listing_food"] = intent["title_hint"]
+
+    if not out.get("listing_id") or out.get("_resolve_error"):
+        if not out.get("_no_matching_listing_food"):
+            from_history = _last_listing_pick_from_history(history, uid)
+            if from_history:
+                out["listing_id"] = from_history
+                out.pop("_resolve_error", None)
+                out["_resolved_from_history"] = True
+
+    if out.get("quantity") is None and intent.get("quantity") is not None:
+        out["quantity"] = intent["quantity"]
+
+    if out.get("quantity") is None:
+        if _quantity_step_complete(history, message) or _assistant_awaiting_quantity(history):
+            qty = _extract_quantity_from_message(message)
+            if qty is not None:
+                out["quantity"] = qty
+    if out.get("quantity") is None and _quantity_step_complete(history, message):
+        out["quantity"] = 1
+    return out
+
+
+def claiming_tool_block_reason(
+    message: str,
+    history: list | None,
+    fn_args: dict | None = None,
+    user_id: str = "",
+) -> str | None:
+    """Block premature claim_listing before quantity/listing is verified.
+
+    Priorities (checked in order):
+      0. User is asking availability — answer qty, don't claim.
+      1. User asked for a food that isn't in the last search results —
+         tell the model to search that specific food instead of pretending
+         to claim something we haven't verified exists.
+      2. No listing_id could be resolved at all — tell the model to search.
+      3. User picked a listing but hasn't said how many yet — ask quantity.
+    """
+    if _user_asking_availability(message):
+        return (
+            "The user is asking how much/many is available — answer with "
+            "the quantity from the visible listings. Do NOT call "
+            "claim_listing this turn."
+        )
+
+    args = fn_args or {}
+    uid = str(user_id or args.get("user_id") or "")
+
+    no_match_food = args.get("_no_matching_listing_food")
+    if no_match_food:
+        return (
+            f"You don't have a listing for '{no_match_food}' in the current "
+            "search results — do NOT ask 'how many'. Call search_food_near_user "
+            f"with title_query='{no_match_food}' to see if it's available, then let "
+            "the user pick from the fresh results."
+        )
+
+    intent = _extract_claim_intent(message)
+    hint = intent.get("title_hint") or _mentioned_food_hint_from_message(message)
+    if hint and uid and get_last_search_listings(uid):
+        titles = _last_search_food_titles(uid)
+        if titles and not any(hint in t for t in titles):
+            # Only fire when the model actually tried to claim without a
+            # verified listing_id; otherwise pass-through and let the model
+            # ask a clarifying question or search.
+            if not args.get("listing_id"):
+                return (
+                    f"You don't have a listing for '{hint}' in the current "
+                    "search results. Do NOT invent one — call "
+                    f"search_food_near_user with title_query='{hint}' first."
+                )
+
+    if not args.get("listing_id") and not _last_listing_pick_from_history(history, uid):
+        # No listing anywhere — don't ask quantity in the void.
+        if _user_just_picked_listing(message, history) is False and hint:
+            return (
+                f"No listing yet for '{hint}'. Run search_food_near_user "
+                "(or ask which numbered option they meant) before claiming."
+            )
+
+    if not _user_just_picked_listing(message, history):
+        return None
+    return (
+        "Ask how many they want from that listing before calling claim_listing."
+    )
+
+
+_CLAIM_DISTRACTOR_TOOLS = frozenset({
+    "search_food_near_user",
+    "get_active_communities",
+    "get_profile_gaps",
+})
+
+
+def _user_wants_fresh_search(message: str) -> bool:
+    t = (message or "").lower()
+    return any(k in t for k in (
+        "search again", "other options", "something else", "different listing",
+        "show me more", "find food", "what else", "another option", "other food",
+        "available food", "what's available", "whats available", "show available",
+        "any food", "new food", "more food", "food near", "near me", "nearby",
+        "buscar otra", "otra opción", "algo más", "buscar de nuevo",
+        "buscar comida", "busco comida",
+    ))
+
+
+def claiming_distractor_tool_block_reason(
+    tool_name: str,
+    message: str,
+    history: list | None,
+    user_id: str = "",
+) -> str | None:
+    """Stop search/community/profile tools from hijacking an in-progress claim.
+
+    Yields to the search tool when the user pivots to a new food/listing —
+    otherwise Nouri keeps saying 'claim in progress' when the user just
+    wanted to switch targets.
+    """
+    if tool_name not in _CLAIM_DISTRACTOR_TOOLS:
+        return None
+    if is_finding_flow(message, history) or _user_wants_fresh_search(message):
+        return None
+    if detect_conversation_flow(message, history) != "claiming":
+        return None
+    if _user_pivoted_claim_target(message, history, str(user_id or "")):
+        return None
+    if _quantity_step_complete(history, message):
+        return (
+            f"Do not call {tool_name} — the user gave a quantity. "
+            "Call claim_listing now with their listing and quantity."
+        )
+    if _user_just_picked_listing(message, history):
+        return (
+            f"Do not call {tool_name} — the user just picked a listing. "
+            "Ask how many they want first."
+        )
+    if _assistant_awaiting_quantity(history):
+        return (
+            f"Do not call {tool_name} — waiting for the user's quantity answer."
+        )
+    return (
+        f"Do not call {tool_name} during an active claim. "
+        "Finish claim_listing or ask one clarifying question."
+    )
+
+
+def _user_wants_different_community(message: str) -> bool:
+    t = (message or "").lower()
+    return any(k in t for k in (
+        "different community", "different school", "other community",
+        "another school", "not that one", "change community",
+        "otra comunidad", "otra escuela", "cambiar comunidad",
+    ))
+
+
+def _posting_community_already_shown(history: list | None) -> bool:
+    blob_l = _history_blob(history, "", limit=14).lower()
+    return any(p in blob_l for p in (
+        "alameda unified", "which community", "which school", "list under",
+        "school district", "go under", "active communit", "comunidad",
+        "escuela", "different one", "list this under",
+    ))
+
+
+def posting_distractor_tool_block_reason(
+    tool_name: str,
+    message: str,
+    history: list | None,
+) -> str | None:
+    """Stop repeated get_active_communities calls from hijacking share flow."""
+    if tool_name != "get_active_communities":
+        return None
+    if not is_posting_flow(message, history):
+        return None
+    if _user_wants_different_community(message):
+        return None
+    if not _posting_community_already_shown(history):
+        return None
+    return (
+        "Do not call get_active_communities again — you already showed communities. "
+        "Ask the donor to confirm the school/community (yes or the name), then call "
+        "post_food_listing with community_name and community_confirmed=true."
+    )
+
+
+def build_food_order_spec_reminder(
+    message: str,
+    history: list | None,
+    lang: str = "en",
+) -> str | None:
+    """When user lists foods + amounts, map each to one listing at a time."""
+    if not _looks_like_food_quantity_spec(message):
+        return None
+    if not _recent_search_context(history):
+        return None
+    if lang == "es":
+        return (
+            "PEDIDO CON CANTIDADES (este turno):\n"
+            "El usuario pidió comidas con cantidades. NO sumes listings iguales. "
+            "Pregunta UNA cosa: confirma el listing # para el PRIMER artículo "
+            "y cuántos quieren de ESE listing antes de claim_listing."
+        )
+    return (
+        "FOOD + QUANTITY ORDER (this turn):\n"
+        "The user named foods with amounts (not listing numbers). "
+        "Do NOT add quantities across duplicate titles. "
+        "Ask ONE question: confirm which listing # matches the FIRST item, "
+        "then how many they want from THAT listing only — before claim_listing."
+    )

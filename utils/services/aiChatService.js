@@ -10,7 +10,6 @@ import {
   cacheInsights,
   computeLocalInsights,
 } from './insightsFallback.js'
-import { buildChatFallback } from './chatFallback.js'
 import { normalizeToolResults } from './normalizeToolResults.js'
 
 /**
@@ -31,63 +30,24 @@ const REQUEST_TIMEOUT = 60000 // allow time for tool-calling flows (GPT call + t
 // Re-export so callers / UI can subscribe to AI health without an extra import path
 export { aiHealth }
 
-/** Normalize backend suggestion chips (strings or proactive objects) for the UI. */
-export function normalizeSuggestionChips(raw = []) {
-  if (!Array.isArray(raw)) return []
-  const out = []
-  const seen = new Set()
-  for (const item of raw) {
-    let chip = item
-    if (typeof item === 'string') {
-      const label = item.trim()
-      if (!label || seen.has(label)) continue
-      seen.add(label)
-      out.push(label)
-      continue
-    }
-    if (!item || typeof item !== 'object') continue
-    const label = String(
-      item.label || item.action_label || item.message || item.prompt || item.text || '',
-    ).trim()
-    const message = String(
-      item.message || item.prompt || item.text || item.query || label,
-    ).trim()
-    // Display label; send the full prompt when they differ (e.g. next-step chips).
-    const sendText = (
-      item.prompt && item.label && item.prompt !== item.label
-        ? item.prompt
-        : message
-    )
-    if (!label || seen.has(label)) continue
-    seen.add(label)
-    chip = {
-      ...item,
-      label,
-      message: sendText,
-      action: item.action || (item.href || item.target ? 'navigate' : 'send'),
-    }
-    out.push(chip)
-  }
-  return out
-}
-
 /** Map a successful /api/ai/chat JSON body to the frontend contract. */
 function mapChatSuccess(data, requestId = null) {
-  const toolResults = normalizeToolResults(data.tool_results || [])
+  const toolResults = normalizeToolResults(data.actions || data.tool_results || [])
+  const pendingAction = data.pending_action || toolResults.find(
+    (tr) => tr.type === 'requires_confirmation'
+  ) || null
   return {
     response: data.text,
     lang: data.lang || 'en',
+    tone: data.tone || 'warm',
     audioUrl: data.audio_url || null,
     conversationId: data.conversation_id || null,
-    turnId: data.turn_id || null,
     toolResults,
-    suggestions: normalizeSuggestionChips(data.suggestions || []),
+    suggestions: data.suggestions || [],
     nextStep: data.next_step || null,
     action: extractActionFromToolResults(toolResults),
-    pendingAction: data.pending_action || null,
-    confirmationRecommended: Boolean(data.confirmation_recommended),
-    confirmationSummary: data.confirmation_summary || null,
-    toolAudit: Array.isArray(data.tool_audit) ? data.tool_audit : [],
+    requiresConfirmation: !!data.requires_confirmation || !!pendingAction,
+    pendingAction,
     requestId,
     error: null,
   }
@@ -122,70 +82,40 @@ class AIChatService {
    *   On typed backend error (4xx/5xx with JSON body) →
    *     { response: null, error: { code, message, retryable, retryAfter,
    *       requestId, status }, requestId, lang }
-   *   On full backend outage (network / circuit open) → buildChatFallback(...)
-   *     which returns { response: "...", degraded: true, ... } so the UI
-   *     never breaks.
+   *   On network error → throws, caller handles it.
    */
-  async sendMessage(message, { userId, includeAudio = false, silent = false, conversationId = null } = {}) {
-    try {
-      const payload = {
-        user_id: userId,
-        message,
-        include_audio: includeAudio,
-        silent,
+  async sendMessage(message, { userId, includeAudio = false, silent = false, tone = null } = {}) {
+    const response = await resilientFetch(
+      `${API_BASE}/chat`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: userId,
+          message,
+          include_audio: includeAudio,
+          silent,
+          ...(tone ? { tone } : {}),
+        }),
+      },
+      { timeout: REQUEST_TIMEOUT }
+    )
+
+    const requestId = response.headers.get('X-Request-ID') || null
+
+    if (!response.ok) {
+      const typed = await mapChatError(response)
+      if (typed) {
+        console.warn(`[ai/chat] backend error ${typed.error?.code} (${typed.error?.status})`)
+        return typed
       }
-      if (conversationId) {
-        payload.conversation_id = conversationId
-      }
-
-      const response = await resilientFetch(
-        `${API_BASE}/chat`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        },
-        {
-          retries: 3,
-          timeout: REQUEST_TIMEOUT,
-          backoff: [500, 1500, 3000],
-          label: 'ai/chat',
-          // Self-healing: when the backend is unreachable, return a
-          // deterministic helpful reply instead of throwing. The user
-          // still gets value while the circuit breaker reconnects.
-          fallback: () => buildChatFallback(message),
-        }
-      )
-
-      // If the self-healing fallback fired, it returned a plain object,
-      // not a Response — pass it through directly.
-      if (!(response instanceof Response)) {
-        return response
-      }
-
-      const requestId = response.headers.get('X-Request-ID') || null
-
-      if (!response.ok) {
-        const typed = await mapChatError(response)
-        if (typed) {
-          console.warn(
-            `[ai/chat] backend error ${typed.error.code} (${typed.error.status})`,
-            { requestId: typed.requestId, message: typed.error.message }
-          )
-          return typed
-        }
-        console.error('AI backend error (unstructured):', response.status)
-        return buildChatFallback(message)
-      }
-
-      const data = await response.json()
-      return mapChatSuccess(data, requestId)
-    } catch (error) {
-      console.error('AI chat service error:', error)
-      reportError(error)
-      // Last-resort heal: never let the chat UI break
-      return buildChatFallback(message)
+      const err = new Error(`AI chat failed: HTTP ${response.status}`)
+      err.status = response.status
+      throw err
     }
+
+    const data = await response.json()
+    return mapChatSuccess(data, requestId)
   }
 
   /**
@@ -202,13 +132,14 @@ class AIChatService {
    * @param {boolean} silent       - skip persisting the transcript as a user row
    * @returns {{ response: string, transcript: string, lang: string, audioUrl: string|null }}
    */
-  async sendVoice(audioBlob, { userId, includeAudio = true, silent = false } = {}) {
+  async sendVoice(audioBlob, { userId, includeAudio = true, silent = false, tone = null } = {}) {
     try {
       const formData = new FormData()
       formData.append('audio', audioBlob, 'audio.webm')
       formData.append('user_id', userId)
       formData.append('include_audio', includeAudio.toString())
       formData.append('silent', silent ? 'true' : 'false')
+      if (tone) formData.append('tone', tone)
 
       const response = await resilientFetch(
         `${API_BASE}/voice`,
@@ -348,68 +279,54 @@ class AIChatService {
   }
 
   /**
-   * Confirm or cancel a pending destructive action queued by the agent.
-   *
-   * @param {string} pendingId - from `pending_action.pending_id`
-   * @param {'confirm'|'cancel'} decision
-   * @returns {Promise<{ status: string, tool?: string, summary?: string, error?: string }>}
+   * Get the user's preferred conversation tone.
    */
-  async confirmAction(pendingId, decision = 'confirm') {
-    if (!pendingId) throw new Error('pendingId is required')
+  async getTone(userId) {
     try {
-      const data = await resilientPostJson(
-        `${API_BASE}/confirm`,
-        { pending_id: pendingId, decision },
-        {
-          retries: 1,
-          timeout: 30000,
-          backoff: [500],
-          label: 'ai/confirm',
-        }
+      const response = await resilientFetch(
+        `${API_BASE}/tone/${encodeURIComponent(userId)}`,
+        { method: 'GET' },
+        { retries: 1, timeout: 10000, label: 'ai/tone-get' }
       )
-      return {
-        status: data.status || 'failed',
-        tool: data.tool || null,
-        summary: data.summary || null,
-        auditId: data.audit_id || null,
-        error: data.error || null,
-      }
+      if (!response.ok) return 'warm'
+      const data = await response.json()
+      return data.tone || 'warm'
     } catch (error) {
-      console.error('Confirm action error:', error)
-      reportError(error)
-      throw error
+      console.warn('Get AI tone error:', error?.message || error)
+      return 'warm'
     }
   }
 
   /**
-   * Roll back a committed write via its audit log id (from tool_audit).
-   *
-   * @param {string} auditId
-   * @returns {Promise<{ status: string, auditId?: string, error?: string }>}
+   * Save the user's preferred conversation tone.
    */
-  async rollbackAction(auditId) {
-    if (!auditId) throw new Error('auditId is required')
-    try {
-      const data = await resilientPostJson(
-        `${API_BASE}/rollback`,
-        { audit_id: auditId },
-        {
-          retries: 1,
-          timeout: 30000,
-          backoff: [500],
-          label: 'ai/rollback',
-        }
-      )
-      return {
-        status: data.status || 'failed',
-        auditId: data.audit_id || auditId,
-        error: data.error || null,
-      }
-    } catch (error) {
-      console.error('Rollback action error:', error)
-      reportError(error)
-      throw error
+  async setTone(userId, tone) {
+    const response = await resilientFetch(
+      `${API_BASE}/tone/${encodeURIComponent(userId)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tone }),
+      },
+      { retries: 1, timeout: 10000, label: 'ai/tone-set' }
+    )
+    if (!response.ok) {
+      await throwAiHttpError(response, 'Set tone failed')
     }
+    const data = await response.json()
+    return data.tone || tone
+  }
+
+  /**
+   * Confirm or cancel a pending destructive action (post, delete, bulk import).
+   */
+  async confirmAction(userId, confirmed = true) {
+    const response = await resilientPostJson(
+      `${API_BASE}/confirm`,
+      { user_id: userId, confirmed },
+      { retries: 1, timeout: REQUEST_TIMEOUT, label: 'ai/confirm' }
+    )
+    return mapChatSuccess(response, null)
   }
 
   /**

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useAIChat } from '../../utils/hooks/useAIChat.js'
+import { useAIChat, AI_TONE_OPTIONS, AI_TONE_LABELS } from '../../utils/hooks/useAIChat.js'
 import { useAuthContext } from '../../utils/AuthContext.jsx'
 import { useMapContext } from '../../utils/MapContext.jsx'
 import { useUIControl } from '../../utils/UIControlContext.jsx'
@@ -12,7 +12,6 @@ import { assignImagestoRows, assignFoodImage } from '../../utils/foodImages.js'
 import dataService from '../../utils/dataService.js'
 import supabase from '../../utils/supabaseClient.js'
 import { toast } from 'react-toastify'
-import { getLazyPreChips, resolveInputChips } from '../../utils/suggestionChips.js'
 
 // ─── Welcome hero categories (richer onboarding surface) ───────────
 // Replaces the flat 6-pill row when the chat is empty. Each category
@@ -20,14 +19,25 @@ import { getLazyPreChips, resolveInputChips } from '../../utils/suggestionChips.
 // Nouri can do, organized by intent (Find / Share / Manage / Learn).
 const WELCOME_CATEGORIES_EN = [
   {
+    key: 'guide',
+    icon: 'fa-compass',
+    accent: 'amber',
+    title: 'Not sure?',
+    blurb: 'I’ll walk you through it',
+    prompts: [
+      'I\'m not sure what to do — help me',
+      'How does DoGoods work?',
+    ],
+  },
+  {
     key: 'find',
     icon: 'fa-magnifying-glass-location',
     accent: 'emerald',
     title: 'Find food',
     blurb: 'Discover nearby donations',
     prompts: [
-      'What food is available near me?',
-      'Find food expiring soon',
+      'Find free food near me',
+      'Show food expiring soon',
     ],
   },
   {
@@ -35,10 +45,10 @@ const WELCOME_CATEGORIES_EN = [
     icon: 'fa-hand-holding-heart',
     accent: 'fuchsia',
     title: 'Share food',
-    blurb: 'Post or upload listings',
+    blurb: 'Post in 2 taps',
     prompts: [
-      'I want to share some food',
-      'Help me post a listing from a photo',
+      'Share extra food from my address',
+      'Post 5 apples — use my profile address',
     ],
   },
   {
@@ -52,20 +62,20 @@ const WELCOME_CATEGORIES_EN = [
       'Show my impact stats',
     ],
   },
-  {
-    key: 'learn',
-    icon: 'fa-circle-question',
-    accent: 'sky',
-    title: 'Learn & cook',
-    blurb: 'Recipes and how-to',
-    prompts: [
-      'Suggest a recipe from available food',
-      'How does DoGoods work?',
-    ],
-  },
 ]
 
 const WELCOME_CATEGORIES_ES = [
+  {
+    key: 'guide',
+    icon: 'fa-compass',
+    accent: 'amber',
+    title: '¿No estás seguro?',
+    blurb: 'Te guío paso a paso',
+    prompts: [
+      'No sé qué hacer — ayúdame',
+      '¿Cómo funciona DoGoods?',
+    ],
+  },
   {
     key: 'find',
     icon: 'fa-magnifying-glass-location',
@@ -73,7 +83,7 @@ const WELCOME_CATEGORIES_ES = [
     title: 'Buscar comida',
     blurb: 'Donaciones cerca de ti',
     prompts: [
-      '¿Qué comida hay disponible cerca de mí?',
+      'Buscar comida gratis cerca',
       'Comida que vence pronto',
     ],
   },
@@ -82,10 +92,10 @@ const WELCOME_CATEGORIES_ES = [
     icon: 'fa-hand-holding-heart',
     accent: 'fuchsia',
     title: 'Compartir comida',
-    blurb: 'Publica o sube listados',
+    blurb: 'Publicar en 2 pasos',
     prompts: [
-      'Quiero compartir comida',
-      'Ayúdame a publicar desde una foto',
+      'Compartir comida extra desde mi dirección',
+      'Publicar 5 manzanas — usa mi dirección guardada',
     ],
   },
   {
@@ -97,17 +107,6 @@ const WELCOME_CATEGORIES_ES = [
     prompts: [
       '¿Cuáles son mis próximas recogidas?',
       'Muestra mis estadísticas de impacto',
-    ],
-  },
-  {
-    key: 'learn',
-    icon: 'fa-circle-question',
-    accent: 'sky',
-    title: 'Aprender y cocinar',
-    blurb: 'Recetas y guías',
-    prompts: [
-      'Sugiéreme una receta con lo disponible',
-      '¿Cómo funciona DoGoods?',
     ],
   },
 ]
@@ -128,16 +127,22 @@ const ACCENT_MAP = {
     promptHover: 'hover:bg-fuchsia-500/10 hover:text-fuchsia-200',
   },
   cyan: {
-    iconBg: 'bg-cyan-500/15 text-cyan-300 ring-cyan-400/30',
-    border: 'border-cyan-500/20 hover:border-cyan-400/40',
-    glow: 'hover:shadow-cyan-500/10',
-    promptHover: 'hover:bg-cyan-500/10 hover:text-cyan-200',
+    iconBg: 'bg-[#2CABE3]/15 text-[#2CABE3] ring-[#2CABE3]/30',
+    border: 'border-[#2CABE3]/20 hover:border-[#2CABE3]/40',
+    glow: 'hover:shadow-[#2CABE3]/10',
+    promptHover: 'hover:bg-[#2CABE3]/10 hover:text-[#2299c7]',
   },
   sky: {
-    iconBg: 'bg-sky-500/15 text-sky-300 ring-sky-400/30',
+    iconBg: 'bg-sky-500/15 text-sky-600 ring-sky-400/30',
     border: 'border-sky-500/20 hover:border-sky-400/40',
     glow: 'hover:shadow-sky-500/10',
-    promptHover: 'hover:bg-sky-500/10 hover:text-sky-200',
+    promptHover: 'hover:bg-sky-500/10 hover:text-sky-700',
+  },
+  amber: {
+    iconBg: 'bg-amber-500/15 text-amber-600 ring-amber-400/30',
+    border: 'border-amber-500/20 hover:border-amber-400/40',
+    glow: 'hover:shadow-amber-500/10',
+    promptHover: 'hover:bg-amber-500/10 hover:text-amber-800',
   },
 }
 
@@ -148,28 +153,14 @@ function WelcomeHero({ language, userName, onPromptClick }) {
     ? (userName ? `¡Hola, ${userName}!` : '¡Hola!')
     : (userName ? `Hi, ${userName}!` : 'Hi there!')
   const subtitle = language === 'es'
-    ? 'Soy Nouri. ¿Cómo puedo ayudarte hoy?'
-    : "I'm Nouri. What would you like to do?"
+    ? 'Elige una opción abajo o escríbeme — te guío paso a paso.'
+    : 'Pick an option below or type anything — I’ll guide you step by step.'
 
   return (
     <div className="px-4 pt-3 pb-2">
       <div className="mb-3">
-        <h2 className="text-base font-semibold text-cyan-100 tracking-tight">{greeting}</h2>
-        <p className="text-xs text-slate-400/90 mt-0.5">{subtitle}</p>
-      </div>
-
-      {/* Quick one-tap chips — tap to send, no typing required */}
-      <div className="flex flex-wrap gap-1.5 mb-3">
-        {getLazyPreChips(language).slice(0, 4).map((chip) => (
-          <button
-            key={chip}
-            type="button"
-            onClick={() => onPromptClick?.(chip)}
-            className="text-[11px] px-2.5 py-1 rounded-full bg-cyan-500/10 text-cyan-200 border border-cyan-500/25 hover:bg-cyan-500/20 transition-colors"
-          >
-            {chip}
-          </button>
-        ))}
+        <h2 className="text-base font-semibold text-gray-900 tracking-tight">{greeting}</h2>
+        <p className="text-xs text-gray-600 mt-0.5">{subtitle}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-2">
@@ -178,15 +169,15 @@ function WelcomeHero({ language, userName, onPromptClick }) {
           return (
             <div
               key={cat.key}
-              className={`rounded-xl p-3 bg-slate-800/50 backdrop-blur-sm border transition-all ${accent.border} hover:bg-slate-800/70 hover:shadow-md ${accent.glow}`}
+              className={`rounded-xl p-3 bg-white/70 backdrop-blur-sm border transition-all ${accent.border} hover:bg-white/90 hover:shadow-md shadow-sm ${accent.glow}`}
             >
               <div className="flex items-center gap-2 mb-1.5">
                 <span className={`w-7 h-7 rounded-lg ring-1 flex items-center justify-center ${accent.iconBg}`}>
                   <i className={`fas ${cat.icon} text-xs`} aria-hidden="true" />
                 </span>
                 <div className="min-w-0">
-                  <div className="text-xs font-semibold text-slate-100 truncate">{cat.title}</div>
-                  <div className="text-[10px] text-slate-400/80 truncate">{cat.blurb}</div>
+                  <div className="text-xs font-semibold text-gray-900 truncate">{cat.title}</div>
+                  <div className="text-[10px] text-gray-500 truncate">{cat.blurb}</div>
                 </div>
               </div>
               <ul className="space-y-1">
@@ -195,7 +186,7 @@ function WelcomeHero({ language, userName, onPromptClick }) {
                     <button
                       type="button"
                       onClick={() => onPromptClick?.(p)}
-                      className={`w-full text-left text-[11px] leading-snug text-slate-300 px-2 py-1 rounded-md transition-colors ${accent.promptHover}`}
+                      className={`w-full text-left text-[11px] leading-snug text-gray-600 px-2 py-1 rounded-md transition-colors ${accent.promptHover}`}
                     >
                       {p}
                     </button>
@@ -230,11 +221,11 @@ function formatSeparator(iso, language) {
 function DateSeparator({ label }) {
   return (
     <div className="relative my-3 flex items-center gap-2" aria-hidden="true">
-      <span className="flex-1 h-px bg-gradient-to-r from-transparent via-slate-700/60 to-transparent" />
-      <span className="text-[10px] uppercase tracking-wider text-slate-500 px-2 py-0.5 rounded-full bg-slate-800/60 border border-slate-700/50">
+      <span className="flex-1 h-px bg-gradient-to-r from-transparent via-[#2CABE3]/25 to-transparent" />
+      <span className="text-[10px] uppercase tracking-wider text-gray-500 px-2 py-0.5 rounded-full bg-white/80 border border-[#2CABE3]/15">
         {label}
       </span>
-      <span className="flex-1 h-px bg-gradient-to-l from-transparent via-slate-700/60 to-transparent" />
+      <span className="flex-1 h-px bg-gradient-to-l from-transparent via-[#2CABE3]/25 to-transparent" />
     </div>
   )
 }
@@ -246,7 +237,7 @@ function ScrollToBottomPill({ visible, onClick, language }) {
     <button
       type="button"
       onClick={onClick}
-      className="absolute bottom-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-800/95 backdrop-blur-sm border border-cyan-500/30 text-cyan-200 text-xs shadow-lg shadow-cyan-500/10 hover:bg-slate-700/95 hover:border-cyan-400/50 hover:scale-105 active:scale-95 transition-all animate-fade-in"
+      className="absolute bottom-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/90 backdrop-blur-md border border-[#2CABE3]/20 text-[#2CABE3] text-xs shadow-lg shadow-[#2CABE3]/10 hover:bg-white hover:border-[#2CABE3]/40 hover:scale-105 active:scale-95 transition-all animate-fade-in"
       aria-label={language === 'es' ? 'Ir al final' : 'Jump to latest'}
     >
       <i className="fas fa-arrow-down text-[10px]" aria-hidden="true" />
@@ -310,25 +301,18 @@ const SUGGESTIONS_ES = [
   'Muestra publicaciones urgentes',
 ]
 
-// ─── Typing indicator ─────────────────────────────────
-function TypingIndicator({ language = 'en' }) {
-  const label = language === 'es' ? 'Nouri está escribiendo' : 'Nouri is typing'
+function TypingIndicator() {
   return (
-    <div
-      className="flex items-start gap-2.5 px-4 py-2"
-      role="status"
-      aria-live="polite"
-      aria-label={label}
-    >
-      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex-shrink-0 flex items-center justify-center shadow-sm">
-        <i className="fas fa-sparkles text-[10px] text-white" aria-hidden="true" />
-      </div>
-      <div className="bg-slate-800/75 rounded-2xl rounded-tl-md px-4 py-3 border border-slate-700/60">
-        <div className="flex items-center gap-1.5" aria-hidden="true">
-          <span className="ai-typing-dot w-2 h-2 rounded-full bg-slate-300" style={{ animationDelay: '0ms' }} />
-          <span className="ai-typing-dot w-2 h-2 rounded-full bg-slate-300" style={{ animationDelay: '150ms' }} />
-          <span className="ai-typing-dot w-2 h-2 rounded-full bg-slate-300" style={{ animationDelay: '300ms' }} />
-        </div>
+    <div className="flex px-4 py-1.5" aria-live="polite" aria-label="Nouri is typing">
+      <div className="inline-flex items-center gap-1 rounded-2xl bg-white/80 border border-[#2CABE3]/15 px-3 py-2 backdrop-blur-sm shadow-sm">
+        {[0, 180, 360].map((delay) => (
+          <span
+            key={delay}
+            className="ai-typing-dot w-1.5 h-1.5 rounded-full bg-[#2CABE3]/70"
+            style={{ animationDelay: `${delay}ms` }}
+            aria-hidden="true"
+          />
+        ))}
       </div>
     </div>
   )
@@ -366,6 +350,22 @@ const TOOL_CARD_TOKENS = {
     accent: 'text-amber-300',
     sub: 'text-amber-400/75',
   },
+  updated: {
+    title: { en: 'Listing updated', es: 'Listado actualizado' },
+    icon: 'fa-pen-to-square',
+    ring: 'ring-violet-400/40',
+    bg: 'bg-gradient-to-br from-violet-900/40 to-violet-950/30 border-violet-500/25',
+    accent: 'text-violet-200',
+    sub: 'text-violet-300/75',
+  },
+  deleted: {
+    title: { en: 'Listing deleted', es: 'Listado eliminado' },
+    icon: 'fa-trash-can',
+    ring: 'ring-slate-400/40',
+    bg: 'bg-gradient-to-br from-slate-800/50 to-slate-900/40 border-slate-500/25',
+    accent: 'text-slate-200',
+    sub: 'text-slate-300/75',
+  },
   post: {
     title: { en: 'Listing posted', es: 'Donación publicada' },
     icon: 'fa-bullhorn',
@@ -398,6 +398,14 @@ const TOOL_CARD_TOKENS = {
     accent: 'text-slate-200',
     sub: 'text-slate-300/75',
   },
+  claimfail: {
+    title: { en: 'Could not claim', es: 'No se pudo reclamar' },
+    icon: 'fa-circle-xmark',
+    ring: 'ring-red-400/40',
+    bg: 'bg-gradient-to-br from-red-950/50 to-red-900/30 border-red-500/25',
+    accent: 'text-red-200',
+    sub: 'text-red-300/80',
+  },
 }
 
 function ToolCardShell({ kind, language = 'en', titleOverride, children }) {
@@ -424,10 +432,10 @@ function ToolResultCard({ toolResult, language = 'en' }) {
 
   const { tool } = toolResult
   const result = toolResult.result ?? toolResult
-  const ok = result?.success || toolResult.ok
+  const ok = (result?.success === true || toolResult.ok === true) && !result?.error
 
   const searchItems = result.listings ?? result.results ?? []
-  if ((tool === 'search_food_near_user' || tool === 'search_food_nearby' || tool === 'get_recent_listings' || tool === 'get_my_claims' || tool === 'get_community_listings') && searchItems.length > 0) {
+  if ((tool === 'search_food_near_user' || tool === 'search_food_nearby' || tool === 'get_recent_listings' || tool === 'get_my_claims' || tool === 'get_community_listings' || tool === 'get_user_listings') && searchItems.length > 0) {
     const t = TOOL_CARD_TOKENS.search
 
     /** Format an ISO date string (YYYY-MM-DD) as a short human-readable label. */
@@ -445,7 +453,8 @@ function ToolResultCard({ toolResult, language = 'en' }) {
     return (
       <ToolCardShell kind="search" language={language} titleOverride={`${t.title[language] || t.title.en} · ${searchItems.length}`}>
         <ul className="space-y-1.5">
-          {searchItems.slice(0, 3).map(item => {
+          {searchItems.slice(0, 5).map((item, idx) => {
+            const displayNum = item.display_index ?? (idx + 1)
             // Backend returns km; the rest of the app uses miles, so
             // convert for display. Fall back to distance_miles if the
             // tool already returned that, or hide if neither is set.
@@ -456,11 +465,15 @@ function ToolResultCard({ toolResult, language = 'en' }) {
               ? `${miles.toFixed(miles < 10 ? 1 : 0)} mi`
               : null
 
+            const qtyLabel = item.quantity != null
+              ? `${item.quantity}${item.unit ? ` ${item.unit}` : ''} available`
+              : null
+
             // Expiry: prefer expiry_date, fall back to pickup_by
             const expiryRaw = item.expiry_date || item.pickup_by || null
             const expiryLabel = fmtDate(expiryRaw)
 
-            const meta = [distance, item.category, expiryLabel ? `Exp ${expiryLabel}` : null].filter(Boolean).join(' · ')
+            const meta = [distance, qtyLabel, item.category, expiryLabel ? `Exp ${expiryLabel}` : null].filter(Boolean).join(' · ')
             const address = item.address || item.full_address || item.pickup_location || null
             // Only show the real listing photo. We deliberately do NOT fall
             // back to a category placeholder so the chat thumbnail always
@@ -469,8 +482,14 @@ function ToolResultCard({ toolResult, language = 'en' }) {
               ? item.image_url
               : null
             return (
-              <li key={item.id} className="rounded-lg bg-slate-900/40 px-2.5 py-2 border border-emerald-500/15">
+              <li key={item.id || displayNum} className="rounded-lg bg-slate-900/40 px-2.5 py-2 border border-emerald-500/15">
                 <div className="flex gap-2.5">
+                  <span
+                    className={`flex-shrink-0 w-7 h-7 rounded-full bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-[12px] font-bold ${t.accent}`}
+                    aria-hidden="true"
+                  >
+                    {displayNum}
+                  </span>
                   {photoUrl && (
                     <img
                       src={photoUrl}
@@ -507,9 +526,9 @@ function ToolResultCard({ toolResult, language = 'en' }) {
               </li>
             )
           })}
-          {searchItems.length > 3 && (
+          {searchItems.length > 5 && (
             <li className={`text-[11px] ${t.sub} text-center pt-0.5`}>
-              {language === 'es' ? `+${searchItems.length - 3} más en el mapa` : `+${searchItems.length - 3} more on the map`}
+              {language === 'es' ? `+${searchItems.length - 5} más en el mapa` : `+${searchItems.length - 5} more on the map`}
             </li>
           )}
         </ul>
@@ -517,10 +536,14 @@ function ToolResultCard({ toolResult, language = 'en' }) {
     )
   }
 
-  if (tool === 'create_reminder' && (result?.success || result?.created)) {
+  if ((tool === 'claim_listing' || tool === 'claim_food') && !ok && (result?.error || toolResult.summary)) {
+    const errText = result?.error || toolResult.summary
     return (
-      <ToolCardShell kind="reminder" language={language}>
-        <span className="text-blue-100">{result.summary || (language === 'es' ? 'Te avisaré.' : "I'll ping you.")}</span>
+      <ToolCardShell kind="claimfail" language={language}>
+        <div className="text-red-100">{errText}</div>
+        {result?.next_step && (
+          <div className={`${TOOL_CARD_TOKENS.claimfail.sub} text-[11px] mt-1.5`}>{result.next_step}</div>
+        )}
       </ToolCardShell>
     )
   }
@@ -573,6 +596,26 @@ function ToolResultCard({ toolResult, language = 'en' }) {
     )
   }
 
+  if (tool === 'create_reminder' && (result?.success || result?.created)) {
+    return (
+      <ToolCardShell kind="reminder" language={language}>
+        <span className="text-blue-100">{result.summary || (language === 'es' ? 'Te avisaré.' : "I'll ping you.")}</span>
+      </ToolCardShell>
+    )
+  }
+
+  if ((tool === 'create_food_listing' || tool === 'post_food_listing') && !ok && (result?.error || toolResult.summary)) {
+    const errText = result?.error || toolResult.summary
+    return (
+      <ToolCardShell kind="claimfail" language={language} titleOverride={language === 'es' ? 'No se pudo publicar' : 'Could not post'}>
+        <div className="text-red-100">{errText}</div>
+        {result?.next_step && (
+          <div className={`${TOOL_CARD_TOKENS.claimfail.sub} text-[11px] mt-1.5`}>{result.next_step}</div>
+        )}
+      </ToolCardShell>
+    )
+  }
+
   if ((tool === 'create_food_listing' || tool === 'post_food_listing') && ok) {
     return (
       <ToolCardShell kind="post" language={language}>
@@ -603,6 +646,118 @@ function ToolResultCard({ toolResult, language = 'en' }) {
         )}
         {(result.summary || result.message) && (
           <div className="text-fuchsia-300/75 mt-1">{result.summary || result.message}</div>
+        )}
+      </ToolCardShell>
+    )
+  }
+
+  if ((tool === 'update_food_listing' || tool === 'update_listing' || tool === 'edit_listing') && ok) {
+    const item = result.listing || result
+    const fmtDate = (iso) => {
+      if (!iso) return null
+      try {
+        const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number)
+        return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+      } catch {
+        return iso
+      }
+    }
+    const qtyLabel = item.quantity != null
+      ? `${item.quantity}${item.unit ? ` ${item.unit}` : ''}`
+      : null
+    const expiryLabel = fmtDate(item.expiry_date || item.pickup_by)
+    const address = item.address || item.full_address || item.location || null
+    const photoUrl = typeof item.image_url === 'string' && /^https?:\/\//i.test(item.image_url)
+      ? item.image_url
+      : null
+    return (
+      <ToolCardShell kind="updated" language={language}>
+        <div className="flex gap-2.5">
+          {photoUrl && (
+            <img
+              src={photoUrl}
+              alt={item.title || ''}
+              loading="lazy"
+              className="h-14 w-14 flex-shrink-0 rounded-md object-cover border border-violet-500/15 bg-slate-800"
+              onError={(e) => { e.currentTarget.style.display = 'none' }}
+            />
+          )}
+          <div className="min-w-0 flex-1">
+            {item.title && (
+              <div className="text-violet-100 font-semibold">{item.title}</div>
+            )}
+            <div className={`${TOOL_CARD_TOKENS.updated.sub} text-[11px] mt-0.5 space-y-0.5`}>
+              {qtyLabel && (
+                <div>{language === 'es' ? 'Cantidad: ' : 'Quantity: '}{qtyLabel}</div>
+              )}
+              {expiryLabel && (
+                <div>{language === 'es' ? 'Vence: ' : 'Expires: '}{expiryLabel}</div>
+              )}
+              {item.community_name && (
+                <div className="flex items-center gap-1">
+                  <i className="fas fa-people-group text-[10px] opacity-70" aria-hidden="true" />
+                  <span>{item.community_name}</span>
+                </div>
+              )}
+              {address && (
+                <div className="flex items-start gap-1">
+                  <i className="fas fa-map-marker-alt mt-[2px] text-[10px] opacity-70" aria-hidden="true" />
+                  <span className="break-words">{address}</span>
+                </div>
+              )}
+              {item.description && (
+                <div className="italic opacity-90">{item.description}</div>
+              )}
+            </div>
+            {(result.summary || result.message) && (
+              <div className="text-violet-300/75 text-[11px] mt-1">{result.summary || result.message}</div>
+            )}
+          </div>
+        </div>
+      </ToolCardShell>
+    )
+  }
+
+  if ((tool === 'update_food_listing' || tool === 'update_listing' || tool === 'edit_listing') && !ok) {
+    return (
+      <ToolCardShell kind="claimfail" language={language} titleOverride={language === 'es' ? 'No se pudo actualizar' : 'Could not update'}>
+        <div className="text-red-100">{result?.error || result?.message || result?.summary}</div>
+      </ToolCardShell>
+    )
+  }
+
+  if (tool === 'delete_listing' && ok) {
+    const count = result.deleted_count || 1
+    const titles = result.titles || (result.title ? [result.title] : [])
+    return (
+      <ToolCardShell kind="deleted" language={language}>
+        <div className="text-slate-100">
+          {count > 1 ? (
+            language === 'es'
+              ? `Eliminados ${count} listados duplicados.`
+              : `Removed ${count} duplicate listings.`
+          ) : (
+            <>
+              {language === 'es' ? 'Eliminado: ' : 'Removed: '}
+              <span className="font-semibold">{result.title || titles[0] || 'listing'}</span>
+            </>
+          )}
+        </div>
+        {(result.summary || result.message) && (
+          <div className="text-slate-300/75 mt-1">{result.summary || result.message}</div>
+        )}
+      </ToolCardShell>
+    )
+  }
+
+  if (tool === 'delete_listing' && !ok) {
+    return (
+      <ToolCardShell kind="error" language={language}>
+        <div className="text-red-200 font-medium">
+          {language === 'es' ? 'No se pudo eliminar' : 'Could not delete listing'}
+        </div>
+        {(result.error || result.message || result.summary) && (
+          <div className="text-red-300/80 mt-1">{result.error || result.message || result.summary}</div>
         )}
       </ToolCardShell>
     )
@@ -703,52 +858,41 @@ function describeErrorCode(code, language = 'en') {
   }
 }
 
-function PendingActionCard({
-  pendingAction,
-  language = 'en',
-  onConfirm,
-  onCancel,
-  disabled = false,
-  resolved = null,
-}) {
-  if (!pendingAction && !resolved) return null
+function ConfirmationBar({ language, pendingAction, onConfirm, onCancel, onEdit, disabled }) {
+  const summary = pendingAction?.summary || ''
   const isEs = language === 'es'
-
-  if (resolved === 'cancelled') {
-    return (
-      <div className="mt-2 px-3 py-2 rounded-xl bg-slate-800/50 border border-slate-600/30 text-[11px] text-slate-400">
-        {isEs ? 'Acción cancelada' : 'Action cancelled'}
-      </div>
-    )
-  }
-
-  if (!pendingAction) return null
-
   return (
-    <div className="mt-2 rounded-xl border border-amber-400/30 bg-amber-500/10 p-3 shadow-sm">
-      <div className="flex items-start gap-2 mb-2.5">
-        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-amber-500/20 text-amber-200 flex items-center justify-center">
-          <i className="fas fa-triangle-exclamation text-[10px]" aria-hidden="true" />
-        </span>
-        <p className="text-[12px] leading-relaxed text-amber-50/90 whitespace-pre-wrap">
-          {pendingAction.summary || (isEs ? 'Confirma esta acción' : 'Confirm this action')}
-        </p>
-      </div>
+    <div className="mt-2 p-3 rounded-xl bg-amber-50 border border-amber-200 ring-1 ring-amber-200/60">
+      {summary && (
+        <div className="text-amber-900 text-xs mb-2.5 leading-snug">
+          {isEs ? 'Acción pendiente: ' : 'Pending: '}
+          <span className="font-medium">{summary}</span>
+        </div>
+      )}
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
           onClick={onConfirm}
           disabled={disabled}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/90 hover:bg-emerald-400 text-white text-[11px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-40"
         >
-          <i className={`fas ${disabled ? 'fa-spinner fa-spin' : 'fa-check'} text-[10px]`} aria-hidden="true" />
+          <i className="fas fa-check text-[10px]" aria-hidden="true" />
           {isEs ? 'Confirmar' : 'Confirm'}
+        </button>
+        <button
+          type="button"
+          onClick={onEdit}
+          disabled={disabled}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white hover:bg-gray-50 text-gray-700 border border-gray-300 disabled:opacity-40"
+        >
+          <i className="fas fa-pen text-[10px]" aria-hidden="true" />
+          {isEs ? 'Editar' : 'Edit'}
         </button>
         <button
           type="button"
           onClick={onCancel}
           disabled={disabled}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-600 text-slate-100 text-[11px] font-semibold transition-colors ring-1 ring-slate-500/40 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white hover:bg-gray-50 text-gray-600 border border-gray-300 disabled:opacity-40"
         >
           <i className="fas fa-xmark text-[10px]" aria-hidden="true" />
           {isEs ? 'Cancelar' : 'Cancel'}
@@ -758,60 +902,24 @@ function PendingActionCard({
   )
 }
 
-function ToolAuditUndoCard({
-  toolAudit = [],
-  confirmationRecommended = false,
-  confirmationSummary = null,
-  language = 'en',
-  onRollback,
-  disabled = false,
-}) {
-  const isEs = language === 'es'
-  const undoable = (toolAudit || []).filter(
-    row => row && row.audit_id && row.status === 'committed',
-  )
-  if (!confirmationRecommended && undoable.length === 0) return null
-
-  return (
-    <div className="mt-2 rounded-xl border border-slate-500/30 bg-slate-800/40 p-3">
-      <p className="text-[11px] text-slate-300 mb-2">
-        {confirmationSummary || (isEs ? 'Puedes deshacer acciones recientes.' : 'You can undo recent actions.')}
-      </p>
-      <div className="flex flex-wrap gap-2">
-        {undoable.map(row => (
-          <button
-            key={row.audit_id}
-            type="button"
-            disabled={disabled}
-            onClick={() => onRollback?.(row.audit_id)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-600 text-slate-100 text-[11px] font-semibold transition-colors ring-1 ring-slate-500/40 disabled:opacity-40"
-          >
-            <i className="fas fa-rotate-left text-[10px]" aria-hidden="true" />
-            {isEs ? 'Deshacer' : 'Undo'} {row.tool || ''}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 function MessageBubble({
   msg,
   onFeedback,
   language,
+  onSuggestionClick,
+  onConfirmAction,
   isLoading,
   currentUser,
   onRetry,
   onRegenerate,
-  onConfirmPending,
-  onCancelPending,
-  onRollbackAudit,
   showRegenerate = false,
+  showSuggestionChips = false,
 }) {
   const [feedbackGiven, setFeedbackGiven] = useState(null)
   const [avatarBroken, setAvatarBroken] = useState(false)
   const [copied, setCopied] = useState(false)
   const isUser = msg.role === 'user'
+  const suggestionItems = msg.suggestions || msg.suggestedActions || []
   const isVoiceMessage = msg.source === 'voice'
 
   const handleFeedback = (rating) => {
@@ -854,7 +962,7 @@ function MessageBubble({
       <div className={`max-w-[85%] flex items-start gap-2 ${isUser ? 'flex-row-reverse' : ''}`}>
         {/* Nouri avatar (assistant) */}
         {!isUser && (
-          <div className="flex-shrink-0 w-7 h-7 rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 flex items-center justify-center mt-1 shadow-sm shadow-cyan-400/30">
+          <div className="flex-shrink-0 w-7 h-7 rounded-full bg-gradient-to-br from-[#2CABE3] to-emerald-500 flex items-center justify-center mt-1 shadow-sm shadow-[#2CABE3]/25">
             <svg viewBox="0 0 100 100" className="w-5 h-5">
               <circle cx="50" cy="52" r="36" fill="#f0f4f8" />
               <rect x="26" y="38" rx="12" ry="12" width="48" height="24" fill="#1e293b" opacity="0.85" />
@@ -867,7 +975,7 @@ function MessageBubble({
         {/* User avatar bubble */}
         {isUser && (
           <div
-            className="flex-shrink-0 w-7 h-7 rounded-full overflow-hidden mt-1 shadow-sm shadow-cyan-500/30 ring-1 ring-cyan-400/40 bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center"
+            className="flex-shrink-0 w-7 h-7 rounded-full overflow-hidden mt-1 shadow-sm shadow-[#2CABE3]/20 ring-1 ring-[#2CABE3]/30 bg-gradient-to-br from-[#2CABE3] to-emerald-500 flex items-center justify-center"
             title={currentUser?.name || currentUser?.email || 'You'}
             aria-label={`Message from ${currentUser?.name || 'you'}`}
           >
@@ -888,10 +996,10 @@ function MessageBubble({
           <div
             className={`px-4 py-2.5 rounded-2xl text-[13px] leading-relaxed ${
               isUser
-                ? 'bg-gradient-to-br from-cyan-500 to-blue-500 text-white rounded-br-md shadow-md shadow-cyan-500/25 ring-1 ring-cyan-300/20'
+                ? 'bg-gradient-to-br from-[#2CABE3] to-emerald-500 text-white rounded-br-md shadow-md shadow-[#2CABE3]/20 ring-1 ring-[#2CABE3]/20'
                 : msg.isError
-                  ? 'bg-red-900/30 text-red-200 border border-red-500/30 rounded-bl-md backdrop-blur-sm'
-                  : 'bg-slate-800/70 text-slate-100 rounded-bl-md border border-slate-600/40 backdrop-blur-sm shadow-sm'
+                  ? 'bg-red-50 text-red-800 border border-red-200 rounded-bl-md backdrop-blur-sm'
+                  : 'bg-white/85 text-gray-800 rounded-bl-md border border-[#2CABE3]/10 backdrop-blur-sm shadow-sm'
             }`}
           >
             {/* Inline photo message: show thumbnail instead of raw URL */}
@@ -920,8 +1028,8 @@ function MessageBubble({
                 Retry button re-sends the original user text (stashed on the
                 error bubble as retryText) and removes this bubble. */}
             {msg.isError && msg.errorCode && (
-              <div className="mt-2.5 pt-2.5 border-t border-red-500/20 flex flex-wrap items-center gap-2">
-                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-red-500/15 text-red-200/90 text-[10px] font-semibold tracking-wide ring-1 ring-red-500/25">
+              <div className="mt-2.5 pt-2.5 border-t border-red-200 flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-red-100 text-red-800 text-[10px] font-semibold tracking-wide ring-1 ring-red-200">
                   <i className="fas fa-circle-exclamation text-[9px]" aria-hidden="true" />
                   {describeErrorCode(msg.errorCode, language).eyebrow}
                 </span>
@@ -930,19 +1038,19 @@ function MessageBubble({
                     type="button"
                     onClick={() => onRetry(msg.id)}
                     disabled={isLoading}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-500/15 hover:bg-red-500/25 text-red-100 text-[11px] font-semibold transition-colors ring-1 ring-red-500/30 hover:ring-red-400/50 disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-600 hover:bg-red-700 text-white text-[11px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
                     aria-label={language === 'es' ? 'Reintentar mensaje' : 'Retry message'}
                   >
                     <i className={`fas ${isLoading ? 'fa-spinner fa-spin' : 'fa-rotate-right'} text-[10px]`} aria-hidden="true" />
                     {language === 'es' ? 'Reintentar' : 'Retry'}
                     {msg.errorRetryAfter ? (
-                      <span className="text-red-200/60 font-normal">· {msg.errorRetryAfter}s</span>
+                      <span className="text-white/80 font-normal">· {msg.errorRetryAfter}s</span>
                     ) : null}
                   </button>
                 )}
                 {msg.requestId && (
                   <span
-                    className="ml-auto text-[9px] font-mono text-red-200/40 tracking-wider truncate max-w-[120px]"
+                    className="ml-auto text-[9px] font-mono text-red-400 tracking-wider truncate max-w-[120px]"
                     title={`Request ID: ${msg.requestId}`}
                   >
                     {msg.requestId.slice(0, 8)}
@@ -952,39 +1060,43 @@ function MessageBubble({
             )}
           </div>
 
+          {/* Confirmation bar for destructive actions (post, delete, etc.) */}
+          {!isUser && msg.requiresConfirmation && showSuggestionChips && onConfirmAction && (
+            <ConfirmationBar
+              language={language}
+              pendingAction={msg.pendingAction}
+              disabled={isLoading}
+              onConfirm={() => onConfirmAction(true)}
+              onCancel={() => onConfirmAction(false)}
+              onEdit={() => onSuggestionClick?.(language === 'es' ? 'Espera, edítalo' : 'Wait, edit it')}
+            />
+          )}
+
           {/* Tool result cards */}
           {msg.toolResults?.map((tr, i) => (
             <ToolResultCard key={i} toolResult={tr} language={language} />
           ))}
 
-          {/* Destructive-action confirmation (delete listing, cancel claim, etc.) */}
-          {(msg.pendingAction || msg.pendingResolved === 'cancelled') && (
-            <PendingActionCard
-              pendingAction={msg.pendingAction}
-              resolved={msg.pendingResolved}
-              language={language}
-              disabled={isLoading}
-              onConfirm={() => onConfirmPending?.(msg.id)}
-              onCancel={() => onCancelPending?.(msg.id)}
-            />
+          {/* Suggested actions — only on the latest assistant turn so stale
+              chips from earlier questions don't linger in the scrollback. */}
+          {showSuggestionChips && suggestionItems.length > 0 && !isUser && (
+            <div className={`flex flex-wrap gap-1 mt-2 ${suggestionItems.length > 4 ? 'max-h-36 overflow-y-auto pr-1' : ''}`}>
+              {suggestionItems.map((action, i) => (
+                <SuggestedActionButton
+                  key={i}
+                  action={action}
+                  onSuggestionClick={onSuggestionClick}
+                  disabled={isLoading}
+                  compact={suggestionItems.length > 4}
+                />
+              ))}
+            </div>
           )}
-
-          <ToolAuditUndoCard
-            toolAudit={msg.toolAudit}
-            confirmationRecommended={msg.confirmationRecommended}
-            confirmationSummary={msg.confirmationSummary}
-            language={language}
-            disabled={isLoading}
-            onRollback={(auditId) => onRollbackAudit?.(msg.id, auditId)}
-          />
-
-          {/* Suggestion chips live in the input rail only — avoids duplicate /
-              mismatched chips on the bubble vs above the text box. */}
 
           {/* Hover-revealed action row for assistant replies */}
           {!isUser && !msg.isError && msg.id !== 'welcome' && (
             <div
-              className="flex items-center gap-1 mt-1.5 opacity-60 md:opacity-0 md:group-hover/msg:opacity-100 transition-opacity"
+              className="flex items-center gap-1 mt-1.5 opacity-80 md:opacity-70 md:group-hover/msg:opacity-100 transition-opacity"
               role="toolbar"
               aria-label={language === 'es' ? 'Acciones del mensaje' : 'Message actions'}
             >
@@ -992,18 +1104,18 @@ function MessageBubble({
               <button
                 type="button"
                 onClick={handleCopy}
-                className="inline-flex items-center justify-center w-6 h-6 rounded-md text-slate-500 hover:text-cyan-300 hover:bg-cyan-500/10 transition-colors"
+                className="inline-flex items-center justify-center w-6 h-6 rounded-md text-gray-500 hover:text-[#2CABE3] hover:bg-[#2CABE3]/10 transition-colors"
                 title={copied ? (language === 'es' ? 'Copiado' : 'Copied') : (language === 'es' ? 'Copiar' : 'Copy')}
                 aria-label={language === 'es' ? 'Copiar mensaje' : 'Copy message'}
               >
-                <i className={`fas ${copied ? 'fa-check text-cyan-300' : 'fa-copy'} text-[11px]`} aria-hidden="true" />
+                <i className={`fas ${copied ? 'fa-check text-[#2CABE3]' : 'fa-copy'} text-[11px]`} aria-hidden="true" />
               </button>
               {!feedbackGiven && (
                 <>
                   <button
                     type="button"
                     onClick={() => handleFeedback('helpful')}
-                    className="inline-flex items-center justify-center w-6 h-6 rounded-md text-slate-500 hover:text-emerald-300 hover:bg-emerald-500/10 transition-colors"
+                    className="inline-flex items-center justify-center w-6 h-6 rounded-md text-gray-500 hover:text-emerald-600 hover:bg-emerald-50 transition-colors"
                     title={language === 'es' ? 'Útil' : 'Helpful'}
                     aria-label={language === 'es' ? 'Marcar como útil' : 'Mark as helpful'}
                   >
@@ -1012,7 +1124,7 @@ function MessageBubble({
                   <button
                     type="button"
                     onClick={() => handleFeedback('not_helpful')}
-                    className="inline-flex items-center justify-center w-6 h-6 rounded-md text-slate-500 hover:text-rose-300 hover:bg-rose-500/10 transition-colors"
+                    className="inline-flex items-center justify-center w-6 h-6 rounded-md text-gray-500 hover:text-rose-600 hover:bg-rose-50 transition-colors"
                     title={language === 'es' ? 'No útil' : 'Not helpful'}
                     aria-label={language === 'es' ? 'Marcar como no útil' : 'Mark as not helpful'}
                   >
@@ -1021,7 +1133,7 @@ function MessageBubble({
                 </>
               )}
               {feedbackGiven && (
-                <span className="text-[10px] text-cyan-300/70 px-1.5 py-0.5 rounded-md bg-cyan-500/10 border border-cyan-500/20">
+                <span className="text-[10px] text-[#2299c7] px-1.5 py-0.5 rounded-md bg-[#2CABE3]/10 border border-[#2CABE3]/20">
                   {feedbackGiven === 'helpful'
                     ? (language === 'es' ? 'Gracias 👍' : 'Thanks 👍')
                     : (language === 'es' ? 'Anotado 👎' : 'Noted 👎')}
@@ -1034,7 +1146,7 @@ function MessageBubble({
                   type="button"
                   onClick={onRegenerate}
                   disabled={isLoading}
-                  className="ml-1 inline-flex items-center gap-1 px-1.5 h-6 rounded-md text-slate-500 hover:text-cyan-300 hover:bg-cyan-500/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-[10px] font-medium"
+                  className="ml-1 inline-flex items-center gap-1 px-1.5 h-6 rounded-md text-gray-500 hover:text-[#2CABE3] hover:bg-[#2CABE3]/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-[10px] font-medium"
                   title={language === 'es' ? 'Regenerar respuesta' : 'Regenerate response'}
                   aria-label={language === 'es' ? 'Regenerar respuesta' : 'Regenerate response'}
                 >
@@ -1046,9 +1158,9 @@ function MessageBubble({
           )}
 
           {/* Timestamp */}
-          <div className={`text-[10px] mt-1 flex items-center gap-1 ${isUser ? 'justify-end text-cyan-200/60' : 'text-slate-400/80'}`}>
+          <div className={`text-[10px] mt-1 flex items-center gap-1 ${isUser ? 'justify-end text-white/75' : 'text-gray-500'}`}>
             {isVoiceMessage && (
-              <span className="px-1.5 py-0.5 rounded-full border border-cyan-500/25 bg-cyan-500/10 text-cyan-200/85 text-[9px] uppercase tracking-wide inline-flex items-center gap-1">
+              <span className="px-1.5 py-0.5 rounded-full border border-white/30 bg-white/15 text-white/90 text-[9px] uppercase tracking-wide inline-flex items-center gap-1">
                 <i className="fas fa-microphone text-[8px]" aria-hidden="true" />
                 {language === 'es' ? 'Voz' : 'Voice'}
               </span>
@@ -1061,29 +1173,8 @@ function MessageBubble({
   )
 }
 
-// ─── Persistent quick-chip rail (above input) ─────────────────────
-function QuickChipRail({ chips, language, onChipClick, disabled = false }) {
-  if (!chips?.length) return null
-  return (
-    <div
-      className="flex gap-1.5 overflow-x-auto pb-1.5 nourish-scrollbar snap-x snap-mandatory"
-      role="group"
-      aria-label={language === 'es' ? 'Acciones rápidas' : 'Quick actions'}
-    >
-      {chips.map((chip, i) => (
-        <SuggestedActionButton
-          key={`${typeof chip === 'string' ? chip : chip.label}-${i}`}
-          action={chip}
-          onSuggestionClick={onChipClick}
-          disabled={disabled}
-        />
-      ))}
-    </div>
-  )
-}
-
 // ─── Suggested action button ───────────────────────────
-function SuggestedActionButton({ action, onSuggestionClick, disabled = false }) {
+function SuggestedActionButton({ action, onSuggestionClick, disabled = false, compact = false }) {
   const navigate = useNavigate()
 
   const asObject = action && typeof action === 'object'
@@ -1113,14 +1204,14 @@ function SuggestedActionButton({ action, onSuggestionClick, disabled = false }) 
   if (!label) return null
 
   const styleClass = actionType === 'navigate'
-    ? 'bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 border-blue-400/20'
-    : 'bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 border-cyan-500/20'
+    ? 'bg-blue-50 text-blue-700 hover:bg-blue-100 border-blue-200/60'
+    : 'bg-[#2CABE3]/10 text-[#2CABE3] hover:bg-[#2CABE3]/15 border-[#2CABE3]/20'
 
   return (
     <button
       onClick={handleClick}
       disabled={disabled}
-      className={`text-xs px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${styleClass} disabled:opacity-60 disabled:cursor-not-allowed`}
+      className={`${compact ? 'text-[10px] px-2 py-0.5' : 'text-xs px-2.5 py-1'} rounded-full transition-colors border ${styleClass} disabled:opacity-60 disabled:cursor-not-allowed`}
     >
       {label}
     </button>
@@ -1446,13 +1537,14 @@ function AIChatPanel() {
     // Error recovery actions surfaced via Retry / Regenerate buttons in the bubble UI.
     retryMessage,
     regenerateLast,
+    historyLoaded,
+    tone,
+    setTone,
     confirmPendingAction,
-    cancelPendingAction,
-    rollbackAuditAction,
   } = useAIChat()
 
   const { applyToolResults, clearAIOverlays } = useMapContext()
-  const { registerHandler, executeUIActionsFromToolResults } = useUIControl()
+  const { registerHandler, executeUIActionsFromToolResults, executeUIAction } = useUIControl()
   const { user: authUser } = useAuthContext() || {}
   const lastAppliedToolMsgRef = useRef(null)
   const lastSurfacedErrorRef = useRef(null)
@@ -1486,14 +1578,7 @@ function AIChatPanel() {
       const ok = result?.success || tr.ok
       if ((tr.tool === 'claim_listing' || tr.tool === 'claim_food') && ok) {
         lastToastedClaimRef.current = key
-        const title = result?.title || tr.title
-        const t = title ? `"${title}"` : 'the item'
-        toast.success(
-          language === 'es'
-            ? `¡Reclamo confirmado! Has reservado ${t}.`
-            : `Claim confirmed! You reserved ${t}. Check Receipts & Activity.`,
-          { autoClose: 6000, position: 'top-center' }
-        )
+        // Claim success is shown in the chat card — skip duplicate toast.
       }
       if (tr.tool === 'cancel_claim' && ok) {
         lastToastedClaimRef.current = key
@@ -1505,6 +1590,9 @@ function AIChatPanel() {
       // Notify FoodMap and FindFoodPage to refresh so the new listing pin
       // appears immediately without requiring a page reload.
       if ((tr.tool === 'create_food_listing' || tr.tool === 'post_food_listing') && ok) {
+        window.dispatchEvent(new CustomEvent('foodShared'))
+      }
+      if (ok && ['update_food_listing', 'update_listing', 'edit_listing', 'deactivate_listing', 'delete_listing'].includes(tr.tool)) {
         window.dispatchEvent(new CustomEvent('foodShared'))
       }
     }
@@ -1530,7 +1618,10 @@ function AIChatPanel() {
           && lastAppliedToolMsgRef.current !== last.id) {
         lastAppliedToolMsgRef.current = last.id
         applyToolResults(last.toolResults)
-        executeUIActionsFromToolResults(last.toolResults)
+        const navCount = executeUIActionsFromToolResults(last.toolResults)
+        if (navCount === 0 && last.action && !last.fromHistory) {
+          executeUIAction({ ok: true, ...last.action })
+        }
       }
       return
     }
@@ -1551,7 +1642,7 @@ function AIChatPanel() {
         break
       }
     }
-  }, [messages, applyToolResults, executeUIActionsFromToolResults, MAP_TOOLS])
+  }, [messages, applyToolResults, executeUIActionsFromToolResults, executeUIAction, MAP_TOOLS])
 
   const [isOpen, setIsOpen] = useState(false)
   const [isExpanded, setIsExpanded] = useState(false)
@@ -1595,10 +1686,26 @@ function AIChatPanel() {
   // doesn't compete with the normal autoscroll behavior.
   const messagesContainerRef = useRef(null)
   const [showScrollPill, setShowScrollPill] = useState(false)
+  const wasOpenRef = useRef(false)
+  const historyScrollDoneRef = useRef(false)
+
+  const scrollMessagesToEnd = useCallback(() => {
+    const run = () => {
+      const el = messagesContainerRef.current
+      if (el) {
+        el.scrollTop = el.scrollHeight
+      } else {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'auto' })
+      }
+      setShowScrollPill(false)
+    }
+    requestAnimationFrame(() => requestAnimationFrame(run))
+  }, [])
   const [showAttachMenu, setShowAttachMenu] = useState(false)
   const attachMenuRef = useRef(null)
   const inputRef = useRef(null)
   const panelRef = useRef(null)
+  const previousFocusRef = useRef(null)
   const currentAudioRef = useRef(null)
   const lastSpokenIdRef = useRef(null)
   const voiceModeRef = useRef(false)
@@ -1630,16 +1737,98 @@ function AIChatPanel() {
 
   useEffect(() => { sendVoiceRef.current = sendVoice }, [sendVoice])
 
+  const closeAssistant = useCallback(() => {
+    setIsOpen(false)
+    setIsExpanded(false)
+    setShowMenu(false)
+    setShowAttachMenu(false)
+    setSuggestionsOpen(false)
+    setSuggestionIndex(-1)
+  }, [])
+
   // Register imperative handlers so the AI's ui_action tool can drive this panel.
   useEffect(() => {
-    const u1 = registerHandler('setAssistantOpen', (open) => setIsOpen(!!open))
+    const u1 = registerHandler('setAssistantOpen', (open) => {
+      if (open) setIsOpen(true)
+      else closeAssistant()
+    })
     const u2 = registerHandler('setAssistantExpanded', (exp) => setIsExpanded(!!exp))
     const u3 = registerHandler('clearMapOverlays', () => clearAIOverlays())
     const u4 = registerHandler('setLanguage', (lang) => {
       if (lang === 'en' || lang === 'es') setLanguage(lang)
     })
     return () => { u1(); u2(); u3(); u4() }
-  }, [registerHandler, clearAIOverlays, setLanguage])
+  }, [registerHandler, clearAIOverlays, setLanguage, closeAssistant])
+
+  // Hold focus like the main menu: backdrop dim + scroll lock.
+  useEffect(() => {
+    if (!isOpen) return undefined
+
+    previousFocusRef.current = document.activeElement
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+
+    return () => {
+      document.body.style.overflow = prevOverflow
+      const prev = previousFocusRef.current
+      if (prev && typeof prev.focus === 'function') {
+        requestAnimationFrame(() => {
+          try { prev.focus() } catch { /* element may have unmounted */ }
+        })
+      }
+      previousFocusRef.current = null
+    }
+  }, [isOpen])
+
+  // Focus trap + Escape while the assistant is open.
+  useEffect(() => {
+    if (!isOpen) return undefined
+
+    const getFocusable = () => {
+      if (!panelRef.current) return []
+      return Array.from(panelRef.current.querySelectorAll(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ))
+    }
+
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        if (showMenu) {
+          setShowMenu(false)
+          return
+        }
+        if (showAttachMenu) {
+          setShowAttachMenu(false)
+          return
+        }
+        if (suggestionsOpen) {
+          setSuggestionsOpen(false)
+          setSuggestionIndex(-1)
+          return
+        }
+        closeAssistant()
+        return
+      }
+      if (e.key !== 'Tab') return
+      const focusable = getFocusable()
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (e.shiftKey) {
+        if (document.activeElement === first || !panelRef.current?.contains(document.activeElement)) {
+          e.preventDefault()
+          last.focus()
+        }
+      } else if (document.activeElement === last || !panelRef.current?.contains(document.activeElement)) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [isOpen, closeAssistant, showMenu, showAttachMenu, suggestionsOpen])
 
   // Last assistant message for voice mode auto-speak
   const lastAssistantMessage = useMemo(() => {
@@ -1648,12 +1837,6 @@ function AIChatPanel() {
     }
     return null
   }, [messages])
-
-  // Pre-chips above input — single chip rail synced to the latest assistant reply.
-  const inputQuickChips = useMemo(() => {
-    if (isLoading) return []
-    return resolveInputChips(lastAssistantMessage?.suggestions, language)
-  }, [lastAssistantMessage, language, isLoading])
 
   // Autocomplete always follows the sticky conversation language — never
   // flip pools mid-typing from accent marks in English loan-words.
@@ -1694,16 +1877,37 @@ function AIChatPanel() {
   useEffect(() => {
     if (!isOpen) return
     const el = messagesContainerRef.current
-    const scrollBehavior = isLoading ? 'auto' : 'smooth'
     if (!el) {
-      messagesEndRef.current?.scrollIntoView({ behavior: scrollBehavior })
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
       return
     }
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200
-    if (nearBottom || isLoading) {
-      messagesEndRef.current?.scrollIntoView({ behavior: scrollBehavior })
+    if (nearBottom) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     }
   }, [messages, isOpen, isLoading])
+
+  // Opening the panel should always land on the latest messages, not the
+  // top of a long history thread.
+  useEffect(() => {
+    if (isOpen && !wasOpenRef.current) {
+      scrollMessagesToEnd()
+    }
+    wasOpenRef.current = isOpen
+  }, [isOpen, scrollMessagesToEnd])
+
+  // When async history hydrates after login, jump to the newest turn once.
+  useEffect(() => {
+    historyScrollDoneRef.current = false
+  }, [authUser?.id])
+
+  useEffect(() => {
+    if (!historyLoaded || historyScrollDoneRef.current) return
+    historyScrollDoneRef.current = true
+    if (isOpen) {
+      scrollMessagesToEnd()
+    }
+  }, [historyLoaded, isOpen, scrollMessagesToEnd])
 
   // Track scroll position to toggle the "jump to latest" pill.
   useEffect(() => {
@@ -1729,6 +1933,17 @@ function AIChatPanel() {
     }
   }, [isOpen])
 
+  // Keep the textarea ready for the next message after each AI turn.
+  // `disabled` yanks focus; `readOnly` preserves it while blocking edits.
+  const prevLoadingRef = useRef(isLoading)
+  useEffect(() => {
+    const wasLoading = prevLoadingRef.current
+    prevLoadingRef.current = isLoading
+    if (wasLoading && !isLoading && isOpen && !voiceMode) {
+      requestAnimationFrame(() => inputRef.current?.focus())
+    }
+  }, [isLoading, isOpen, voiceMode])
+
   // Close menu on outside click
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -1750,11 +1965,13 @@ function AIChatPanel() {
     setInputText('')
     setSuggestionsOpen(false)
     setSuggestionIndex(-1)
+    requestAnimationFrame(() => inputRef.current?.focus())
   }, [inputText, isLoading, sendMessage])
 
   const handleQuickAction = useCallback((msg) => {
     if (isLoading) return
     sendMessage(msg)
+    requestAnimationFrame(() => inputRef.current?.focus())
   }, [isLoading, sendMessage])
 
   // ─── File uploads (photo + CSV → bulk-listings) ───────
@@ -1853,6 +2070,19 @@ function AIChatPanel() {
     uploadSessionRef.current += 1
     setPendingUpload(null)
   }, [uploadBusy])
+
+  const handleClearConversation = useCallback(async () => {
+    setShowMenu(false)
+    cancelPendingUpload()
+    clearAIOverlays()
+    historyScrollDoneRef.current = false
+    setShowScrollPill(false)
+    setInputText('')
+    setSuggestionsOpen(false)
+    setSuggestionIndex(-1)
+    await clearHistory()
+    scrollMessagesToEnd()
+  }, [cancelPendingUpload, clearAIOverlays, clearHistory, scrollMessagesToEnd])
 
   const handlePhotoSelected = useCallback(async (e) => {
     const file = e.target.files?.[0]
@@ -2696,9 +2926,9 @@ function AIChatPanel() {
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      handleSend()
+      if (!isLoading) handleSend()
     }
-  }, [handleSend, suggestionsOpen, filteredSuggestions, suggestionIndex, acceptSuggestion])
+  }, [handleSend, isLoading, suggestionsOpen, filteredSuggestions, suggestionIndex, acceptSuggestion])
 
   // ─── Floating bubble (closed state) ──────
   if (!isOpen) {
@@ -2822,15 +3052,35 @@ function AIChatPanel() {
 
   // ─── Chat panel (open state) ─────────────
   const panelClasses = isExpanded
-    ? 'fixed inset-2 z-50 sm:inset-4 md:inset-8'
-    : 'fixed z-50 inset-x-2 top-2 bottom-2 sm:inset-x-auto sm:top-auto sm:bottom-20 sm:right-4 sm:w-[540px] sm:max-w-[calc(100vw-2rem)] sm:h-[820px] sm:max-h-[calc(100vh-6rem)]'
+    ? 'fixed inset-2 z-[1] sm:inset-4 md:inset-8'
+    : 'fixed z-[1] inset-x-2 top-2 bottom-2 sm:inset-x-auto sm:left-auto sm:top-auto sm:bottom-20 sm:right-4 sm:w-[540px] sm:max-w-[calc(100vw-2rem)] sm:h-[820px] sm:max-h-[calc(100vh-6rem)]'
 
   return (
-    <div ref={panelRef} className={`${panelClasses} flex flex-col rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 border border-slate-700/50`} style={{ background: 'linear-gradient(145deg, #0f172a 0%, #1e293b 50%, #0f172a 100%)' }}>
-      {/* Header */}
-      <div className="bg-gradient-to-r from-slate-800 via-slate-800 to-slate-900 text-white px-4 py-3 flex items-center justify-between flex-shrink-0 border-b border-cyan-500/20">
+    <div className="fixed inset-0 z-[60]">
+      {/* Backdrop — same focus pattern as the mobile main menu */}
+      <div
+        className="fixed inset-0 bg-black/50"
+        onClick={closeAssistant}
+        aria-hidden="true"
+      />
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={language === 'es' ? 'Asistente Nouri' : 'Nouri AI Assistant'}
+        className={`${panelClasses} flex flex-col rounded-2xl shadow-2xl shadow-[#2CABE3]/10 overflow-hidden transition-all duration-300 border border-[#2CABE3]/15 bg-white/75 backdrop-blur-xl`}
+      >
+      {/* Ambient orbs — matches Find Food / Share Food hero pages */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
+        <div className="absolute -top-24 -left-24 w-72 h-72 rounded-full bg-[#2CABE3]/15 blur-3xl" />
+        <div className="absolute top-1/4 -right-20 w-64 h-64 rounded-full bg-emerald-300/20 blur-3xl" />
+        <div className="absolute bottom-0 left-1/4 w-48 h-48 rounded-full bg-[#2CABE3]/8 blur-2xl" />
+      </div>
+
+      {/* Header — z-30 so the ⋮ menu dropdown sits above message content */}
+      <div className="relative z-30 flex-shrink-0 bg-white/60 backdrop-blur-md text-gray-900 px-4 py-3 flex items-center justify-between border-b border-[#2CABE3]/15">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 flex items-center justify-center shadow-md shadow-cyan-500/30">
+          <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[#2CABE3] to-emerald-500 flex items-center justify-center shadow-md shadow-[#2CABE3]/25">
             <svg viewBox="0 0 100 100" className="w-6 h-6">
               <circle cx="50" cy="52" r="36" fill="#f0f4f8" />
               <rect x="26" y="38" rx="12" ry="12" width="48" height="24" fill="#1e293b" opacity="0.85" />
@@ -2839,15 +3089,17 @@ function AIChatPanel() {
             </svg>
           </div>
           <div>
-            <h3 className="font-semibold text-sm text-white leading-tight">Nouri</h3>
-            <p className="text-cyan-200/80 text-[10px] flex items-center gap-1.5 leading-tight mt-0.5">
+            <h3 className="font-semibold text-sm text-gray-900 leading-tight">Nouri</h3>
+            <p className="text-[#2CABE3] text-[10px] flex items-center gap-1.5 leading-tight mt-0.5">
               <span
-                className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shadow-sm shadow-emerald-400/60"
+                className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shadow-sm shadow-emerald-400/60"
                 aria-hidden="true"
               />
               <span>
                 {isAuthenticated
-                  ? (language === 'es' ? 'En línea · siempre disponible' : 'Online · always here')
+                  ? (language === 'es'
+                    ? `En línea · tono ${AI_TONE_LABELS.es[tone] || tone}`
+                    : `Online · ${AI_TONE_LABELS.en[tone] || tone} tone`)
                   : (language === 'es' ? 'Inicia sesión para más funciones' : 'Sign in for full features')}
               </span>
             </p>
@@ -2861,7 +3113,7 @@ function AIChatPanel() {
               const newLang = language === 'es' ? 'en' : 'es'
               sendMessage(newLang === 'es' ? 'Hola, habla en español por favor' : 'Hi, please speak in English')
             }}
-            className="flex items-center gap-1 text-cyan-200/85 hover:text-white text-[11px] font-medium px-2 py-1 rounded-md hover:bg-cyan-500/15 transition-colors border border-cyan-500/20 hover:border-cyan-400/40"
+            className="flex items-center gap-1 text-[#2CABE3] hover:text-[#2299c7] text-[11px] font-semibold px-2 py-1 rounded-full bg-[#2CABE3]/10 transition-colors border border-[#2CABE3]/20 hover:border-[#2CABE3]/35"
             title={language === 'es' ? 'Switch to English' : 'Cambiar a Español'}
             aria-label={language === 'es' ? 'Switch to English' : 'Cambiar a Español'}
           >
@@ -2870,27 +3122,52 @@ function AIChatPanel() {
           </button>
 
           {/* Menu */}
-          <div className="relative">
+          <div className="relative z-40">
             <button
               onClick={() => setShowMenu(!showMenu)}
-              className="text-cyan-300/60 hover:text-cyan-300 p-1 rounded hover:bg-cyan-500/10 transition-colors"
+              className="text-[#2CABE3]/70 hover:text-[#2CABE3] p-1 rounded hover:bg-[#2CABE3]/10 transition-colors"
               aria-label="Chat menu"
+              aria-expanded={showMenu}
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                 <path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z" />
               </svg>
             </button>
             {showMenu && (
-              <div className="absolute right-0 top-full mt-1 bg-slate-800 rounded-lg shadow-xl border border-slate-700 py-1 w-44 z-10 backdrop-blur-sm">
+              <div className="absolute right-0 top-full mt-1 bg-white/95 rounded-lg shadow-xl border border-[#2CABE3]/15 py-1 w-52 z-50 backdrop-blur-md">
+                <div className="px-2 pt-1 pb-0.5">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-400 px-2 py-1">
+                    {language === 'es' ? 'Tono de conversación' : 'Conversation tone'}
+                  </p>
+                  {AI_TONE_OPTIONS.map((t) => {
+                    const labels = AI_TONE_LABELS[language === 'es' ? 'es' : 'en']
+                    const active = tone === t
+                    return (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => { setTone(t); setShowMenu(false) }}
+                        className={`w-full text-left px-4 py-1.5 text-sm transition-colors ${
+                          active
+                            ? 'text-[#2CABE3] bg-[#2CABE3]/10'
+                            : 'text-gray-700 hover:bg-[#2CABE3]/5 hover:text-[#2CABE3]'
+                        }`}
+                      >
+                        {active ? '✓ ' : ''}{labels[t]}
+                      </button>
+                    )
+                  })}
+                </div>
+                <div className="border-t border-[#2CABE3]/10 my-1" />
                 <button
-                  onClick={() => { clearHistory(); setShowMenu(false) }}
-                  className="w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-slate-700/50 hover:text-cyan-300 transition-colors"
+                  onClick={handleClearConversation}
+                  className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-[#2CABE3]/5 hover:text-[#2CABE3] transition-colors"
                 >
                   🗑️ Clear conversation
                 </button>
                 <button
                   onClick={() => { setIsExpanded(!isExpanded); setShowMenu(false) }}
-                  className="w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-slate-700/50 hover:text-cyan-300 transition-colors"
+                  className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-[#2CABE3]/5 hover:text-[#2CABE3] transition-colors"
                 >
                   {isExpanded ? '🗗 Compact view' : '⬜ Full screen'}
                 </button>
@@ -2901,7 +3178,7 @@ function AIChatPanel() {
           {/* Expand / collapse */}
           <button
             onClick={() => setIsExpanded(!isExpanded)}
-            className="text-cyan-300/60 hover:text-cyan-300 p-1 rounded hover:bg-cyan-500/10 transition-colors hidden md:block"
+            className="text-[#2CABE3]/70 hover:text-[#2CABE3] p-1 rounded hover:bg-[#2CABE3]/10 transition-colors hidden md:block"
             aria-label={isExpanded ? 'Compact view' : 'Expand'}
           >
             {isExpanded ? (
@@ -2917,8 +3194,8 @@ function AIChatPanel() {
 
           {/* Close */}
           <button
-            onClick={() => { setIsOpen(false); setIsExpanded(false); setShowMenu(false) }}
-            className="text-cyan-300/60 hover:text-cyan-300 p-1 rounded hover:bg-red-500/20 transition-colors"
+            onClick={closeAssistant}
+            className="text-gray-400 hover:text-red-500 p-1 rounded hover:bg-red-50 transition-colors"
             aria-label="Close chat"
           >
             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -2931,8 +3208,7 @@ function AIChatPanel() {
       {/* ─── Voice Mode (ChatGPT-like immersive voice UI) ─────── */}
       {voiceMode ? (
         <div
-          className="flex-1 flex flex-col items-center justify-between py-5 px-6 overflow-hidden relative"
-          style={{ background: 'radial-gradient(ellipse at center, #0f172a 0%, #020617 100%)' }}
+          className="relative z-0 flex-1 flex flex-col items-center justify-between py-5 px-6 overflow-hidden bg-gradient-to-b from-[#2CABE3]/5 via-white/40 to-emerald-50/30 backdrop-blur-sm"
           role="region"
           aria-label={language === 'es' ? 'Modo de voz' : 'Voice mode'}
         >
@@ -3199,7 +3475,7 @@ function AIChatPanel() {
       ) : (
       <>
       {/* Messages area */}
-      <div className="flex-1 relative min-h-0">
+      <div className="flex-1 relative min-h-0 z-0">
         <div
           ref={messagesContainerRef}
           className="absolute inset-0 overflow-y-auto px-4 py-3 nourish-scrollbar scroll-smooth"
@@ -3259,21 +3535,21 @@ function AIChatPanel() {
                     msg={msg}
                     onFeedback={submitFeedback}
                     language={language}
+                    onSuggestionClick={handleQuickAction}
+                    onConfirmAction={confirmPendingAction}
                     isLoading={isLoading}
                     currentUser={authUser}
                     onRetry={retryMessage}
                     onRegenerate={regenerateLast}
-                    onConfirmPending={confirmPendingAction}
-                    onCancelPending={cancelPendingAction}
-                    onRollbackAudit={rollbackAuditAction}
                     showRegenerate={idx === lastAssistantIdx}
+                    showSuggestionChips={idx === lastAssistantIdx && !isLoading}
                   />
                 </React.Fragment>
               )
             })
           })()}
 
-          {isLoading && <TypingIndicator language={language} />}
+          {isLoading && <TypingIndicator />}
 
           <div ref={messagesEndRef} />
         </div>
@@ -3329,15 +3605,7 @@ function AIChatPanel() {
       />
 
       {/* Input area */}
-      <form onSubmit={handleSend} className="border-t border-cyan-500/20 px-3 pt-2.5 pb-2 flex flex-col gap-1 flex-shrink-0 bg-slate-900/80 backdrop-blur-sm">
-        {!inputText.trim() && !isLoading && (
-          <QuickChipRail
-            chips={inputQuickChips.slice(0, 6)}
-            language={language}
-            onChipClick={handleQuickAction}
-            disabled={isLoading}
-          />
-        )}
+      <form onSubmit={handleSend} className="relative z-0 border-t border-[#2CABE3]/15 px-3 pt-2.5 pb-2 flex flex-col gap-1 flex-shrink-0 bg-white/60 backdrop-blur-md">
         <div className="flex items-end gap-2">
           {/* Attachments menu — collapses photo + CSV uploads behind a
               single "+" button (Slack/Messenger pattern) so the input bar
@@ -3349,8 +3617,8 @@ function AIChatPanel() {
               disabled={isLoading || uploadBusy}
               className={`inline-flex items-center justify-center w-9 h-9 rounded-full transition-all border ${
                 showAttachMenu
-                  ? 'bg-cyan-500/20 text-cyan-200 border-cyan-400/40 rotate-45'
-                  : 'bg-slate-800/60 text-slate-300 border-slate-600/50 hover:bg-cyan-500/15 hover:text-cyan-200 hover:border-cyan-400/30'
+                  ? 'bg-[#2CABE3]/15 text-[#2CABE3] border-[#2CABE3]/30 rotate-45'
+                  : 'bg-white/80 text-gray-600 border-[#2CABE3]/15 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] hover:border-[#2CABE3]/30'
               } disabled:opacity-40 disabled:cursor-not-allowed`}
               title={language === 'es' ? 'Adjuntar' : 'Attach'}
               aria-label={language === 'es' ? 'Adjuntar foto o CSV' : 'Attach photo or CSV'}
@@ -3363,22 +3631,22 @@ function AIChatPanel() {
             {showAttachMenu && (
               <div
                 role="menu"
-                className="absolute bottom-full left-0 mb-2 min-w-[200px] rounded-xl border border-cyan-500/25 bg-slate-900/95 backdrop-blur-md shadow-xl shadow-cyan-500/10 overflow-hidden z-30 animate-fade-in"
+                className="absolute bottom-full left-0 mb-2 min-w-[200px] rounded-xl border border-[#2CABE3]/15 bg-white/95 backdrop-blur-md shadow-xl shadow-[#2CABE3]/10 overflow-hidden z-30 animate-fade-in"
               >
                 <button
                   type="button"
                   role="menuitem"
                   onClick={() => { setShowAttachMenu(false); triggerPhotoUpload() }}
-                  className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-slate-200 hover:bg-fuchsia-500/15 hover:text-fuchsia-100 transition-colors"
+                  className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-[#2CABE3]/5 hover:text-[#2CABE3] transition-colors"
                 >
-                  <span className="inline-flex w-8 h-8 rounded-lg bg-fuchsia-500/15 text-fuchsia-300 items-center justify-center">
+                  <span className="inline-flex w-8 h-8 rounded-lg bg-fuchsia-500/15 text-fuchsia-600 items-center justify-center">
                     <i className="fas fa-camera text-[13px]" aria-hidden="true" />
                   </span>
                   <span className="flex-1 text-left">
                     <span className="block font-medium leading-tight">
                       {language === 'es' ? 'Foto → publicar' : 'Photo → list food'}
                     </span>
-                    <span className="block text-[10px] text-slate-400 leading-tight mt-0.5">
+                    <span className="block text-[10px] text-gray-500 leading-tight mt-0.5">
                       {language === 'es' ? 'IA detecta artículos' : 'AI auto-detects items'}
                     </span>
                   </span>
@@ -3387,16 +3655,16 @@ function AIChatPanel() {
                   type="button"
                   role="menuitem"
                   onClick={() => { setShowAttachMenu(false); triggerInlinePhotoUpload() }}
-                  className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-slate-200 hover:bg-sky-500/15 hover:text-sky-100 transition-colors border-t border-slate-700/50"
+                  className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-[#2CABE3]/5 hover:text-[#2CABE3] transition-colors border-t border-[#2CABE3]/10"
                 >
-                  <span className="inline-flex w-8 h-8 rounded-lg bg-sky-500/15 text-sky-300 items-center justify-center">
+                  <span className="inline-flex w-8 h-8 rounded-lg bg-sky-500/15 text-sky-600 items-center justify-center">
                     <i className="fas fa-image text-[13px]" aria-hidden="true" />
                   </span>
                   <span className="flex-1 text-left">
                     <span className="block font-medium leading-tight">
                       {language === 'es' ? 'Enviar foto al chat' : 'Send photo to chat'}
                     </span>
-                    <span className="block text-[10px] text-slate-400 leading-tight mt-0.5">
+                    <span className="block text-[10px] text-gray-500 leading-tight mt-0.5">
                       {language === 'es' ? 'Añade foto a tu publicación actual' : 'Add photo to your current listing'}
                     </span>
                   </span>
@@ -3405,16 +3673,16 @@ function AIChatPanel() {
                   type="button"
                   role="menuitem"
                   onClick={() => { setShowAttachMenu(false); triggerCsvUpload() }}
-                  className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-slate-200 hover:bg-emerald-500/15 hover:text-emerald-100 transition-colors border-t border-slate-700/50"
+                  className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-[#2CABE3]/5 hover:text-[#2CABE3] transition-colors border-t border-[#2CABE3]/10"
                 >
-                  <span className="inline-flex w-8 h-8 rounded-lg bg-emerald-500/15 text-emerald-300 items-center justify-center">
+                  <span className="inline-flex w-8 h-8 rounded-lg bg-emerald-500/15 text-emerald-600 items-center justify-center">
                     <i className="fas fa-file-csv text-[13px]" aria-hidden="true" />
                   </span>
                   <span className="flex-1 text-left">
                     <span className="block font-medium leading-tight">
                       {language === 'es' ? 'CSV en lote' : 'Bulk import CSV'}
                     </span>
-                    <span className="block text-[10px] text-slate-400 leading-tight mt-0.5">
+                    <span className="block text-[10px] text-gray-500 leading-tight mt-0.5">
                       {language === 'es' ? 'Sube varios listados a la vez' : 'Upload many listings at once'}
                     </span>
                   </span>
@@ -3429,7 +3697,7 @@ function AIChatPanel() {
               <ul
                 role="listbox"
                 aria-label={language === 'es' ? 'Sugerencias' : 'Suggestions'}
-                className="absolute bottom-full left-0 right-0 mb-2 max-h-56 overflow-y-auto rounded-xl border border-cyan-500/30 bg-slate-900/95 backdrop-blur-md shadow-lg shadow-cyan-500/10 z-20 nourish-scrollbar"
+                className="absolute bottom-full left-0 right-0 mb-2 max-h-56 overflow-y-auto rounded-xl border border-[#2CABE3]/15 bg-white/95 backdrop-blur-md shadow-lg shadow-[#2CABE3]/10 z-20 nourish-scrollbar"
               >
                 {filteredSuggestions.map((s, idx) => (
                   <li
@@ -3440,8 +3708,8 @@ function AIChatPanel() {
                     onMouseEnter={() => setSuggestionIndex(idx)}
                     className={`px-3 py-2 text-sm cursor-pointer transition-colors ${
                       idx === suggestionIndex
-                        ? 'bg-cyan-500/20 text-cyan-100'
-                        : 'text-slate-200 hover:bg-slate-800/80'
+                        ? 'bg-[#2CABE3]/15 text-[#2299c7]'
+                        : 'text-gray-700 hover:bg-[#2CABE3]/5'
                     }`}
                   >
                     {s}
@@ -3452,18 +3720,19 @@ function AIChatPanel() {
             <textarea
               ref={inputRef}
               value={inputText}
-              onChange={(e) => { setInputText(e.target.value); setSuggestionsOpen(true) }}
+              onChange={(e) => { if (!isLoading) { setInputText(e.target.value); setSuggestionsOpen(true) } }}
               onKeyDown={handleKeyDown}
               onFocus={() => setSuggestionsOpen(true)}
               onBlur={() => setTimeout(() => setSuggestionsOpen(false), 120)}
               placeholder={language === 'es' ? 'Pregunta lo que quieras…' : 'Message Nouri…'}
-              className={`w-full resize-none rounded-2xl border bg-slate-800/70 text-slate-100 placeholder-slate-500 px-4 py-2.5 text-sm leading-relaxed max-h-32 outline-none transition-all ${
+              className={`w-full resize-none rounded-2xl border bg-white/90 text-gray-800 placeholder-gray-400 px-4 py-2.5 text-sm leading-relaxed max-h-32 outline-none transition-all backdrop-blur-sm ${
                 isLoading
-                  ? 'ai-input-glow border-cyan-400/80'
-                  : 'border-slate-600/50 focus:border-cyan-400/60 focus:ring-2 focus:ring-cyan-500/20 focus:bg-slate-800/90'
+                  ? 'ai-input-glow border-[#2CABE3]/60 cursor-wait'
+                  : 'border-[#2CABE3]/15 focus:border-[#2CABE3]/50 focus:ring-2 focus:ring-[#2CABE3]/20 focus:bg-white'
               }`}
               rows={1}
-              disabled={isLoading}
+              readOnly={isLoading}
+              aria-busy={isLoading}
               aria-label="Message input"
               aria-autocomplete="list"
               aria-expanded={showSuggestions}
@@ -3478,8 +3747,8 @@ function AIChatPanel() {
               onClick={toggleWakeWord}
               className={`flex-shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-full transition-all border ${
                 wakeWordEnabled
-                  ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
-                  : 'border-slate-600/50 bg-slate-800/60 text-slate-300 hover:text-emerald-200 hover:bg-emerald-500/10 hover:border-emerald-400/30'
+                  ? 'border-emerald-500/40 bg-emerald-50 text-emerald-600 hover:bg-emerald-100'
+                  : 'border-[#2CABE3]/15 bg-white/80 text-gray-600 hover:text-emerald-600 hover:bg-emerald-50 hover:border-emerald-400/30'
               }`}
               title={
                 wakeWordEnabled
@@ -3503,7 +3772,7 @@ function AIChatPanel() {
             type="button"
             onClick={enterVoiceMode}
             disabled={isLoading}
-            className="flex-shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-full transition-all border border-slate-600/50 bg-slate-800/60 text-slate-300 hover:text-cyan-200 hover:bg-cyan-500/15 hover:border-cyan-400/30 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex-shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-full transition-all border border-[#2CABE3]/15 bg-white/80 text-gray-600 hover:text-[#2CABE3] hover:bg-[#2CABE3]/10 hover:border-[#2CABE3]/30 disabled:opacity-40 disabled:cursor-not-allowed"
             title={language === 'es' ? 'Modo voz' : 'Voice mode'}
             aria-label="Switch to voice mode"
           >
@@ -3516,8 +3785,8 @@ function AIChatPanel() {
             disabled={!inputText.trim() || isLoading}
             className={`flex-shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-full transition-all ${
               inputText.trim() && !isLoading
-                ? 'bg-gradient-to-br from-cyan-400 to-blue-500 text-white hover:from-cyan-300 hover:to-blue-400 shadow-md shadow-cyan-500/30 hover:scale-105 active:scale-95'
-                : 'bg-slate-800/60 text-slate-500 border border-slate-600/40 cursor-not-allowed'
+                ? 'bg-gradient-to-br from-[#2CABE3] to-emerald-500 text-white hover:from-[#2299c7] hover:to-emerald-600 shadow-md shadow-[#2CABE3]/25 hover:scale-105 active:scale-95'
+                : 'bg-gray-100 text-gray-400 border border-gray-200 cursor-not-allowed'
             }`}
             aria-label={language === 'es' ? 'Enviar mensaje' : 'Send message'}
           >
@@ -3592,6 +3861,7 @@ function AIChatPanel() {
         }
         .animate-voice-dot { animation: voice-dot-pulse 0.8s ease-in-out infinite; }
       `}</style>
+      </div>
     </div>
   )
 }

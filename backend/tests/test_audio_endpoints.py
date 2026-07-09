@@ -23,10 +23,14 @@ _ENV = {
     "SUPABASE_URL": "https://test.supabase.co",
     "SUPABASE_SERVICE_ROLE_KEY": "test-service-key",
     "MAPBOX_TOKEN": "pk.test-mapbox",
+    # Gate off the strict Bearer requirement introduced for production;
+    # this test file exercises the endpoints without minting real JWTs.
+    "AI_REQUIRE_AUTH": "false",
 }
 
 with patch.dict("os.environ", _ENV, clear=False):
-    from backend.app import app, _is_whisper_noise
+    from backend.app import app
+    from backend.ai.routes import _is_whisper_noise
 
 TEST_USER_ID = "c4dcbd93-081e-4160-87eb-1d51d444413a"
 
@@ -45,13 +49,15 @@ def client():
 def _authenticated():
     """Treat HTTP requests as authenticated as TEST_USER_ID.
 
-    The voice endpoint enforces ``_require_auth_for_user``: any real (non
-    nil-UUID) user_id must present a matching Supabase JWT. The TestClient
-    can't mint a real token, so we patch the JWT validator to return the
-    test user. Production auth is unchanged — this only affects the harness.
+    Patches the JWT extractor in ``backend.ai.routes`` so ownership checks
+    pass without minting a real Supabase token in the TestClient. The
+    production auth path (``_auth_user_id``) is unchanged — this only
+    affects the harness.
     """
-    with patch("backend.app._authenticate_request", new_callable=AsyncMock,
-               return_value=TEST_USER_ID):
+    with patch(
+        "backend.ai.routes._auth_user_id",
+        return_value=TEST_USER_ID,
+    ):
         yield
 
 
@@ -123,14 +129,13 @@ class TestWhisperNoiseFilter:
 # ===================================================================
 
 class TestVoiceEndpoint:
-    @patch("backend.app._run_agent_turn")
-    @patch("backend.app.conversation_engine")
-    def test_voice_success(self, mock_engine, mock_agent_turn, client):
-        """Valid audio → transcribe → agent turn → response with transcript."""
+    @patch("backend.ai.routes.conversation_engine")
+    def test_voice_success(self, mock_engine, client):
+        """Valid audio → transcribe → chat → response with transcript."""
         mock_engine.transcribe_audio = AsyncMock(return_value="Find food near me")
-        mock_agent_turn.return_value = _chat_result(
-            text="Here's food nearby!",
-        )
+        mock_engine.chat = AsyncMock(return_value=_chat_result(
+            text="Here's food nearby!", transcript="Find food near me"
+        ))
 
         resp = client.post(
             "/api/ai/voice",
@@ -141,9 +146,8 @@ class TestVoiceEndpoint:
         data = resp.json()
         assert data["text"] == "Here's food nearby!"
         assert data["transcript"] == "Find food near me"
-        mock_agent_turn.assert_awaited_once()
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_voice_filters_noise(self, mock_engine, client):
         """Whisper noise should be rejected with 400."""
         mock_engine.transcribe_audio = AsyncMock(return_value="Thank you")
@@ -185,7 +189,7 @@ class TestVoiceEndpoint:
         assert resp.status_code == 400
         assert "empty" in resp.json()["detail"].lower()
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_voice_timeout_returns_504(self, mock_engine, client):
         """Whisper timeout should return 504."""
         mock_engine.transcribe_audio = AsyncMock(
@@ -202,7 +206,7 @@ class TestVoiceEndpoint:
         assert body.get("error_code") == "timeout"
         assert body.get("retryable") is True
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_voice_runtime_error_returns_503(self, mock_engine, client):
         """RuntimeError (e.g. missing API key) should return 503."""
         mock_engine.transcribe_audio = AsyncMock(
@@ -217,7 +221,7 @@ class TestVoiceEndpoint:
         assert resp.status_code == 503
         assert resp.json().get("error_code") == "model_unavailable"
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_voice_codec_params_stripped(self, mock_engine, client):
         """Content-type with codec params (e.g. audio/webm;codecs=opus) should be accepted."""
         mock_engine.transcribe_audio = AsyncMock(return_value="Hello there")
@@ -230,7 +234,7 @@ class TestVoiceEndpoint:
         )
         assert resp.status_code == 200
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_voice_spanish_transcript(self, mock_engine, client):
         """Spanish audio should flow through correctly."""
         mock_engine.transcribe_audio = AsyncMock(return_value="Necesito comida cerca de aquí")
@@ -255,7 +259,7 @@ class TestVoiceEndpoint:
 # ===================================================================
 
 class TestTranscribeEndpoint:
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_transcribe_success(self, mock_engine, client):
         """Valid audio should return transcript text."""
         mock_engine.transcribe_audio = AsyncMock(return_value="I want to share food")
@@ -269,7 +273,7 @@ class TestTranscribeEndpoint:
         assert data["transcript"] == "I want to share food"
         assert data["filtered"] is False
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_transcribe_filters_noise(self, mock_engine, client):
         """Whisper noise should return empty transcript with filtered=True."""
         mock_engine.transcribe_audio = AsyncMock(return_value="Thank you for watching")
@@ -299,7 +303,7 @@ class TestTranscribeEndpoint:
         )
         assert resp.status_code == 400
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_transcribe_timeout_returns_504(self, mock_engine, client):
         """Whisper timeout should return 504."""
         mock_engine.transcribe_audio = AsyncMock(
@@ -312,7 +316,7 @@ class TestTranscribeEndpoint:
         )
         assert resp.status_code == 504
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_transcribe_runtime_error_returns_503(self, mock_engine, client):
         """RuntimeError should return 503."""
         mock_engine.transcribe_audio = AsyncMock(
@@ -326,7 +330,7 @@ class TestTranscribeEndpoint:
         assert resp.status_code == 503
         assert resp.json().get("error_code") == "model_unavailable"
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_transcribe_strips_whitespace(self, mock_engine, client):
         """Transcript should be stripped of leading/trailing whitespace."""
         mock_engine.transcribe_audio = AsyncMock(return_value="  Hello world  ")
@@ -349,7 +353,7 @@ class TestTranscribeEndpoint:
             ("audio/mp3", "test.mp3"),
         ]
         for mime, fname in allowed:
-            with patch("backend.app.conversation_engine") as mock_eng:
+            with patch("backend.ai.routes.conversation_engine") as mock_eng:
                 mock_eng.transcribe_audio = AsyncMock(return_value="Test transcript")
                 resp = client.post(
                     "/api/ai/transcribe",
@@ -363,7 +367,7 @@ class TestTranscribeEndpoint:
 # ===================================================================
 
 class TestTTSEndpoint:
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_tts_success(self, mock_engine, client):
         """Valid text should return audio/mpeg bytes."""
         mock_engine.generate_speech = AsyncMock(return_value=b"\xff\xfb\x90\x00fake-mp3")
@@ -376,7 +380,7 @@ class TestTTSEndpoint:
         assert resp.headers["content-type"] == "audio/mpeg"
         assert len(resp.content) > 0
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_tts_spanish(self, mock_engine, client):
         """Spanish TTS should pass lang='es' to the engine."""
         mock_engine.generate_speech = AsyncMock(return_value=b"fake-audio")
@@ -388,7 +392,7 @@ class TestTTSEndpoint:
         assert resp.status_code == 200
         mock_engine.generate_speech.assert_called_once_with("Hola mundo", lang="es")
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_tts_default_lang_is_english(self, mock_engine, client):
         """Omitting lang should default to 'en'."""
         mock_engine.generate_speech = AsyncMock(return_value=b"fake-audio")
@@ -408,7 +412,7 @@ class TestTTSEndpoint:
         )
         assert resp.status_code == 422  # Pydantic validation error
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_tts_runtime_error_returns_503(self, mock_engine, client):
         """RuntimeError (API key issue) should return 503."""
         mock_engine.generate_speech = AsyncMock(
@@ -422,7 +426,7 @@ class TestTTSEndpoint:
         assert resp.status_code == 503
         assert resp.json().get("error_code") == "model_unavailable"
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_tts_upstream_error_returns_503(self, mock_engine, client):
         """HTTP 5xx from OpenAI should return retryable model_unavailable."""
         mock_resp = httpx.Response(500, request=httpx.Request("POST", "http://test"))
@@ -437,7 +441,7 @@ class TestTTSEndpoint:
         assert resp.status_code == 503
         assert resp.json().get("error_code") == "model_unavailable"
 
-    @patch("backend.app.conversation_engine")
+    @patch("backend.ai.routes.conversation_engine")
     def test_tts_generic_error_returns_500(self, mock_engine, client):
         """Unexpected errors should return structured internal error."""
         mock_engine.generate_speech = AsyncMock(

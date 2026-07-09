@@ -8,11 +8,14 @@
 export function normalizeToolResults(raw) {
   if (!Array.isArray(raw)) return []
 
-  const META = new Set(['tool', 'ok', 'summary', 'result'])
+  const META = new Set(['tool', 'ok', 'summary', 'result', 'type'])
 
   // Drop null/non-object/malformed entries up front so downstream consumers
   // (UI maps over toolResults assuming `entry.tool`) never crash on garbage.
-  return raw.filter((entry) => entry && typeof entry === 'object' && entry.tool).map((entry) => {
+  return raw
+    .filter((entry) => entry && typeof entry === 'object' && entry.tool)
+    .filter((entry) => entry.type !== 'requires_confirmation')
+    .map((entry) => {
     if (entry.result && typeof entry.result === 'object') {
       return entry
     }

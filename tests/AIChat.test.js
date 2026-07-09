@@ -15,6 +15,8 @@ const mockSendMessage = jest.fn()
 const mockGetHistory = jest.fn().mockResolvedValue([])
 const mockClearHistory = jest.fn().mockResolvedValue(true)
 const mockSubmitFeedback = jest.fn().mockResolvedValue(true)
+const mockGetTone = jest.fn().mockResolvedValue('warm')
+const mockSetTone = jest.fn().mockResolvedValue('warm')
 jest.mock('../utils/services/aiChatService.js', () => ({
   __esModule: true,
   default: {
@@ -22,6 +24,8 @@ jest.mock('../utils/services/aiChatService.js', () => ({
     getHistory: (...args) => mockGetHistory(...args),
     clearHistory: (...args) => mockClearHistory(...args),
     submitFeedback: (...args) => mockSubmitFeedback(...args),
+    getTone: (...args) => mockGetTone(...args),
+    setTone: (...args) => mockSetTone(...args),
   },
 }))
 
@@ -85,8 +89,12 @@ describe('AI Chat — Message Send/Receive', () => {
   test('sends a message and displays AI response', async () => {
     await renderAndOpen()
 
-    // Welcome message should show
-    expect(screen.getByText(/I'm Nouri/)).toBeInTheDocument()
+    // WelcomeHero greets the user by their first name ("Hi, Test!") on
+    // the empty-state onboarding surface; the older "Hi! I'm Nouri..."
+    // bubble was retired when we shipped category-guided prompts.
+    await waitFor(() => {
+      expect(screen.getByText(/Hi, Test!/)).toBeInTheDocument()
+    })
 
     // Type a message and send
     const input = screen.getByPlaceholderText(/Message Nouri|Ask me anything|Pregunta/i)

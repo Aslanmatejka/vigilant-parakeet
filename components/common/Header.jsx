@@ -34,6 +34,7 @@ function Header({ menuItems: menuItemsProp }) {
     const isDonor = communityRole === 'donor';
     const isRecipient = communityRole === 'recipient';
     const isOrganizer = communityRole === 'organizer';
+    const showReceiptsAndActivity = isAuthenticated && !isDonor && !isOrganizer;
 
     const menuItems = React.useMemo(() => {
         if (menuItemsProp) return menuItemsProp;
@@ -74,10 +75,8 @@ function Header({ menuItems: menuItemsProp }) {
         return [{ label: 'Find Food', path: '/find' }, ...AUTH_TAIL];
     }, [menuItemsProp, isAuthenticated, isDonor, isRecipient, isOrganizer]);
 
-    const hasReceiptsNavItem = menuItems.some(
-        (item) => item.label === 'Receipts & Activity' || item.path === '/receipts',
-    );
-    const showReceiptsActivity = !isDonor && !isOrganizer;
+    const hasReceiptsInMainNav = menuItems.some((item) => item.label === 'Receipts & Activity');
+    const showReceiptsNavLink = showReceiptsAndActivity && !hasReceiptsInMainNav;
 
     const navigate = useNavigate();
     const location = useLocation();
@@ -218,9 +217,9 @@ function Header({ menuItems: menuItemsProp }) {
                                 </a>
                             )
                         ))}
-                        {isAuthenticated && showReceiptsActivity && !hasReceiptsNavItem && (
+                        {showReceiptsNavLink && (
                             <a
-                                href="/dashboard"
+                                href="/receipts"
                                 className="nav-link hover:text-[#2CABE3] transition-colors duration-200"
                             >
                                 Receipts & Activity
@@ -266,9 +265,9 @@ function Header({ menuItems: menuItemsProp }) {
                                         role="menu"
                                     >
                                         <div className="py-1">
-                                            {showReceiptsActivity && (
+                                            {showReceiptsNavLink && (
                                                 <a
-                                                    href="/dashboard"
+                                                    href="/receipts"
                                                     className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
                                                     role="menuitem"
                                                 >
@@ -410,19 +409,19 @@ function Header({ menuItems: menuItemsProp }) {
                                     ))}
                                     {isAuthenticated && (
                                         <>
-                                            {showReceiptsActivity && !hasReceiptsNavItem && (
-                                            <li className="border-t border-gray-200 mt-2 pt-2">
-                                                <a
-                                                    href="/dashboard"
-                                                    className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
-                                                    onClick={() => setIsMenuOpen(false)}
-                                                >
-                                                    Receipts & Activity
-                                                </a>
-                                            </li>
+                                            {showReceiptsNavLink && (
+                                                <li className="border-t border-gray-200 mt-2 pt-2">
+                                                    <a
+                                                        href="/receipts"
+                                                        className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
+                                                        onClick={() => setIsMenuOpen(false)}
+                                                    >
+                                                        Receipts & Activity
+                                                    </a>
+                                                </li>
                                             )}
                                             {!isAdminRoute && (
-                                                <li>
+                                                <li className={showReceiptsNavLink ? undefined : 'border-t border-gray-200 mt-2 pt-2'}>
                                                     <a
                                                         href="/profile"
                                                         className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"

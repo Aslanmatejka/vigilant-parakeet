@@ -65,7 +65,8 @@ describe('Header component', () => {
     expect(screen.getByText('Find Food')).toBeInTheDocument();
     expect(screen.getByText('Impact Story')).toBeInTheDocument();
     expect(screen.getByText('Recipes')).toBeInTheDocument();
-    expect(screen.getByText('Sponsors')).toBeInTheDocument();
+    // Nav label was rebranded "Sponsors" → "Partners" (href /sponsors stays).
+    expect(screen.getByText('Partners')).toBeInTheDocument();
     expect(screen.getByText('Contact')).toBeInTheDocument();
   });
 

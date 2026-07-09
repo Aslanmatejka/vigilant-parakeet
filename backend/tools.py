@@ -12,12 +12,36 @@ import logging
 import math
 import os
 import re
+import difflib
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
 
 logger = logging.getLogger("ai_tools")
+
+# #region agent log
+_DEBUG_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "debug-d12b6b.log",
+)
+
+
+def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict | None = None) -> None:
+    try:
+        payload = {
+            "sessionId": "d12b6b",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data or {},
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        }
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
+# #endregion
 
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN") or os.getenv("VITE_MAPBOX_TOKEN", "")
 MAPBOX_DIRECTIONS_URL = "https://api.mapbox.com/directions/v5/mapbox"
@@ -84,6 +108,18 @@ def _extract_location_text(location_field) -> str:
                 pass
         return trimmed
     return ""
+
+
+def _community_name_from_listing(listing: dict) -> Optional[str]:
+    """Extract community name from PostgREST embed (dict, list, or null)."""
+    comm = listing.get("communities")
+    if isinstance(comm, dict):
+        return comm.get("name") or listing.get("community_name")
+    if isinstance(comm, list):
+        for item in comm:
+            if isinstance(item, dict) and item.get("name"):
+                return item.get("name")
+    return listing.get("community_name")
 
 
 def _normalize_expiry_date(*candidates: Optional[str]) -> Optional[str]:
@@ -1011,6 +1047,42 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "post_food_request",
+            "description": (
+                "ACTION: create a FoodRequest for the current recipient user "
+                "(they are asking the community for food help). Use when the "
+                "user needs food and search_food_near_user returned nothing "
+                "close enough. Set category to one of produce/prepared/"
+                "packaged/bakery/water/fruit/leftovers or omit for 'any'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "category": {"type": "string"},
+                    "household_size": {"type": "integer", "default": 1},
+                    "address": {"type": "string"},
+                    "notes": {"type": "string"},
+                    "latest_by": {
+                        "type": "string",
+                        "description": "ISO 8601 datetime",
+                    },
+                    "special_needs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "dietary_restrictions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "claim_listing",
             "description": (
                 "Claim a food listing on behalf of the authenticated user. Use this "
@@ -1261,7 +1333,7 @@ TOOL_DEFINITIONS = [
                     "ingredients": {"type": "array", "items": {"type": "string"}},
                     "dietary_preferences": {"type": "string"},
                 },
-                "required": [],
+                "required": ["ingredients"],
             },
         },
     },
@@ -1292,18 +1364,28 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "delete_listing",
             "description": (
-                "Permanently delete one of the authenticated user's own food listings "
-                "from the database. Use ONLY when the user explicitly says 'delete', "
-                "'permanently delete', 'remove from database', or 'erase my listing'. "
-                "This is irreversible — confirm with the user before calling. "
-                "Provide listing_id (preferred) OR the listing title to look it up."
+                "Permanently delete one or more of the authenticated user's own food listings "
+                "from the database. Use when the user says 'delete', 'remove permanently', "
+                "'delete duplicates', or 'delete all duplicates'. "
+                "For duplicate cleanup set delete_duplicates=true (keeps one best copy per "
+                "title — prefer photo, else newest). For many specific rows pass listing_ids. "
+                "Irreversible — confirm with the user before calling."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "user_id": {"type": "string", "description": "UUID of the authenticated user (the donor)."},
-                    "listing_id": {"type": "string", "description": "UUID of the food_listings row to delete."},
-                    "title": {"type": "string", "description": "Listing title to look up if listing_id is not known."},
+                    "listing_id": {"type": "string", "description": "UUID of a single food_listings row to delete."},
+                    "listing_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Multiple listing UUIDs to delete in one confirmed action.",
+                    },
+                    "delete_duplicates": {
+                        "type": "boolean",
+                        "description": "When true, delete extra copies of duplicate titles (keep one per title).",
+                    },
+                    "title": {"type": "string", "description": "Optional title filter for duplicate cleanup or single lookup."},
                     "confirmed": {"type": "boolean", "description": "Must be true — set only after the user has explicitly confirmed the deletion."},
                 },
                 "required": ["user_id", "confirmed"],
@@ -1381,62 +1463,6 @@ TOOL_DEFINITIONS = [
                             "or the literal DB enum values approved / expired / completed / claimed / cancelled."
                         ),
                     },
-                },
-                "required": ["user_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "update_listing",
-            "description": "Alias of update_food_listing.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "user_id": {"type": "string"},
-                    "listing_id": {"type": "string"},
-                    "title_lookup": {"type": "string"},
-                    "title": {"type": "string"},
-                    "quantity": {"type": "number"},
-                    "unit": {"type": "string"},
-                    "description": {"type": "string"},
-                    "category": {"type": "string"},
-                    "expiry_date": {"type": "string"},
-                    "pickup_by": {"type": "string"},
-                    "location": {"type": "string"},
-                    "dietary_tags": {"type": "array", "items": {"type": "string"}},
-                    "allergens": {"type": "array", "items": {"type": "string"}},
-                    "image_url": {"type": "string"},
-                    "status": {"type": "string"},
-                },
-                "required": ["user_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "edit_listing",
-            "description": "Alias of update_food_listing.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "user_id": {"type": "string"},
-                    "listing_id": {"type": "string"},
-                    "title_lookup": {"type": "string"},
-                    "title": {"type": "string"},
-                    "quantity": {"type": "number"},
-                    "unit": {"type": "string"},
-                    "description": {"type": "string"},
-                    "category": {"type": "string"},
-                    "expiry_date": {"type": "string"},
-                    "pickup_by": {"type": "string"},
-                    "location": {"type": "string"},
-                    "dietary_tags": {"type": "array", "items": {"type": "string"}},
-                    "allergens": {"type": "array", "items": {"type": "string"}},
-                    "image_url": {"type": "string"},
-                    "status": {"type": "string"},
                 },
                 "required": ["user_id"],
             },
@@ -1650,33 +1676,71 @@ TOOL_DEFINITIONS = [
 ]
 
 
-# Planner / legacy names that differ from registered handler keys.
-_TOOL_NAME_ALIASES: dict[str, str] = {
-    "get_my_listings": "get_user_listings",
-    "get_my_profile": "get_user_profile",
-    "search_food_listings": "search_food_near_user",
-    "search_food_nearby": "search_food_near_user",
-    "search_nearby_food": "search_food_near_user",
-    "find_food": "search_food_near_user",
-    "claim_food": "claim_listing",
-}
-
-
 # ---------------------------------------------------------------------------
 # Tool execution dispatcher
 # ---------------------------------------------------------------------------
 
-async def execute_tool(name: str, arguments: dict) -> dict:
-    """Route a tool call to its handler and return the result.
+async def _post_food_request_forward(**kwargs) -> dict:
+    """Dispatch post_food_request through the ai.tools implementation.
 
-    Handlers are registered in the module-level `_HANDLERS` dict at end of
-    this file (after all handler implementations are defined). Looking up
-    from a module global here — instead of rebuilding a local dict per call
-    — lets `_validate_tool_definitions()` introspect the registration table
-    without invoking the dispatcher.
+    ai.tools has the concrete FoodRequest writer wired to SessionLocal +
+    the SQLAlchemy models. Rather than duplicating that logic here, we
+    forward. Keeps a single source of truth while still exposing the
+    tool via backend.tools.execute_tool (which the engine uses).
     """
-    canonical = _TOOL_NAME_ALIASES.get(name, name)
-    handler = _HANDLERS.get(canonical)
+    from backend.ai.tools import _post_food_request as _impl
+    return await _impl(**kwargs)
+
+
+async def execute_tool(name: str, arguments: dict) -> dict:
+    """Route a tool call to its handler and return the result."""
+    handlers = {
+        "search_food_near_user": _search_food_near_user,
+        "get_recent_listings": _get_recent_listings,
+        "get_user_profile": _get_user_profile,
+        "update_user_profile": _update_user_profile,
+        "get_pickup_schedule": _get_pickup_schedule,
+        "create_reminder": _create_reminder,
+        "get_mapbox_route": _get_mapbox_route,
+        "query_distribution_centers": _query_distribution_centers,
+        "get_user_dashboard": _get_user_dashboard,
+        "check_pickup_schedule": _check_pickup_schedule,
+        "get_recipes": _get_recipes,
+        "get_storage_tips": _get_storage_tips,
+        "get_active_communities": _get_active_communities,
+        "get_user_notifications": _get_user_notifications,
+        "send_notification": _send_notification,
+        "mark_notifications_read": _mark_notifications_read,
+        "ui_action": _ui_action,
+        "forget_about_me": _forget_about_me,
+        "create_food_listing": _create_food_listing,
+        "claim_listing": _claim_food_listing,
+        "cancel_claim": _cancel_claim,
+        "confirm_claim": _confirm_claim,
+        "post_food_listing": _create_food_listing,
+        "post_food_request": _post_food_request_forward,
+        "bulk_import_listings": _bulk_import_listings,
+        "get_donor_expiring_listings": _get_donor_expiring_listings,
+        "attach_photos_to_listing": _attach_photos_to_listing,
+        "navigate_ui": _navigate_ui,
+        "meal_suggestions": _get_recipes,
+        "bulk_post_food_listings": _bulk_import_listings,
+        "deactivate_listing": _deactivate_listing,
+        "delete_listing": _delete_listing,
+        "get_user_listings": _get_user_listings,
+        "update_food_listing": _update_food_listing,
+        "update_listing": _update_food_listing,
+        "edit_listing": _update_food_listing,
+        "get_my_claims": _get_my_claims,
+        "get_community_listings": _get_community_listings,
+        # AGENT_V2 (Phase 4) — 4 new WRITE tools
+        "message_donor": _message_donor,
+        "schedule_pickup": _schedule_pickup,
+        "join_community": _join_community,
+        "leave_community": _leave_community,
+    }
+
+    handler = handlers.get(name)
     if handler is None:
         logger.warning("Unknown tool requested: %s", name)
         return {"error": f"Unknown tool: {name}"}
@@ -1684,7 +1748,7 @@ async def execute_tool(name: str, arguments: dict) -> dict:
     try:
         return await handler(**arguments)
     except Exception as exc:
-        logger.error("Tool %s failed: %s", canonical, exc)
+        logger.error("Tool %s failed: %s", name, exc)
         return {"error": f"Tool execution failed: {str(exc)}"}
 
 
@@ -2196,6 +2260,78 @@ _FOOD_TYPE_SYNONYMS: dict[str, Optional[str]] = {
 }
 
 
+def _normalize_listing_title_key(title: str) -> str:
+    """Normalize titles so 'Tomatoes' and 'Test Tomatoes' group as the same food kind."""
+    t = (title or "").strip().lower()
+    t = re.sub(r"^test\s+", "", t)
+    t = re.sub(r"[^a-z0-9\s]", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t or "unknown"
+
+
+def _annotate_duplicate_listings(results: list[dict]) -> dict[str, list[dict]]:
+    """Tag each listing with same-title metadata; return groups with 2+ entries."""
+    from collections import defaultdict
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for row in results:
+        key = _normalize_listing_title_key(str(row.get("title") or ""))
+        row["title_key"] = key
+        groups[key].append(row)
+
+    duplicate_groups: dict[str, list[dict]] = {}
+    for key, rows in groups.items():
+        count = len(rows)
+        for row in rows:
+            row["same_title_count"] = count
+            row["same_title_listing_ids"] = [r.get("id") for r in rows if r.get("id")]
+        if count > 1:
+            duplicate_groups[key] = rows
+    return duplicate_groups
+
+
+def _pick_duplicate_listing_to_keep(rows: list[dict]) -> dict:
+    """Keep newest row with a photo when possible; else newest."""
+    if not rows:
+        return {}
+    with_photo = [r for r in rows if r.get("image_url") or r.get("has_photo")]
+    return with_photo[0] if with_photo else rows[0]
+
+
+def duplicate_listing_ids_to_remove(
+    listings: list[dict],
+    *,
+    title: Optional[str] = None,
+) -> tuple[list[str], dict]:
+    """Return ids to delete (extras per title group) and a summary dict."""
+    rows = [dict(r) for r in (listings or []) if r.get("id")]
+    if not rows:
+        return [], {"groups": 0, "to_delete": 0, "kept": []}
+
+    duplicate_groups = _annotate_duplicate_listings(rows)
+    title_key = _normalize_listing_title_key(title) if title else None
+    ids_to_remove: list[str] = []
+    kept: list[dict] = []
+
+    for key, group in duplicate_groups.items():
+        if title_key and key != title_key:
+            continue
+        keep = _pick_duplicate_listing_to_keep(group)
+        keep_id = str(keep.get("id") or "")
+        if keep_id:
+            kept.append({"id": keep_id, "title": keep.get("title")})
+        for row in group:
+            lid = str(row.get("id") or "")
+            if lid and lid != keep_id:
+                ids_to_remove.append(lid)
+
+    return ids_to_remove, {
+        "groups": len({k for k in duplicate_groups if not title_key or k == title_key}),
+        "to_delete": len(ids_to_remove),
+        "kept": kept,
+    }
+
+
 async def _search_food_near_user(
     user_id: str,
     radius_km: float = 10,
@@ -2205,6 +2341,7 @@ async def _search_food_near_user(
     exclude_allergens: Optional[list] = None,
     expiry_within_days: Optional[int] = None,
     min_quantity: Optional[float] = None,
+    title_query: Optional[str] = None,
     **_ignored,
 ) -> dict:
     """Search available food listings near the user's location.
@@ -2223,6 +2360,13 @@ async def _search_food_near_user(
         normalized = _FOOD_TYPE_SYNONYMS.get(food_type.strip().lower())
         food_type = normalized  # May become None for "other" / unmapped values
 
+    if not title_query:
+        title_query = _ignored.get("title")
+    if isinstance(title_query, str):
+        title_query = title_query.strip() or None
+    else:
+        title_query = None
+
     # Normalize dietary/allergen filter terms for case-insensitive comparison.
     def _norm_tag(s: str) -> str:
         return (s or "").strip().lower().replace("_", "-").replace(" ", "-")
@@ -2236,6 +2380,20 @@ async def _search_food_near_user(
         user_id, radius_km, food_type, want_diet, bad_allergens,
         expiry_within_days, min_quantity,
     )
+    # #region agent log
+    _agent_debug_log(
+        "E", "tools.py:search_entry",
+        "search_food_near_user called",
+        {
+            "user_id_prefix": str(user_id)[:8] if user_id else None,
+            "radius_km": radius_km,
+            "food_type": food_type,
+            "want_diet": sorted(want_diet),
+            "bad_allergens": sorted(bad_allergens),
+            "min_quantity": min_quantity,
+        },
+    )
+    # #endregion
 
     # --- 1. Get user location ---
     # Prefer the geocoded latitude/longitude columns populated when the
@@ -2271,8 +2429,25 @@ async def _search_food_near_user(
                         user_lng = parsed.get("longitude")
                     except (ValueError, TypeError):
                         pass
+            # 1c) Geocode saved profile address when coords missing (no live GPS)
+            if (user_lat is None or user_lng is None) and profile.get("address"):
+                geo = await _forward_geocode(str(profile.get("address")))
+                if geo is not None:
+                    user_lat, user_lng = geo
     except Exception as exc:
         logger.error("User lookup failed: %s", exc)
+
+    # #region agent log
+    _agent_debug_log(
+        "A", "tools.py:user_location",
+        "user location resolved",
+        {
+            "user_lat": user_lat,
+            "user_lng": user_lng,
+            "has_coords": user_lat is not None and user_lng is not None,
+        },
+    )
+    # #endregion
 
     # --- 2. Query food_listings with bounding box pre-filter ---
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -2313,19 +2488,9 @@ async def _search_food_near_user(
     if min_quantity is not None and min_quantity > 0:
         params["quantity"] = f"gte.{min_quantity}"
 
-    # Bounding box pre-filter: narrow DB results to ~radius before fetching
-    if user_lat is not None and user_lng is not None:
-        # Rough degree offset for the given radius (1 deg lat ≈ 111 km)
-        lat_offset = radius_km / 111.0
-        lng_offset = radius_km / (111.0 * max(math.cos(math.radians(user_lat)), 0.01))
-        # PostgREST doesn't support duplicate query-param keys, so bounding-box
-        # filtering across two columns uses a single `and` compound filter.
-        params["and"] = (
-            f"(latitude.gte.{user_lat - lat_offset},"
-            f"latitude.lte.{user_lat + lat_offset},"
-            f"longitude.gte.{user_lng - lng_offset},"
-            f"longitude.lte.{user_lng + lng_offset})"
-        )
+    # Do NOT apply a PostgREST bounding-box filter: listings without
+    # latitude/longitude would be excluded entirely even though they are
+    # visible on Find Food. Distance is applied post-fetch instead.
 
     try:
         listings = await supabase_get("food_listings", params)
@@ -2333,104 +2498,239 @@ async def _search_food_near_user(
         logger.error("Food listings fetch failed: %s", exc)
         return {"listings": [], "total": 0, "error": f"Database query failed: {exc}"}
 
+    # #region agent log
+    _agent_debug_log(
+        "A_F", "tools.py:db_fetch",
+        "raw listings from supabase",
+        {
+            "raw_count": len(listings),
+            "bbox_applied": "and" in params,
+            "status_filter": params.get("status"),
+            "listing_type_filter": params.get("listing_type"),
+            "sample": [
+                {
+                    "id": l.get("id"),
+                    "title": (l.get("title") or "")[:40],
+                    "status": l.get("status"),
+                    "lat": l.get("latitude"),
+                    "lng": l.get("longitude"),
+                    "user_id_match": str(l.get("user_id") or "") == str(user_id),
+                }
+                for l in (listings or [])[:5]
+            ],
+        },
+    )
+    # #endregion
+
     # --- 3. Filter by distance ---
     now = datetime.now(timezone.utc)
+    raw_count = len(listings)
     results = []
+    skip_fresh = skip_own = skip_distance = skip_diet = skip_allergen = skip_parse = 0
+    own_included = 0
+    listings_no_coords = 0
     for listing in listings:
-        if not _listing_is_fresh_enough(listing, now=now):
-            continue
-        # Exclude the current user's own listings from search results.
-        # The claim tool enforces this at DB level, but filtering here prevents
-        # GPT from seeing and mis-handling listings with a matching donor_name.
-        if str(listing.get("user_id") or "") == str(user_id):
-            continue
-        lat = listing.get("latitude")
-        lng = listing.get("longitude")
+        try:
+            if not _listing_is_fresh_enough(listing, now=now):
+                skip_fresh += 1
+                continue
+            is_own = str(listing.get("user_id") or "") == str(user_id)
+            if is_own:
+                own_included += 1
+            lat = listing.get("latitude")
+            lng = listing.get("longitude")
+            if lat is None or lng is None:
+                listings_no_coords += 1
 
-        if lat is not None and lng is not None and user_lat is not None and user_lng is not None:
-            try:
-                dist = _haversine(user_lat, user_lng, float(lat), float(lng))
-            except (ValueError, TypeError):
-                dist = None
-        else:
-            dist = None
-
-        # Include listing if within radius, or if no location data available
-        if dist is not None and dist > radius_km:
-            continue
-
-        # Dietary / allergen filters (post-fetch so we can normalise tags).
-        # Listing tag columns may be a list, comma-separated string, or null.
-        def _as_tag_set(val) -> set:
-            if val is None:
-                return set()
-            if isinstance(val, str):
-                items = [t for t in val.replace(";", ",").split(",") if t.strip()]
-            elif isinstance(val, (list, tuple)):
-                items = list(val)
+            if lat is not None and lng is not None and user_lat is not None and user_lng is not None:
+                try:
+                    dist = _haversine(user_lat, user_lng, float(lat), float(lng))
+                except (ValueError, TypeError):
+                    dist = None
             else:
-                return set()
-            return {_norm_tag(str(t)) for t in items if str(t).strip()}
+                dist = None
 
-        listing_diet = _as_tag_set(listing.get("dietary_tags"))
-        listing_allergens = _as_tag_set(listing.get("allergens"))
+            # Include listing if within radius, or if no location data available
+            if dist is not None and dist > radius_km:
+                skip_distance += 1
+                continue
 
-        # Require ALL requested dietary tags to be present on the listing.
-        if want_diet and not want_diet.issubset(listing_diet):
+            # Dietary / allergen filters (post-fetch so we can normalise tags).
+            # Listing tag columns may be a list, comma-separated string, or null.
+            def _as_tag_set(val) -> set:
+                if val is None:
+                    return set()
+                if isinstance(val, str):
+                    items = [t for t in val.replace(";", ",").split(",") if t.strip()]
+                elif isinstance(val, (list, tuple)):
+                    items = list(val)
+                else:
+                    return set()
+                return {_norm_tag(str(t)) for t in items if str(t).strip()}
+
+            listing_diet = _as_tag_set(listing.get("dietary_tags"))
+            listing_allergens = _as_tag_set(listing.get("allergens"))
+
+            # Require ALL requested dietary tags only when the listing declares tags.
+            if want_diet and listing_diet and not want_diet.issubset(listing_diet):
+                skip_diet += 1
+                continue
+            # Drop listings that contain ANY excluded allergen.
+            if bad_allergens and (bad_allergens & listing_allergens):
+                skip_allergen += 1
+                continue
+
+            try:
+                listing_qty = float(listing.get("quantity") or 0)
+            except (TypeError, ValueError):
+                listing_qty = 0
+            if listing.get("quantity") is not None and listing_qty <= 0:
+                continue
+
+            result = {
+                "id": listing.get("id"),
+                "title": listing.get("title"),
+                "description": (listing.get("description") or "")[:200],
+                "category": listing.get("category"),
+                "quantity": listing.get("quantity"),
+                "unit": listing.get("unit"),
+                # The chat panel renders this thumbnail in the search tool card so
+                # the user sees the exact photo attached to the listing. Pass it
+                # through verbatim; never substitute a placeholder here.
+                "image_url": listing.get("image_url"),
+                "address": listing.get("full_address") or _extract_location_text(listing.get("location")),
+                # donor_name intentionally excluded: GPT must NOT use display names
+                # to infer ownership — two accounts can share the same name. Use
+                # listing_owner_id vs the current user_id context for that check.
+                "listing_owner_id": listing.get("user_id"),
+                "expiry_date": listing.get("expiry_date"),
+                "pickup_by": listing.get("pickup_by"),
+                "dietary_tags": listing.get("dietary_tags", []),
+                "allergens": listing.get("allergens", []),
+                "distance_km": round(dist, 1) if dist is not None else None,
+                "latitude": lat,
+                "longitude": lng,
+                "community_name": _community_name_from_listing(listing),
+                "is_own_listing": is_own,
+            }
+            results.append(result)
+        except Exception as exc:
+            skip_parse += 1
+            logger.warning(
+                "search_food_near_user skip listing %s: %s",
+                listing.get("id"), exc,
+            )
+            # #region agent log
+            _agent_debug_log(
+                "F", "tools.py:listing_parse_error",
+                "skipped listing during search parse",
+                {"listing_id": listing.get("id"), "error": type(exc).__name__},
+            )
+            # #endregion
             continue
-        # Drop listings that contain ANY excluded allergen.
-        if bad_allergens and (bad_allergens & listing_allergens):
-            continue
 
-        result = {
-            "id": listing.get("id"),
-            "title": listing.get("title"),
-            "description": listing.get("description", "")[:200],
-            "category": listing.get("category"),
-            "quantity": listing.get("quantity"),
-            "unit": listing.get("unit"),
-            # The chat panel renders this thumbnail in the search tool card so
-            # the user sees the exact photo attached to the listing. Pass it
-            # through verbatim; never substitute a placeholder here.
-            "image_url": listing.get("image_url"),
-            "address": listing.get("full_address") or _extract_location_text(listing.get("location")),
-            # donor_name intentionally excluded: GPT must NOT use display names
-            # to infer ownership — two accounts can share the same name. Use
-            # listing_owner_id vs the current user_id context for that check.
-            "listing_owner_id": listing.get("user_id"),
-            "expiry_date": listing.get("expiry_date"),
-            "pickup_by": listing.get("pickup_by"),
-            "dietary_tags": listing.get("dietary_tags", []),
-            "allergens": listing.get("allergens", []),
-            "distance_km": round(dist, 1) if dist is not None else None,
-            "latitude": lat,
-            "longitude": lng,
-            "community_name": (
-                (listing.get("communities") or {}).get("name")
-                or listing.get("community_name")
-                or None
-            ),
-        }
-        results.append(result)
+    if title_query:
+        hint = title_query.strip().lower()
+
+        def _title_matches(row: dict) -> bool:
+            title_l = str(row.get("title") or "").strip().lower()
+            if not title_l:
+                return False
+            if hint in title_l:
+                return True
+            tokens = re.findall(r"[a-z']+", title_l)
+            if hint in tokens:
+                return True
+            if difflib.SequenceMatcher(None, hint, title_l).ratio() >= 0.72:
+                return True
+            return any(
+                difflib.SequenceMatcher(None, hint, tok).ratio() >= 0.72
+                for tok in tokens
+            )
+
+        title_filtered = [r for r in results if _title_matches(r)]
+        if title_filtered:
+            results = title_filtered
 
     # Sort by distance (nearest first), nulls last
     results.sort(key=lambda r: r["distance_km"] if r["distance_km"] is not None else 9999)
     results = results[:max_results]
+    for i, r in enumerate(results, 1):
+        r["display_index"] = i
+    duplicate_groups = _annotate_duplicate_listings(results)
+
+    # #region agent log
+    _agent_debug_log(
+        "B_C_D", "tools.py:search_result",
+        "search filtering complete",
+        {
+            "final_count": len(results),
+            "skip_fresh": skip_fresh,
+            "skip_own": skip_own,
+            "own_included": own_included,
+            "skip_distance": skip_distance,
+            "skip_diet": skip_diet,
+            "skip_allergen": skip_allergen,
+            "skip_parse": skip_parse,
+            "listings_no_coords": listings_no_coords,
+            "result_titles": [(r.get("id"), r.get("title")) for r in results[:5]],
+            "duplicate_title_groups": [
+                {"title_key": k, "count": len(v), "ids": [x.get("id") for x in v[:4]]}
+                for k, v in duplicate_groups.items()
+            ],
+            "runId": "claim-qty-v1",
+        },
+    )
+    # #endregion
 
     # --- 4. Format natural response summary ---
     if results:
         summary_parts = []
         for i, r in enumerate(results, 1):
             dist_str = f"{r['distance_km']} km away" if r["distance_km"] is not None else "distance unknown"
+            own_note = " (your donation — you can't claim your own)" if r.get("is_own_listing") else ""
+            dup_note = ""
+            if r.get("same_title_count", 1) > 1:
+                dup_note = (
+                    f" [posting #{i} — same food name as another listing; "
+                    f"quantities are separate]"
+                )
             summary_parts.append(
-                f"{i}. **{r['title']}** ({r['category'] or 'uncategorized'}) — "
-                f"{r['quantity']} {r['unit'] or 'items'}, {dist_str}. "
+                f"{i}. **{r['title']}** ({r['category'] or 'food'}) — "
+                f"{r['quantity']} {r['unit'] or 'items'}, {dist_str}{own_note}{dup_note}. "
                 f"Pickup: {r['address'] or 'contact donor'}."
             )
+        own_count = sum(1 for r in results if r.get("is_own_listing"))
+        lead = f"Found {len(results)} food item(s) near you"
+        if own_count and own_count == len(results):
+            lead = (
+                f"Found {len(results)} listing(s) near your address — "
+                "these are your own donations (others can claim them; you cannot claim your own)"
+            )
+        elif own_count:
+            lead = f"Found {len(results)} food item(s) near you ({own_count} are your donations)"
+        dup_group_lines = []
+        for key, rows in duplicate_groups.items():
+            label = rows[0].get("title") or key
+            dup_group_lines.append(
+                f"• **{label}**: {len(rows)} separate listings — "
+                "same food type, each with its own quantity and pickup. "
+                "Never sum their quantities (e.g. 10 + 10 ≠ 20 available from one donor)."
+            )
+        dup_block = ""
+        if dup_group_lines:
+            dup_block = (
+                "\n\nSame food type, separate postings:\n"
+                + "\n".join(dup_group_lines)
+            )
         summary = (
-            f"Found {len(results)} food item(s) near you:\n" 
+            f"{lead}:\n"
             + "\n".join(summary_parts)
-            + "\n\n(Quantities shown are current now but may change as others claim food.)"
+            + dup_block
+            + "\n\nTell the user food cards appear in chat — keep your reply to "
+            "1–2 warm sentences plus 'Which number works for you?' Do NOT paste "
+            "this full list into the user message. Each number maps to listing_id "
+            "when calling claim_listing."
         )
     else:
         active_filters = []
@@ -2445,11 +2745,18 @@ async def _search_food_near_user(
         if min_quantity:
             active_filters.append(f"qty>={min_quantity}")
         hint = f" (filters: {'; '.join(active_filters)})" if active_filters else ""
-        summary = (
-            f"No available food listings found within {radius_km} km{hint}. "
-            "Try widening your radius, relaxing dietary/allergen filters, "
-            "or check back later!"
-        )
+        if raw_count > 0 and own_included == raw_count:
+            summary = (
+                f"There are {raw_count} active listing(s) near your address, but "
+                "they are all your own donations — you cannot claim your own food. "
+                "Others can claim them; sign in as a recipient or browse Find Food "
+                "to see food shared by other donors."
+            )
+        else:
+            summary = (
+                f"No available food listings found within {radius_km} km of your "
+                f"saved address{hint}. Try a wider search or check back later!"
+            )
 
     return {
         # `listings` is the canonical key. The duplicate `results` field
@@ -2459,6 +2766,19 @@ async def _search_food_near_user(
         # _build_memory_snapshot and _persist_conversation compaction).
         "listings": results,
         "total": len(results),
+        "duplicate_title_groups": [
+            {
+                "title_key": key,
+                "display_title": (rows[0].get("title") or key),
+                "count": len(rows),
+                "listing_ids": [r.get("id") for r in rows],
+            }
+            for key, rows in duplicate_groups.items()
+        ],
+        "display_rules": (
+            "Each listing is a separate posting. Identical titles are the same food "
+            "TYPE but NOT one combined pool — never add quantities across listings."
+        ),
         "radius_km": radius_km,
         "user_location_available": user_lat is not None,
         "filters_applied": {
@@ -3130,25 +3450,6 @@ async def _get_user_dashboard(user_id: str) -> dict:
     }
 
     return dashboard
-
-
-async def _get_my_impact_summary(user_id: str) -> dict:
-    """Lightweight impact stats for 'show my impact' help turns."""
-    dashboard = await _get_user_dashboard(user_id)
-    impact = dashboard.get("impact_summary") or {}
-    shared = int(impact.get("food_shared_count") or 0)
-    received = int(impact.get("food_received_count") or 0)
-    return {
-        "success": True,
-        "food_shared_count": shared,
-        "food_received_count": received,
-        "listings_total": shared,
-        "claims_total": received,
-        "summary": (
-            f"You've shared {shared} listing{'s' if shared != 1 else ''} "
-            f"and received {received} claim{'s' if received != 1 else ''}."
-        ),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -3841,9 +4142,118 @@ async def _resolve_community(community_name: Optional[str], community_id: Option
             })
         if rows:
             return str(rows[0]["id"]), rows[0].get("name")
+
+        # Last resort: score all active communities locally (handles partial
+        # names like "Do Good" → "Do Good Warehouse", typos, word reorder).
+        all_rows = await supabase_get("communities", {
+            "is_active": "eq.true",
+            "select": "id,name",
+            "limit": "50",
+        })
+        hit = _best_community_name_match(name, all_rows or [])
+        if hit:
+            return str(hit["id"]), hit.get("name")
     except Exception as exc:
         logger.warning("community lookup by name failed: %s", exc)
     return None, None
+
+
+def _best_community_name_match(query: str, rows: list) -> Optional[dict]:
+    """Return the best-matching community row for a free-text query."""
+    import difflib
+    import re as _re
+
+    q = (query or "").strip().lower()
+    q = _re.sub(
+        r"^(?:the|a|an|please|use|pick|choose|under|list under|go under)\s+",
+        "",
+        q,
+    ).strip()
+    q = _re.sub(r"\s+(?:please|instead|community|school)\.?$", "", q).strip()
+    if len(q) < 2 or not rows:
+        return None
+
+    q_tokens = set(_re.findall(r"[a-z0-9]+", q))
+    best_row: Optional[dict] = None
+    best_score = 0.0
+    for row in rows:
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        n_lower = name.lower()
+        n_tokens = set(_re.findall(r"[a-z0-9]+", n_lower))
+        if q == n_lower:
+            score = 1.0
+        elif q in n_lower or n_lower in q:
+            score = 0.93
+        else:
+            score = difflib.SequenceMatcher(None, q, n_lower).ratio()
+            if q_tokens and n_tokens:
+                overlap = len(q_tokens & n_tokens) / max(len(q_tokens), len(n_tokens))
+                score = max(score, overlap)
+        if score > best_score:
+            best_score = score
+            best_row = row
+    if best_row and best_score >= 0.55:
+        return best_row
+    return None
+
+
+async def _find_recent_duplicate_listing(
+    user_id: str,
+    title: str,
+    *,
+    quantity: Optional[float] = None,
+    address: Optional[str] = None,
+    window_minutes: int = 45,
+) -> Optional[dict]:
+    """Return a recent matching listing by the same donor (duplicate-post guard)."""
+    from backend.ai_engine import supabase_get, _is_placeholder_address
+
+    title_key = (title or "").strip().lower()[:200]
+    if not title_key or not user_id:
+        return None
+
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    ).isoformat()
+    try:
+        rows = await supabase_get("food_listings", {
+            "user_id": f"eq.{user_id}",
+            "status": "in.(approved,pending)",
+            "created_at": f"gte.{cutoff}",
+            "select": (
+                "id,title,quantity,unit,image_url,location,full_address,"
+                "latitude,longitude,community_id,expiry_date,created_at"
+            ),
+            "order": "created_at.desc",
+            "limit": "25",
+        })
+    except Exception as exc:
+        logger.warning("duplicate listing lookup failed (non-fatal): %s", exc)
+        return None
+
+    addr_norm = ""
+    if address and not _is_placeholder_address(address):
+        addr_norm = str(address).strip().lower()
+
+    for row in rows or []:
+        if (row.get("title") or "").strip().lower() != title_key:
+            continue
+        if quantity is not None:
+            try:
+                if float(row.get("quantity", 0)) != float(quantity):
+                    continue
+            except (TypeError, ValueError):
+                pass
+        if addr_norm:
+            row_addr = (
+                row.get("full_address") or row.get("location") or ""
+            ).strip().lower()
+            if row_addr and row_addr != addr_norm:
+                continue
+        return row
+    return None
 
 
 async def _create_food_listing(
@@ -3872,6 +4282,7 @@ async def _create_food_listing(
         supabase_post,
         fetch_donor_listing_defaults,
         apply_donor_defaults_to_listing,
+        _is_placeholder_address,
     )
 
     logger.info("create_food_listing: user=%s title=%s qty=%s", user_id, title, quantity)
@@ -3959,7 +4370,7 @@ async def _create_food_listing(
         }
     row["expiry_date"] = resolved_expiry
 
-    if location:
+    if location and not _is_placeholder_address(location):
         loc_s = str(location).strip()[:200]
         row["location"] = loc_s
         # full_address powers the address line on search cards + the map pin
@@ -3972,6 +4383,73 @@ async def _create_food_listing(
         row["allergens"] = [str(t).strip()[:40] for t in allergens if str(t).strip()][:20]
     if image_url and isinstance(image_url, str) and image_url.strip().startswith(("http://", "https://")):
         row["image_url"] = image_url.strip()[:2000]
+
+    # Duplicate-post guard (Supabase path). The legacy SQLite handler had this;
+    # without it the model often posts once without a photo, then again with one.
+    dup = await _find_recent_duplicate_listing(
+        str(user_id),
+        title_s,
+        quantity=qty,
+        address=row.get("full_address") or row.get("location"),
+    )
+    if dup:
+        dup_id = str(dup.get("id"))
+        new_photo = row.get("image_url")
+        existing_photo = dup.get("image_url")
+        if new_photo and not existing_photo:
+            from backend.ai_engine import supabase_patch
+            try:
+                await supabase_patch(
+                    "food_listings",
+                    {"id": f"eq.{dup_id}", "user_id": f"eq.{user_id}"},
+                    {"image_url": new_photo},
+                )
+                dup["image_url"] = new_photo
+            except Exception as exc:
+                logger.warning("duplicate listing photo merge failed: %s", exc)
+            return {
+                "success": True,
+                "listing_id": dup_id,
+                "title": dup.get("title") or title_s,
+                "quantity": dup.get("quantity") or qty,
+                "unit": dup.get("unit") or unit_s,
+                "category": cat,
+                "address": dup.get("full_address") or dup.get("location"),
+                "latitude": dup.get("latitude"),
+                "longitude": dup.get("longitude"),
+                "community_id": dup.get("community_id"),
+                "expiry_date": dup.get("expiry_date"),
+                "on_map": dup.get("latitude") is not None and dup.get("longitude") is not None,
+                "duplicate_of_recent": True,
+                "photo_merged": True,
+                "summary": (
+                    f"That listing is already live — added the photo to '{title_s}' "
+                    f"(id {dup_id[:8]}…). No duplicate was created."
+                ),
+            }
+        logger.info(
+            "create_food_listing: dedup hit user=%s title=%r -> existing id=%s",
+            user_id, title_s, dup_id,
+        )
+        return {
+            "success": True,
+            "listing_id": dup_id,
+            "title": dup.get("title") or title_s,
+            "quantity": dup.get("quantity") or qty,
+            "unit": dup.get("unit") or unit_s,
+            "category": cat,
+            "address": dup.get("full_address") or dup.get("location"),
+            "latitude": dup.get("latitude"),
+            "longitude": dup.get("longitude"),
+            "community_id": dup.get("community_id"),
+            "expiry_date": dup.get("expiry_date"),
+            "on_map": dup.get("latitude") is not None and dup.get("longitude") is not None,
+            "duplicate_of_recent": True,
+            "summary": (
+                f"That listing is already up — '{title_s}' (id {dup_id[:8]}…). "
+                "Skipped creating a duplicate."
+            ),
+        }
 
     # Explicit coords from the model win over donor profile defaults.
     try:
@@ -4247,13 +4725,39 @@ async def _claim_food_listing(
             "food_id": f"eq.{listing_id}",
             "claimer_id": f"eq.{user_id}",
             "status": "in.(pending,approved)",
-            "select": "id",
+            "select": "id,quantity,status,food_id",
             "limit": "1",
         })
         if existing_claim:
+            claim = existing_claim[0]
+            title = str(listing.get("title") or "the listing")
+            unit = str(listing.get("unit") or "units")
+            pickup_loc = (
+                listing.get("full_address")
+                or _extract_location_text(listing.get("location"))
+                or None
+            )
+            qty = int(claim.get("quantity") or requested_qty or 1)
+            summary = (
+                f"You already claimed {qty} {unit} of '{title}'."
+                + (f" Pickup at {pickup_loc}." if pickup_loc else "")
+            )
             return {
-                "success": False,
-                "error": "You already have an active claim on this listing. Use cancel_claim to release it first if you want to re-claim.",
+                "success": True,
+                "already_claimed": True,
+                "claim_id": str(claim.get("id")),
+                "listing_id": str(listing_id),
+                "title": title,
+                "quantity": qty,
+                "unit": unit,
+                "pickup_location": pickup_loc,
+                "summary": summary,
+                "message": (
+                    "This listing is already reserved for this user. "
+                    "Confirm pickup details. If they want different food, "
+                    "call search_food_near_user for a fresh search — do not "
+                    "treat this as an in-progress intake."
+                ),
             }
     except Exception as exc:
         logger.warning("claim_food_listing: duplicate claim check failed (non-fatal): %s", exc)
@@ -4635,12 +5139,22 @@ async def _delete_listing(
     user_id: str,
     listing_id: Optional[str] = None,
     title: Optional[str] = None,
+    listing_ids: Optional[list] = None,
+    delete_duplicates: bool = False,
     confirmed: bool = False,
     **_ignored,
 ) -> dict:
     from backend.ai_engine import supabase_get, supabase_delete
+    from backend.ai.conversation_flow import (
+        get_last_donor_listings,
+        resolve_donor_listing_id,
+        set_last_donor_listings,
+    )
 
-    logger.info("delete_listing: user=%s listing=%s title=%s confirmed=%s", user_id, listing_id, title, confirmed)
+    logger.info(
+        "delete_listing: user=%s listing=%s title=%s confirmed=%s bulk=%s dup=%s",
+        user_id, listing_id, title, confirmed, bool(listing_ids), delete_duplicates,
+    )
     if not user_id:
         return {"success": False, "error": "missing user_id"}
     if not confirmed:
@@ -4649,6 +5163,110 @@ async def _delete_listing(
             "needs_confirmation": True,
             "message": "Deletion is permanent and cannot be undone. Please confirm you want to permanently delete this listing.",
         }
+
+    if not get_last_donor_listings(user_id):
+        fetched = await _get_user_listings(user_id, status="active")
+        if fetched.get("listings"):
+            set_last_donor_listings(str(user_id), fetched["listings"])
+
+    # ---- Bulk delete: explicit ids or duplicate cleanup -------------------
+    bulk_ids: list[str] = []
+    if listing_ids:
+        bulk_ids = [str(x).strip() for x in listing_ids if str(x).strip()]
+    elif delete_duplicates:
+        donor_rows = get_last_donor_listings(user_id)
+        if not donor_rows:
+            fetched = await _get_user_listings(user_id, status="active")
+            donor_rows = fetched.get("listings") or []
+        remove_ids, dup_meta = duplicate_listing_ids_to_remove(
+            donor_rows, title=title,
+        )
+        bulk_ids = remove_ids
+        if not bulk_ids:
+            return {
+                "success": False,
+                "error": "no_duplicates",
+                "message": (
+                    "No duplicate listings found to remove."
+                    if not title
+                    else f"No duplicate listings found for '{title}'."
+                ),
+            }
+
+    if bulk_ids:
+        deleted: list[dict] = []
+        failed: list[dict] = []
+        titles_seen: set[str] = set()
+        for lid in bulk_ids:
+            check = await supabase_get("food_listings", {
+                "id": f"eq.{lid}",
+                "user_id": f"eq.{user_id}",
+                "select": "id,title",
+                "limit": "1",
+            })
+            if not check:
+                failed.append({"listing_id": lid, "error": "not_found"})
+                continue
+            row_title = check[0].get("title") or "listing"
+            try:
+                count = await supabase_delete("food_listings", {
+                    "id": f"eq.{lid}",
+                    "user_id": f"eq.{user_id}",
+                })
+            except Exception as exc:
+                logger.error("delete_listing bulk: delete failed for %s: %s", lid, exc)
+                failed.append({"listing_id": lid, "error": str(exc)})
+                continue
+            if count == 0:
+                failed.append({"listing_id": lid, "error": "already_deleted"})
+                continue
+            deleted.append({"listing_id": lid, "title": row_title})
+            if row_title:
+                titles_seen.add(str(row_title))
+
+        if not deleted:
+            return {
+                "success": False,
+                "error": "bulk_delete_failed",
+                "failed": failed,
+                "message": "Could not delete any of the selected listings.",
+            }
+
+        # Refresh donor cache after bulk delete
+        refreshed = await _get_user_listings(user_id, status="active")
+        if refreshed.get("listings"):
+            set_last_donor_listings(str(user_id), refreshed["listings"])
+
+        title_sample = ", ".join(sorted(titles_seen)[:3])
+        if delete_duplicates and not listing_ids:
+            summary = (
+                f"Removed {len(deleted)} duplicate listing(s)"
+                + (f" (kept one copy of each title)" if len(titles_seen) > 1 else f" for '{title_sample}'")
+                + "."
+            )
+        else:
+            summary = f"Permanently deleted {len(deleted)} listing(s)."
+
+        return {
+            "success": True,
+            "ok": True,
+            "deleted_count": len(deleted),
+            "deleted": deleted,
+            "failed_count": len(failed),
+            "failed": failed or None,
+            "title": title_sample or (deleted[0].get("title") if deleted else None),
+            "titles": sorted(titles_seen),
+            "summary": summary,
+            "delete_duplicates": bool(delete_duplicates),
+        }
+
+    # ---- Single listing delete -------------------------------------------
+    if listing_id is not None and str(listing_id).strip():
+        resolved, resolve_err = resolve_donor_listing_id(listing_id, str(user_id))
+        if resolved:
+            listing_id = resolved
+        elif resolve_err and not title:
+            return {"success": False, "error": resolve_err}
 
     # Resolve listing_id from title if not provided. Use substring match
     # (ilike %lookup%) and refuse to silently pick when more than one row
@@ -4743,6 +5361,23 @@ async def _deactivate_listing(
     logger.info("deactivate_listing: user=%s listing=%s title=%s", user_id, listing_id, title)
     if not user_id:
         return {"success": False, "error": "missing user_id"}
+
+    from backend.ai.conversation_flow import (
+        get_last_donor_listings,
+        resolve_donor_listing_id,
+        set_last_donor_listings,
+    )
+    if not get_last_donor_listings(user_id):
+        fetched = await _get_user_listings(user_id, status="active")
+        if fetched.get("listings"):
+            set_last_donor_listings(str(user_id), fetched["listings"])
+
+    if listing_id is not None and str(listing_id).strip():
+        resolved, resolve_err = resolve_donor_listing_id(listing_id, str(user_id))
+        if resolved:
+            listing_id = resolved
+        elif resolve_err and not title:
+            return {"success": False, "error": resolve_err}
 
     # Resolve listing_id from title if not provided. Honor the title the
     # caller gave us: a miss must NOT silently take down the wrong listing.
@@ -4851,7 +5486,11 @@ async def _get_user_listings(
 
     params: dict = {
         "user_id": f"eq.{user_id}",
-        "select": "id,title,quantity,unit,category,status,expiry_date,created_at,image_url",
+        "select": (
+            "id,title,quantity,unit,category,status,expiry_date,pickup_by,"
+            "created_at,image_url,full_address,location,description,"
+            "community_id,communities(id,name)"
+        ),
         "order": "created_at.desc",
         "limit": "20",
     }
@@ -4867,16 +5506,20 @@ async def _get_user_listings(
     except Exception as exc:
         return {"success": False, "error": f"Could not fetch listings: {exc}"}
 
+    raw_rows = [dict(r) for r in (rows or [])]
+    duplicate_groups = _annotate_duplicate_listings(raw_rows)
+    duplicate_extra = sum(max(len(g) - 1, 0) for g in duplicate_groups.values())
+
     # Enrich each listing with a claim count so the donor can answer
     # "has anyone claimed my food?" / "how many claims does X have?"
     # without a second tool round-trip.
-    listing_ids = [str(r.get("id")) for r in (rows or []) if r.get("id")]
+    listing_ids = [str(r.get("id")) for r in raw_rows if r.get("id")]
     claims_by_listing: dict[str, int] = {}
     if listing_ids:
         try:
             claims = await supabase_get("food_claims", {
                 "food_id": f"in.({','.join(listing_ids)})",
-                "status": "in.(pending,approved,confirmed,completed)",
+                "status": "in.(pending,approved)",
                 "select": "food_id,status",
             })
             for c in claims or []:
@@ -4885,31 +5528,55 @@ async def _get_user_listings(
         except Exception as exc:
             logger.warning("get_user_listings: claim-count enrichment failed: %s", exc)
 
-    listings = [
-        {
-            "id": r.get("id"),
-            "title": r.get("title"),
-            "quantity": r.get("quantity"),
-            "unit": r.get("unit"),
-            "category": r.get("category"),
-            "status": r.get("status"),
-            "expiry_date": r.get("expiry_date"),
-            "has_photo": bool(r.get("image_url")),
-            "claims_count": claims_by_listing.get(str(r.get("id")), 0),
-        }
-        for r in (rows or [])
-    ]
+    listings = []
+    for i, r in enumerate(raw_rows, start=1):
+        snap = _listing_snapshot_from_row(r)
+        snap["display_index"] = i
+        snap["has_photo"] = bool(r.get("image_url"))
+        snap["claims_count"] = claims_by_listing.get(str(r.get("id")), 0)
+        snap["same_title_count"] = r.get("same_title_count", 1)
+        listings.append(snap)
+
+    if listings:
+        from backend.ai.conversation_flow import set_last_donor_listings
+        set_last_donor_listings(str(user_id), listings)
 
     total_claims = sum(l["claims_count"] for l in listings)
+    dup_lines = ""
+    if duplicate_extra:
+        dup_lines = (
+            f"\n{duplicate_extra} duplicate listing(s) detected across "
+            f"{len(duplicate_groups)} title group(s). "
+            "Use delete_listing with delete_duplicates=true to remove extras "
+            "(keeps one copy per title)."
+        )
     return {
         "success": True,
         "ok": True,
         "count": len(listings),
         "total_claims": total_claims,
+        "duplicate_extra_count": duplicate_extra,
+        "duplicate_groups": [
+            {
+                "title": grp[0].get("title"),
+                "count": len(grp),
+                "extras_to_remove": max(len(grp) - 1, 0),
+            }
+            for grp in duplicate_groups.values()
+        ],
         "listings": listings,
         "summary": (
             f"You have {len(listings)} {status if status != 'active' else 'active'} "
             f"listing(s) with {total_claims} active claim(s) across them."
+            + dup_lines
+            + (
+                "\n" + "\n".join(
+                    f"{row['display_index']}. {row['title']}"
+                    + (f" ({row['same_title_count']} with same title)" if row.get("same_title_count", 1) > 1 else "")
+                    for row in listings[:10]
+                )
+                if listings else ""
+            )
         ),
         # Views are NOT tracked yet — surface this so the AI can honestly
         # answer "how many views does my listing have?".
@@ -4926,8 +5593,34 @@ _UPDATABLE_LISTING_FIELDS = {
     "title", "description", "quantity", "unit",
     "expiry_date", "pickup_by",
     "dietary_tags", "allergens", "image_url",
-    "category", "location", "full_address",
+    "category", "location", "full_address", "community_id",
 }
+
+_LISTING_SNAPSHOT_SELECT = (
+    "id,title,quantity,unit,category,status,expiry_date,pickup_by,"
+    "full_address,location,description,image_url,community_id,"
+    "communities(id,name)"
+)
+
+
+def _listing_snapshot_from_row(row: dict) -> dict:
+    """UI-friendly listing row after read or update."""
+    if not row:
+        return {}
+    return {
+        "id": row.get("id"),
+        "title": row.get("title"),
+        "quantity": row.get("quantity"),
+        "unit": row.get("unit"),
+        "category": row.get("category"),
+        "status": row.get("status"),
+        "expiry_date": row.get("expiry_date"),
+        "pickup_by": row.get("pickup_by"),
+        "description": row.get("description"),
+        "address": row.get("full_address") or _extract_location_text(row.get("location")),
+        "image_url": row.get("image_url"),
+        "community_name": _community_name_from_listing(row),
+    }
 
 _STATUS_ALIASES = {
     "available": "approved", "live": "approved", "active": "approved",
@@ -4950,6 +5643,8 @@ async def _update_food_listing(
     expiry_date: Optional[str] = None,
     pickup_by: Optional[str] = None,
     location: Optional[str] = None,
+    community_id: Optional[str] = None,
+    community_name: Optional[str] = None,
     dietary_tags: Optional[list] = None,
     allergens: Optional[list] = None,
     image_url: Optional[str] = None,
@@ -5037,11 +5732,31 @@ async def _update_food_listing(
         return {"success": False, "error": "Listing not found or you don't own it."}
     current_title = check[0].get("title") or "the listing"
 
+    # When listing_id is already resolved, title_lookup is often the NEW title
+    # the model meant to set — not a search key. Honor that if it differs.
+    if title_lookup and str(title_lookup).strip():
+        tl = str(title_lookup).strip()
+        if tl.lower() != str(current_title).lower() and title is None:
+            title = tl
+
+    # Models often pack community/expiry into description — unwrap before patch.
+    from backend.ai.conversation_flow import _unwrap_listing_metadata_from_args
+    unwrapped = _unwrap_listing_metadata_from_args({
+        "description": description,
+        "expiry_date": expiry_date,
+        "community_name": community_name,
+        "community_id": community_id,
+    })
+    description = unwrapped.get("description", description)
+    expiry_date = unwrapped.get("expiry_date", expiry_date)
+    community_name = unwrapped.get("community_name", community_name)
+    community_id = unwrapped.get("community_id", community_id)
+
     # 3) Build the patch
     patch: dict = {}
     if title is not None:
         t = str(title).strip()
-        if t:
+        if t and t.lower() != str(current_title).lower():
             patch["title"] = t[:200]
     if description is not None:
         patch["description"] = str(description).strip()[:2000]
@@ -5079,6 +5794,21 @@ async def _update_food_listing(
         if loc_s:
             patch["location"] = loc_s
             patch["full_address"] = loc_s
+    if community_name or community_id:
+        resolved_community_id, _resolved_community_name = await _resolve_community(
+            community_name, community_id,
+        )
+        if resolved_community_id:
+            patch["community_id"] = resolved_community_id
+        elif community_name or community_id:
+            return {
+                "success": False,
+                "error": "community_not_found",
+                "message": (
+                    f"Could not find community '{community_name or community_id}'. "
+                    "Call get_active_communities and retry with community_id."
+                ),
+            }
     if isinstance(dietary_tags, list):
         patch["dietary_tags"] = [str(t).strip()[:40] for t in dietary_tags if str(t).strip()][:20]
     if isinstance(allergens, list):
@@ -5098,8 +5828,10 @@ async def _update_food_listing(
             "message": (
                 "No updatable fields were supplied. Pass at least one of "
                 "title, description, quantity, unit, category, expiry_date, "
-                "pickup_by, location, dietary_tags, allergens, "
-                "image_url, status."
+                "pickup_by, location, community_name, community_id, "
+                "dietary_tags, allergens, image_url, status. "
+                "Do NOT put community or expiry inside description — use "
+                "expiry_date and community_name instead."
             ),
         }
 
@@ -5113,13 +5845,53 @@ async def _update_food_listing(
         logger.error("update_food_listing: patch failed: %s", exc)
         return {"success": False, "error": f"Could not update listing: {exc}"}
 
+    refreshed = await supabase_get("food_listings", {
+        "id": f"eq.{listing_id}",
+        "user_id": f"eq.{user_id}",
+        "select": _LISTING_SNAPSHOT_SELECT,
+        "limit": "1",
+    })
+    listing = _listing_snapshot_from_row(refreshed[0]) if refreshed else {}
+    final_title = listing.get("title") or patch.get("title") or current_title
+
+    try:
+        from backend.ai.conversation_flow import set_last_donor_listings, get_last_donor_listings
+        cached = get_last_donor_listings(str(user_id))
+        if cached and listing.get("id"):
+            updated_cache = []
+            for row in cached:
+                if str(row.get("id")) == str(listing_id):
+                    merged = dict(row)
+                    merged.update(listing)
+                    updated_cache.append(merged)
+                else:
+                    updated_cache.append(row)
+            set_last_donor_listings(str(user_id), updated_cache)
+    except Exception as exc:
+        logger.debug("update_food_listing: cache refresh skipped: %s", exc)
+
+    field_bits = []
+    for key in sorted(patch.keys()):
+        val = listing.get(key) if key in listing else patch.get(key)
+        if key == "community_id":
+            val = listing.get("community_name") or val
+            key = "community"
+        if val is not None:
+            field_bits.append(f"{key}={val}")
+
     return {
         "success": True,
         "ok": True,
         "listing_id": str(listing_id),
-        "title": current_title,
+        "title": final_title,
+        "previous_title": current_title,
         "updated_fields": sorted(patch.keys()),
-        "summary": f"Updated '{current_title}' ({', '.join(sorted(patch.keys()))}).",
+        "listing": listing,
+        "summary": (
+            f"Updated '{final_title}'"
+            + (f" — {', '.join(field_bits)}" if field_bits else "")
+            + "."
+        ),
     }
 
 
@@ -5461,8 +6233,8 @@ async def _attach_photos_to_listing(
     logger.info("attach_photos_to_listing: user=%s listing=%s", user_id, listing_id)
     if not (user_id and listing_id and image_url):
         return {"success": False, "error": "user_id, listing_id, and image_url are all required"}
-    if not (image_url.startswith("http://") or image_url.startswith("https://")):
-        return {"success": False, "error": "image_url must start with http:// or https://"}
+    if not (image_url.startswith("http://") or image_url.startswith("https://") or image_url.startswith("/")):
+        return {"success": False, "error": "image_url must start with http://, https://, or /"}
 
     try:
         listings = await supabase_get("food_listings", {
@@ -5503,7 +6275,6 @@ async def _attach_photos_to_listing(
 
 _NAVIGATE_ACTION_ALIASES = {
     "open": "navigate",
-    "open_page": "navigate",
     "go": "navigate",
     "goto": "navigate",
     "go_to": "navigate",
@@ -5570,8 +6341,6 @@ async def _navigate_ui(
     mapped_action = _NAVIGATE_ACTION_ALIASES.get(action_lc, action)
     if mapped_action == "navigate" and not path and target:
         path = target if target.startswith("/") else f"/{target.lstrip('/')}"
-    if mapped_action == "navigate" and path and not str(path).startswith("/"):
-        path = f"/{str(path).lstrip('/')}"
     return await _ui_action(
         action=mapped_action,
         path=path,
@@ -5973,160 +6742,3 @@ async def _leave_community(user_id: str, **_ignored) -> dict:
         "summary": summary,
         "message": summary,
     }
-
-
-# ---------------------------------------------------------------------------
-# Handler registration & signature validation
-# ---------------------------------------------------------------------------
-#
-# `_HANDLERS` is the single source of truth mapping schema tool names
-# (TOOL_DEFINITIONS[*]["function"]["name"]) to their Python implementations.
-# It must be declared AFTER every handler function so all names resolve at
-# module load. `execute_tool()` above reads from this dict at call time.
-#
-# Aliases (e.g. `post_food_listing` -> `_create_food_listing`) intentionally
-# share a handler and each MUST have its own TOOL_DEFINITIONS entry; the
-# validator below enforces that contract.
-
-import inspect as _inspect
-
-_HANDLERS: dict[str, callable] = {
-    "search_food_near_user": _search_food_near_user,
-    "get_recent_listings": _get_recent_listings,
-    "get_user_profile": _get_user_profile,
-    "update_user_profile": _update_user_profile,
-    "get_pickup_schedule": _get_pickup_schedule,
-    "create_reminder": _create_reminder,
-    "get_mapbox_route": _get_mapbox_route,
-    "query_distribution_centers": _query_distribution_centers,
-    "get_user_dashboard": _get_user_dashboard,
-    "get_my_impact_summary": _get_my_impact_summary,
-    "check_pickup_schedule": _check_pickup_schedule,
-    "get_recipes": _get_recipes,
-    "get_storage_tips": _get_storage_tips,
-    "get_active_communities": _get_active_communities,
-    "get_user_notifications": _get_user_notifications,
-    "send_notification": _send_notification,
-    "mark_notifications_read": _mark_notifications_read,
-    "ui_action": _ui_action,
-    "forget_about_me": _forget_about_me,
-    "create_food_listing": _create_food_listing,
-    "claim_listing": _claim_food_listing,
-    "cancel_claim": _cancel_claim,
-    "confirm_claim": _confirm_claim,
-    "post_food_listing": _create_food_listing,
-    "bulk_import_listings": _bulk_import_listings,
-    "get_donor_expiring_listings": _get_donor_expiring_listings,
-    "attach_photos_to_listing": _attach_photos_to_listing,
-    "navigate_ui": _navigate_ui,
-    "meal_suggestions": _get_recipes,
-    "bulk_post_food_listings": _bulk_import_listings,
-    "deactivate_listing": _deactivate_listing,
-    "delete_listing": _delete_listing,
-    "get_user_listings": _get_user_listings,
-    "update_food_listing": _update_food_listing,
-    "update_listing": _update_food_listing,
-    "edit_listing": _update_food_listing,
-    "get_my_claims": _get_my_claims,
-    "get_community_listings": _get_community_listings,
-    # AGENT_V2 (Phase 4) — 4 new WRITE tools
-    "message_donor": _message_donor,
-    "schedule_pickup": _schedule_pickup,
-    "join_community": _join_community,
-    "leave_community": _leave_community,
-}
-
-
-def _handler_accepts_var_keyword(handler) -> bool:
-    """True if the handler declares **kwargs (e.g. **_ignored)."""
-    try:
-        sig = _inspect.signature(handler)
-    except (TypeError, ValueError):
-        return False
-    return any(
-        p.kind == _inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
-
-
-def _handler_param_names(handler) -> set[str]:
-    """Explicit parameter names on the handler (excludes *args / **kwargs)."""
-    try:
-        sig = _inspect.signature(handler)
-    except (TypeError, ValueError):
-        return set()
-    return {
-        name
-        for name, param in sig.parameters.items()
-        if param.kind
-        not in (_inspect.Parameter.VAR_POSITIONAL, _inspect.Parameter.VAR_KEYWORD)
-    }
-
-
-def _validate_tool_definitions() -> list[str]:
-    """Cross-check TOOL_DEFINITIONS against the `_HANDLERS` registry.
-
-    Returns a list of human-readable error strings. Empty list means every
-    declared tool has a handler, every handler has a schema, every schema
-    `required[]` name resolves to a handler parameter (or the handler
-    accepts **kwargs), and every tool whose schema exposes `user_id` has
-    a handler willing to receive it (the ai_engine dispatch layer
-    unconditionally injects the authenticated user_id).
-    """
-    errors: list[str] = []
-
-    schema_names = {
-        t["function"]["name"]
-        for t in TOOL_DEFINITIONS
-        if isinstance(t, dict)
-        and isinstance(t.get("function"), dict)
-        and "name" in t["function"]
-    }
-
-    # (1) Every declared tool must have a handler.
-    for name in sorted(schema_names):
-        if name not in _HANDLERS:
-            errors.append(f"tool '{name}' declared in TOOL_DEFINITIONS but no handler in _HANDLERS")
-
-    # (2) Every handler must have a declared tool (catches orphan aliases).
-    for name in sorted(_HANDLERS.keys()):
-        if name not in schema_names:
-            errors.append(f"handler '{name}' registered in _HANDLERS but no TOOL_DEFINITIONS entry")
-
-    # (3) For each shared schema+handler pair, verify required params + user_id.
-    for tool in TOOL_DEFINITIONS:
-        if not (isinstance(tool, dict) and isinstance(tool.get("function"), dict)):
-            continue
-        name = tool["function"].get("name")
-        handler = _HANDLERS.get(name)
-        if handler is None:
-            continue  # already reported in (1)
-
-        params_schema = tool["function"].get("parameters") or {}
-        properties = params_schema.get("properties") or {}
-        required = params_schema.get("required") or []
-
-        explicit_params = _handler_param_names(handler)
-        accepts_kwargs = _handler_accepts_var_keyword(handler)
-
-        # (3a) Every required schema param must be in the handler signature,
-        # or the handler must accept **kwargs.
-        for pname in required:
-            if pname not in explicit_params and not accepts_kwargs:
-                errors.append(
-                    f"tool '{name}': schema requires '{pname}' but handler "
-                    f"'{handler.__name__}' does not accept it"
-                )
-
-        # (3b) If the schema exposes `user_id`, the handler must accept it
-        # (either explicitly or via **kwargs). The ai_engine dispatch layer
-        # force-injects the authenticated user_id, so a handler that can't
-        # receive it would raise TypeError at call time.
-        if "user_id" in properties:
-            if "user_id" not in explicit_params and not accepts_kwargs:
-                errors.append(
-                    f"tool '{name}': schema exposes 'user_id' but handler "
-                    f"'{handler.__name__}' does not accept it "
-                    f"(ai_engine dispatch always injects user_id)"
-                )
-
-    return errors

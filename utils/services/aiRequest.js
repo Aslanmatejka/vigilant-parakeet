@@ -108,6 +108,9 @@ export function extractActionFromToolResults(toolResults) {
   for (const entry of toolResults) {
     if (!entry || (entry.tool !== 'navigate_ui' && entry.tool !== 'ui_action')) continue
     const r = entry.result || entry
+    if (r.path && (r.action === 'navigate' || !r.action)) {
+      return { action: 'navigate', target: r.path, path: r.path }
+    }
     if (r.action && r.target) {
       return { action: r.action, target: r.target, path: r.path, view: r.view, focus: r.focus }
     }

@@ -1,22 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { flushSync } from 'react-dom'
 import { useAuthContext } from '../AuthContext.jsx'
 import aiChatService from '../services/aiChatService.js'
 import normalizeToolResults from '../services/normalizeToolResults.js'
-
-const INITIAL_MESSAGE = {
-  id: 'welcome',
-  role: 'assistant',
-  message: "Hi! I'm Nouri, your DoGoods assistant. I can help you find food, share food, check your pickups, get recipes, set reminders, and more. How can I help you today?",
-  timestamp: new Date().toISOString(),
-}
-
-const INITIAL_MESSAGE_ES = {
-  id: 'welcome',
-  role: 'assistant',
-  message: '¡Hola! Soy Nouri, tu asistente de DoGoods. Puedo ayudarte a encontrar comida, compartir comida, verificar tus recogidas, obtener recetas, crear recordatorios y más. ¿En qué puedo ayudarte hoy?',
-  timestamp: new Date().toISOString(),
-}
 
 function normalizeAssistantAction(action) {
   if (!action || typeof action !== 'object') return action || null
@@ -48,12 +33,41 @@ function pickInitialLanguage(user) {
   return 'en'
 }
 
+export const AI_TONE_OPTIONS = ['warm', 'professional', 'casual', 'empathetic']
+const DEFAULT_TONE = 'warm'
+
+export const AI_TONE_LABELS = {
+  en: {
+    warm: 'Warm',
+    professional: 'Professional',
+    casual: 'Casual',
+    empathetic: 'Empathetic',
+  },
+  es: {
+    warm: 'Cálido',
+    professional: 'Profesional',
+    casual: 'Informal',
+    empathetic: 'Empático',
+  },
+}
+
+function pickInitialTone() {
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      const cached = sessionStorage.getItem('dg.ai.tone')
+      if (cached && AI_TONE_OPTIONS.includes(cached)) return cached
+    }
+  } catch { /* private mode */ }
+  return DEFAULT_TONE
+}
+
 export function useAIChat() {
   const { user, isAuthenticated, initialized } = useAuthContext()
-  const [messages, setMessages] = useState([INITIAL_MESSAGE])
+  const [messages, setMessages] = useState([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
   const [language, setLanguage] = useState(() => pickInitialLanguage(null))
+  const [tone, setToneState] = useState(pickInitialTone)
   // Mirror the active language into sessionStorage so a page refresh
   // mid-conversation doesn't snap a Spanish user back to English.
   useEffect(() => {
@@ -63,13 +77,19 @@ export function useAIChat() {
       }
     } catch { /* noop */ }
   }, [language])
+  useEffect(() => {
+    try {
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem('dg.ai.tone', tone)
+      }
+    } catch { /* noop */ }
+  }, [tone])
   const [historyLoaded, setHistoryLoaded] = useState(false)
   // Monotonic counter so a slow earlier request can't append after a
   // newer, faster one finished. Prevents out-of-order assistant bubbles
   // when the user double-sends or retries quickly.
   const reqSeqRef = useRef(0)
   const isLoadingRef = useRef(false)
-  const conversationIdRef = useRef(null)
 
   // When the active user changes (logout → login as a different account,
   // or guest → authenticated), we MUST forget the previous chat so the
@@ -77,14 +97,14 @@ export function useAIChat() {
   useEffect(() => {
     reqSeqRef.current += 1
     setHistoryLoaded(false)
-    conversationIdRef.current = null
     // Adopt the freshly-logged-in user's preferred language if they
     // have one set. Falls back to current state (which already honored
     // navigator.language at mount). Never auto-flips an EN session to
     // ES once the user has chosen a language explicitly via the toggle.
     const preferred = pickInitialLanguage(user)
     setLanguage((prev) => (preferred !== 'en' ? preferred : prev))
-    setMessages([preferred === 'es' ? INITIAL_MESSAGE_ES : INITIAL_MESSAGE])
+    setMessages([])
+    setToneState(pickInitialTone())
     setError(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, isAuthenticated])
@@ -141,8 +161,7 @@ export function useAIChat() {
         // Preserve the current language for the welcome bubble so a
         // Spanish session doesn't get an English "Hi! I'm Nouri..."
         // wedged in at the top after history loads.
-        const welcome = language === 'es' ? INITIAL_MESSAGE_ES : INITIAL_MESSAGE
-        setMessages([welcome, ...formatted])
+        setMessages(formatted)
         setHistoryLoaded(true)
       } catch (err) {
         console.error('Failed to load AI history:', err)
@@ -153,6 +172,33 @@ export function useAIChat() {
     loadHistory()
     return () => { cancelled = true }
   }, [initialized, isAuthenticated, user?.id, historyLoaded, language])
+
+  // Load saved conversation tone from backend when user logs in.
+  useEffect(() => {
+    if (!initialized || !isAuthenticated || !user?.id) return
+    let cancelled = false
+    aiChatService.getTone(user.id).then((saved) => {
+      if (!cancelled && saved && AI_TONE_OPTIONS.includes(saved)) {
+        setToneState(saved)
+      }
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [initialized, isAuthenticated, user?.id])
+
+  const setTone = useCallback(async (nextTone) => {
+    const normalized = AI_TONE_OPTIONS.includes(nextTone) ? nextTone : DEFAULT_TONE
+    setToneState(normalized)
+    // #region agent log
+    fetch('http://127.0.0.1:7559/ingest/72c771bc-152f-419f-89ff-a5ff31987947',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d12b6b'},body:JSON.stringify({sessionId:'d12b6b',hypothesisId:'D',location:'useAIChat.js:setTone',message:'tone changed in UI',data:{tone:normalized,hasUser:!!user?.id},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    if (user?.id && isAuthenticated) {
+      try {
+        await aiChatService.setTone(user.id, normalized)
+      } catch (err) {
+        console.warn('Failed to save AI tone preference:', err)
+      }
+    }
+  }, [user?.id, isAuthenticated])
 
   /**
    * Translate a typed backend error code into a friendly bubble message.
@@ -226,44 +272,46 @@ export function useAIChat() {
   const runChatTurn = useCallback(async (text, { userMessage = null, replaceErrorId = null } = {}) => {
     if (!text?.trim()) return
     const seq = ++reqSeqRef.current
+    isLoadingRef.current = true
+    setIsLoading(true)
+    setError(null)
 
-    const userMsg = userMessage || {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      message: text.trim(),
-      timestamp: new Date().toISOString(),
+    // If we're re-running after a failure, remove the failed bubble so the
+    // chat doesn't accumulate stale errors when a retry succeeds.
+    if (replaceErrorId) {
+      setMessages(prev => prev.filter(m => m.id !== replaceErrorId))
     }
 
-    // Paint user bubble + typing indicator in the same frame — no wait for fetch.
-    flushSync(() => {
-      isLoadingRef.current = true
-      setIsLoading(true)
-      setError(null)
-      if (replaceErrorId) {
-        setMessages(prev => prev.filter(m => m.id !== replaceErrorId))
+    // If caller didn't provide a userMessage (i.e. plain sendMessage), add one.
+    if (!userMessage) {
+      const userMsg = {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        message: text.trim(),
+        timestamp: new Date().toISOString(),
       }
-      if (!userMessage) {
-        setMessages(prev => [...prev, userMsg])
-      }
-    })
+      setMessages(prev => [...prev, userMsg])
+    }
 
     try {
+      // #region agent log
+      fetch('http://127.0.0.1:7559/ingest/72c771bc-152f-419f-89ff-a5ff31987947',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d12b6b'},body:JSON.stringify({sessionId:'d12b6b',hypothesisId:'A',location:'useAIChat.js:runChatTurn',message:'sending chat with tone',data:{tone,textPrefix:text.trim().slice(0,40)},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       const result = await aiChatService.sendMessage(text.trim(), {
         userId: user.id,
-        conversationId: conversationIdRef.current,
+        tone,
       })
 
       // Drop the response if a newer request was started while this one
       // was in flight — prevents out-of-order assistant bubbles.
       if (seq !== reqSeqRef.current) return
 
-      if (result.conversationId) {
-        conversationIdRef.current = result.conversationId
-      }
-
       // Update language from backend detection
       if (result.lang && result.lang !== language) {
         setLanguage(result.lang)
+      }
+      if (result.tone && AI_TONE_OPTIONS.includes(result.tone) && result.tone !== tone) {
+        setToneState(result.tone)
       }
 
       // Typed backend error — render an error bubble carrying the retry
@@ -298,10 +346,8 @@ export function useAIChat() {
         toolResults: result.toolResults || [],
         suggestions: result.suggestions || [],
         action: normalizeAssistantAction(result.action),
+        requiresConfirmation: !!result.requiresConfirmation,
         pendingAction: result.pendingAction || null,
-        toolAudit: result.toolAudit || [],
-        confirmationRecommended: !!result.confirmationRecommended,
-        confirmationSummary: result.confirmationSummary || null,
         degraded: !!result.degraded,
         source: result.source || null,
         requestId: result.requestId || null,
@@ -331,7 +377,7 @@ export function useAIChat() {
         setIsLoading(false)
       }
     }
-  }, [language, user?.id, friendlyErrorMessage])
+  }, [language, tone, user?.id, friendlyErrorMessage])
 
   const sendMessage = useCallback(async (text) => {
     if (!text?.trim() || isLoadingRef.current) return
@@ -391,26 +437,24 @@ export function useAIChat() {
     }
 
     const seq = ++reqSeqRef.current
-    flushSync(() => {
-      isLoadingRef.current = true
-      setIsLoading(true)
-      setError(null)
-    })
+    isLoadingRef.current = true
+    setIsLoading(true)
+    setError(null)
 
     try {
       const result = await aiChatService.sendVoice(audioBlob, {
         userId: user.id,
         includeAudio: true,
+        tone,
       })
 
       if (seq !== reqSeqRef.current) return
 
-      if (result.conversationId) {
-        conversationIdRef.current = result.conversationId
-      }
-
       if (result.lang && result.lang !== language) {
         setLanguage(result.lang)
+      }
+      if (result.tone && AI_TONE_OPTIONS.includes(result.tone) && result.tone !== tone) {
+        setToneState(result.tone)
       }
 
       if (result.transcript) {
@@ -432,10 +476,6 @@ export function useAIChat() {
         toolResults: result.toolResults || [],
         suggestions: result.suggestions || [],
         action: normalizeAssistantAction(result.action),
-        pendingAction: result.pendingAction || null,
-        toolAudit: result.toolAudit || [],
-        confirmationRecommended: !!result.confirmationRecommended,
-        confirmationSummary: result.confirmationSummary || null,
         source: 'voice',
         degraded: !!result.degraded,
         requestId: result.requestId || null,
@@ -482,21 +522,30 @@ export function useAIChat() {
         setIsLoading(false)
       }
     }
-  }, [language, user?.id, friendlyErrorMessage, isAuthenticated, renderSignInRequired])
+  }, [language, tone, user?.id, friendlyErrorMessage, isAuthenticated, renderSignInRequired])
 
   const clearHistory = useCallback(async () => {
+    // Drop any in-flight turn so a slow response can't repopulate the thread.
+    reqSeqRef.current += 1
+    isLoadingRef.current = false
+    setIsLoading(false)
+
     try {
       if (isAuthenticated && user?.id) {
         await aiChatService.clearHistory(user.id)
       }
-      const welcome = language === 'es' ? INITIAL_MESSAGE_ES : INITIAL_MESSAGE
-      setMessages([welcome])
-      setHistoryLoaded(false)
+      // Empty array → WelcomeHero renders immediately (no stale bubbles).
+      setMessages([])
       setError(null)
+      // Mark loaded so the history effect does NOT re-fetch old rows.
+      setHistoryLoaded(true)
+      return true
     } catch (err) {
       console.error('Failed to clear AI history:', err)
+      setError(err.message || 'Failed to clear conversation')
+      return false
     }
-  }, [isAuthenticated, user?.id, language])
+  }, [isAuthenticated, user?.id])
 
   const submitFeedback = useCallback(async (messageId, rating) => {
     if (!isAuthenticated || !user?.id) return
@@ -546,11 +595,7 @@ export function useAIChat() {
       const result = await aiChatService.sendMessage(text.trim(), {
         userId: user.id,
         silent: true,
-        conversationId: conversationIdRef.current,
       })
-      if (result.conversationId) {
-        conversationIdRef.current = result.conversationId
-      }
       if (result.lang && result.lang !== language) setLanguage(result.lang)
       if (result.error) {
         console.warn('sendSilentMessage backend error:', result.error.code)
@@ -575,126 +620,32 @@ export function useAIChat() {
     }
   }, [language, user?.id, isAuthenticated])
 
-  const resolvePendingAction = useCallback(async (messageId, decision) => {
-    if (isLoadingRef.current) return
-    const target = messages.find(m => m.id === messageId)
-    const pending = target?.pendingAction
-    if (!pending?.pending_id || !isAuthenticated || !user?.id) return
-
+  const confirmPendingAction = useCallback(async (confirmed = true) => {
+    if (!isAuthenticated || !user?.id || isLoadingRef.current) return
     const seq = ++reqSeqRef.current
-    flushSync(() => {
-      isLoadingRef.current = true
-      setIsLoading(true)
-      setError(null)
-    })
-
+    isLoadingRef.current = true
+    setIsLoading(true)
+    setError(null)
     try {
-      const result = await aiChatService.confirmAction(pending.pending_id, decision)
+      const result = await aiChatService.confirmAction(user.id, confirmed)
       if (seq !== reqSeqRef.current) return
-
-      setMessages(prev => prev.map(m => (
-        m.id === messageId
-          ? {
-              ...m,
-              pendingAction: null,
-              pendingResolved: decision === 'cancel' ? 'cancelled' : result.status,
-            }
-          : m
-      )))
-
-      const isEs = language === 'es'
-      if (decision === 'cancel') {
-        setMessages(prev => [...prev, {
-          id: `assistant-pending-${Date.now()}`,
-          role: 'assistant',
-          message: isEs ? 'Acción cancelada.' : 'Action cancelled.',
-          timestamp: new Date().toISOString(),
-        }])
-      } else if (result.status === 'committed') {
-        setMessages(prev => [...prev, {
-          id: `assistant-pending-${Date.now()}`,
-          role: 'assistant',
-          message: result.summary || (isEs ? 'Acción completada.' : 'Action completed.'),
-          timestamp: new Date().toISOString(),
-        }])
-      } else if (result.error || result.status === 'failed' || result.status === 'expired') {
-        setMessages(prev => [...prev, {
-          id: `assistant-pending-${Date.now()}`,
-          role: 'assistant',
-          message: result.error || (isEs
-            ? 'No pude completar esa acción. Intenta de nuevo.'
-            : "I couldn't complete that action. Please try again."),
-          isError: true,
-          timestamp: new Date().toISOString(),
-        }])
+      if (result.error) {
+        setError(result.error.message)
+        return
       }
-    } catch (err) {
-      if (seq !== reqSeqRef.current) return
-      setError(err.message)
-      setMessages(prev => [...prev, {
-        id: `error-pending-${Date.now()}`,
+      if (result.lang && result.lang !== language) setLanguage(result.lang)
+      const assistantMsg = {
+        id: `assistant-${Date.now()}`,
         role: 'assistant',
-        message: language === 'es'
-          ? 'No pude confirmar la acción. Intenta de nuevo.'
-          : "I couldn't confirm the action. Please try again.",
-        isError: true,
+        message: result.response,
+        toolResults: result.toolResults || [],
+        suggestions: result.suggestions || [],
+        action: normalizeAssistantAction(result.action),
+        requiresConfirmation: false,
+        pendingAction: null,
         timestamp: new Date().toISOString(),
-      }])
-    } finally {
-      if (seq === reqSeqRef.current) {
-        isLoadingRef.current = false
-        setIsLoading(false)
       }
-    }
-  }, [messages, isAuthenticated, user?.id, language])
-
-  const confirmPendingAction = useCallback(
-    (messageId) => resolvePendingAction(messageId, 'confirm'),
-    [resolvePendingAction],
-  )
-
-  const cancelPendingAction = useCallback(
-    (messageId) => resolvePendingAction(messageId, 'cancel'),
-    [resolvePendingAction],
-  )
-
-  const rollbackAuditAction = useCallback(async (messageId, auditId) => {
-    if (isLoadingRef.current || !auditId || !isAuthenticated || !user?.id) return
-
-    const seq = ++reqSeqRef.current
-    flushSync(() => {
-      isLoadingRef.current = true
-      setIsLoading(true)
-      setError(null)
-    })
-
-    try {
-      const result = await aiChatService.rollbackAction(auditId)
-      if (seq !== reqSeqRef.current) return
-
-      const isEs = language === 'es'
-      setMessages(prev => prev.map(m => (
-        m.id === messageId
-          ? {
-              ...m,
-              toolAudit: (m.toolAudit || []).map(row => (
-                row.audit_id === auditId
-                  ? { ...row, status: result.status === 'rolled_back' ? 'rolled_back' : row.status }
-                  : row
-              )),
-            }
-          : m
-      )))
-
-      setMessages(prev => [...prev, {
-        id: `assistant-rollback-${Date.now()}`,
-        role: 'assistant',
-        message: result.status === 'rolled_back'
-          ? (isEs ? 'Acción deshecha.' : 'Action undone.')
-          : (result.error || (isEs ? 'No pude deshacer esa acción.' : "I couldn't undo that action.")),
-        isError: result.status !== 'rolled_back',
-        timestamp: new Date().toISOString(),
-      }])
+      setMessages(prev => [...prev, assistantMsg])
     } catch (err) {
       if (seq !== reqSeqRef.current) return
       setError(err.message)
@@ -722,8 +673,9 @@ export function useAIChat() {
     // New: error recovery actions
     retryMessage,
     regenerateLast,
+    historyLoaded,
+    tone,
+    setTone,
     confirmPendingAction,
-    cancelPendingAction,
-    rollbackAuditAction,
   }
 }
