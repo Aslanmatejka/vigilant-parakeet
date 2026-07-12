@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAIChat, AI_TONE_OPTIONS, AI_TONE_LABELS } from '../../utils/hooks/useAIChat.js'
 import { useAuthContext } from '../../utils/AuthContext.jsx'
+import { useCommunityRole } from '../../utils/hooks/useCommunityRole.js'
 import { useMapContext } from '../../utils/MapContext.jsx'
 import { useUIControl } from '../../utils/UIControlContext.jsx'
 import VoiceOutput from './VoiceOutput.jsx'
@@ -11,7 +12,7 @@ import { parseListingsCsv, downloadCsvTemplate } from '../../utils/csvListings.j
 import { assignImagestoRows, assignFoodImage } from '../../utils/foodImages.js'
 import dataService from '../../utils/dataService.js'
 import supabase from '../../utils/supabaseClient.js'
-import { getLazyPreChips } from '../../utils/suggestionChips.js'
+import { resolveInputChips } from '../../utils/suggestionChips.js'
 import { toast } from 'react-toastify'
 
 // ─── Welcome hero categories (richer onboarding surface) ───────────
@@ -148,8 +149,14 @@ const ACCENT_MAP = {
 }
 
 // ─── WelcomeHero — empty-state onboarding surface ──────────────────
-function WelcomeHero({ language, userName, onPromptClick }) {
-  const categories = language === 'es' ? WELCOME_CATEGORIES_ES : WELCOME_CATEGORIES_EN
+function WelcomeHero({ language, userName, onPromptClick, communityRole }) {
+  const all = language === 'es' ? WELCOME_CATEGORIES_ES : WELCOME_CATEGORIES_EN
+  const role = String(communityRole || '').toLowerCase()
+  const categories = all.filter((cat) => {
+    if (role === 'donor') return cat.key !== 'find'
+    if (role === 'recipient') return cat.key !== 'share'
+    return true
+  })
   const greeting = language === 'es'
     ? (userName ? `¡Hola, ${userName}!` : '¡Hola!')
     : (userName ? `Hi, ${userName}!` : 'Hi there!')
@@ -1547,6 +1554,12 @@ function AIChatPanel() {
   const { applyToolResults, clearAIOverlays } = useMapContext()
   const { registerHandler, executeUIActionsFromToolResults, executeUIAction } = useUIControl()
   const { user: authUser } = useAuthContext() || {}
+  const communityRole = useCommunityRole()
+  // Photo / CSV attach is donor-only (list food, attach listing photos, bulk CSV).
+  const canAttachFiles = communityRole !== 'recipient'
+  // Staged photos for the composer (attach + optional text, then send together).
+  const [pendingChatPhotos, setPendingChatPhotos] = useState([])
+  const prevCommunityRoleRef = useRef(null)
   const lastAppliedToolMsgRef = useRef(null)
   const lastSurfacedErrorRef = useRef(null)
 
@@ -1704,6 +1717,32 @@ function AIChatPanel() {
   }, [])
   const [showAttachMenu, setShowAttachMenu] = useState(false)
   const attachMenuRef = useRef(null)
+
+  useEffect(() => {
+    if (!canAttachFiles) setShowAttachMenu(false)
+  }, [canAttachFiles])
+
+  // When the user switches donor ↔ recipient, drop prior chat so Nouri
+  // doesn't keep acting under the old role from history.
+  useEffect(() => {
+    const role = String(communityRole || '').toLowerCase()
+    const prev = prevCommunityRoleRef.current
+    prevCommunityRoleRef.current = role || null
+    if (!prev || !role || prev === role) return
+    if (!['donor', 'recipient'].includes(prev) || !['donor', 'recipient'].includes(role)) {
+      return
+    }
+    ;(async () => {
+      await clearHistory()
+      toast.info(
+        language === 'es'
+          ? `Rol actualizado a ${role}. Empezamos un chat limpio.`
+          : `Role updated to ${role}. Starting a fresh chat.`,
+        { autoClose: 3500, position: 'top-center' },
+      )
+    })()
+  }, [communityRole, clearHistory, language])
+
   const inputRef = useRef(null)
   const panelRef = useRef(null)
   const previousFocusRef = useRef(null)
@@ -1959,15 +1998,87 @@ function AIChatPanel() {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [showMenu, showAttachMenu])
 
-  const handleSend = useCallback((e) => {
+  const handleSend = useCallback(async (e) => {
     e?.preventDefault()
-    if (!inputText.trim() || isLoading) return
-    sendMessage(inputText)
-    setInputText('')
+    if (isLoading || uploadBusy) return
+    const text = inputText.trim()
+    const photos = pendingChatPhotos
+    if (!text && photos.length === 0) return
+
     setSuggestionsOpen(false)
     setSuggestionIndex(-1)
-    requestAnimationFrame(() => inputRef.current?.focus())
-  }, [inputText, isLoading, sendMessage])
+
+    if (photos.length === 0) {
+      sendMessage(text)
+      setInputText('')
+      requestAnimationFrame(() => inputRef.current?.focus())
+      return
+    }
+
+    setUploadBusy(true)
+    try {
+      const urls = []
+      for (const photo of photos) {
+        if (photo.url) {
+          urls.push(photo.url)
+          continue
+        }
+        if (!photo.file || !authUser?.id) continue
+        try {
+          const res = await dataService.uploadFile(photo.file, 'food-images')
+          if (res?.url) urls.push(res.url)
+        } catch (err) {
+          console.warn('Chat photo upload failed:', err?.message || err)
+        }
+      }
+      if (urls.length === 0) {
+        appendLocalMessage({
+          role: 'assistant',
+          message: language === 'es'
+            ? 'No pude subir esas fotos. ¿Puedes intentar de nuevo?'
+            : "I couldn't upload those photos. Please try again.",
+          isError: true,
+        })
+        return
+      }
+      const imageBlock = urls.map((u) => `image: ${u}`).join('\n')
+      const payload = text ? `${text}\n\n${imageBlock}` : imageBlock
+      sendMessage(payload)
+      setInputText('')
+      setPendingChatPhotos((prev) => {
+        prev.forEach((p) => {
+          if (p.previewUrl) URL.revokeObjectURL(p.previewUrl)
+        })
+        return []
+      })
+    } finally {
+      setUploadBusy(false)
+      requestAnimationFrame(() => inputRef.current?.focus())
+    }
+  }, [
+    inputText,
+    isLoading,
+    uploadBusy,
+    pendingChatPhotos,
+    sendMessage,
+    authUser?.id,
+    appendLocalMessage,
+    language,
+  ])
+
+  const removePendingChatPhoto = useCallback((id) => {
+    setPendingChatPhotos((prev) => {
+      const next = []
+      for (const p of prev) {
+        if (p.id === id) {
+          if (p.previewUrl) URL.revokeObjectURL(p.previewUrl)
+        } else {
+          next.push(p)
+        }
+      }
+      return next
+    })
+  }, [])
 
   const handleQuickAction = useCallback((msg) => {
     if (isLoading) return
@@ -1981,7 +2092,7 @@ function AIChatPanel() {
   // duplicate the per-bubble chips or crowd the WelcomeHero.
   const railChips = useMemo(() => {
     if (messages.length <= 1) return []
-    if (isLoading || pendingUpload || voiceMode) return []
+    if (isLoading || pendingUpload || voiceMode || pendingChatPhotos.length > 0) return []
     let lastAssistant = null
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
@@ -1992,9 +2103,8 @@ function AIChatPanel() {
     }
     if (lastAssistant?.requiresConfirmation) return []
     const backendSuggestions = Array.isArray(lastAssistant?.suggestions) ? lastAssistant.suggestions : []
-    if (backendSuggestions.length > 0) return []
-    return getLazyPreChips(language)
-  }, [messages, isLoading, pendingUpload, voiceMode, language])
+    return resolveInputChips(backendSuggestions, language, communityRole)
+  }, [messages, isLoading, pendingUpload, voiceMode, language, communityRole, pendingChatPhotos.length])
 
   // ─── File uploads (photo + CSV → bulk-listings) ───────
   // All three uploads require an authenticated user: the vision/enrichment
@@ -2031,17 +2141,33 @@ function AIChatPanel() {
     inlinePhotoInputRef.current?.click()
   }, [uploadBusy, isLoading, requireAuthForUpload])
 
-  // Inline photo upload: upload to storage and inject "image: <url>" as a
-  // regular chat message so the AI handles it per CASE A (include in the
-  // upcoming listing) or CASE B (attach to the most recent listing).
+  // Inline photo attach: stage one or more photos in the composer so the
+  // donor can add a caption and send text + photos together.
   const handleInlinePhotoSelected = useCallback(async (e) => {
-    const file = e.target.files?.[0]
+    const files = Array.from(e.target.files || [])
     e.target.value = ''
-    if (!file) return
-    // Same raster-only whitelist as the vision upload — SVG/etc. are rejected
-    // here too because the URL ends up in food_listings.image_url.
+    if (!files.length) return
     const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
-    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+    const accepted = []
+    let rejectedType = false
+    let rejectedSize = false
+    for (const file of files) {
+      if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+        rejectedType = true
+        continue
+      }
+      if (file.size > 8 * 1024 * 1024) {
+        rejectedSize = true
+        continue
+      }
+      accepted.push({
+        id: `chat-photo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+        name: file.name,
+      })
+    }
+    if (rejectedType) {
       appendLocalMessage({
         role: 'assistant',
         message: language === 'es'
@@ -2049,41 +2175,17 @@ function AIChatPanel() {
           : 'Only JPG, PNG, WEBP, or GIF images are supported.',
         isError: true,
       })
-      return
     }
-    if (file.size > 8 * 1024 * 1024) {
-      appendLocalMessage({ role: 'assistant', message: language === 'es' ? 'La imagen es demasiado grande (máx 8 MB).' : 'Image too large (max 8 MB).', isError: true })
-      return
+    if (rejectedSize) {
+      appendLocalMessage({
+        role: 'assistant',
+        message: language === 'es' ? 'Una o más imágenes son demasiado grandes (máx 8 MB).' : 'One or more images are too large (max 8 MB).',
+        isError: true,
+      })
     }
-    setUploadBusy(true)
-    try {
-      let imageUrl = null
-      if (authUser?.id) {
-        try {
-          const res = await dataService.uploadFile(file, 'food-images')
-          imageUrl = res?.url || null
-        } catch (err) {
-          console.warn('Inline photo upload failed:', err?.message || err)
-        }
-      }
-      if (!imageUrl) {
-        appendLocalMessage({
-          role: 'assistant',
-          message: language === 'es'
-            ? 'No pude subir la foto. ¿Puedes intentar de nuevo?'
-            : "I couldn't upload that photo. Please try again.",
-          isError: true,
-        })
-        return
-      }
-      // Send as a regular chat message — the AI system prompt recognises
-      // messages starting with "image: https://" and uses the URL as the
-      // listing's image_url (CASE A) or attaches it (CASE B).
-      sendMessage(`image: ${imageUrl}`)
-    } finally {
-      setUploadBusy(false)
-    }
-  }, [appendLocalMessage, authUser?.id, language, sendMessage])
+    if (!accepted.length) return
+    setPendingChatPhotos((prev) => [...prev, ...accepted].slice(0, 8))
+  }, [appendLocalMessage, language])
 
   const cancelPendingUpload = useCallback(() => {
     if (uploadBusy) return
@@ -2096,6 +2198,12 @@ function AIChatPanel() {
   const handleClearConversation = useCallback(async () => {
     setShowMenu(false)
     cancelPendingUpload()
+    setPendingChatPhotos((prev) => {
+      prev.forEach((p) => {
+        if (p.previewUrl) URL.revokeObjectURL(p.previewUrl)
+      })
+      return []
+    })
     clearAIOverlays()
     historyScrollDoneRef.current = false
     setShowScrollPill(false)
@@ -3513,6 +3621,7 @@ function AIChatPanel() {
               language={language}
               userName={authUser?.name?.split(' ')?.[0] || null}
               onPromptClick={handleQuickAction}
+              communityRole={communityRole}
             />
           )}
 
@@ -3611,6 +3720,7 @@ function AIChatPanel() {
         ref={inlinePhotoInputRef}
         type="file"
         accept="image/*"
+        multiple
         className="hidden"
         onChange={handleInlinePhotoSelected}
         aria-hidden="true"
@@ -3628,6 +3738,28 @@ function AIChatPanel() {
 
       {/* Input area */}
       <form onSubmit={handleSend} className="relative z-0 border-t border-[#2CABE3]/15 px-3 pt-2.5 pb-2 flex flex-col gap-1 flex-shrink-0 bg-white/60 backdrop-blur-md">
+        {pendingChatPhotos.length > 0 && (
+          <div className="flex gap-2 overflow-x-auto pb-1 nourish-scrollbar-h" aria-label={language === 'es' ? 'Fotos adjuntas' : 'Attached photos'}>
+            {pendingChatPhotos.map((photo) => (
+              <div key={photo.id} className="relative flex-shrink-0 w-14 h-14 rounded-lg overflow-hidden border border-[#2CABE3]/25 bg-white shadow-sm">
+                <img
+                  src={photo.previewUrl}
+                  alt={photo.name || 'attachment'}
+                  className="w-full h-full object-cover"
+                />
+                <button
+                  type="button"
+                  onClick={() => removePendingChatPhoto(photo.id)}
+                  disabled={uploadBusy || isLoading}
+                  className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-black/60 text-white text-[10px] leading-none flex items-center justify-center hover:bg-rose-600 disabled:opacity-40"
+                  aria-label={language === 'es' ? 'Quitar foto' : 'Remove photo'}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         {/* Quick-suggestion chip rail — appears mid-conversation when the
             backend didn't return per-turn suggestions, giving the user a
             one-tap way to keep the conversation moving. */}
@@ -3652,9 +3784,9 @@ function AIChatPanel() {
         )}
 
         <div className="flex items-end gap-2">
-          {/* Attachments menu — collapses photo + CSV uploads behind a
-              single "+" button (Slack/Messenger pattern) so the input bar
-              feels focused on the most important action: typing + send. */}
+          {/* Attachments menu — donor-only (list food / listing photo / CSV).
+              Recipients claim food and don't need file uploads in chat. */}
+          {canAttachFiles && (
           <div ref={attachMenuRef} className="relative flex-shrink-0">
             <button
               type="button"
@@ -3707,10 +3839,10 @@ function AIChatPanel() {
                   </span>
                   <span className="flex-1 text-left">
                     <span className="block font-medium leading-tight">
-                      {language === 'es' ? 'Enviar foto al chat' : 'Send photo to chat'}
+                      {language === 'es' ? 'Adjuntar fotos al mensaje' : 'Attach photo(s) to message'}
                     </span>
                     <span className="block text-[10px] text-gray-500 leading-tight mt-0.5">
-                      {language === 'es' ? 'Añade foto a tu publicación actual' : 'Add photo to your current listing'}
+                      {language === 'es' ? 'Puedes añadir texto y enviar juntas' : 'Add a caption, then send together'}
                     </span>
                   </span>
                 </button>
@@ -3735,6 +3867,7 @@ function AIChatPanel() {
               </div>
             )}
           </div>
+          )}
 
           <div className="flex-1 relative">
             {/* Autocomplete dropdown */}
@@ -3769,7 +3902,11 @@ function AIChatPanel() {
               onKeyDown={handleKeyDown}
               onFocus={() => setSuggestionsOpen(true)}
               onBlur={() => setTimeout(() => setSuggestionsOpen(false), 120)}
-              placeholder={language === 'es' ? 'Pregunta lo que quieras…' : 'Message Nouri…'}
+              placeholder={
+                pendingChatPhotos.length > 0
+                  ? (language === 'es' ? 'Añade un mensaje (opcional)…' : 'Add a caption (optional)…')
+                  : (language === 'es' ? 'Pregunta lo que quieras…' : 'Message Nouri…')
+              }
               className={`w-full resize-none rounded-2xl border bg-white/90 text-gray-800 placeholder-gray-400 px-4 py-2.5 text-sm leading-relaxed max-h-32 outline-none transition-all backdrop-blur-sm ${
                 isLoading
                   ? 'ai-input-glow border-[#2CABE3]/60 cursor-wait'
@@ -3827,9 +3964,9 @@ function AIChatPanel() {
           {/* Send button — stronger affordance, clearer disabled state */}
           <button
             type="submit"
-            disabled={!inputText.trim() || isLoading}
+            disabled={(!inputText.trim() && pendingChatPhotos.length === 0) || isLoading || uploadBusy}
             className={`flex-shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-full transition-all ${
-              inputText.trim() && !isLoading
+              (inputText.trim() || pendingChatPhotos.length > 0) && !isLoading && !uploadBusy
                 ? 'bg-gradient-to-br from-[#2CABE3] to-emerald-500 text-white hover:from-[#2299c7] hover:to-emerald-600 shadow-md shadow-[#2CABE3]/25 hover:scale-105 active:scale-95'
                 : 'bg-gray-100 text-gray-400 border border-gray-200 cursor-not-allowed'
             }`}

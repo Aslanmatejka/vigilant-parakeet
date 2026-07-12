@@ -625,6 +625,34 @@ def _build_action_policy() -> str:
         "topic, acknowledge briefly and steer back to the open task; "
         "if they insist, park the current task cleanly.\n"
         "\n"
+        "## Multi-item share (2+ foods)\n"
+        "When the donor names TWO OR MORE distinct foods to share "
+        "('bread and apples', '3 loaves and a bag of oranges', 'also "
+        "some eggs'), keep a draft queue — do NOT collapse them into "
+        "one listing. Shared fields (community, address) are asked "
+        "ONCE. Per-item fields (qty if missing, expiry, photo) are "
+        "filled one question at a time. Each photo upload (`image: "
+        "<url>`) binds to the next draft still missing a photo, or to "
+        "the food they named ('photo for the apples'). Never reuse "
+        "draft A's photo on draft B. When every draft is ready, give "
+        "ONE summary covering all items and call post_food_listings "
+        "with items[] (each item has its own images[]). If they give "
+        "full details + photos for everything in one shot, still do a "
+        "short summary confirm, then post_food_listings. For a single "
+        "food, keep using post_food_listing.\n"
+        "\n"
+        "## Multi-item claim (2+ listings)\n"
+        "When the recipient picks TWO OR MORE listings ('#1 and #3', "
+        "'1 and 2', 'both', '2 oranges and 3 bread', 'the apples and "
+        "the bananas'), keep a claim draft queue — do NOT claim only "
+        "the first. Resolve each against the last search results. Ask "
+        "missing quantities ONE question per turn ('How many of the "
+        "oranges?'). When every draft has listing_id + qty, give a "
+        "brief confirm if needed and call claim_listings with items[]. "
+        "If indices/titles + quantities are already given, confirm "
+        "briefly and claim_listings. For a single listing, keep using "
+        "claim_listing.\n"
+        "\n"
         "## Non-food / off-scope requests\n"
         "DoGoods is FOOD only. Old couches, cash, gift cards, cars, "
         "trivia, medical/legal advice → decline warmly in one line, "
@@ -858,7 +886,26 @@ def _role_behavior_prompt(role: Optional[str], lang: str = "en") -> Optional[str
         return None
     key = str(role).lower().strip()
     mapping = _ROLE_BEHAVIOR_ES if lang == "es" else _ROLE_BEHAVIOR_EN
-    return mapping.get(key)
+    body = mapping.get(key)
+    if not body:
+        return None
+    # Hard lock so prior turns (from when the user had a different role)
+    # cannot override the live community_role from the database.
+    if lang == "es":
+        lock = (
+            f"ROL BLOQUEADO ESTE TURNO: community_role=\"{key}\". "
+            "Esto es la fuente de verdad — ignora cualquier turno anterior "
+            "donde el usuario actuara con otro rol (donante vs receptor). "
+            "No ofrezcas acciones prohibidas para este rol."
+        )
+    else:
+        lock = (
+            f"ROLE LOCK THIS TURN: community_role=\"{key}\". "
+            "This is authoritative — IGNORE any earlier turns where the "
+            "user acted under a different role (donor vs recipient). "
+            "Do NOT offer actions that are forbidden for this role."
+        )
+    return f"{lock}\n\n{body}"
 
 
 async def _profile_gap_prompt(user_id: str, lang: str = "en") -> Optional[str]:
@@ -979,6 +1026,7 @@ def _scope_safe_query(fn_args: dict, auth_user_id) -> dict:
 _CONFIRM_TOOLS: frozenset[str] = frozenset({
     "cancel_claim",
     "post_food_listing",
+    "post_food_listings",
     "post_food_request",
     "bulk_import_listings",
     "delete_listing",
@@ -1106,16 +1154,36 @@ def _build_confirmation_summary(tool_name: str, args: dict) -> str:
         title = args.get("title") or "this food"
         qty = args.get("quantity") or args.get("quantity_requested") or 1
         return f"claim {qty} of {title}"
+    if tool_name == "claim_listings":
+        items = args.get("items") if isinstance(args.get("items"), list) else []
+        titles = [
+            str(i.get("title") or i.get("listing_id") or "item")
+            for i in items
+            if isinstance(i, dict)
+        ][:5]
+        if titles:
+            return f"claim {len(items)} listings ({', '.join(titles)})"
+        return f"claim {max(len(items), 2)} listings"
     if tool_name == "cancel_claim":
         title = args.get("title") or "your claim"
         return f"release your claim on {title}"
     if tool_name == "post_food_listing":
         title = args.get("title", "this item")
-        qty = args.get("quantity", "")
+        qty = args.get("quantity", "") or args.get("qty", "")
         unit = args.get("unit", "")
         addr = args.get("address", "your saved address")
         parts = [p for p in (str(qty), unit, "of", title, "for pickup at", addr) if p and p != "of"]
         return "share " + " ".join(parts)
+    if tool_name == "post_food_listings":
+        items = args.get("items") if isinstance(args.get("items"), list) else []
+        titles = [
+            str(i.get("title") or "item")
+            for i in items
+            if isinstance(i, dict)
+        ][:5]
+        if titles:
+            return f"share {len(items)} listings ({', '.join(titles)})"
+        return f"share {max(len(items), 2)} listings"
     if tool_name == "post_food_request":
         title = args.get("title", "food")
         return f"post a food request for {title}"
@@ -1189,6 +1257,18 @@ class ConversationEngine:
                     args["address"] = donor["address"]
                 else:
                     args.pop("address", None)
+        if tool_name == "post_food_listings":
+            from backend.ai.conversation_flow import enrich_post_food_listings_args
+            args = enrich_post_food_listings_args(
+                args, user_message, history, str(user_id),
+            )
+            from backend.ai_engine import fetch_donor_listing_defaults, _is_placeholder_address
+            if not args.get("address") or _is_placeholder_address(args.get("address")):
+                donor = await fetch_donor_listing_defaults(str(user_id))
+                if donor.get("address"):
+                    args["address"] = donor["address"]
+                else:
+                    args.pop("address", None)
         if tool_name == "claim_listing":
             from backend.ai.conversation_flow import enrich_claim_listing_args
             args = enrich_claim_listing_args(
@@ -1202,6 +1282,11 @@ class ConversationEngine:
                 "_no_matching_listing_food",
             ):
                 args.pop(key, None)
+        if tool_name == "claim_listings":
+            from backend.ai.conversation_flow import enrich_claim_listings_args
+            args = enrich_claim_listings_args(
+                args, user_message, history, str(user_id),
+            )
         if tool_name == "delete_listing":
             from backend.ai.conversation_flow import enrich_donor_listing_tool_args
             args = enrich_donor_listing_tool_args(
@@ -1935,23 +2020,32 @@ class ConversationEngine:
             # null/blank fields so we don't pollute the prompt.
             facts = [f"Current user: {profile.get('name') or 'Community Member'} (ID: {user_id})"]
             role = profile.get("role") or "member"
-            facts.append(f"role: {role}")
+            role_key = str(role).lower().strip()
+            facts.append(f"community_role: {role_key} (authoritative — do not infer a different role from chat history)")
             if profile.get("address"):
                 facts.append(f"profile address on file: {profile['address']}")
-                facts.append(
-                    "FIND FOOD: use search_food_near_user with user_id — "
-                    "location comes from this saved address. Do NOT ask for GPS."
-                )
-                facts.append(
-                    "FOOLPROOF POSTING: when sharing food, default pickup to this "
-                    "address — do not ask unless the donor wants a different one"
-                )
+                if role_key in ("recipient", "member", ""):
+                    facts.append(
+                        "FIND FOOD: use search_food_near_user with user_id — "
+                        "location comes from this saved address. Do NOT ask for GPS."
+                    )
+                if role_key in ("donor", "admin", "organizer"):
+                    facts.append(
+                        "FOOLPROOF POSTING: when sharing food, default pickup to this "
+                        "address — do not ask unless the donor wants a different one"
+                    )
             else:
-                facts.append("NO profile address on file (will need one to post listings/requests)")
+                if role_key in ("donor", "admin", "organizer"):
+                    facts.append("NO profile address on file (will need one to post listings)")
+                else:
+                    facts.append("NO profile address on file (helpful for finding nearby food)")
             if profile.get("phone"):
-                facts.append(f"phone on file: {profile['phone']} (required to claim listings; SMS codes go here)")
+                facts.append(f"phone on file: {profile['phone']}")
             else:
-                facts.append("NO phone on file (claim_listing will fail until they add one)")
+                if role_key == "recipient":
+                    facts.append("NO phone on file (claim_listing will fail until they add one)")
+                elif role_key == "donor":
+                    facts.append("NO phone on file (optional for donors)")
             if profile.get("dietary_restrictions"):
                 facts.append(f"dietary restrictions: {profile['dietary_restrictions']}")
             if profile.get("allergens"):
@@ -2011,7 +2105,8 @@ class ConversationEngine:
         # Role-specific behaviour (best-effort; non-fatal)
         try:
             role_prompt = _role_behavior_prompt(
-                (profile or {}).get("role"), lang=lang
+                (profile or {}).get("community_role") or (profile or {}).get("role"),
+                lang=lang,
             )
             if role_prompt:
                 messages.append({"role": "system", "content": role_prompt})
@@ -2113,6 +2208,58 @@ class ConversationEngine:
             messages.append({"role": "system", "content": posting_reminder})
 
         try:
+            from backend.ai.conversation_flow import (
+                sync_share_drafts,
+                build_share_drafts_reminder,
+                is_posting_flow,
+            )
+            if is_posting_flow(message, history):
+                sync_share_drafts(str(user_id), message, history)
+                drafts_reminder = build_share_drafts_reminder(
+                    str(user_id), message, history, lang=lang,
+                )
+                if drafts_reminder:
+                    messages.append({"role": "system", "content": drafts_reminder})
+        except Exception as exc:  # pragma: no cover — advisory only
+            logger.debug("share drafts reminder skipped: %s", exc)
+
+        try:
+            from backend.ai.conversation_flow import (
+                sync_claim_drafts,
+                build_claim_drafts_reminder,
+                build_ambiguous_pick_reminder,
+                build_food_order_spec_reminder,
+                is_claiming_flow,
+            )
+            if (
+                is_claiming_flow(message, history)
+                or build_ambiguous_pick_reminder(
+                    message, history, lang=lang, user_id=str(user_id),
+                )
+                or build_food_order_spec_reminder(
+                    message, history, lang=lang, user_id=str(user_id),
+                )
+            ):
+                sync_claim_drafts(str(user_id), message, history)
+                claim_drafts_reminder = build_claim_drafts_reminder(
+                    str(user_id), message, history, lang=lang,
+                )
+                if claim_drafts_reminder:
+                    messages.append({"role": "system", "content": claim_drafts_reminder})
+                else:
+                    amb = build_ambiguous_pick_reminder(
+                        message, history, lang=lang, user_id=str(user_id),
+                    )
+                    food_ord = build_food_order_spec_reminder(
+                        message, history, lang=lang, user_id=str(user_id),
+                    )
+                    for rem in (amb, food_ord):
+                        if rem:
+                            messages.append({"role": "system", "content": rem})
+        except Exception as exc:  # pragma: no cover — advisory only
+            logger.debug("claim drafts reminder skipped: %s", exc)
+
+        try:
             from backend.ai.world_model import build_world_model_reminder
             wm_reminder = build_world_model_reminder(
                 message, history, lang=lang, flow=flow_kind,
@@ -2150,12 +2297,58 @@ class ConversationEngine:
         except Exception as exc:  # pragma: no cover — advisory only
             logger.debug("reflection reminder skipped: %s", exc)
 
+        preattach_actions: list[dict] = []
+        # Bare photo upload OR caption + image: URL(s) mid-share → auto-attach
+        # when a listing is already in play.
+        if re.search(r"image:\s*\S+", message or "", re.I):
+            from backend.ai.conversation_flow import (
+                donor_photo_add_intent,
+                enrich_attach_photos_args,
+                _extract_all_photo_urls_from_history,
+            )
+            intent = donor_photo_add_intent(message, history, user_id)
+            photo_urls = _extract_all_photo_urls_from_history([], message)
+            if not photo_urls and intent and intent.get("photo_url"):
+                photo_urls = [intent.get("photo_url")]
+            if intent and intent.get("listing_id") and photo_urls:
+                attach_args = enrich_attach_photos_args(
+                    {
+                        "user_id": user_id,
+                        "listing_id": intent["listing_id"],
+                        "images": photo_urls,
+                    },
+                    message, history, user_id,
+                )
+                if attach_args.get("listing_id") and attach_args.get("images"):
+                    attach_result = await self._execute_tool(
+                        "attach_photos_to_listing", attach_args,
+                    )
+                    if isinstance(attach_result, dict) and attach_result.get("success"):
+                        preattach_actions.append({
+                            "tool": "attach_photos_to_listing",
+                            "ok": True,
+                            "summary": attach_result.get("summary"),
+                            "listing_id": attach_result.get("listing_id"),
+                            "image_url": attach_result.get("image_url"),
+                        })
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "SYSTEM: The donor's photo was automatically attached "
+                                f"to listing {attach_result.get('listing_id')}. "
+                                "Confirm warmly in one sentence. Do NOT call "
+                                "attach_photos_to_listing again this turn."
+                            ),
+                        })
+
         messages.append({"role": "user", "content": message})
 
         response_text, actions = await self._call_with_fallbacks(
             messages, lang, auth_user_id=user_id, tone=active_tone,
             chat_history=history,
         )
+        if preattach_actions:
+            actions = preattach_actions + (actions or [])
 
         response_text = polish_assistant_response(response_text, actions, lang=lang)
 
@@ -2442,10 +2635,12 @@ class ConversationEngine:
     # authenticated session, never from the model's arguments.
     _ACTION_TOOLS = {
         "claim_listing",
+        "claim_listings",
         "cancel_claim",
         "update_user_profile",
         "post_food_request",
         "post_food_listing",
+        "post_food_listings",
         "attach_photos_to_listing",
         "send_user_message",
         "create_ai_reminder",
@@ -2637,6 +2832,38 @@ class ConversationEngine:
                     })
                     continue
 
+                if fn_name == "attach_photos_to_listing" and auth_user_id is not None:
+                    from backend.ai.conversation_flow import enrich_attach_photos_args
+                    fn_args = enrich_attach_photos_args(
+                        fn_args, user_text, chat_history, str(auth_user_id),
+                    )
+
+                if fn_name == "post_food_listings":
+                    from backend.ai.conversation_flow import (
+                        enrich_post_food_listings_args,
+                        posting_batch_tool_block_reason,
+                        sync_share_drafts,
+                    )
+                    if auth_user_id is not None:
+                        sync_share_drafts(str(auth_user_id), user_text, chat_history)
+                        fn_args = enrich_post_food_listings_args(
+                            fn_args, user_text, chat_history, str(auth_user_id),
+                        )
+                    block_reason = posting_batch_tool_block_reason(
+                        user_text, chat_history, fn_args,
+                        user_id=str(auth_user_id or ""),
+                    )
+                    if block_reason:
+                        tool_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": json.dumps({
+                                "error": "posting_batch_incomplete",
+                                "message": block_reason,
+                            }),
+                        })
+                        continue
+
                 if fn_name == "post_food_listing":
                     if posted_listing_id:
                         tool_messages.append({
@@ -2647,12 +2874,36 @@ class ConversationEngine:
                                 "message": (
                                     f"Listing {posted_listing_id} was already posted this turn. "
                                     "Do NOT call post_food_listing again. To add a photo, use "
-                                    "attach_photos_to_listing with that listing_id."
+                                    "attach_photos_to_listing with that listing_id. For more "
+                                    "foods in the same share, use post_food_listings."
                                 ),
                                 "listing_id": posted_listing_id,
                             }),
                         })
                         continue
+                    if auth_user_id is not None:
+                        from backend.ai.conversation_flow import (
+                            get_share_drafts,
+                            sync_share_drafts,
+                        )
+                        drafts = sync_share_drafts(
+                            str(auth_user_id), user_text, chat_history,
+                        )
+                        if len(drafts) >= 2:
+                            tool_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call["id"],
+                                "content": json.dumps({
+                                    "error": "use_post_food_listings",
+                                    "message": (
+                                        f"The donor has {len(drafts)} share drafts in queue. "
+                                        "Call post_food_listings with items[] for all of them "
+                                        "(each with its own images[]), not post_food_listing."
+                                    ),
+                                    "draft_titles": [d.get("title") for d in drafts],
+                                }),
+                            })
+                            continue
                     from backend.ai.conversation_flow import (
                         enrich_post_food_listing_args,
                         posting_tool_block_reason,
@@ -2727,11 +2978,55 @@ class ConversationEngine:
                             })
                             continue
 
+                if fn_name == "claim_listings" and auth_user_id is not None:
+                    from backend.ai.conversation_flow import (
+                        enrich_claim_listings_args,
+                        claiming_batch_tool_block_reason,
+                        sync_claim_drafts,
+                    )
+                    sync_claim_drafts(str(auth_user_id), user_text, chat_history)
+                    fn_args = enrich_claim_listings_args(
+                        fn_args, user_text, chat_history, str(auth_user_id),
+                    )
+                    block_reason = claiming_batch_tool_block_reason(
+                        user_text, chat_history, fn_args,
+                        user_id=str(auth_user_id),
+                    )
+                    if block_reason:
+                        tool_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": json.dumps({
+                                "error": "claim_batch_incomplete",
+                                "message": block_reason,
+                            }),
+                        })
+                        continue
+
                 if fn_name == "claim_listing" and auth_user_id is not None:
                     from backend.ai.conversation_flow import (
                         enrich_claim_listing_args,
                         claiming_tool_block_reason,
+                        sync_claim_drafts,
                     )
+                    drafts = sync_claim_drafts(
+                        str(auth_user_id), user_text, chat_history,
+                    )
+                    if len(drafts) >= 2:
+                        tool_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": json.dumps({
+                                "error": "use_claim_listings",
+                                "message": (
+                                    f"The recipient has {len(drafts)} claim drafts in queue. "
+                                    "Call claim_listings with items[] for all of them "
+                                    "(each with listing_id + quantity), not claim_listing."
+                                ),
+                                "draft_titles": [d.get("title") for d in drafts],
+                            }),
+                        })
+                        continue
                     fn_args = enrich_claim_listing_args(
                         fn_args, user_text, chat_history, str(auth_user_id),
                     )
@@ -2856,6 +3151,44 @@ class ConversationEngine:
                     logger.exception("Tool %s failed", fn_name)
                     result = {"error": True, "message": f"{fn_name} failed. Please try again."}
 
+                if (
+                    fn_name == "post_food_listing"
+                    and isinstance(result, dict)
+                    and tool_result_ok(result)
+                    and auth_user_id is not None
+                    and result.get("listing_id")
+                    and not result.get("image_url")
+                    and not result.get("photo_merged")
+                ):
+                    from backend.ai.conversation_flow import (
+                        _extract_photo_url_for_current_posting,
+                        enrich_attach_photos_args,
+                    )
+                    photo = _extract_photo_url_for_current_posting(
+                        chat_history, user_text,
+                    )
+                    if photo:
+                        attach_args = enrich_attach_photos_args(
+                            {
+                                "user_id": str(auth_user_id),
+                                "listing_id": str(result["listing_id"]),
+                                "images": [photo],
+                            },
+                            user_text, chat_history, str(auth_user_id),
+                        )
+                        attach_result = await self._execute_tool(
+                            "attach_photos_to_listing", attach_args,
+                        )
+                        if isinstance(attach_result, dict) and attach_result.get("success"):
+                            result["image_url"] = attach_result.get("image_url")
+                            result["has_photo"] = True
+                            result["photo_auto_attached"] = True
+                            if attach_result.get("summary"):
+                                result["summary"] = (
+                                    f"{result.get('summary') or ''} "
+                                    f"{attach_result['summary']}"
+                                ).strip()
+
                 # Trace tool calls so we can debug why the model picked a tool.
                 try:
                     logger.info(
@@ -2924,6 +3257,42 @@ class ConversationEngine:
                         and result.get("listing_id")
                     ):
                         posted_listing_id = str(result["listing_id"])
+
+                    if (
+                        fn_name == "post_food_listings"
+                        and ok
+                        and isinstance(result, dict)
+                        and (result.get("count_posted") or 0) > 0
+                    ):
+                        posted_rows = result.get("posted") or []
+                        if posted_rows and isinstance(posted_rows[0], dict):
+                            posted_listing_id = str(
+                                posted_rows[0].get("listing_id") or posted_listing_id or ""
+                            ) or posted_listing_id
+                        if auth_user_id is not None:
+                            from backend.ai.conversation_flow import clear_share_drafts
+                            clear_share_drafts(str(auth_user_id))
+                        if actions_out is not None and isinstance(result, dict):
+                            # Ensure success copy can hit post-success markers.
+                            if not result.get("summary"):
+                                result["summary"] = (
+                                    f"Posted! {result.get('count_posted', 0)} listings are live."
+                                )
+
+                    if (
+                        fn_name == "claim_listings"
+                        and ok
+                        and isinstance(result, dict)
+                        and (result.get("count_claimed") or 0) > 0
+                    ):
+                        if auth_user_id is not None:
+                            from backend.ai.conversation_flow import clear_claim_drafts
+                            clear_claim_drafts(str(auth_user_id))
+                        if actions_out is not None and isinstance(result, dict):
+                            if not result.get("summary"):
+                                result["summary"] = (
+                                    f"Claimed! {result.get('count_claimed', 0)} listings reserved."
+                                )
 
                     if (
                         fn_name in {"update_food_listing", "update_listing", "edit_listing"}

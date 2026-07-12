@@ -1,4 +1,10 @@
-"""Regression tests for planner ↔ handler tool name alignment."""
+"""Regression tests for planner ↔ handler tool name alignment.
+
+These exercise the retired planner + `backend.tools.execute_tool` dispatcher
+so that if we ever re-enable the LangGraph planner path (behind
+`AGENT_V2` / `ENABLE_AGENTIC_MODE`), legacy tool-name aliases keep working
+and the `navigate_ui` plan step produces args the handler actually accepts.
+"""
 
 import pytest
 from unittest.mock import AsyncMock, patch
@@ -24,24 +30,39 @@ class TestNavigatePlan:
 class TestToolAliases:
     @pytest.mark.asyncio
     async def test_get_my_listings_alias_resolves(self):
+        """Legacy `get_my_listings` name must route to `get_user_listings`."""
         mock_list = AsyncMock(return_value={"success": True, "listings": []})
-        with patch.dict("backend.tools._HANDLERS", {"get_user_listings": mock_list}, clear=False):
+        with patch.dict(
+            "backend.tools._HANDLERS",
+            {"get_user_listings": mock_list},
+            clear=False,
+        ):
             from backend.tools import execute_tool
             result = await execute_tool("get_my_listings", {"user_id": "u-1"})
         assert result["success"] is True
         mock_list.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_get_my_impact_summary_registered(self):
-        mock_impact = AsyncMock(return_value={"success": True, "summary": "ok"})
-        with patch.dict("backend.tools._HANDLERS", {"get_my_impact_summary": mock_impact}, clear=False):
+    async def test_share_food_alias_resolves_to_post_food_listing(self):
+        """Fuzzy legacy names for the donor share flow must not 404."""
+        mock_post = AsyncMock(return_value={"success": True, "listing_id": "abc"})
+        with patch.dict(
+            "backend.tools._HANDLERS",
+            {"post_food_listing": mock_post},
+            clear=False,
+        ):
             from backend.tools import execute_tool
-            result = await execute_tool("get_my_impact_summary", {"user_id": "u-1"})
+            result = await execute_tool(
+                "share_food",
+                {"user_id": "u-1", "title": "Bread", "quantity": 2},
+            )
         assert result["success"] is True
-        mock_impact.assert_awaited_once()
+        mock_post.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_navigate_open_page_dashboard_path(self):
+        """`action=open_page, path=dashboard` (legacy) must normalise to
+        `action=navigate, path=/dashboard` before hitting `_ui_action`."""
         from backend.tools import _navigate_ui
         result = await _navigate_ui(action="open_page", path="dashboard")
         assert result.get("ok") is True
@@ -51,7 +72,9 @@ class TestToolAliases:
 
 class TestExecutePlanStepAliases:
     @pytest.mark.asyncio
-    async def test_planner_get_user_listings_dispatches(self):
+    async def test_planner_falls_back_to_flat_dispatcher(self):
+        """Planner should reach `backend.tools.execute_tool` for handlers
+        that aren't wrapped in the LangChain `TOOL_DISPATCH` map."""
         step: PlanStep = {
             "step_number": 1,
             "action": "Listings",

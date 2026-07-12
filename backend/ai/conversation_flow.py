@@ -2,14 +2,25 @@
 from __future__ import annotations
 
 import difflib
+import os
 import re
 from typing import Literal, Optional
 
 FlowKind = Literal["idle", "posting", "claiming", "finding", "requesting"]
 
 _PHOTO_URL_RE = re.compile(
-    r"(?:^|\s)image:\s*\S+|/uploads/ai/\S+",
+    r"(?:^|\s)image:\s*\S+"
+    r"|/uploads/ai/\S+"
+    r"|https?://\S+/storage/v1/object/public/\S+",
     re.IGNORECASE,
+)
+
+_PHOTO_DECLINE_PHRASES: tuple[str, ...] = (
+    "no photo", "skip photo", "without a photo", "without photo",
+    "no picture", "sin foto", "no foto", "skip the photo",
+    "don't have a photo", "dont have a photo",
+    "post without", "post now", "publish without",
+    "sin imagen", "sin foto", "publicar sin foto",
 )
 
 _DISTRESS_TRIGGERS = (
@@ -391,12 +402,7 @@ def posting_flow_state(message: str, history: list | None) -> dict:
     photo_asked = any(p in scoped_blob_l for p in (
         "photo", "picture", "snap a", "upload a", "foto", "imagen",
     ))
-    photo_declined = any(p in scoped_blob_l for p in (
-        "no photo", "skip photo", "without a photo", "without photo",
-        "no picture", "sin foto", "no foto", "skip the photo",
-        "don't have a photo", "dont have a photo", "no thanks",
-        "skip it", "maybe later", "not this time",
-    ))
+    photo_declined = _user_declined_photo(scoped_hist, message)
     post_summary_offered = any(p in blob_l for p in (
         "ready to post", "post it?", "shall i post", "want me to post",
         "go ahead and post", "¿listo para publicar", "¿publico",
@@ -859,6 +865,34 @@ def _current_posting_boundary_index(history: list | None) -> int:
     return 0
 
 
+def _user_declined_photo(history: list | None, message: str = "") -> bool:
+    """True only when the donor explicitly skips adding a photo."""
+    for msg in history or []:
+        if msg.get("role") != "user":
+            continue
+        ul = (msg.get("message") or "").lower()
+        if any(p in ul for p in _PHOTO_DECLINE_PHRASES):
+            return True
+    ul = (message or "").lower()
+    return any(p in ul for p in _PHOTO_DECLINE_PHRASES)
+
+
+def normalize_public_image_url(url: str | None) -> str | None:
+    """Return a storable public image URL (absolute https preferred)."""
+    if not url:
+        return None
+    u = str(url).strip().rstrip(").,]")
+    if not u:
+        return None
+    if u.startswith(("http://", "https://")):
+        return u[:2000]
+    if u.startswith("/"):
+        base = (os.getenv("PUBLIC_BASE_URL") or "").rstrip("/")
+        if base:
+            return f"{base}{u}"[:2000]
+    return None
+
+
 def _extract_photo_url_from_history(
     history: list | None,
     message: str = "",
@@ -875,6 +909,7 @@ def _extract_photo_url_from_history(
     for pat in (
         r"image:\s*(https?://\S+)",
         r"image:\s*(/uploads/\S+)",
+        r"(https?://\S+/storage/v1/object/public/\S+)",
         r"(https?://\S+\.(?:jpg|jpeg|png|webp|gif)(?:\?\S*)?)",
     ):
         matches = re.findall(pat, blob, re.IGNORECASE)
@@ -901,6 +936,587 @@ def _extract_photo_url_for_current_posting(
     boundary = _current_posting_boundary_index(hist)
     scoped = hist[boundary:] if boundary else hist
     return _extract_photo_url_from_history(scoped, message)
+
+
+def _extract_all_photo_urls_from_history(
+    history: list | None,
+    message: str = "",
+) -> list[str]:
+    """Return every photo URL in order (oldest → newest) from the blob."""
+    blob = _history_blob(history, message, limit=24)
+    found: list[str] = []
+    seen: set[str] = set()
+    for pat in (
+        r"image:\s*(https?://\S+)",
+        r"image:\s*(/uploads/\S+)",
+        r"(https?://\S+/storage/v1/object/public/\S+)",
+    ):
+        for match in re.finditer(pat, blob, re.IGNORECASE):
+            url = match.group(1).strip().rstrip(").,]")
+            if not url.startswith(("http://", "https://", "/")):
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            found.append(url)
+    return found
+
+
+def _extract_all_photo_urls_for_current_posting(
+    history: list | None,
+    message: str = "",
+) -> list[str]:
+    hist = history or []
+    boundary = _current_posting_boundary_index(hist)
+    scoped = hist[boundary:] if boundary else hist
+    return _extract_all_photo_urls_from_history(scoped, message)
+
+
+# ---------------------------------------------------------------------------
+# Multi-listing share drafts (queue of items + per-item photos)
+# ---------------------------------------------------------------------------
+
+_share_drafts_by_user: dict[str, list[dict]] = {}
+
+_SHARE_ITEM_RE = re.compile(
+    r"(?P<qty>\d{1,4}(?:\.\d+)?)\s+"
+    r"(?:(?P<unit>loaves?|trays?|boxes?|bags?|bunches?|pieces?|packs?|"
+    r"packets?|cartons?|cans?|jars?|containers?|bottles?|"
+    r"pounds?|lbs?|kg|kilos?|grams?|cups?|units?|portions?|"
+    r"servings?|slices?|dozen)\s+(?:of\s+)?)?"
+    r"(?P<title>[a-zA-Z][a-zA-Z'\-]*(?:\s+[a-zA-Z][a-zA-Z'\-]*){0,3})",
+    re.IGNORECASE,
+)
+
+_ALSO_FOOD_RE = re.compile(
+    r"(?:also|and|plus|y)\s+"
+    r"(?:some\s+|a\s+|an\s+)?"
+    r"(?:(?P<unit>loaves?|trays?|boxes?|bags?|bunches?|pieces?|packs?|"
+    r"packets?|cartons?|cans?|jars?|containers?|bottles?|"
+    r"pounds?|lbs?|dozen)\s+(?:of\s+)?)?"
+    r"(?P<title>[a-zA-Z][a-zA-Z'\-]+(?:\s+[a-zA-Z][a-zA-Z'\-]*){0,2})",
+    re.IGNORECASE,
+)
+
+
+def get_share_drafts(user_id: str) -> list[dict]:
+    return list(_share_drafts_by_user.get(str(user_id or ""), []) or [])
+
+
+def set_share_drafts(user_id: str, drafts: list[dict] | None) -> None:
+    uid = str(user_id or "").strip()
+    if not uid:
+        return
+    if not drafts:
+        _share_drafts_by_user.pop(uid, None)
+        return
+    _share_drafts_by_user[uid] = [dict(d) for d in drafts]
+
+
+def clear_share_drafts(user_id: str) -> None:
+    _share_drafts_by_user.pop(str(user_id or ""), None)
+
+
+def _normalize_share_title(raw: str) -> str:
+    words = [
+        w for w in re.findall(r"[a-zA-Z']+", (raw or "").lower())
+        if w not in _QTY_UNIT_WORDS
+        and w not in {
+            "and", "with", "some", "extra", "fresh", "my", "the", "a", "an",
+            "want", "share", "donate", "give", "away", "post", "listing",
+            "please", "thanks", "expire", "expires", "tomorrow", "today",
+            "friday", "monday", "under", "for", "to",
+        }
+    ]
+    if not words:
+        return (raw or "").strip()[:80]
+    # Prefer a known food word if present.
+    food = next((w for w in words if w in _FOOD_WORDS), None)
+    if food:
+        return food
+    return " ".join(words[:3])[:80]
+
+
+def _parse_share_items_from_text(text: str) -> list[dict]:
+    """Parse one or more share items from a donor message."""
+    t = (text or "").strip()
+    if not t:
+        return []
+    # Skip pure photo uploads.
+    if re.match(r"^\s*image:\s*\S+\s*$", t, re.I):
+        return []
+
+    items: list[dict] = []
+    seen_titles: set[str] = set()
+
+    for m in _SHARE_ITEM_RE.finditer(t):
+        title = _normalize_share_title(m.group("title") or "")
+        if not title or len(title) < 2:
+            continue
+        # Require a food-ish signal to avoid "3 days" / "2 miles".
+        title_tokens = set(re.findall(r"[a-zA-Z']+", title.lower()))
+        if not (title_tokens & _FOOD_WORDS) and title.lower() not in _FOOD_WORDS:
+            # Allow multi-word food phrases even if not in the small lexicon
+            # when unit is present (e.g. "3 loaves of sourdough bread").
+            if not m.group("unit"):
+                continue
+        key = title.lower()
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+        try:
+            qty = float(m.group("qty"))
+        except (TypeError, ValueError):
+            qty = 1.0
+        unit = (m.group("unit") or "items").lower().rstrip("s")
+        if unit == "loave":
+            unit = "loaf"
+        elif unit == "lb":
+            unit = "lb"
+        elif unit.endswith("e") and unit + "s" in {
+            "loaves", "boxes", "bunches", "pieces", "slices",
+        }:
+            pass
+        items.append({
+            "title": title,
+            "qty": qty if qty > 0 else 1.0,
+            "unit": unit or "items",
+        })
+
+    # "also some oranges" / "and a bag of apples" without a leading quantity.
+    if not items or len(items) == 1:
+        for m in _ALSO_FOOD_RE.finditer(t):
+            title = _normalize_share_title(m.group("title") or "")
+            if not title or title.lower() in seen_titles:
+                continue
+            if title.lower() not in _FOOD_WORDS and not any(
+                w in _FOOD_WORDS for w in title.lower().split()
+            ):
+                continue
+            seen_titles.add(title.lower())
+            unit = (m.group("unit") or "items").lower().rstrip("s")
+            if unit == "loave":
+                unit = "loaf"
+            items.append({"title": title, "qty": 1.0, "unit": unit or "items"})
+
+    # Bare multi-food without numbers: "share bread and apples"
+    if len(items) < 2:
+        foods = [
+            w for w in re.findall(r"[a-zA-Z']+", t.lower())
+            if w in _FOOD_WORDS and w not in _QTY_UNIT_WORDS
+        ]
+        # Deduplicate while preserving order.
+        uniq: list[str] = []
+        for f in foods:
+            if f not in uniq:
+                uniq.append(f)
+        if len(uniq) >= 2 and len(items) <= 1:
+            items = [{"title": f, "qty": 1.0, "unit": "items"} for f in uniq[:6]]
+
+    return items
+
+
+def upsert_share_drafts_from_message(
+    user_id: str,
+    message: str,
+    history: list | None = None,
+) -> list[dict]:
+    """Merge newly mentioned share items into the user's draft queue."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return []
+
+    parsed = _parse_share_items_from_text(message or "")
+    # Also scan recent user turns in the current posting segment for items
+    # when the current message is short (qty/photo/confirm).
+    if len(parsed) < 2 and history:
+        boundary = _current_posting_boundary_index(history)
+        scoped = (history or [])[boundary:]
+        blob_parts = [
+            (m.get("message") or "")
+            for m in scoped
+            if m.get("role") == "user"
+        ]
+        blob_parts.append(message or "")
+        combined = _parse_share_items_from_text(" . ".join(blob_parts))
+        if len(combined) > len(parsed):
+            parsed = combined
+
+    existing = get_share_drafts(uid)
+    by_title = {str(d.get("title") or "").lower(): dict(d) for d in existing}
+
+    for item in parsed:
+        key = str(item.get("title") or "").lower()
+        if not key:
+            continue
+        if key in by_title:
+            cur = by_title[key]
+            if item.get("qty") and (
+                cur.get("qty") is None or float(cur.get("qty") or 0) <= 0
+            ):
+                cur["qty"] = item["qty"]
+            if item.get("unit") and not cur.get("unit"):
+                cur["unit"] = item["unit"]
+        else:
+            by_title[key] = {
+                "id": f"d{len(by_title) + 1}",
+                "title": item["title"],
+                "qty": item.get("qty") or 1.0,
+                "unit": item.get("unit") or "items",
+                "expiry": None,
+                "photo_url": None,
+                "photo_declined": False,
+                "allergens": [],
+                "dietary_tags": [],
+            }
+
+    # Apply expiry from this message to drafts that still need one.
+    exp = _extract_expiry_from_text(message or "")
+    if exp:
+        for d in by_title.values():
+            if not d.get("expiry"):
+                d["expiry"] = exp
+
+    # Per-draft photo decline when the donor says skip while naming the food.
+    ul = (message or "").lower()
+    if any(p in ul for p in _PHOTO_DECLINE_PHRASES):
+        named = _normalize_share_title(message)
+        for d in by_title.values():
+            title = str(d.get("title") or "").lower()
+            if named and named.lower() in ul and title in ul:
+                d["photo_declined"] = True
+            elif len(by_title) == 1:
+                d["photo_declined"] = True
+
+    drafts = list(by_title.values())
+    # Stable order: existing titles first, then new ones by parse order.
+    order_keys = [str(d.get("title") or "").lower() for d in existing]
+    for item in parsed:
+        k = str(item.get("title") or "").lower()
+        if k and k not in order_keys:
+            order_keys.append(k)
+    for k in by_title:
+        if k not in order_keys:
+            order_keys.append(k)
+    ordered = [by_title[k] for k in order_keys if k in by_title]
+    for i, d in enumerate(ordered, start=1):
+        d["id"] = f"d{i}"
+    set_share_drafts(uid, ordered)
+    return ordered
+
+
+def assign_photos_to_drafts(
+    user_id: str,
+    history: list | None,
+    message: str = "",
+) -> list[dict]:
+    """Bind photo URLs in the current posting segment to drafts missing photos."""
+    uid = str(user_id or "").strip()
+    drafts = get_share_drafts(uid)
+    if not drafts:
+        return []
+
+    urls = _extract_all_photo_urls_for_current_posting(history, message)
+    if not urls:
+        return drafts
+
+    # Explicit "photo for the apples" + image in this message.
+    ul = (message or "").lower()
+    titled = None
+    if "photo" in ul or "picture" in ul or "image:" in ul:
+        for d in drafts:
+            title = str(d.get("title") or "").lower()
+            if title and title in ul and not d.get("photo_url"):
+                titled = d
+                break
+    msg_urls = _extract_all_photo_urls_from_history([], message)
+    if titled and msg_urls:
+        titled["photo_url"] = normalize_public_image_url(msg_urls[-1]) or msg_urls[-1]
+        set_share_drafts(uid, drafts)
+        drafts = get_share_drafts(uid)
+
+    used = {
+        str(d.get("photo_url"))
+        for d in drafts
+        if d.get("photo_url")
+    }
+    unused = [
+        (normalize_public_image_url(u) or u)
+        for u in urls
+        if (normalize_public_image_url(u) or u) not in used
+    ]
+    ui = 0
+    for d in drafts:
+        if d.get("photo_url") or d.get("photo_declined"):
+            continue
+        if ui >= len(unused):
+            break
+        d["photo_url"] = unused[ui]
+        ui += 1
+
+    set_share_drafts(uid, drafts)
+    return get_share_drafts(uid)
+
+
+def share_drafts_missing(drafts: list[dict] | None) -> list[dict]:
+    """Return per-draft missing required fields (title/qty/expiry/photo)."""
+    missing: list[dict] = []
+    for d in drafts or []:
+        gaps: list[str] = []
+        if not d.get("title"):
+            gaps.append("title")
+        if d.get("qty") is None or float(d.get("qty") or 0) <= 0:
+            gaps.append("qty")
+        if not d.get("expiry"):
+            gaps.append("expiry")
+        if not d.get("photo_url") and not d.get("photo_declined"):
+            gaps.append("photo")
+        if gaps:
+            missing.append({
+                "id": d.get("id"),
+                "title": d.get("title"),
+                "missing": gaps,
+            })
+    return missing
+
+
+def share_drafts_ready(
+    drafts: list[dict] | None,
+    *,
+    community_confirmed: bool = False,
+) -> bool:
+    if not drafts or len(drafts) < 1:
+        return False
+    if not community_confirmed:
+        return False
+    return len(share_drafts_missing(drafts)) == 0
+
+
+def sync_share_drafts(
+    user_id: str,
+    message: str,
+    history: list | None = None,
+) -> list[dict]:
+    """Upsert items from the message, then assign photos. Returns drafts."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return []
+    drafts = upsert_share_drafts_from_message(uid, message, history)
+    if len(drafts) >= 1:
+        drafts = assign_photos_to_drafts(uid, history, message)
+    return drafts
+
+
+def build_share_drafts_reminder(
+    user_id: str,
+    message: str,
+    history: list | None = None,
+    lang: str = "en",
+) -> str | None:
+    """System nudge listing multi-share drafts and what's still needed."""
+    drafts = get_share_drafts(str(user_id or ""))
+    if len(drafts) < 2:
+        return None
+    state = posting_flow_state(message, history)
+    missing = share_drafts_missing(drafts)
+    lines = []
+    for d in drafts:
+        photo = "photo=yes" if d.get("photo_url") else (
+            "photo=skipped" if d.get("photo_declined") else "photo=missing"
+        )
+        exp = d.get("expiry") or "expiry=?"
+        lines.append(
+            f"- {d.get('title')}: qty={d.get('qty')} {d.get('unit')}, "
+            f"{exp}, {photo}"
+        )
+    body = "\n".join(lines)
+    if lang == "es":
+        tip = (
+            "Cola de publicaciones múltiples. Completa campos faltantes "
+            "uno por turno (comunidad compartida una vez; luego vencimiento/"
+            "foto por ítem). Cuando todo esté listo, un resumen y "
+            "post_food_listings. Nunca reutilices la foto del ítem A en B."
+        )
+    else:
+        tip = (
+            "MULTI-SHARE DRAFT QUEUE (2+ items). Ask ONE missing field per "
+            "turn (shared community/address once, then per-item expiry/photo). "
+            "When all drafts are ready, give one summary and call "
+            "post_food_listings with items[] (each with its own images[]). "
+            "Never reuse draft A's photo on draft B."
+        )
+    gap = ""
+    if missing:
+        gap = " Still missing: " + "; ".join(
+            f"{m.get('title')}→{','.join(m.get('missing') or [])}"
+            for m in missing
+        )
+    elif not state.get("community_confirmed"):
+        gap = " Community not confirmed yet."
+    else:
+        gap = " All item fields ready — confirm summary then post_food_listings."
+    return f"{tip}\nDrafts:\n{body}.{gap}"
+
+
+def enrich_post_food_listings_args(
+    args: dict,
+    message: str,
+    history: list | None,
+    user_id: str,
+) -> dict:
+    """Fill batch post args from the share-draft queue + thread context."""
+    out = dict(args or {})
+    uid = str(user_id or "").strip()
+    drafts = sync_share_drafts(uid, message, history) if uid else get_share_drafts(uid)
+
+    # Shared community / address from single-post enrich helpers.
+    single = enrich_post_food_listing_args(
+        {
+            "community_name": out.get("community_name"),
+            "community_id": out.get("community_id"),
+            "community_confirmed": out.get("community_confirmed"),
+            "address": out.get("address"),
+            "expiration_date": out.get("expiration_date"),
+        },
+        message,
+        history,
+    )
+    for key in (
+        "community_name", "community_id", "community_confirmed", "address",
+    ):
+        if single.get(key) is not None:
+            out[key] = single[key]
+
+    items = out.get("items")
+    if not isinstance(items, list) or not items:
+        items = []
+        for d in drafts:
+            item = {
+                "title": d.get("title"),
+                "qty": d.get("qty") or 1,
+                "unit": d.get("unit") or "items",
+            }
+            if d.get("expiry"):
+                item["expiration_date"] = d["expiry"]
+            if d.get("photo_url"):
+                item["images"] = [d["photo_url"]]
+            if d.get("allergens"):
+                item["allergens"] = list(d["allergens"])
+            if d.get("dietary_tags"):
+                item["dietary_tags"] = list(d["dietary_tags"])
+            items.append(item)
+        out["items"] = items
+    else:
+        # Merge draft photos into model-supplied items by title order.
+        by_title = {
+            str(d.get("title") or "").lower(): d for d in drafts
+        }
+        used_photos: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title_key = str(item.get("title") or "").lower()
+            draft = by_title.get(title_key)
+            imgs = item.get("images") if isinstance(item.get("images"), list) else []
+            cleaned = []
+            for u in imgs:
+                norm = normalize_public_image_url(str(u)) or str(u).strip()
+                if norm:
+                    cleaned.append(norm)
+                    used_photos.add(norm)
+            if not cleaned and draft and draft.get("photo_url"):
+                cleaned = [draft["photo_url"]]
+                used_photos.add(draft["photo_url"])
+            if cleaned:
+                item["images"] = cleaned
+            if draft and draft.get("expiry") and not (
+                item.get("expiration_date") or item.get("expiry_date")
+            ):
+                item["expiration_date"] = draft["expiry"]
+        out["items"] = items
+
+    return out
+
+
+def posting_batch_tool_block_reason(
+    message: str,
+    history: list | None,
+    fn_args: dict | None = None,
+    user_id: str = "",
+) -> str | None:
+    """Block post_food_listings when the multi-share queue is incomplete."""
+    args = fn_args or {}
+    uid = str(user_id or args.get("user_id") or "").strip()
+    drafts = get_share_drafts(uid) if uid else []
+    items = args.get("items") if isinstance(args.get("items"), list) else []
+
+    if len(drafts) < 2 and len(items) < 2:
+        return (
+            "post_food_listings is for 2+ items. For a single listing use "
+            "post_food_listing instead."
+        )
+
+    state = posting_flow_state(message, history)
+    community_confirmed = bool(args.get("community_confirmed")) or state["community_confirmed"]
+    if not community_confirmed:
+        return (
+            "Confirm which community/school this batch goes under, then call "
+            "post_food_listings with community_name and community_confirmed=true."
+        )
+
+    # Prefer explicit items[] gaps when provided; else draft queue.
+    if items:
+        gaps = []
+        for i, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                gaps.append(f"item {i}: invalid")
+                continue
+            miss = []
+            if not item.get("title"):
+                miss.append("title")
+            if item.get("qty") is None and item.get("quantity") is None:
+                miss.append("qty")
+            if not (item.get("expiration_date") or item.get("expiry_date")):
+                miss.append("expiry")
+            imgs = item.get("images") if isinstance(item.get("images"), list) else []
+            if not imgs:
+                # Allow decline only when drafts say so for that title.
+                title = str(item.get("title") or "").lower()
+                declined = any(
+                    str(d.get("title") or "").lower() == title and d.get("photo_declined")
+                    for d in drafts
+                )
+                if not declined and not state.get("photo_declined"):
+                    miss.append("photo")
+            if miss:
+                gaps.append(f"{item.get('title') or i}: {', '.join(miss)}")
+        if gaps:
+            return (
+                "Batch incomplete — still need: " + "; ".join(gaps) + ". "
+                "Ask for the next missing field, then retry post_food_listings."
+            )
+    else:
+        missing = share_drafts_missing(drafts)
+        if missing:
+            bits = [
+                f"{m.get('title')}: {', '.join(m.get('missing') or [])}"
+                for m in missing
+            ]
+            return (
+                "Batch incomplete — still need: " + "; ".join(bits) + ". "
+                "Ask for the next missing field (one at a time), then retry."
+            )
+
+    if _is_affirmative_post_confirm(message) and not state["post_summary_offered"]:
+        last_asked = _assistant_last_asked_kind(history)
+        if last_asked != "post_confirm":
+            return (
+                "Give a one-sentence summary of ALL items (food, qty, community, "
+                "photo yes/no each) and ask 'Ready to post these?' before calling "
+                "post_food_listings."
+            )
+
+    return None
 
 
 def enrich_post_food_listing_args(
@@ -935,7 +1551,8 @@ def enrich_post_food_listing_args(
     else:
         photo_url = _extract_photo_url_for_current_posting(history, message)
         if photo_url:
-            out["images"] = [photo_url]
+            norm = normalize_public_image_url(photo_url) or photo_url
+            out["images"] = [norm]
         else:
             out.pop("images", None)
 
@@ -957,6 +1574,49 @@ def enrich_post_food_listing_args(
         out = enrich_post_listing_allergen_args(out, message, history)
     except Exception:  # pragma: no cover — allergen layer is advisory
         pass
+    return out
+
+
+def enrich_attach_photos_args(
+    args: dict,
+    message: str,
+    history: list | None,
+    user_id: str,
+) -> dict:
+    """Fill listing_id / images[] from chat when the model omits them."""
+    out = dict(args or {})
+    uid = str(user_id or "").strip()
+
+    images: list[str] = []
+    for raw in out.get("images") or []:
+        if not raw:
+            continue
+        norm = normalize_public_image_url(str(raw)) or str(raw).strip()
+        if norm:
+            images.append(norm)
+    if not images:
+        # Prefer every image: URL in the CURRENT message (multi-photo sends),
+        # then fall back to the most recent URL in history.
+        from_msg = _extract_all_photo_urls_from_history([], message)
+        if from_msg:
+            images.extend(from_msg)
+        else:
+            url = _extract_photo_url_from_history(history, message)
+            if url:
+                images.append(url)
+
+    if images:
+        out["images"] = images
+
+    if not out.get("listing_id") and uid:
+        intent = donor_photo_add_intent(message, history, uid)
+        if intent and intent.get("listing_id"):
+            out["listing_id"] = intent["listing_id"]
+        else:
+            recent = get_last_write_action(uid)
+            if isinstance(recent, dict) and recent.get("listing_id"):
+                out["listing_id"] = recent["listing_id"]
+
     return out
 
 
@@ -1114,10 +1774,14 @@ def build_posting_step_reminder(
     if not state["post_summary_offered"]:
         return (
             "Nudge: give a one-sentence summary and get an explicit "
-            "'yes / post it' before calling post_food_listing."
+            "'yes / post it' before calling post_food_listing "
+            "(or post_food_listings when 2+ drafts are queued)."
         )
     if last_asked == "post_confirm" and _is_affirmative_post_confirm(message):
-        return "They confirmed — call post_food_listing now."
+        return (
+            "They confirmed — call post_food_listing now "
+            "(or post_food_listings if 2+ share drafts are queued)."
+        )
     return (
         "Nudge: keep it conversational — one question per turn, warm "
         "quick ack, then the next natural thing."
@@ -1641,22 +2305,29 @@ def build_ambiguous_pick_reminder(
     message: str,
     history: list | None,
     lang: str = "en",
+    user_id: str = "",
 ) -> str | None:
-    """When user picks multiple listings at once, confirm intent."""
+    """When user picks multiple listings at once, queue them for multi-claim."""
     if not _looks_like_multi_option_pick(message) and "both" not in (message or "").lower():
         return None
     if not (_assistant_expects_flow_reply(history) or _recent_search_context(history)):
         return None
+    if user_id:
+        drafts = sync_claim_drafts(str(user_id), message, history)
+        if len(drafts) >= 2:
+            return build_claim_drafts_reminder(str(user_id), message, history, lang=lang)
     if lang == "es":
         return (
-            "SELECCIÓN AMBIGUA (este turno):\n"
-            "El usuario mencionó más de una opción. Pregunta UNA cosa: "
-            "'¿Quisiste decir #1, #2, o ambos?' antes de reclamar."
+            "SELECCIÓN MÚLTIPLE (este turno):\n"
+            "El usuario eligió más de una opción. Trata cada una como un "
+            "borrador de reclamo: pregunta cantidades que falten UNA por "
+            "turno, luego llama claim_listings."
         )
     return (
-        "AMBIGUOUS PICK (this turn):\n"
-        "The user referenced multiple options. Ask ONE warm question: "
-        "'Just to confirm — did you mean #1, #2, or both?' before claiming."
+        "MULTI-PICK (this turn):\n"
+        "The user referenced multiple options. Queue each as a claim draft, "
+        "confirm briefly if needed, ask any missing quantities ONE at a time, "
+        "then call claim_listings."
     )
 
 
@@ -2821,6 +3492,419 @@ def _last_listing_pick_from_history(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Multi-listing claim drafts (queue of items + per-item qty)
+# ---------------------------------------------------------------------------
+
+_claim_drafts_by_user: dict[str, list[dict]] = {}
+
+
+def get_claim_drafts(user_id: str) -> list[dict]:
+    return list(_claim_drafts_by_user.get(str(user_id or ""), []) or [])
+
+
+def set_claim_drafts(user_id: str, drafts: list[dict] | None) -> None:
+    uid = str(user_id or "").strip()
+    if not uid:
+        return
+    if not drafts:
+        _claim_drafts_by_user.pop(uid, None)
+        return
+    _claim_drafts_by_user[uid] = [dict(d) for d in drafts]
+
+
+def clear_claim_drafts(user_id: str) -> None:
+    _claim_drafts_by_user.pop(str(user_id or ""), None)
+
+
+def _parse_claim_index_picks(message: str, user_id: str) -> list[dict]:
+    """Parse '#1 and #3' / '1 and 2' / 'both' into claim draft stubs."""
+    t = (message or "").strip().lower()
+    listings = get_last_search_listings(user_id)
+    if not listings:
+        return []
+
+    indices: list[int] = []
+    if t in ("both", "all", "both of them", "all of them"):
+        indices = list(range(1, min(len(listings), 2) + 1))
+        if t.startswith("all") and len(listings) > 2:
+            indices = list(range(1, len(listings) + 1))
+    else:
+        # Prefer #N tokens; fall back to small integers when multi-pick.
+        hash_nums = [int(n) for n in re.findall(r"#(\d{1,2})", t)]
+        if hash_nums:
+            indices = hash_nums
+        elif _looks_like_multi_option_pick(message):
+            indices = [int(n) for n in re.findall(r"\d+", t) if 1 <= int(n) <= 15]
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for idx in indices:
+        if idx < 1 or idx > len(listings):
+            continue
+        row = listings[idx - 1]
+        lid = str(row.get("id") or "")
+        if not lid or lid in seen:
+            continue
+        seen.add(lid)
+        out.append({
+            "listing_id": lid,
+            "display_index": idx,
+            "title": str(row.get("title") or f"#{idx}"),
+            "qty": None,
+            "unit": row.get("unit"),
+        })
+    return out
+
+
+def _parse_claim_food_items(message: str, user_id: str) -> list[dict]:
+    """Parse '2 oranges and 3 bread' / 'the apples and bananas' against search."""
+    items = _parse_share_items_from_text(message or "")
+    # Bare dual food titles without quantities.
+    if len(items) < 2:
+        foods = [
+            w for w in re.findall(r"[a-zA-Z']+", (message or "").lower())
+            if w in _FOOD_WORDS and w not in _QTY_UNIT_WORDS
+        ]
+        uniq: list[str] = []
+        for f in foods:
+            if f not in uniq:
+                uniq.append(f)
+        if len(uniq) >= 2:
+            items = [{"title": f, "qty": None, "unit": "items"} for f in uniq[:6]]
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        lid = _resolve_listing_id_by_title_hint(title, user_id)
+        key = lid or title.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        display_index = None
+        if lid:
+            for i, row in enumerate(get_last_search_listings(user_id), start=1):
+                if str(row.get("id") or "") == lid:
+                    display_index = i
+                    title = str(row.get("title") or title)
+                    break
+        qty = item.get("qty")
+        try:
+            qty_val = float(qty) if qty is not None else None
+        except (TypeError, ValueError):
+            qty_val = None
+        # _parse_share_items always sets qty=1.0 default for bare foods —
+        # treat that as missing when the message had no digit for that food.
+        if qty_val is not None and qty_val == 1.0:
+            # Keep 1 only if message explicitly has "1 <food>" or "a/an <food>".
+            tl = title.lower()
+            msg_l = (message or "").lower()
+            explicit = bool(re.search(rf"\b1\s+(?:[a-z]+\s+)*(?:of\s+)?{re.escape(tl)}\b", msg_l))
+            if not explicit and not re.search(
+                rf"\b(?:a|an)\s+(?:[a-z]+\s+)*(?:of\s+)?{re.escape(tl)}\b", msg_l,
+            ):
+                # For share-style "2 oranges and 3 bread", qty is real.
+                if not re.search(rf"\b\d+\s+(?:[a-z]+\s+)*(?:of\s+)?{re.escape(tl)}\b", msg_l):
+                    qty_val = None
+        out.append({
+            "listing_id": lid,
+            "display_index": display_index,
+            "title": title,
+            "qty": qty_val,
+            "unit": item.get("unit") or "items",
+        })
+    return out
+
+
+def upsert_claim_drafts_from_message(
+    user_id: str,
+    message: str,
+    history: list | None = None,
+) -> list[dict]:
+    """Merge newly mentioned claim targets into the user's draft queue."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return []
+
+    parsed = _parse_claim_index_picks(message, uid)
+    if len(parsed) < 2:
+        food_parsed = _parse_claim_food_items(message, uid)
+        if len(food_parsed) >= 2:
+            parsed = food_parsed
+        elif len(parsed) == 0 and len(food_parsed) == 1:
+            # Don't start a multi-queue from a single item.
+            parsed = []
+
+    existing = get_claim_drafts(uid)
+    by_key: dict[str, dict] = {}
+    for d in existing:
+        key = str(d.get("listing_id") or d.get("title") or "").lower()
+        if key:
+            by_key[key] = dict(d)
+
+    for item in parsed:
+        key = str(item.get("listing_id") or item.get("title") or "").lower()
+        if not key:
+            continue
+        if key in by_key:
+            cur = by_key[key]
+            if item.get("listing_id") and not cur.get("listing_id"):
+                cur["listing_id"] = item["listing_id"]
+            if item.get("display_index") and not cur.get("display_index"):
+                cur["display_index"] = item["display_index"]
+            if item.get("qty") is not None and (
+                cur.get("qty") is None or float(cur.get("qty") or 0) <= 0
+            ):
+                cur["qty"] = item["qty"]
+            if item.get("title"):
+                cur["title"] = item["title"]
+        else:
+            by_key[key] = {
+                "id": f"c{len(by_key) + 1}",
+                "listing_id": item.get("listing_id"),
+                "display_index": item.get("display_index"),
+                "title": item.get("title"),
+                "qty": item.get("qty"),
+                "unit": item.get("unit"),
+            }
+
+    # Short qty reply while a draft is missing qty and assistant asked how many.
+    if existing and re.fullmatch(r"\d{1,3}", (message or "").strip()):
+        qty = _extract_quantity_from_message(message)
+        if qty is not None:
+            for d in by_key.values():
+                if d.get("qty") is None or float(d.get("qty") or 0) <= 0:
+                    # Prefer draft mentioned in last assistant turn.
+                    last_a = ""
+                    for msg in reversed(history or []):
+                        if msg.get("role") == "assistant":
+                            last_a = (msg.get("message") or "").lower()
+                            break
+                    title = str(d.get("title") or "").lower()
+                    if title and title in last_a:
+                        d["qty"] = float(qty)
+                        break
+            else:
+                for d in by_key.values():
+                    if d.get("qty") is None or float(d.get("qty") or 0) <= 0:
+                        d["qty"] = float(qty)
+                        break
+
+    # Resolve missing listing_ids from search cache.
+    for d in by_key.values():
+        if d.get("listing_id"):
+            continue
+        title = str(d.get("title") or "")
+        if title:
+            lid = _resolve_listing_id_by_title_hint(title, uid)
+            if lid:
+                d["listing_id"] = lid
+                for i, row in enumerate(get_last_search_listings(uid), start=1):
+                    if str(row.get("id") or "") == lid:
+                        d["display_index"] = i
+                        d["title"] = str(row.get("title") or title)
+                        break
+
+    order_keys = [
+        str(d.get("listing_id") or d.get("title") or "").lower()
+        for d in existing
+    ]
+    for item in parsed:
+        k = str(item.get("listing_id") or item.get("title") or "").lower()
+        if k and k not in order_keys:
+            order_keys.append(k)
+    for k in by_key:
+        if k not in order_keys:
+            order_keys.append(k)
+    ordered = [by_key[k] for k in order_keys if k in by_key]
+    for i, d in enumerate(ordered, start=1):
+        d["id"] = f"c{i}"
+    set_claim_drafts(uid, ordered)
+    return ordered
+
+
+def sync_claim_drafts(
+    user_id: str,
+    message: str,
+    history: list | None = None,
+) -> list[dict]:
+    uid = str(user_id or "").strip()
+    if not uid:
+        return []
+    return upsert_claim_drafts_from_message(uid, message, history)
+
+
+def claim_drafts_missing(drafts: list[dict] | None) -> list[dict]:
+    missing: list[dict] = []
+    for d in drafts or []:
+        gaps: list[str] = []
+        if not d.get("listing_id"):
+            gaps.append("listing")
+        if d.get("qty") is None or float(d.get("qty") or 0) <= 0:
+            gaps.append("qty")
+        if gaps:
+            missing.append({
+                "id": d.get("id"),
+                "title": d.get("title"),
+                "display_index": d.get("display_index"),
+                "missing": gaps,
+            })
+    return missing
+
+
+def claim_drafts_ready(drafts: list[dict] | None) -> bool:
+    if not drafts or len(drafts) < 2:
+        return False
+    return len(claim_drafts_missing(drafts)) == 0
+
+
+def build_claim_drafts_reminder(
+    user_id: str,
+    message: str = "",
+    history: list | None = None,
+    lang: str = "en",
+) -> str | None:
+    drafts = get_claim_drafts(str(user_id or ""))
+    if len(drafts) < 2:
+        return None
+    missing = claim_drafts_missing(drafts)
+    lines = []
+    for d in drafts:
+        idx = d.get("display_index")
+        label = f"#{idx} " if idx else ""
+        qty = d.get("qty")
+        qty_s = f"qty={qty}" if qty is not None else "qty=?"
+        lid = "listing=ok" if d.get("listing_id") else "listing=?"
+        lines.append(f"- {label}{d.get('title')}: {qty_s}, {lid}")
+    body = "\n".join(lines)
+    if lang == "es":
+        tip = (
+            "COLA DE RECLAMOS MÚLTIPLES (2+). Pregunta UN campo faltante "
+            "por turno (cantidad por ítem). Cuando todo esté listo, llama "
+            "claim_listings con items[]. No reclames solo el primero."
+        )
+    else:
+        tip = (
+            "MULTI-CLAIM DRAFT QUEUE (2+ listings). Ask ONE missing field "
+            "per turn (usually qty for the next unfinished item). When all "
+            "drafts have listing_id + qty, call claim_listings with items[]. "
+            "Do NOT claim only the first item with claim_listing."
+        )
+    if missing:
+        gap = " Still missing: " + "; ".join(
+            f"{m.get('title') or m.get('display_index')}→{','.join(m.get('missing') or [])}"
+            for m in missing
+        )
+    else:
+        gap = " All drafts ready — call claim_listings now."
+    return f"{tip}\nDrafts:\n{body}.{gap}"
+
+
+def enrich_claim_listings_args(
+    args: dict,
+    message: str,
+    history: list | None,
+    user_id: str,
+) -> dict:
+    """Fill claim_listings items[] from the claim-draft queue."""
+    out = dict(args or {})
+    uid = str(user_id or "").strip()
+    drafts = sync_claim_drafts(uid, message, history) if uid else get_claim_drafts(uid)
+
+    items = out.get("items")
+    if not isinstance(items, list) or not items:
+        items = []
+        for d in drafts:
+            if not d.get("listing_id"):
+                continue
+            item = {"listing_id": d["listing_id"]}
+            if d.get("qty") is not None:
+                try:
+                    item["quantity"] = int(float(d["qty"]))
+                except (TypeError, ValueError):
+                    item["quantity"] = d["qty"]
+            if d.get("title"):
+                item["title"] = d["title"]
+            items.append(item)
+        out["items"] = items
+    else:
+        by_lid = {
+            str(d.get("listing_id") or ""): d for d in drafts if d.get("listing_id")
+        }
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            lid = str(item.get("listing_id") or "").strip()
+            if lid and not re.match(r"^[0-9a-f-]{36}$", lid, re.I):
+                resolved, err = resolve_listing_id_from_search(lid, uid)
+                if resolved:
+                    item["listing_id"] = resolved
+                    lid = resolved
+            draft = by_lid.get(lid)
+            if draft and item.get("quantity") is None and draft.get("qty") is not None:
+                try:
+                    item["quantity"] = int(float(draft["qty"]))
+                except (TypeError, ValueError):
+                    item["quantity"] = draft["qty"]
+        out["items"] = items
+    return out
+
+
+def claiming_batch_tool_block_reason(
+    message: str,
+    history: list | None,
+    fn_args: dict | None = None,
+    user_id: str = "",
+) -> str | None:
+    """Block claim_listings when the multi-claim queue is incomplete."""
+    args = fn_args or {}
+    uid = str(user_id or args.get("user_id") or "").strip()
+    drafts = get_claim_drafts(uid) if uid else []
+    items = args.get("items") if isinstance(args.get("items"), list) else []
+
+    if len(drafts) < 2 and len(items) < 2:
+        return (
+            "claim_listings is for 2+ listings. For a single listing use "
+            "claim_listing instead."
+        )
+
+    if items:
+        gaps = []
+        for i, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                gaps.append(f"item {i}: invalid")
+                continue
+            miss = []
+            if not item.get("listing_id"):
+                miss.append("listing_id")
+            if item.get("quantity") is None and item.get("qty") is None:
+                miss.append("qty")
+            if miss:
+                gaps.append(f"{item.get('title') or i}: {', '.join(miss)}")
+        if gaps:
+            return (
+                "Batch claim incomplete — still need: " + "; ".join(gaps) + ". "
+                "Ask for the next missing quantity (one at a time), then retry "
+                "claim_listings."
+            )
+    else:
+        missing = claim_drafts_missing(drafts)
+        if missing:
+            bits = [
+                f"{m.get('title') or m.get('display_index')}: "
+                f"{', '.join(m.get('missing') or [])}"
+                for m in missing
+            ]
+            return (
+                "Batch claim incomplete — still need: " + "; ".join(bits) + ". "
+                "Ask ONE missing field per turn, then retry claim_listings."
+            )
+    return None
+
+
 def enrich_claim_listing_args(
     args: dict,
     message: str,
@@ -3034,7 +4118,8 @@ def posting_distractor_tool_block_reason(
     return (
         "Do not call get_active_communities again — you already showed communities. "
         "Ask the donor to confirm the school/community (yes or the name), then call "
-        "post_food_listing with community_name and community_confirmed=true."
+        "post_food_listing (or post_food_listings for 2+ items) with community_name "
+        "and community_confirmed=true."
     )
 
 
@@ -3042,23 +4127,28 @@ def build_food_order_spec_reminder(
     message: str,
     history: list | None,
     lang: str = "en",
+    user_id: str = "",
 ) -> str | None:
-    """When user lists foods + amounts, map each to one listing at a time."""
+    """When user lists foods + amounts, queue multi-claim drafts."""
     if not _looks_like_food_quantity_spec(message):
         return None
     if not _recent_search_context(history):
         return None
+    if user_id:
+        drafts = sync_claim_drafts(str(user_id), message, history)
+        if len(drafts) >= 2:
+            return build_claim_drafts_reminder(str(user_id), message, history, lang=lang)
     if lang == "es":
         return (
             "PEDIDO CON CANTIDADES (este turno):\n"
-            "El usuario pidió comidas con cantidades. NO sumes listings iguales. "
-            "Pregunta UNA cosa: confirma el listing # para el PRIMER artículo "
-            "y cuántos quieren de ESE listing antes de claim_listing."
+            "El usuario pidió varias comidas con cantidades. Mantén una cola "
+            "de reclamos; resuelve cada alimento al listing del último search. "
+            "Si falta qty o match, pregunta UNA cosa; luego claim_listings."
         )
     return (
         "FOOD + QUANTITY ORDER (this turn):\n"
-        "The user named foods with amounts (not listing numbers). "
-        "Do NOT add quantities across duplicate titles. "
-        "Ask ONE question: confirm which listing # matches the FIRST item, "
-        "then how many they want from THAT listing only — before claim_listing."
+        "The user named multiple foods with amounts. Keep a claim draft "
+        "queue and match each food to a listing from the last search. "
+        "Ask ONE clarifying question if a match or qty is missing, then "
+        "call claim_listings for all ready items."
     )

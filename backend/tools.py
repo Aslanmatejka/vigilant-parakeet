@@ -1673,9 +1673,46 @@ async def _post_food_request_forward(**kwargs) -> dict:
     return await _impl(**kwargs)
 
 
-async def execute_tool(name: str, arguments: dict) -> dict:
-    """Route a tool call to its handler and return the result."""
-    handlers = {
+# Planner / legacy tool names that differ from the canonical handler keys.
+# Any model call using one of these aliases is transparently routed to the
+# real handler so a schema drift or a stale prompt never fails a live turn.
+_TOOL_NAME_ALIASES: dict[str, str] = {
+    "get_my_listings": "get_user_listings",
+    "get_my_profile": "get_user_profile",
+    "search_food_listings": "search_food_near_user",
+    "search_listings": "search_food_near_user",
+    "find_food": "search_food_near_user",
+    "claim_food": "claim_listing",
+    "share_food": "post_food_listing",
+    "donate_food": "post_food_listing",
+    "post_listing": "post_food_listing",
+    "list_food": "post_food_listing",
+    "create_listing": "post_food_listing",
+    "cancel_food_claim": "cancel_claim",
+    "confirm_food_claim": "confirm_claim",
+    "attach_photo_to_listing": "attach_photos_to_listing",
+    "attach_photo": "attach_photos_to_listing",
+    "get_dashboard": "get_user_dashboard",
+    "show_dashboard": "get_user_dashboard",
+    "get_profile": "get_user_profile",
+    "get_recipes_from_ingredients": "get_recipes",
+}
+
+# Module-level handler registry — declared BEFORE execute_tool so tests and
+# tools that need to patch or introspect the routing can import it directly.
+# Every handler function is defined further down in the file; the actual
+# populated dict is built lazily by `_build_handlers()` at first call so
+# forward references still resolve.
+_HANDLERS: dict[str, "callable"] = {}
+
+
+def _build_handlers() -> dict[str, "callable"]:
+    """Lazily construct the tool-name → handler registry.
+
+    Kept lazy so forward references to functions defined later in this
+    module resolve at first call rather than at import time.
+    """
+    return {
         "search_food_near_user": _search_food_near_user,
         "get_recent_listings": _get_recent_listings,
         "get_user_profile": _get_user_profile,
@@ -1721,9 +1758,22 @@ async def execute_tool(name: str, arguments: dict) -> dict:
         "leave_community": _leave_community,
     }
 
-    handler = handlers.get(name)
+
+async def execute_tool(name: str, arguments: dict) -> dict:
+    """Route a tool call to its handler and return the result.
+
+    Handlers live in the module-level `_HANDLERS` dict (populated lazily on
+    first call). Names go through `_TOOL_NAME_ALIASES` first so legacy /
+    planner-style tool names keep working even after a schema rename.
+    """
+    global _HANDLERS
+    if not _HANDLERS:
+        _HANDLERS = _build_handlers()
+
+    canonical = _TOOL_NAME_ALIASES.get(name, name)
+    handler = _HANDLERS.get(canonical)
     if handler is None:
-        logger.warning("Unknown tool requested: %s", name)
+        logger.warning("Unknown tool requested: %s (canonical=%s)", name, canonical)
         return {"error": f"Unknown tool: {name}"}
 
     try:
@@ -3361,10 +3411,15 @@ async def _get_user_dashboard(user_id: str) -> dict:
         "status": "eq.approved",
         "select": "id",
     }))
+    stats_q = _safe(supabase_get("user_stats", {
+        "user_id": f"eq.{user_id}",
+        "select": "total_donations,total_food_saved,total_impact_score,last_updated",
+        "limit": "1",
+    }))
 
     (profile_rows, listings, claims, reminders,
-     completed_listings, completed_claims) = await asyncio.gather(
-        profile_q, listings_q, claims_q, reminders_q, shared_q, received_q
+     completed_listings, completed_claims, stats_rows) = await asyncio.gather(
+        profile_q, listings_q, claims_q, reminders_q, shared_q, received_q, stats_q
     )
 
     # Build dashboard from parallel results
@@ -3424,11 +3479,21 @@ async def _get_user_dashboard(user_id: str) -> dict:
     ]
 
     # Impact
-    dashboard["impact_summary"] = {
+    impact_summary = {
         "food_shared_count": len(completed_listings),
         "food_received_count": len(completed_claims),
         "total_contributions": len(completed_listings) + len(completed_claims),
     }
+    if stats_rows:
+        s = stats_rows[0]
+        raw_saved = s.get("total_food_saved")
+        impact_summary.update({
+            "total_donations": s.get("total_donations"),
+            "total_food_saved_lb": float(raw_saved) if raw_saved is not None else None,
+            "total_impact_score": s.get("total_impact_score"),
+            "last_updated": s.get("last_updated"),
+        })
+    dashboard["impact_summary"] = impact_summary
 
     return dashboard
 
@@ -4362,8 +4427,11 @@ async def _create_food_listing(
         row["dietary_tags"] = [str(t).strip()[:40] for t in dietary_tags if str(t).strip()][:20]
     if isinstance(allergens, list):
         row["allergens"] = [str(t).strip()[:40] for t in allergens if str(t).strip()][:20]
-    if image_url and isinstance(image_url, str) and image_url.strip().startswith(("http://", "https://")):
-        row["image_url"] = image_url.strip()[:2000]
+    if image_url and isinstance(image_url, str):
+        from backend.ai.conversation_flow import normalize_public_image_url
+        norm = normalize_public_image_url(image_url.strip())
+        if norm:
+            row["image_url"] = norm
 
     # Duplicate-post guard (Supabase path). The legacy SQLite handler had this;
     # without it the model often posts once without a photo, then again with one.
@@ -4502,6 +4570,8 @@ async def _create_food_listing(
         "community_name": resolved_community_name,
         "expiry_date": row.get("expiry_date"),
         "on_map": on_map,
+        "image_url": row.get("image_url"),
+        "has_photo": bool(row.get("image_url")),
         "summary": " ".join(summary_bits),
     }
 
@@ -5950,6 +6020,14 @@ def _normalize_bulk_row(raw: dict, user_id: str) -> Optional[dict]:
     )
     if row_addr:
         row["location"] = str(row_addr)[:400]
+    image_url = raw.get("image_url") or raw.get("photo") or raw.get("photo_url")
+    if image_url and isinstance(image_url, str):
+        from backend.ai.conversation_flow import normalize_public_image_url
+        norm = normalize_public_image_url(image_url.strip())
+        if norm:
+            row["image_url"] = norm
+        elif image_url.strip().startswith(("http://", "https://")):
+            row["image_url"] = image_url.strip()[:2000]
     return row
 
 
@@ -6214,8 +6292,10 @@ async def _attach_photos_to_listing(
     logger.info("attach_photos_to_listing: user=%s listing=%s", user_id, listing_id)
     if not (user_id and listing_id and image_url):
         return {"success": False, "error": "user_id, listing_id, and image_url are all required"}
-    if not (image_url.startswith("http://") or image_url.startswith("https://") or image_url.startswith("/")):
-        return {"success": False, "error": "image_url must start with http://, https://, or /"}
+    from backend.ai.conversation_flow import normalize_public_image_url
+    norm_url = normalize_public_image_url(image_url) or image_url.strip()
+    if not (norm_url.startswith("http://") or norm_url.startswith("https://")):
+        return {"success": False, "error": "image_url must be a public http(s) URL"}
 
     try:
         listings = await supabase_get("food_listings", {
@@ -6233,7 +6313,7 @@ async def _attach_photos_to_listing(
         await supabase_patch(
             "food_listings",
             {"id": f"eq.{listing_id}", "user_id": f"eq.{user_id}"},
-            {"image_url": image_url},
+            {"image_url": norm_url},
         )
     except Exception as exc:
         logger.error("attach_photos_to_listing: patch failed: %s", exc)
@@ -6243,7 +6323,8 @@ async def _attach_photos_to_listing(
     return {
         "success": True,
         "listing_id": str(listing_id),
-        "image_url": image_url,
+        "image_url": norm_url,
+        "has_photo": True,
         "title": title,
         "summary": f"Photo attached to '{title}'.",
     }
@@ -6256,10 +6337,13 @@ async def _attach_photos_to_listing(
 
 _NAVIGATE_ACTION_ALIASES = {
     "open": "navigate",
+    "open_page": "navigate",
     "go": "navigate",
     "goto": "navigate",
     "go_to": "navigate",
     "show": "navigate",
+    # Legacy names used by the retired planner + earlier tool schemas.
+    "navigate_to": "navigate",
 }
 
 # Recipient-facing AI modal surfaces. The frontend opens these as overlays —
@@ -6322,6 +6406,10 @@ async def _navigate_ui(
     mapped_action = _NAVIGATE_ACTION_ALIASES.get(action_lc, action)
     if mapped_action == "navigate" and not path and target:
         path = target if target.startswith("/") else f"/{target.lstrip('/')}"
+    # Accept bare page names ("dashboard") from legacy planner / older prompts
+    # by adding the leading slash so `_ui_action` finds them in the allowlist.
+    if mapped_action == "navigate" and path and not path.startswith("/"):
+        path = f"/{path.lstrip('/')}"
     return await _ui_action(
         action=mapped_action,
         path=path,

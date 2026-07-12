@@ -6,6 +6,11 @@ python-dotenv>=1.0.0
 pydantic>=2.5.0
 python-multipart>=0.0.6
 
+# Database (used by backend.app / backend.db / backend.models — pinned
+# directly instead of relying on the langchain-community transitive dep,
+# so future langchain upgrades cannot silently break production boot).
+sqlalchemy>=2.0,<3.0
+
 # OpenAI SDK
 openai>=1.10.0
 
@@ -21,9 +26,13 @@ langgraph-checkpoint>=2.0.8
 redis>=5.0.0
 hiredis>=2.3.0
 
-# JWT validation
+# JWT validation + password hashing (backend.app)
 pyjwt>=2.8.0
 cryptography>=41.0.0
+passlib[bcrypt]>=1.7.4
+
+# SMS (backend.app Twilio client)
+twilio>=9.0.0
 
 # Vector store (Supabase pgvector)
 pgvector>=0.3.0

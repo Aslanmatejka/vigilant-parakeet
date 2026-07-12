@@ -452,6 +452,50 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "claim_listings",
+            "description": (
+                "Claim TWO OR MORE available listings for the current user in one "
+                "call. Use when the user picked multiple options (#1 and #3, both, "
+                "or '2 oranges and 3 bread'). Each item needs listing_id (UUID or "
+                "display index from the last search) and quantity. Prefer this over "
+                "calling claim_listing repeatedly. For a single listing, use "
+                "claim_listing instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "items": {
+                        "type": "array",
+                        "description": "One object per claim (min 2).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "listing_id": {
+                                    "description": (
+                                        "UUID from search results, OR display index 1-N."
+                                    ),
+                                },
+                                "quantity": {
+                                    "type": "integer",
+                                    "description": "How many units from THIS listing.",
+                                },
+                                "title": {
+                                    "type": "string",
+                                    "description": "Optional food title for summaries.",
+                                },
+                            },
+                            "required": ["listing_id", "quantity"],
+                        },
+                    },
+                },
+                "required": ["user_id", "items"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "confirm_claim",
             "description": (
                 "Finalize a pending claim using the 4-digit code the user "
@@ -585,6 +629,66 @@ TOOL_DEFINITIONS = [
                     "images": {"type": "array", "items": {"type": "string"}, "description": "Photo URLs from chat (image: …)."},
                 },
                 "required": ["user_id", "title", "qty", "expiration_date", "community_name", "community_confirmed"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "post_food_listings",
+            "description": (
+                "ACTION: create TWO OR MORE food listings in one call. Use when the "
+                "donor is sharing multiple distinct foods (e.g. bread AND apples). "
+                "Each item in items[] gets its OWN photo via images[]. Shared "
+                "community_name + community_confirmed apply to the whole batch. "
+                "Prefer this over calling post_food_listing repeatedly. For a "
+                "single item, use post_food_listing instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "community_name": {
+                        "type": "string",
+                        "description": "Community/school for the whole batch — after donor confirms.",
+                    },
+                    "community_id": {"type": "string"},
+                    "community_confirmed": {
+                        "type": "boolean",
+                        "description": "Must be true after donor explicitly confirms the community.",
+                    },
+                    "address": {
+                        "type": "string",
+                        "description": "Shared pickup address for all items (profile address OK).",
+                    },
+                    "items": {
+                        "type": "array",
+                        "description": "One object per listing (min 2).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "qty": {"type": "number"},
+                                "unit": {"type": "string"},
+                                "category": {"type": "string"},
+                                "expiration_date": {
+                                    "type": "string",
+                                    "description": "YYYY-MM-DD best-by / expiry for this item.",
+                                },
+                                "description": {"type": "string"},
+                                "allergens": {"type": "array", "items": {"type": "string"}},
+                                "dietary_tags": {"type": "array", "items": {"type": "string"}},
+                                "images": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Photo URL(s) for THIS item only.",
+                                },
+                            },
+                            "required": ["title", "qty", "expiration_date"],
+                        },
+                    },
+                },
+                "required": ["user_id", "items", "community_name", "community_confirmed"],
             },
         },
     },
@@ -1008,11 +1112,13 @@ async def execute_tool(name: str, arguments: dict) -> dict:
         "optimize_pickup_route": _optimize_pickup_route,
         "run_safe_query": _run_safe_query,
         "claim_listing": _claim_listing,
+        "claim_listings": _claim_listings,
         "cancel_claim": _cancel_claim,
         "confirm_claim": _confirm_claim,
         "update_user_profile": _update_user_profile,
         "post_food_request": _post_food_request,
         "post_food_listing": _post_food_listing,
+        "post_food_listings": _post_food_listings,
         "attach_photos_to_listing": _attach_photos_to_listing,
         "get_user_listings": _get_user_listings,
         "update_food_listing": _update_food_listing,
@@ -1575,93 +1681,9 @@ async def _query_distribution_centers(
 
 
 async def _get_user_dashboard(user_id: str) -> dict:
-    from backend.app import SessionLocal
-    from backend.models import User, FoodResource
-    from backend.ai.models import AIReminder
-
-    uid = _to_int(user_id)
-    if uid is None:
-        return {"error": "Invalid user_id"}
-
-    def _sync() -> dict:
-        db = SessionLocal()
-        try:
-            user = db.query(User).filter(User.id == uid).first()
-            if not user:
-                return {"user_id": user_id, "error": "User not found"}
-
-            active_listings = (
-                db.query(FoodResource)
-                .filter(FoodResource.donor_id == uid, FoodResource.status == "available")
-                .order_by(FoodResource.created_at.desc())
-                .limit(5)
-                .all()
-            )
-            pending_claims = (
-                db.query(FoodResource)
-                .filter(FoodResource.recipient_id == uid)
-                .filter(FoodResource.status.in_(["claimed", "pending", "approved"]))
-                .order_by(FoodResource.created_at.desc())
-                .limit(5)
-                .all()
-            )
-            now = _utcnow()
-            upcoming_reminders = (
-                db.query(AIReminder)
-                .filter(AIReminder.user_id == uid)
-                .filter(AIReminder.sent == False)  # noqa: E712
-                .filter(AIReminder.trigger_time >= now)
-                .order_by(AIReminder.trigger_time.asc())
-                .limit(5)
-                .all()
-            )
-            completed_shared = (
-                db.query(FoodResource)
-                .filter(FoodResource.donor_id == uid, FoodResource.status == "claimed")
-                .count()
-            )
-            completed_received = (
-                db.query(FoodResource)
-                .filter(FoodResource.recipient_id == uid, FoodResource.status == "claimed")
-                .count()
-            )
-
-            return {
-                "user_id": user_id,
-                "profile": {
-                    "name": user.name,
-                    "email": user.email,
-                    "phone": user.phone,
-                    "role": user.role.value if user.role else None,
-                    "is_admin": user.role and user.role.value == "admin",
-                    "trust_score": user.trust_score,
-                    "member_since": user.created_at.isoformat() if user.created_at else None,
-                },
-                "active_listings": [
-                    {"title": l.title, "category": l.category.value if l.category else None,
-                     "quantity": l.qty, "status": l.status}
-                    for l in active_listings
-                ],
-                "pending_claims": [
-                    {"food_title": l.title, "status": l.status,
-                     "pickup_date": l.pickup_window_start.isoformat() if l.pickup_window_start else None}
-                    for l in pending_claims
-                ],
-                "upcoming_reminders": [
-                    {"message": r.message, "trigger_time": r.trigger_time.isoformat(),
-                     "type": r.reminder_type}
-                    for r in upcoming_reminders
-                ],
-                "impact_summary": {
-                    "food_shared_count": completed_shared,
-                    "food_received_count": completed_received,
-                    "total_contributions": completed_shared + completed_received,
-                },
-            }
-        finally:
-            db.close()
-
-    return await _run(_sync)
+    """Rich dashboard via Supabase (auth IDs are UUIDs, not legacy ints)."""
+    from backend.tools import _get_user_dashboard as _impl
+    return await _impl(user_id=str(user_id).strip())
 
 
 async def _check_pickup_schedule(
@@ -2811,6 +2833,116 @@ async def _claim_listing(
     return await _run(_sync)
 
 
+async def _claim_listings(
+    user_id: str,
+    items: list,
+    **_ignored,
+) -> dict:
+    """Claim two or more listings, each with its own quantity."""
+    if not (user_id or "").strip():
+        return {"error": "Invalid user_id", "success": False}
+    if not isinstance(items, list) or len(items) < 2:
+        return {
+            "error": "items must contain at least 2 claims",
+            "success": False,
+            "next_step": "Use claim_listing for a single listing.",
+        }
+
+    claimed: list[dict] = []
+    failed: list[dict] = []
+    for idx, raw in enumerate(items, start=1):
+        if not isinstance(raw, dict):
+            failed.append({"index": idx, "error": "invalid item"})
+            continue
+        lid = raw.get("listing_id")
+        if lid is None or str(lid).strip() == "":
+            failed.append({
+                "index": idx,
+                "title": raw.get("title"),
+                "error": "missing listing_id",
+            })
+            continue
+        qty = raw.get("quantity")
+        if qty is None:
+            qty = raw.get("qty")
+        try:
+            qty_int = int(float(qty)) if qty is not None else None
+        except (TypeError, ValueError):
+            qty_int = None
+        if qty_int is None or qty_int <= 0:
+            failed.append({
+                "index": idx,
+                "listing_id": lid,
+                "title": raw.get("title"),
+                "error": "missing or invalid quantity",
+            })
+            continue
+
+        result = await _claim_listing(
+            user_id=str(user_id),
+            listing_id=lid,
+            quantity=qty_int,
+        )
+        if isinstance(result, dict) and result.get("success"):
+            claimed.append({
+                "listing_id": result.get("listing_id") or lid,
+                "title": result.get("title") or raw.get("title"),
+                "quantity": result.get("quantity") or qty_int,
+                "claim_id": result.get("claim_id"),
+                "already_claimed": bool(result.get("already_claimed")),
+            })
+            try:
+                from backend.ai.conversation_flow import (
+                    update_last_search_listing_after_claim,
+                )
+                remaining = result.get("remaining_on_listing")
+                update_last_search_listing_after_claim(
+                    str(user_id),
+                    str(result.get("listing_id") or lid),
+                    remaining,
+                    fully_claimed=bool(result.get("already_claimed"))
+                    or (
+                        remaining is not None
+                        and float(remaining) <= 0
+                    ),
+                )
+            except Exception:
+                pass
+        else:
+            err = (result or {}).get("error") or (result or {}).get("message") or "failed"
+            failed.append({
+                "index": idx,
+                "listing_id": lid,
+                "title": raw.get("title"),
+                "error": err,
+            })
+
+    ok = len(claimed) > 0 and len(failed) == 0
+    summary_bits = [f"Claimed {len(claimed)}/{len(items)} listings"]
+    if claimed:
+        names = ", ".join(
+            f"{c.get('quantity')}× {c.get('title') or c.get('listing_id')}"
+            for c in claimed
+        )
+        summary_bits.append(f"— {names}.")
+    if failed:
+        summary_bits.append(
+            f"{len(failed)} failed: "
+            + "; ".join(
+                f"{f.get('title') or f.get('listing_id') or f.get('index')}: {f.get('error')}"
+                for f in failed
+            )
+        )
+    return {
+        "success": ok,
+        "claimed": claimed,
+        "failed": failed,
+        "count_claimed": len(claimed),
+        "count_failed": len(failed),
+        "summary": " ".join(summary_bits),
+    }
+
+
 async def _confirm_claim(user_id: str, listing_id: int = None, code: str = "") -> dict:
     """Finalize a pending claim (SMS code for legacy SQLite, pickup confirm for Supabase)."""
     if _is_supabase_user_id(user_id):
@@ -3503,8 +3635,15 @@ async def _post_food_listing_via_supabase(
 
     image_url = None
     if isinstance(images, list):
+        from backend.ai.conversation_flow import normalize_public_image_url
         for url in images:
-            if url and str(url).strip().startswith(("http://", "https://", "/")):
+            if not url:
+                continue
+            norm = normalize_public_image_url(str(url).strip())
+            if norm:
+                image_url = norm
+                break
+            if str(url).strip().startswith(("http://", "https://", "/")):
                 image_url = str(url).strip()
                 break
 
@@ -3546,6 +3685,9 @@ async def _post_food_listing_via_supabase(
             out["duplicate_of_recent"] = True
         if result.get("photo_merged"):
             out["photo_merged"] = True
+        if result.get("image_url"):
+            out["image_url"] = result["image_url"]
+            out["has_photo"] = True
         return out
 
     err = result.get("message") or result.get("error") or "Could not post the listing."
@@ -3571,6 +3713,101 @@ async def _post_food_listing_via_supabase(
             "Ask them to pick a community by name, confirm it, then retry the post."
         )
     return out
+
+
+async def _post_food_listings(
+    user_id: str,
+    items: list,
+    community_name: Optional[str] = None,
+    community_id: Optional[str] = None,
+    community_confirmed: bool = False,
+    address: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    """Create two or more listings, each with its own optional photo."""
+    if not (user_id or "").strip():
+        return {"error": "Invalid user_id", "success": False}
+    if not isinstance(items, list) or len(items) < 2:
+        return {
+            "error": "items must contain at least 2 listings",
+            "success": False,
+            "next_step": "Use post_food_listing for a single item.",
+        }
+    if not community_confirmed:
+        return {
+            "error": "community_not_confirmed",
+            "success": False,
+            "next_step": (
+                "Confirm community/school, then retry with community_name and "
+                "community_confirmed=true."
+            ),
+        }
+
+    posted: list[dict] = []
+    failed: list[dict] = []
+    for idx, raw in enumerate(items, start=1):
+        if not isinstance(raw, dict):
+            failed.append({"index": idx, "error": "invalid item"})
+            continue
+        title = str(raw.get("title") or "").strip()
+        if not title:
+            failed.append({"index": idx, "error": "missing title"})
+            continue
+        try:
+            qty = float(raw.get("qty") if raw.get("qty") is not None else raw.get("quantity") or 1)
+        except (TypeError, ValueError):
+            qty = 1.0
+        exp = raw.get("expiration_date") or raw.get("expiry_date")
+        images = raw.get("images") if isinstance(raw.get("images"), list) else []
+        result = await _post_food_listing(
+            user_id=str(user_id),
+            title=title,
+            category=raw.get("category"),
+            qty=qty,
+            description=raw.get("description"),
+            unit=raw.get("unit") or "items",
+            address=address or raw.get("address"),
+            expiration_date=exp,
+            allergens=raw.get("allergens"),
+            dietary_tags=raw.get("dietary_tags"),
+            images=images,
+            community_name=community_name,
+            community_id=community_id,
+            community_confirmed=True,
+        )
+        if isinstance(result, dict) and result.get("success") and result.get("listing_id"):
+            posted.append({
+                "listing_id": result.get("listing_id"),
+                "title": title,
+                "image_url": result.get("image_url"),
+                "has_photo": bool(result.get("image_url") or result.get("has_photo")),
+                "duplicate_of_recent": bool(result.get("duplicate_of_recent")),
+            })
+        else:
+            err = (result or {}).get("error") or (result or {}).get("message") or "failed"
+            failed.append({"index": idx, "title": title, "error": err})
+
+    ok = len(posted) > 0 and len(failed) == 0
+    summary_bits = [f"Posted {len(posted)}/{len(items)} listings"]
+    if posted:
+        names = ", ".join(
+            f"{p.get('title')}{' (photo)' if p.get('has_photo') else ''}"
+            for p in posted
+        )
+        summary_bits.append(f"— {names} are live.")
+    if failed:
+        summary_bits.append(
+            f"{len(failed)} failed: "
+            + "; ".join(f"{f.get('title') or f.get('index')}: {f.get('error')}" for f in failed)
+        )
+    return {
+        "success": ok,
+        "posted": posted,
+        "failed": failed,
+        "count_posted": len(posted),
+        "count_failed": len(failed),
+        "summary": " ".join(summary_bits),
+    }
 
 
 async def _post_food_listing(

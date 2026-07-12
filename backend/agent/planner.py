@@ -49,7 +49,7 @@ async def create_plan(
     elif intent == "donate":
         return _plan_donate(entities, user_context, message)
     elif intent == "navigate":
-        return _plan_navigate(entities)
+        return _plan_navigate(entities, message)
     else:
         # Simple intents don't need planning
         return []
@@ -163,21 +163,44 @@ def _plan_donate(entities: Dict[str, Any], user_context: Dict[str, Any], message
     return steps
 
 
-def _plan_navigate(entities: Dict[str, Any]) -> List[PlanStep]:
-    """Plan for navigation."""
-    steps = []
-    
-    target_page = entities.get("page", "dashboard")
-    
+def _plan_navigate(entities: Dict[str, Any], message: str = "") -> List[PlanStep]:
+    """Plan for navigation.
+
+    Produces a `navigate_ui` step with args the handler will actually
+    accept: `action=navigate` and a leading-slash `path`. If the message
+    clearly asks to open the map, we emit `action=open_map` instead
+    (which is also in the `_UI_ALLOWED_ACTIONS` set).
+    """
+    steps: List[PlanStep] = []
+
+    lowered = (message or "").lower()
+    if "map" in lowered and ("open" in lowered or "show" in lowered):
+        steps.append(PlanStep(
+            step_number=1,
+            action="Open the map",
+            tool_name="navigate_ui",
+            tool_args={"action": "open_map"},
+            status="pending",
+            result=None,
+        ))
+        return steps
+
+    target_page = str(entities.get("page") or "dashboard").strip()
+    # Accept both bare page names ("dashboard") and leading-slash paths
+    # ("/dashboard"). `_navigate_ui` also normalises this defensively,
+    # but keeping the planner output canonical avoids one round-trip.
+    if not target_page.startswith("/"):
+        target_page = f"/{target_page.lstrip('/')}"
+
     steps.append(PlanStep(
         step_number=1,
         action=f"Navigate to {target_page} page",
         tool_name="navigate_ui",
-        tool_args={"action": "open_page", "path": target_page},
+        tool_args={"action": "navigate", "path": target_page},
         status="pending",
         result=None,
     ))
-    
+
     return steps
 
 
@@ -203,23 +226,26 @@ async def execute_plan_step(
     logger.info(f"Executing step {step.get('step_number')}: {tool_name}")
     
     try:
-        # Import tool functions from backend.agent.tools
+        # Prefer the LangChain wrapper when one is registered (adds tool
+        # schema validation for structured calls). Fall back to the flat
+        # `backend.tools.execute_tool` dispatcher — which honours the full
+        # handler map + alias table — so any tool NOT wrapped for LangChain
+        # still runs cleanly from the planner path.
         from backend.agent.tools import TOOL_DISPATCH
-        
-        # Get the tool function
+
         tool_fn = TOOL_DISPATCH.get(tool_name)
-        if not tool_fn:
-            raise ValueError(f"Unknown tool: {tool_name}")
-        
-        # Execute the tool (LangChain tools need .ainvoke)
-        if hasattr(tool_fn, 'ainvoke'):
-            result = await tool_fn.ainvoke(tool_args)
+        if tool_fn is not None:
+            if hasattr(tool_fn, "ainvoke"):
+                result = await tool_fn.ainvoke(tool_args)
+            else:
+                result = await tool_fn(**tool_args)
         else:
-            result = await tool_fn(**tool_args)
-        
+            from backend.tools import execute_tool as _dispatch
+            result = await _dispatch(tool_name, tool_args)
+
         logger.info(f"Step {step.get('step_number')} completed successfully")
         return result
-        
+
     except Exception as e:
         logger.error(f"Step {step.get('step_number')} failed: {e}")
         return {
