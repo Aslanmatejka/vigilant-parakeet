@@ -251,7 +251,7 @@ function draftToPatch(draft) {
     weight_unit: String(draft.weight_unit || '').trim() || null,
   };
 
-  if (String(draft.listing_type || listing?.listing_type || '').toLowerCase() === 'request') {
+  if (String(patch.listing_type || draft.listing_type || '').toLowerCase() === 'request') {
     patch.image_url = null;
     delete patch.image;
   } else if (draft.image instanceof File) {

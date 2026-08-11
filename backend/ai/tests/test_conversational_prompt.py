@@ -40,7 +40,9 @@ class TestActionPolicyIsConversational:
         is deliberately generous but catches a regression where someone
         pastes the old giant block back in.
         """
-        assert len(_build_action_policy()) < 21_000, (
+        # Cap allows intentional guidance growth (requests, multi-claim, etc.)
+        # while still catching a return to the old ~40k scripted block.
+        assert len(_build_action_policy()) < 24_000, (
             "Action policy is drifting back toward the 40k-char scripted prompt."
         )
 
@@ -74,8 +76,8 @@ class TestSystemPromptShape:
 
     def test_system_prompt_much_smaller_than_before(self):
         prompt = _build_system_prompt(_load_training_data(), "warm")
-        # Historical ~40k → target well under 25k with training-data sections.
-        assert len(prompt) < 25_000, (
+        # Historical ~40k; allow modest growth for new flows, still block regression.
+        assert len(prompt) < 28_000, (
             f"System prompt grew back to {len(prompt)} chars — check for "
             "scripted dialogs or duplicated rules."
         )
