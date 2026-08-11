@@ -10,10 +10,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from backend.models import DistributionCenter
 
-# Use the same DATABASE_URL as app.py
-DATABASE_URL = os.getenv("DATABASE_URL", "mysql+pymysql://admin:foodmaps2024@database-1.c9um4qfazhpa.us-east-2.rds.amazonaws.com:3306/foodmaps")
+# Use DATABASE_URL from the environment — never commit credentials.
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise SystemExit("Set DATABASE_URL in the environment before running this script.")
 
-print(f"Using database: {DATABASE_URL[:30]}...")
+print(f"Using database: {DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else '(configured)'}...")
 engine = create_engine(DATABASE_URL)
 Session = sessionmaker(bind=engine)
 session = Session()

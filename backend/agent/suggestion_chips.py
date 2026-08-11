@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Union
 
-from backend.ai_engine import compute_next_step, generate_quick_replies
+from backend.ai_engine import compute_next_step
 
 Chip = Union[str, Dict[str, Any]]
 
@@ -93,11 +93,35 @@ def _normalize_proactive(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
     return {"label": label[:60], "message": message}
 
 
+def _listings_from_tool_entry(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract listing rows from either nested ``result`` or flat action shape.
+
+    The live Nouri engine enriches actions with top-level ``listings`` via
+    ``enrich_tool_action``; the older agent path nests them under ``result``.
+    """
+    raw = entry.get("result")
+    result = raw if isinstance(raw, dict) else {}
+    listings = (
+        result.get("results")
+        or result.get("listings")
+        or entry.get("listings")
+        or entry.get("results")
+        or []
+    )
+    if not isinstance(listings, list):
+        return []
+    return [row for row in listings if isinstance(row, dict)]
+
+
 def _chips_from_search_results(
     tool_results: Optional[List[Dict[str, Any]]],
     language: str,
 ) -> List[Chip]:
-    """Numbered claim chips after a search tool returns listings."""
+    """Numbered claim chips after a search tool returns listings.
+
+    When 2+ results are shown, lead with multi-claim chips so recipients
+    discover they can grab several items in one go.
+    """
     es = language == "es"
     for entry in reversed(tool_results or []):
         if not isinstance(entry, dict) or not entry.get("ok"):
@@ -105,16 +129,52 @@ def _chips_from_search_results(
         tool = str(entry.get("tool") or "").lower()
         if tool not in _SEARCH_TOOLS and "search" not in tool:
             continue
-        raw = entry.get("result")
-        result = raw if isinstance(raw, dict) else {}
-        listings = result.get("results") or result.get("listings") or []
-        if not isinstance(listings, list) or not listings:
+        # Don't offer Claim #N on donor listing lookups.
+        if tool in {"get_user_listings", "get_my_listings", "list_my_listings"}:
+            continue
+        listings = _listings_from_tool_entry(entry)
+        if not listings:
             continue
 
         chips: List[Chip] = []
-        for i, listing in enumerate(listings[:3], start=1):
-            if not isinstance(listing, dict):
-                continue
+        n = len(listings)
+
+        # Emphasize multi-claim first when there are 2+ options.
+        if n >= 2:
+            if es:
+                chips.append({
+                    "label": "Reclamar #1 y #2",
+                    "message": "Quiero reclamar el #1 y el #2",
+                })
+                if n >= 3:
+                    chips.append({
+                        "label": "Reclamar los 3 primeros",
+                        "message": "Quiero reclamar el #1, #2 y #3",
+                    })
+                else:
+                    chips.append({
+                        "label": "Reclamar ambos",
+                        "message": "Quiero reclamar ambos",
+                    })
+            else:
+                chips.append({
+                    "label": "Claim #1 & #2",
+                    "message": "I'd like to claim #1 and #2",
+                })
+                if n >= 3:
+                    chips.append({
+                        "label": "Claim first 3",
+                        "message": "I'd like to claim #1, #2, and #3",
+                    })
+                else:
+                    chips.append({
+                        "label": "Claim both",
+                        "message": "I'd like to claim both",
+                    })
+
+        # Individual chips (cap so multi + singles fit under _MAX_CHIPS).
+        single_cap = 2 if n >= 2 else 3
+        for i, listing in enumerate(listings[:single_cap], start=1):
             title = str(listing.get("title") or listing.get("name") or f"#{i}")[:28]
             if es:
                 chips.append({
@@ -126,9 +186,69 @@ def _chips_from_search_results(
                     "label": f"Claim #{i}: {title}",
                     "message": f"Claim #{i}",
                 })
-        if len(listings) > 3:
+        if n > 3:
             chips.append("Show more options" if not es else "Ver más opciones")
         return chips
+    return []
+
+
+_CLAIM_CONFIRM_RESPONSE_CUES = (
+    "ready to claim",
+    "claim these",
+    "claim both",
+    "claim all of these",
+    "shall i claim",
+    "want me to claim",
+    "listo para reclamar",
+    "reclamar estos",
+    "reclamo estos",
+)
+
+_CLAIM_QTY_MULTI_CUES = (
+    "how many of the",
+    "how many for each",
+    "quantity for each",
+    "cuántos de",
+    "cuantos de",
+    "para cada",
+)
+
+
+def _chips_for_multi_claim_flow(
+    response_text: str,
+    language: str,
+) -> List[Chip]:
+    """Chips while Nouri is collecting multi-claim qty or confirmation."""
+    text = (response_text or "").lower()
+    if not text:
+        return []
+    es = language == "es"
+
+    if any(c in text for c in _CLAIM_CONFIRM_RESPONSE_CUES):
+        if es:
+            return [
+                {"label": "Sí, reclamar todos", "message": "Sí, reclama todos"},
+                {"label": "Cambiar cantidades", "message": "Quiero cambiar las cantidades"},
+            ]
+        return [
+            {"label": "Yes, claim these", "message": "Yes, claim these"},
+            {"label": "Change amounts", "message": "I want to change the amounts"},
+        ]
+
+    if any(c in text for c in _CLAIM_QTY_MULTI_CUES) or (
+        "how many" in text and any(k in text for k in ("and", "both", "each", "first", "second"))
+    ):
+        if es:
+            return [
+                {"label": "2 de cada uno", "message": "2 de cada uno"},
+                {"label": "Todo de cada uno", "message": "Todo de cada uno"},
+                {"label": "1 de cada uno", "message": "1 de cada uno"},
+            ]
+        return [
+            {"label": "2 each", "message": "2 each"},
+            {"label": "All of each", "message": "all of them"},
+            {"label": "1 each", "message": "1 each"},
+        ]
     return []
 
 
@@ -532,11 +652,25 @@ def build_turn_suggestions(
         seen.add(label)
         out.append(chip)
 
+    # Lazy import: live quick-reply heuristics live in backend.ai.ai_engine.
+    # Importing at module load would create a cycle with ConversationEngine.
+    from backend.ai.ai_engine import generate_quick_replies
+
     next_step = compute_next_step(tool_results, language)
     if next_step:
-        add({**next_step, "kind": "next_step"})
+        # Normalize to FE shape: SuggestedActionButton uses message/prompt.
+        add({
+            "label": next_step.get("label") or "",
+            "message": next_step.get("prompt") or next_step.get("message") or next_step.get("label") or "",
+            "kind": "next_step",
+        })
 
-    for chip in _chips_from_search_results(tool_results, language):
+    search_chips = _chips_from_search_results(tool_results, language)
+    for chip in search_chips:
+        add(chip)
+
+    multi_claim_chips = _chips_for_multi_claim_flow(response_text or "", language)
+    for chip in multi_claim_chips:
         add(chip)
 
     list_pick_chips = _chips_for_community_list_pick(
@@ -559,8 +693,16 @@ def build_turn_suggestions(
         if community_chips:
             for chip in community_chips:
                 add(chip)
-        else:
-            for chip in generate_quick_replies(response_text or "", language):
+        elif not search_chips:
+            # Skip bare 1/2/3 quick-replies when Claim #N chips already match
+            # the search results — avoids duplicate / less specific chips.
+            for chip in generate_quick_replies(
+                response_text or "",
+                language,
+                user_message=last_user_message or "",
+                communities=(user_context or {}).get("active_communities") or None,
+                suggested_community=(user_context or {}).get("suggested_community"),
+            ):
                 add(chip)
 
     for item in pending_suggestions or []:

@@ -135,7 +135,24 @@ class AIChatService {
   async sendVoice(audioBlob, { userId, includeAudio = true, silent = false, tone = null } = {}) {
     try {
       const formData = new FormData()
-      formData.append('audio', audioBlob, 'audio.webm')
+      // Match filename extension to the recorded blob type. Always sending
+      // "audio.webm" breaks Whisper when Safari/Firefox produce mp4/ogg.
+      const mime = (audioBlob.type || 'audio/webm').split(';')[0].trim() || 'audio/webm'
+      const extByMime = {
+        'audio/webm': 'webm',
+        'video/webm': 'webm',
+        'audio/mp4': 'mp4',
+        'audio/m4a': 'm4a',
+        'audio/x-m4a': 'm4a',
+        'audio/mpeg': 'mp3',
+        'audio/mp3': 'mp3',
+        'audio/ogg': 'ogg',
+        'audio/wav': 'wav',
+        'audio/x-wav': 'wav',
+        'audio/aac': 'aac',
+      }
+      const ext = extByMime[mime] || 'webm'
+      formData.append('audio', audioBlob, `audio.${ext}`)
       formData.append('user_id', userId)
       formData.append('include_audio', includeAudio.toString())
       formData.append('silent', silent ? 'true' : 'false')
@@ -165,6 +182,38 @@ class AIChatService {
           const e = new Error(typed.error.message)
           e.aiError = typed.error
           e.requestId = typed.requestId
+          throw e
+        }
+        // Plain FastAPI {"detail": "..."} — map common voice failures so the
+        // UI doesn't dump the generic "try typing instead" for soft cases.
+        let detailText = ''
+        try {
+          const payload = await response.clone().json()
+          if (typeof payload?.detail === 'string') detailText = payload.detail
+          else if (typeof payload?.message === 'string') detailText = payload.message
+        } catch { /* ignore */ }
+        const lower = detailText.toLowerCase()
+        if (
+          response.status === 400
+          && (lower.includes('understand') || lower.includes('empty audio') || lower.includes('unsupported audio'))
+        ) {
+          const e = new Error(detailText || 'Could not understand the audio')
+          e.aiError = {
+            code: 'invalid_input',
+            message: detailText || 'Could not understand the audio',
+            retryable: false,
+            status: 400,
+          }
+          throw e
+        }
+        if (response.status === 401 || response.status === 403) {
+          const e = new Error(detailText || 'Authentication required')
+          e.aiError = {
+            code: 'auth',
+            message: detailText || 'Authentication required',
+            retryable: false,
+            status: response.status,
+          }
           throw e
         }
         const errorText = await response.text().catch(() => '')
@@ -634,9 +683,19 @@ class AIChatService {
     // Backend rejects nil-UUID with 401 — fail fast instead of burning the
     // per-IP rate-limit bucket on a guaranteed-failed upload.
     if (!userId) throw new Error('userId is required for vision listing')
+
+    // Phone photos often exceed the API body cap; shrink before upload.
+    let imageFile = file
+    try {
+      const { compressImage } = await import('../compressImage.js')
+      imageFile = await compressImage(file)
+    } catch (err) {
+      console.warn('Image compress skipped:', err?.message || err)
+    }
+
     const formData = new FormData()
     formData.append('user_id', userId)
-    formData.append('image', file, file.name || 'photo.jpg')
+    formData.append('image', imageFile, imageFile.name || 'photo.jpg')
 
     try {
       const response = await resilientFetch(
@@ -735,6 +794,8 @@ class AIChatService {
           created: data.created || 0,
           failed: data.failed || 0,
           ids: Array.isArray(data.ids) ? data.ids : [],
+          statuses: Array.isArray(data.statuses) ? data.statuses : [],
+          awaitingApproval: !!data.awaiting_approval,
           errors: Array.isArray(data.errors) ? data.errors : [],
         }
       }

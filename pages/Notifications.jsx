@@ -77,6 +77,10 @@ function Notifications() {
                 return 'fa-hand-holding-heart';
             case 'trade_request':
                 return 'fa-exchange-alt';
+            case 'food_request_listed':
+            case 'food_request_approved':
+            case 'community_food_request':
+                return 'fa-clipboard-list';
             case 'system':
                 return 'fa-bell';
             default:
@@ -90,6 +94,11 @@ function Notifications() {
                 return 'Food Claimed Notification';
             case 'trade_request':
                 return 'Trade Request Notification';
+            case 'food_request_listed':
+            case 'food_request_approved':
+                return 'Food Request Notification';
+            case 'community_food_request':
+                return 'Community Request Notification';
             case 'system':
                 return 'System Notification';
             default:

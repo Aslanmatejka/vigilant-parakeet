@@ -7,6 +7,11 @@ import twilioService from '../utils/twilioService';
 import { useAuthContext } from '../utils/AuthContext';
 import { assignFoodImage } from '../utils/foodImages.js';
 import { toast } from 'react-toastify';
+import dataService from '../utils/dataService';
+import {
+    browseCommunityIdsForUser,
+    listingVisibleToCommunityScope,
+} from '../utils/communityScope';
 
 // Calculate next Friday from today (food returns to inventory at 11:59PM Friday)
 const getNextFriday = () => {
@@ -39,13 +44,13 @@ const formatPickupDate = (isoDate) => {
 export default function ClaimFoodForm() {
     const navigate = useNavigate();
     const location = useLocation();
-    const { user } = useAuthContext();
+    const { user, isAdmin } = useAuthContext();
     const food = location.state?.food;
     const pickupDeadline = getNextFriday();
     const [community, setCommunity] = React.useState(null);
     const [loading, setLoading] = React.useState(true);
     const [claiming, setClaiming] = React.useState(false);
-    const MAX_CLAIM = 2;
+    const MAX_CLAIM = 50; // soft abuse ceiling; real limit is available qty
     const availableQty = food ? Math.max(1, parseInt(food.quantity) || 1) : 1;
     const maxAllowed = Math.min(MAX_CLAIM, availableQty);
     const [claimQty, setClaimQty] = React.useState(1);
@@ -97,8 +102,55 @@ export default function ClaimFoodForm() {
             return;
         }
 
+        const ownerId = food?.user_id || food?.users?.id || food?.donor?.id;
+        if (ownerId && String(ownerId) === String(user.id)) {
+            toast.error("You can't claim your own listing. Manage it from My Listings.");
+            return;
+        }
+
         try {
             setClaiming(true);
+
+            // Re-validate listing against live DB — claim page may hold a stale snapshot.
+            const { data: liveListing, error: liveErr } = await supabase
+                .from('food_listings')
+                .select('id, status, quantity, title, community_id, listing_type')
+                .eq('id', food.id)
+                .maybeSingle();
+            if (liveErr) throw liveErr;
+            if (!liveListing) {
+                toast.error('This listing is no longer available.');
+                navigate('/find');
+                return;
+            }
+            if (String(liveListing.listing_type || '').toLowerCase() === 'request') {
+                toast.error("That's a food request, not a donation — it can't be claimed.");
+                navigate('/find');
+                return;
+            }
+            const liveStatus = String(liveListing.status || '').toLowerCase();
+            if (liveStatus !== 'approved' && liveStatus !== 'active') {
+                toast.error('This listing is no longer available to claim.');
+                navigate('/find');
+                return;
+            }
+            const allowedIds = browseCommunityIdsForUser(user, { isAdmin });
+            if (!listingVisibleToCommunityScope(liveListing, allowedIds)) {
+                toast.error('This listing belongs to a different community/school.');
+                navigate('/find');
+                return;
+            }
+            const liveQty = Math.max(0, parseInt(liveListing.quantity, 10) || 0);
+            if (liveQty < 1) {
+                toast.error('This listing has no portions left.');
+                navigate('/find');
+                return;
+            }
+            if (claimQty > liveQty) {
+                toast.error(`Only ${liveQty} portion${liveQty === 1 ? '' : 's'} left. Adjust your quantity and try again.`);
+                setClaiming(false);
+                return;
+            }
 
             // Check if user has a pending receipt for the SAME pickup location.
             // We intentionally do NOT restrict by claimed_at date so that claims
@@ -152,24 +204,19 @@ export default function ClaimFoodForm() {
                 receiptId = existingReceipts[0].id;
             }
 
-            // Create claim in database (auto-approved) and link to receipt
-            const { data: claimData, error: claimError } = await supabase
-                .from('food_claims')
-                .insert({
-                    food_id: food.id,
-                    claimer_id: user.id,
-                    receipt_id: receiptId,
-                    requester_name: user.name || user.email || 'Anonymous',
-                    requester_email: user.email || null,
-                    requester_phone: user.phone || null,
-                    status: 'approved',
-                    pickup_date: pickupDeadline,
-                    quantity: claimQty,
-                })
-                .select()
-                .single();
-
-            if (claimError) throw claimError;
+            // Create claim as pending when claim approval is required.
+            const claimStatus = await dataService.resolveCreateClaimStatus();
+            const claimData = await dataService.createFoodClaim({
+                food_id: food.id,
+                claimer_id: user.id,
+                receipt_id: receiptId,
+                requester_name: user.name || user.email || 'Anonymous',
+                requester_email: user.email || null,
+                requester_phone: user.phone || null,
+                status: claimStatus,
+                pickup_date: pickupDeadline,
+                quantity: claimQty,
+            });
 
             // Update food listing: decrement quantity, or mark claimed if fully
             // taken. CRITICAL: use compare-and-swap (CAS) — only PATCH if the
@@ -188,13 +235,13 @@ export default function ClaimFoodForm() {
                     if (session?.access_token) accessToken = session.access_token;
                 } catch (_) { /* use anon key */ }
 
-                const remainingQty = availableQty - claimQty;
+                const remainingQty = liveQty - claimQty;
                 const patchBody = remainingQty <= 0
-                    ? { status: 'claimed' }
+                    ? { status: 'claimed', quantity: 0 }
                     : { quantity: remainingQty };
 
                 const patchResp = await fetch(
-                    `${supabaseUrl}/rest/v1/food_listings?id=eq.${food.id}&quantity=eq.${availableQty}`,
+                    `${supabaseUrl}/rest/v1/food_listings?id=eq.${food.id}&quantity=eq.${liveQty}`,
                     {
                         method: 'PATCH',
                         headers: {
@@ -270,7 +317,12 @@ export default function ClaimFoodForm() {
                 console.error('SMS notification error:', smsError);
             }
 
-            toast.success('Added to your receipt — view it in Receipts & Activity!', { autoClose: 5000, position: 'top-center' });
+            toast.success(
+                claimStatus === 'pending'
+                    ? 'Claim submitted — wait for admin approval, then pick up from Receipts & Activity.'
+                    : 'Added to your receipt — view it in Receipts & Activity!',
+                { autoClose: 5000, position: 'top-center' }
+            );
             navigate('/find');
         } catch (error) {
             console.error('Error claiming food:', error);

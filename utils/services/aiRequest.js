@@ -75,13 +75,19 @@ export async function parseAiErrorResponse(response) {
     console.warn('[aiRequest] response body was not JSON:', err?.message)
     return null
   }
-  if (!payload || typeof payload !== 'object' || !payload.error_code) return null
-  const requestId = response.headers.get('X-Request-ID') || payload.request_id || null
+  if (!payload || typeof payload !== 'object') return null
+  // AIError handler flattens detail to top-level. Older / plain FastAPI
+  // responses nest it under `detail` — accept both shapes.
+  const body = (payload.error_code && payload)
+    || (payload.detail && typeof payload.detail === 'object' && payload.detail.error_code && payload.detail)
+    || null
+  if (!body) return null
+  const requestId = response.headers.get('X-Request-ID') || payload.request_id || body.request_id || null
   return {
-    code: payload.error_code,
-    message: payload.message || payload.detail || 'AI service error',
-    retryable: !!payload.retryable,
-    retryAfter: payload.retry_after_seconds ?? null,
+    code: body.error_code,
+    message: body.message || payload.message || 'AI service error',
+    retryable: !!body.retryable,
+    retryAfter: body.retry_after_seconds ?? payload.retry_after_seconds ?? null,
     requestId,
     status: response.status,
   }

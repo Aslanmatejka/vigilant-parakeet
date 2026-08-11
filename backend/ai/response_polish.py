@@ -10,7 +10,7 @@ _UUID_RE = re.compile(
 )
 _NUMBERED_LINE_RE = re.compile(r"^\s*\d+[\.)]\s", re.M)
 _INTERNAL_TOOL_RE = re.compile(
-    r"\b(search_food_near_user|claim_listing|post_food_listing|confirm_claim|"
+    r"\b(search_food_near_user|claim_listing|claim_listings|post_food_listing|confirm_claim|"
     r"delete_listing|get_user_listings|deactivate_listing)\b",
     re.I,
 )
@@ -22,7 +22,8 @@ _LISTING_ID_RE = re.compile(
 _LISTING_UI_KEYS = (
     "id", "title", "quantity", "unit", "distance_km", "distance_miles",
     "display_index", "address", "full_address", "image_url", "category",
-    "expiry_date", "pickup_by", "community_name", "dietary_tags", "is_own_listing",
+    "expiry_date", "pickup_by", "community_id", "community_name",
+    "dietary_tags", "is_own_listing", "status", "latitude", "longitude",
 )
 
 _CLAIM_UI_KEYS = (
@@ -30,6 +31,10 @@ _CLAIM_UI_KEYS = (
     "image_url", "category", "community_name", "already_claimed", "message",
     "error", "next_step", "claim_id", "listing_id",
 )
+
+# How many search / browse cards to forward to the chat UI.
+# Keep in sync with AIChatPanel search card rendering.
+_SEARCH_CARD_LIMIT = 25
 
 
 def tool_result_ok(result: dict) -> bool:
@@ -55,16 +60,32 @@ def enrich_tool_action(fn_name: str, result: dict, entry: dict) -> dict:
     if not isinstance(result, dict):
         return entry
 
-    if fn_name == "search_food_near_user":
+    if fn_name in {
+        "search_food_near_user",
+        "get_recent_listings",
+        "get_community_listings",
+    }:
         listings = result.get("listings") or []
         if listings:
-            entry["listings"] = [_trim_listing(row) for row in listings[:5]]
+            entry["listings"] = [
+                _trim_listing(row) for row in listings[:_SEARCH_CARD_LIMIT]
+            ]
         entry["total"] = result.get("total", len(listings))
         if "user_location_available" in result:
             entry["user_location_available"] = result["user_location_available"]
+        if result.get("summary"):
+            entry["summary"] = result["summary"]
 
     elif fn_name in {"claim_listing", "claim_food"}:
         for key in _CLAIM_UI_KEYS:
+            if key in result and result[key] is not None:
+                entry[key] = result[key]
+
+    elif fn_name == "claim_listings":
+        for key in (
+            "success", "partial", "summary", "message", "error",
+            "claimed", "failed", "count_claimed", "count_failed",
+        ):
             if key in result and result[key] is not None:
                 entry[key] = result[key]
 
@@ -73,7 +94,7 @@ def enrich_tool_action(fn_name: str, result: dict, entry: dict) -> dict:
             "success", "title", "quantity", "unit", "category", "address",
             "community_name", "summary", "message", "listing_id", "image_url",
             "coords_lat", "coords_lng", "on_map", "error", "next_step",
-            "suggested_community_name",
+            "suggested_community_name", "status", "awaiting_approval",
         ):
             if key in result and result[key] is not None:
                 entry[key] = result[key]

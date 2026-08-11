@@ -185,11 +185,20 @@ _CORRECTION_PATTERNS = (
     r"\bi\s+said\s+",
     r"\bnot\s+that\s+one\b",
     r"\bthe\s+other\s+",
+    # Missed / incomplete action — user coaching the agent
+    r"\byou\s+didn'?t\b",
+    r"\byou\s+forgot\b",
+    r"\byou\s+missed\b",
+    r"\bwhy\s+didn'?t\s+you\b",
+    r"\bi(?:'?m|\s+am)\s+not\s+seeing\b",
+    r"\bi\s+don'?t\s+see\b",
     # Spanish
     r"\bno,?\s+(?:quise|me refería|es)\b",
     r"\bespera,?\s+",
     r"\ben realidad,?\s+",
     r"\bno era eso\b",
+    r"\bno\s+(?:hiciste|mostraste|veo)\b",
+    r"\bolvidaste\b",
 )
 _CORRECTION_RE = re.compile("|".join(_CORRECTION_PATTERNS), re.IGNORECASE)
 
@@ -297,7 +306,7 @@ def detect_tool_loop(user_id: str, min_calls: int = 3) -> Optional[str]:
     """Detect the same tool called 3+ times in the last 4 turns.
 
     Returns the tool name if a loop is detected. This is the signal to
-    change strategy — widen the search radius, ask a clarifier, or
+    change strategy — broaden the search query, ask a clarifier, or
     escalate to a different tool.
     """
     state = get_reflection_state(user_id)
@@ -420,7 +429,7 @@ def _en_lines(sig: ReflectionSignals) -> list[str]:
     if sig.tool_loop:
         lines.append(
             f"You've called '{sig.tool_loop}' 3+ times recently without "
-            "progress. Change strategy: widen the search radius, ask a "
+            "progress. Change strategy: broaden the search query, ask a "
             "clarifier, or escalate to a different tool. Do NOT call it "
             "a fourth time with the same args."
         )

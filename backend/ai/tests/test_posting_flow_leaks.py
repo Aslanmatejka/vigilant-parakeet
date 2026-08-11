@@ -107,6 +107,19 @@ class TestPhotoDoesNotLeakAcrossPosts:
         # must report has_photo=False so the block-reason keeps asking.
         assert state["has_photo"] is False
 
+    def test_community_confirm_does_not_leak_across_posts(self):
+        history = [
+            {"role": "user", "message": "share bananas"},
+            {"role": "assistant", "message": "List under Alameda Unified?"},
+            {"role": "user", "message": "yes"},
+            {"role": "assistant", "message": "Posted! Your bananas are live."},
+            {"role": "user", "message": "i want to share carrot and tomatoes"},
+            {"role": "assistant", "message": "How much do you have?"},
+        ]
+        state = posting_flow_state("1 basket each", history)
+        assert state["community_confirmed"] is False
+        assert state["has_photo"] is False
+
     def test_fresh_photo_within_current_flow_is_kept(self):
         # If the donor uploads a photo AFTER the boundary, it must be
         # picked up normally.

@@ -341,10 +341,10 @@ export default function PickupRouteOptimizer({ className = '', explicitStops = n
                         No active pickups to route.
                         <button
                             type="button"
-                            onClick={() => navigate('/find')}
+                            onClick={() => navigate('/listings')}
                             className="ml-1 text-emerald-600 hover:underline"
                         >
-                            Browse listings
+                            View my listings
                         </button>
                     </div>
                 )}

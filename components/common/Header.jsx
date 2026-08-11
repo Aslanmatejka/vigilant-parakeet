@@ -5,6 +5,8 @@ import { useAuthContext } from "../../utils/AuthContext";
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useTutorial } from '../../utils/TutorialContext';
 import { useCommunityRole } from '../../utils/hooks/useCommunityRole.js';
+import { browseCommunityIdsForUser } from '../../utils/communityScope';
+import dataService from '../../utils/dataService';
 import PropTypes from 'prop-types';
 
 const SUPPORT_DROPDOWN = {
@@ -28,12 +30,38 @@ const AUTH_TAIL = [
     { label: 'Contact', path: '/contact' }
 ];
 
+function formatNavCount(n) {
+    const count = Number(n) || 0;
+    if (count <= 0) return null;
+    if (count > 99) return '99+';
+    return String(count);
+}
+
+function NavCountBadge({ count, label }) {
+    const text = formatNavCount(count);
+    if (!text) return null;
+    return (
+        <span
+            className="ml-1.5 inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-[#2CABE3] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white"
+            aria-label={`${text} ${label}`}
+        >
+            {text}
+        </span>
+    );
+}
+
+NavCountBadge.propTypes = {
+    count: PropTypes.number,
+    label: PropTypes.string.isRequired,
+};
+
 function Header({ menuItems: menuItemsProp }) {
     const { user: authUser, isAuthenticated, signOut } = useAuthContext();
     const communityRole = useCommunityRole();
     const isDonor = communityRole === 'donor';
     const isRecipient = communityRole === 'recipient';
     const isOrganizer = communityRole === 'organizer';
+    const isAdmin = authUser?.is_admin === true || authUser?.role === 'admin';
     const showReceiptsAndActivity = isAuthenticated && !isDonor && !isOrganizer;
 
     const menuItems = React.useMemo(() => {
@@ -44,6 +72,7 @@ function Header({ menuItems: menuItemsProp }) {
         if (isDonor) {
             return [
                 { label: 'Share Food', path: '/share' },
+                { label: 'Community Requests', path: '/community-requests' },
                 { label: 'Partners', path: '/sponsors' },
                 { label: 'Impact', path: '/impact-story' },
                 SUPPORT_DROPDOWN,
@@ -53,6 +82,7 @@ function Header({ menuItems: menuItemsProp }) {
         if (isRecipient) {
             return [
                 { label: 'Find Food', path: '/find' },
+                { label: 'Request Food', path: '/request' },
                 { label: 'Recipes', path: '/recipes' },
                 { label: 'Receipts & Activity', path: '/receipts' },
                 { label: 'Partners', path: '/sponsors' },
@@ -65,6 +95,8 @@ function Header({ menuItems: menuItemsProp }) {
             return [
                 { label: 'Share Food', path: '/share' },
                 { label: 'Find Food', path: '/find' },
+                { label: 'Request Food', path: '/request' },
+                { label: 'Community Requests', path: '/community-requests' },
                 { label: 'Recipes', path: '/recipes' },
                 { label: 'Partners', path: '/sponsors' },
                 { label: 'Impact', path: '/impact-story' },
@@ -77,6 +109,8 @@ function Header({ menuItems: menuItemsProp }) {
 
     const hasReceiptsInMainNav = menuItems.some((item) => item.label === 'Receipts & Activity');
     const showReceiptsNavLink = showReceiptsAndActivity && !hasReceiptsInMainNav;
+    const showFindFoodBadge = menuItems.some((item) => item.path === '/find');
+    const showRequestsBadge = menuItems.some((item) => item.path === '/community-requests');
 
     const navigate = useNavigate();
     const location = useLocation();
@@ -86,8 +120,77 @@ function Header({ menuItems: menuItemsProp }) {
     const [isMenuOpen, setIsMenuOpen] = React.useState(false);
     const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
     const [supportDropdownOpen, setSupportDropdownOpen] = React.useState(false);
+    const [findFoodCount, setFindFoodCount] = React.useState(0);
+    const [requestCount, setRequestCount] = React.useState(0);
     const dropdownRef = React.useRef(null);
     const supportDropdownRef = React.useRef(null);
+
+    React.useEffect(() => {
+        let cancelled = false;
+
+        const loadCounts = async () => {
+            if (!showFindFoodBadge && !showRequestsBadge) {
+                if (!cancelled) {
+                    setFindFoodCount(0);
+                    setRequestCount(0);
+                }
+                return;
+            }
+
+            const allowedCommunityIds = browseCommunityIdsForUser(authUser, { isAdmin });
+            const tasks = [];
+
+            if (showFindFoodBadge) {
+                tasks.push(
+                    dataService.countLiveListings({
+                        listing_type: 'donation',
+                        community_ids: allowedCommunityIds,
+                        exclude_user_id: isAuthenticated && authUser?.id ? authUser.id : null,
+                    }).then((n) => {
+                        if (!cancelled) setFindFoodCount(n);
+                    })
+                );
+            } else if (!cancelled) {
+                setFindFoodCount(0);
+            }
+
+            if (showRequestsBadge) {
+                tasks.push(
+                    dataService.countLiveListings({
+                        listing_type: 'request',
+                        community_ids: allowedCommunityIds,
+                    }).then((n) => {
+                        if (!cancelled) setRequestCount(n);
+                    })
+                );
+            } else if (!cancelled) {
+                setRequestCount(0);
+            }
+
+            await Promise.all(tasks);
+        };
+
+        loadCounts();
+
+        const onFoodChanged = () => { loadCounts(); };
+        window.addEventListener('foodShared', onFoodChanged);
+        window.addEventListener('focus', onFoodChanged);
+        const interval = window.setInterval(loadCounts, 60000);
+
+        return () => {
+            cancelled = true;
+            window.removeEventListener('foodShared', onFoodChanged);
+            window.removeEventListener('focus', onFoodChanged);
+            window.clearInterval(interval);
+        };
+    }, [
+        showFindFoodBadge,
+        showRequestsBadge,
+        isAuthenticated,
+        isAdmin,
+        authUser?.id,
+        authUser?.community_id,
+    ]);
 
     React.useEffect(() => {
         const handleClickOutside = (event) => {
@@ -132,6 +235,26 @@ function Header({ menuItems: menuItemsProp }) {
 
             navigate('/', { replace: true });
         }
+    };
+
+    const renderNavLabel = (item) => {
+        if (item.path === '/find') {
+            return (
+                <span className="inline-flex items-center">
+                    {item.label}
+                    <NavCountBadge count={findFoodCount} label="food listings available" />
+                </span>
+            );
+        }
+        if (item.path === '/community-requests') {
+            return (
+                <span className="inline-flex items-center">
+                    {item.label}
+                    <NavCountBadge count={requestCount} label="open food requests" />
+                </span>
+            );
+        }
+        return item.label;
     };
 
     return (
@@ -213,7 +336,7 @@ function Header({ menuItems: menuItemsProp }) {
                                     href={item.path}
                                     className="nav-link hover:text-[#2CABE3] transition-colors duration-200"
                                 >
-                                    {item.label}
+                                    {renderNavLabel(item)}
                                 </a>
                             )
                         ))}
@@ -402,7 +525,7 @@ function Header({ menuItems: menuItemsProp }) {
                                                     className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
                                                     onClick={() => setIsMenuOpen(false)}
                                                 >
-                                                    {item.label}
+                                                    {renderNavLabel(item)}
                                                 </a>
                                             </li>
                                         )

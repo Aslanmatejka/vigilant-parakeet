@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { useAIChat, AI_TONE_OPTIONS, AI_TONE_LABELS } from '../../utils/hooks/useAIChat.js'
 import { useAuthContext } from '../../utils/AuthContext.jsx'
 import { useCommunityRole } from '../../utils/hooks/useCommunityRole.js'
@@ -8,12 +7,16 @@ import { useUIControl } from '../../utils/UIControlContext.jsx'
 import VoiceOutput from './VoiceOutput.jsx'
 import { textToSpeech, playAudioBlob } from '../../utils/openaiVoice.js'
 import aiChatService from '../../utils/services/aiChatService.js'
-import { parseListingsCsv, downloadCsvTemplate } from '../../utils/csvListings.js'
+import { parseListingsCsv, downloadCsvTemplate, sanitizeListingExpiry, visionDraftToRow, matchCommunityByName } from '../../utils/csvListings.js'
 import { assignImagestoRows, assignFoodImage } from '../../utils/foodImages.js'
 import dataService from '../../utils/dataService.js'
 import supabase from '../../utils/supabaseClient.js'
 import { resolveInputChips } from '../../utils/suggestionChips.js'
 import { toast } from 'react-toastify'
+import {
+  browseCommunityIdsForUser,
+  listingVisibleToCommunityScope,
+} from '../../utils/communityScope.js'
 
 // ─── Welcome hero categories (richer onboarding surface) ───────────
 // Replaces the flat 6-pill row when the chat is empty. Each category
@@ -36,10 +39,10 @@ const WELCOME_CATEGORIES_EN = [
     icon: 'fa-magnifying-glass-location',
     accent: 'emerald',
     title: 'Find food',
-    blurb: 'Discover nearby donations',
+    blurb: 'I’ll ask how you want help',
     prompts: [
+      'I want to find food',
       'Find free food near me',
-      'Show food expiring soon',
     ],
   },
   {
@@ -47,10 +50,21 @@ const WELCOME_CATEGORIES_EN = [
     icon: 'fa-hand-holding-heart',
     accent: 'fuchsia',
     title: 'Share food',
-    blurb: 'Post in 2 taps',
+    blurb: 'I’ll ask how you want help',
     prompts: [
+      'I want to share food',
       'Share extra food from my address',
-      'Post 5 apples — use my profile address',
+    ],
+  },
+  {
+    key: 'request',
+    icon: 'fa-clipboard-list',
+    accent: 'sky',
+    title: 'Request food',
+    blurb: 'I’ll ask how you want help',
+    prompts: [
+      'I want to request food',
+      'Request food that isn’t listed yet',
     ],
   },
   {
@@ -83,10 +97,10 @@ const WELCOME_CATEGORIES_ES = [
     icon: 'fa-magnifying-glass-location',
     accent: 'emerald',
     title: 'Buscar comida',
-    blurb: 'Donaciones cerca de ti',
+    blurb: 'Te pregunto cómo ayudar',
     prompts: [
+      'Quiero buscar comida',
       'Buscar comida gratis cerca',
-      'Comida que vence pronto',
     ],
   },
   {
@@ -94,10 +108,21 @@ const WELCOME_CATEGORIES_ES = [
     icon: 'fa-hand-holding-heart',
     accent: 'fuchsia',
     title: 'Compartir comida',
-    blurb: 'Publicar en 2 pasos',
+    blurb: 'Te pregunto cómo ayudar',
     prompts: [
+      'Quiero compartir comida',
       'Compartir comida extra desde mi dirección',
-      'Publicar 5 manzanas — usa mi dirección guardada',
+    ],
+  },
+  {
+    key: 'request',
+    icon: 'fa-clipboard-list',
+    accent: 'sky',
+    title: 'Solicitar comida',
+    blurb: 'Te pregunto cómo ayudar',
+    prompts: [
+      'Quiero solicitar comida',
+      'Solicitar comida que aún no está listada',
     ],
   },
   {
@@ -117,16 +142,16 @@ const WELCOME_CATEGORIES_ES = [
 // while still being visually distinct from each other.
 const ACCENT_MAP = {
   emerald: {
-    iconBg: 'bg-emerald-500/15 text-emerald-300 ring-emerald-400/30',
+    iconBg: 'bg-emerald-500/15 text-emerald-700 ring-emerald-400/30',
     border: 'border-emerald-500/20 hover:border-emerald-400/40',
     glow: 'hover:shadow-emerald-500/10',
-    promptHover: 'hover:bg-emerald-500/10 hover:text-emerald-200',
+    promptHover: 'hover:bg-emerald-500/10 hover:text-emerald-800',
   },
   fuchsia: {
-    iconBg: 'bg-fuchsia-500/15 text-fuchsia-300 ring-fuchsia-400/30',
+    iconBg: 'bg-fuchsia-500/15 text-fuchsia-700 ring-fuchsia-400/30',
     border: 'border-fuchsia-500/20 hover:border-fuchsia-400/40',
     glow: 'hover:shadow-fuchsia-500/10',
-    promptHover: 'hover:bg-fuchsia-500/10 hover:text-fuchsia-200',
+    promptHover: 'hover:bg-fuchsia-500/10 hover:text-fuchsia-800',
   },
   cyan: {
     iconBg: 'bg-[#2CABE3]/15 text-[#2CABE3] ring-[#2CABE3]/30',
@@ -153,7 +178,7 @@ function WelcomeHero({ language, userName, onPromptClick, communityRole }) {
   const all = language === 'es' ? WELCOME_CATEGORIES_ES : WELCOME_CATEGORIES_EN
   const role = String(communityRole || '').toLowerCase()
   const categories = all.filter((cat) => {
-    if (role === 'donor') return cat.key !== 'find'
+    if (role === 'donor') return cat.key !== 'find' && cat.key !== 'request'
     if (role === 'recipient') return cat.key !== 'share'
     return true
   })
@@ -161,8 +186,8 @@ function WelcomeHero({ language, userName, onPromptClick, communityRole }) {
     ? (userName ? `¡Hola, ${userName}!` : '¡Hola!')
     : (userName ? `Hi, ${userName}!` : 'Hi there!')
   const subtitle = language === 'es'
-    ? 'Elige una opción abajo o escríbeme — te guío paso a paso.'
-    : 'Pick an option below or type anything — I’ll guide you step by step.'
+    ? 'Elige una sugerencia abajo, una tarjeta, o escribe — te pregunto si lo hago yo o te guío paso a paso.'
+    : 'Tap a suggestion below, a card, or type — I’ll ask whether to do it for you or guide you step by step.'
 
   return (
     <div className="px-4 pt-3 pb-2">
@@ -336,83 +361,118 @@ const TOOL_CARD_TOKENS = {
   search: {
     title: { en: 'Nearby food', es: 'Comida cerca' },
     icon: 'fa-utensils',
-    ring: 'ring-emerald-400/40',
-    bg: 'bg-gradient-to-br from-emerald-900/40 to-emerald-950/30 border-emerald-500/25',
-    accent: 'text-emerald-300',
-    sub: 'text-emerald-400/75',
-    tag: 'bg-emerald-500/15 text-emerald-200 border-emerald-500/20',
+    ring: 'ring-emerald-400/50',
+    bg: 'bg-emerald-950 border-emerald-500/40',
+    accent: 'text-white',
+    sub: 'text-emerald-50',
+    tag: 'bg-emerald-500/30 text-white border-emerald-400/50',
+  },
+  mylistings: {
+    title: { en: 'Your listings', es: 'Tus publicaciones' },
+    icon: 'fa-clipboard-list',
+    ring: 'ring-emerald-400/50',
+    bg: 'bg-emerald-950 border-emerald-500/40',
+    accent: 'text-white',
+    sub: 'text-emerald-50',
+    tag: 'bg-emerald-500/30 text-white border-emerald-400/50',
+  },
+  myclaims: {
+    title: { en: 'Your claims', es: 'Tus reclamos' },
+    icon: 'fa-hand-holding-heart',
+    ring: 'ring-emerald-400/50',
+    bg: 'bg-emerald-950 border-emerald-500/40',
+    accent: 'text-white',
+    sub: 'text-emerald-50',
+    tag: 'bg-emerald-500/30 text-white border-emerald-400/50',
+  },
+  community: {
+    title: { en: 'Community listings', es: 'Publicaciones de la comunidad' },
+    icon: 'fa-school',
+    ring: 'ring-emerald-400/50',
+    bg: 'bg-emerald-950 border-emerald-500/40',
+    accent: 'text-white',
+    sub: 'text-emerald-50',
+    tag: 'bg-emerald-500/30 text-white border-emerald-400/50',
   },
   claim: {
     title: { en: 'Claim confirmed', es: 'Reclamo confirmado' },
     icon: 'fa-circle-check',
-    ring: 'ring-emerald-400/40',
-    bg: 'bg-gradient-to-br from-emerald-900/40 to-emerald-950/30 border-emerald-500/25',
-    accent: 'text-emerald-300',
-    sub: 'text-emerald-400/75',
+    ring: 'ring-emerald-400/50',
+    bg: 'bg-emerald-950 border-emerald-500/40',
+    accent: 'text-white',
+    sub: 'text-emerald-50',
+  },
+  error: {
+    title: { en: 'Something went wrong', es: 'Algo salió mal' },
+    icon: 'fa-triangle-exclamation',
+    ring: 'ring-rose-400/50',
+    bg: 'bg-rose-950 border-rose-500/40',
+    accent: 'text-white',
+    sub: 'text-rose-50',
   },
   cancel: {
     title: { en: 'Claim released', es: 'Reclamo liberado' },
     icon: 'fa-arrow-rotate-left',
-    ring: 'ring-amber-400/40',
-    bg: 'bg-gradient-to-br from-amber-900/40 to-amber-950/30 border-amber-500/25',
-    accent: 'text-amber-300',
-    sub: 'text-amber-400/75',
+    ring: 'ring-amber-400/50',
+    bg: 'bg-amber-950 border-amber-500/40',
+    accent: 'text-white',
+    sub: 'text-amber-50',
   },
   updated: {
     title: { en: 'Listing updated', es: 'Listado actualizado' },
     icon: 'fa-pen-to-square',
-    ring: 'ring-violet-400/40',
-    bg: 'bg-gradient-to-br from-violet-900/40 to-violet-950/30 border-violet-500/25',
-    accent: 'text-violet-200',
-    sub: 'text-violet-300/75',
+    ring: 'ring-violet-400/50',
+    bg: 'bg-violet-950 border-violet-500/40',
+    accent: 'text-white',
+    sub: 'text-violet-50',
   },
   deleted: {
     title: { en: 'Listing deleted', es: 'Listado eliminado' },
     icon: 'fa-trash-can',
-    ring: 'ring-slate-400/40',
-    bg: 'bg-gradient-to-br from-slate-800/50 to-slate-900/40 border-slate-500/25',
-    accent: 'text-slate-200',
-    sub: 'text-slate-300/75',
+    ring: 'ring-slate-400/50',
+    bg: 'bg-slate-900 border-slate-500/40',
+    accent: 'text-white',
+    sub: 'text-slate-100',
   },
   post: {
     title: { en: 'Listing posted', es: 'Donación publicada' },
     icon: 'fa-bullhorn',
-    ring: 'ring-fuchsia-400/40',
-    bg: 'bg-gradient-to-br from-fuchsia-900/40 to-fuchsia-950/30 border-fuchsia-500/25',
-    accent: 'text-fuchsia-200',
-    sub: 'text-fuchsia-300/75',
+    ring: 'ring-fuchsia-400/50',
+    bg: 'bg-fuchsia-950 border-fuchsia-500/40',
+    accent: 'text-white',
+    sub: 'text-fuchsia-50',
   },
   pickup: {
     title: { en: 'Pickup confirmed', es: 'Recogida confirmada' },
     icon: 'fa-check-double',
-    ring: 'ring-sky-400/40',
-    bg: 'bg-gradient-to-br from-sky-900/40 to-sky-950/30 border-sky-500/25',
-    accent: 'text-sky-200',
-    sub: 'text-sky-300/75',
+    ring: 'ring-sky-400/50',
+    bg: 'bg-sky-950 border-sky-500/40',
+    accent: 'text-white',
+    sub: 'text-sky-50',
   },
   reminder: {
     title: { en: 'Reminder set', es: 'Recordatorio creado' },
     icon: 'fa-bell',
-    ring: 'ring-blue-400/40',
-    bg: 'bg-gradient-to-br from-blue-900/40 to-blue-950/30 border-blue-500/25',
-    accent: 'text-blue-200',
-    sub: 'text-blue-300/75',
+    ring: 'ring-blue-400/50',
+    bg: 'bg-blue-950 border-blue-500/40',
+    accent: 'text-white',
+    sub: 'text-blue-50',
   },
   generic: {
     title: { en: 'Done', es: 'Hecho' },
     icon: 'fa-circle-check',
-    ring: 'ring-slate-400/30',
-    bg: 'bg-gradient-to-br from-slate-800/40 to-slate-900/40 border-slate-500/20',
-    accent: 'text-slate-200',
-    sub: 'text-slate-300/75',
+    ring: 'ring-slate-400/40',
+    bg: 'bg-slate-900 border-slate-500/40',
+    accent: 'text-white',
+    sub: 'text-slate-100',
   },
   claimfail: {
     title: { en: 'Could not claim', es: 'No se pudo reclamar' },
     icon: 'fa-circle-xmark',
-    ring: 'ring-red-400/40',
-    bg: 'bg-gradient-to-br from-red-950/50 to-red-900/30 border-red-500/25',
-    accent: 'text-red-200',
-    sub: 'text-red-300/80',
+    ring: 'ring-red-400/50',
+    bg: 'bg-red-950 border-red-500/40',
+    accent: 'text-white',
+    sub: 'text-red-50',
   },
 }
 
@@ -422,35 +482,285 @@ function ToolCardShell({ kind, language = 'en', titleOverride, children }) {
   return (
     <div
       role="status"
-      className={`mt-2 ${t.bg} border rounded-xl p-3 text-sm backdrop-blur-sm shadow-sm`}
+      className={`mt-2 ${t.bg} border rounded-xl p-3 text-sm shadow-md`}
     >
       <div className="flex items-center gap-2 mb-1.5">
-        <span className={`inline-flex w-6 h-6 rounded-full bg-slate-900/40 ring-1 ${t.ring} items-center justify-center`}>
+        <span className={`inline-flex w-6 h-6 rounded-full bg-black/30 ring-1 ${t.ring} items-center justify-center`}>
           <i className={`fas ${t.icon} text-[11px] ${t.accent}`} aria-hidden="true" />
         </span>
         <div className={`font-semibold text-xs uppercase tracking-wide ${t.accent}`}>{title}</div>
       </div>
-      <div className="text-xs leading-relaxed">{children}</div>
+      <div className={`text-xs leading-relaxed ${t.sub}`}>{children}</div>
     </div>
   )
 }
 
-function ToolResultCard({ toolResult, language = 'en' }) {
+
+function SearchResultsClaimList({
+  searchItems,
+  tool,
+  language,
+  t,
+  cardKind,
+  onSuggestionClick,
+}) {
+  const isEs = language === 'es'
+  const claimable = tool === 'search_food_near_user'
+    || tool === 'search_food_nearby'
+    || tool === 'get_recent_listings'
+    || tool === 'get_community_listings'
+  const [selected, setSelected] = useState(() => new Set())
+
+  const toggle = (displayNum) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(displayNum)) next.delete(displayNum)
+      else next.add(displayNum)
+      return next
+    })
+  }
+
+  const selectAllVisible = () => {
+    const nums = searchItems.slice(0, 25).map((item, idx) => item.display_index ?? (idx + 1))
+    setSelected(new Set(nums))
+  }
+
+  const clearSelection = () => setSelected(new Set())
+
+  const claimSelected = () => {
+    if (!onSuggestionClick || selected.size === 0) return
+    const nums = Array.from(selected).sort((a, b) => a - b)
+    if (nums.length === 1) {
+      onSuggestionClick(
+        isEs ? `Quiero reclamar el #${nums[0]}` : `I'd like to claim #${nums[0]}`,
+      )
+      return
+    }
+    const list = nums.map((n) => `#${n}`).join(', ')
+    onSuggestionClick(
+      isEs
+        ? `Quiero reclamar ${list} — varios a la vez`
+        : `I'd like to claim ${list} — multiple items at once`,
+    )
+  }
+
+  const fmtDate = (iso) => {
+    if (!iso) return null
+    try {
+      const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number)
+      return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    } catch {
+      return iso
+    }
+  }
+
+  const titleOverride = claimable && searchItems.length >= 2
+    ? (isEs
+      ? `Comida cerca · ${searchItems.length} · puedes reclamar varios`
+      : `Food nearby · ${searchItems.length} · claim several at once`)
+    : `${t.title[language] || t.title.en} · ${searchItems.length}`
+
+  return (
+    <ToolCardShell kind={cardKind} language={language} titleOverride={titleOverride}>
+      {claimable && searchItems.length >= 2 && onSuggestionClick && (
+        <div className="mb-2 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-2 space-y-1.5">
+          <p className={`text-[11px] ${t.accent} font-medium`}>
+            {isEs
+              ? 'Marca varios y reclámalos juntos — o usa Reclamar en uno solo.'
+              : 'Select several items and claim them together — or Claim one at a time.'}
+          </p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={selectAllVisible}
+              className="text-[11px] px-2 py-0.5 rounded-md border border-emerald-400/40 text-emerald-50 hover:bg-emerald-500/30"
+            >
+              {isEs ? 'Seleccionar visibles' : 'Select visible'}
+            </button>
+            {selected.size > 0 && (
+              <button
+                type="button"
+                onClick={clearSelection}
+                className="text-[11px] px-2 py-0.5 rounded-md border border-slate-500 text-slate-100 hover:bg-slate-800/60"
+              >
+                {isEs ? 'Limpiar' : 'Clear'}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={claimSelected}
+              disabled={selected.size === 0}
+              className="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-500/40 border border-emerald-300/60 text-white text-[11px] font-semibold hover:bg-emerald-500/55 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <i className="fas fa-hand-holding-heart text-[10px]" aria-hidden="true" />
+              {selected.size === 0
+                ? (isEs ? 'Reclamar seleccionados' : 'Claim selected')
+                : (isEs
+                  ? `Reclamar ${selected.size} seleccionados`
+                  : `Claim ${selected.size} selected`)}
+            </button>
+          </div>
+        </div>
+      )}
+      <ul className="space-y-1.5">
+        {searchItems.slice(0, 25).map((item, idx) => {
+          const displayNum = item.display_index ?? (idx + 1)
+          const miles = item.distance_miles != null
+            ? Number(item.distance_miles)
+            : (item.distance_km != null ? Number(item.distance_km) * 0.621371 : null)
+          const distance = miles != null && Number.isFinite(miles)
+            ? `${miles.toFixed(miles < 10 ? 1 : 0)} mi`
+            : null
+          const qtyLabel = item.quantity != null
+            ? `${item.quantity}${item.unit ? ` ${item.unit}` : ''} available`
+            : null
+          const expiryRaw = item.expiry_date || item.pickup_by || null
+          const expiryLabel = fmtDate(expiryRaw)
+          const meta = [distance, qtyLabel, item.category, expiryLabel ? `Exp ${expiryLabel}` : null].filter(Boolean).join(' · ')
+          const address = item.address || item.full_address || item.pickup_location || null
+          const photoUrl = typeof item.image_url === 'string' && /^https?:\/\//i.test(item.image_url)
+            ? item.image_url
+            : null
+          const isSelected = selected.has(displayNum)
+
+          return (
+            <li
+              key={item.id || displayNum}
+              className={`rounded-lg px-2.5 py-2 border ${
+                isSelected
+                  ? 'bg-emerald-500/15 border-emerald-400/40'
+                  : 'bg-slate-900/40 border-emerald-500/15'
+              }`}
+            >
+              <div className="flex gap-2.5">
+                {claimable && onSuggestionClick && (
+                  <label className="flex-shrink-0 mt-0.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggle(displayNum)}
+                      className="rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500/40"
+                      aria-label={isEs ? `Seleccionar #${displayNum}` : `Select #${displayNum}`}
+                    />
+                  </label>
+                )}
+                <span
+                  className={`flex-shrink-0 w-7 h-7 rounded-full bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-[12px] font-bold ${t.accent}`}
+                  aria-hidden="true"
+                >
+                  {displayNum}
+                </span>
+                {photoUrl && (
+                  <img
+                    src={photoUrl}
+                    alt={item.title || ''}
+                    loading="lazy"
+                    className="h-14 w-14 flex-shrink-0 rounded-md object-cover border border-emerald-500/15 bg-slate-800"
+                    onError={(e) => { e.currentTarget.style.display = 'none' }}
+                  />
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className={`font-medium ${t.accent}`}>{item.title}</div>
+                  {meta && <div className={`${t.sub} text-[11px] mt-0.5`}>{meta}</div>}
+                  {address && (
+                    <div className={`${t.sub} text-[11px] mt-0.5 flex items-start gap-1`}>
+                      <i className="fas fa-map-marker-alt mt-[2px] text-[10px] opacity-70" aria-hidden="true" />
+                      <span className="break-words">{address}</span>
+                    </div>
+                  )}
+                  {item.community_name && (
+                    <div className={`${t.sub} text-[11px] mt-0.5 flex items-center gap-1`}>
+                      <i className="fas fa-people-group text-[10px] opacity-70" aria-hidden="true" />
+                      <span>{item.community_name}</span>
+                    </div>
+                  )}
+                  {item.dietary_tags?.length > 0 && (
+                    <div className="flex gap-1 mt-1.5 flex-wrap">
+                      {item.dietary_tags.map((tag) => (
+                        <span key={tag} className={`${t.tag} text-[10px] px-1.5 py-0.5 rounded border`}>{tag}</span>
+                      ))}
+                    </div>
+                  )}
+                  {onSuggestionClick && item.id && claimable && (
+                    <button
+                      type="button"
+                      onClick={() => onSuggestionClick(
+                        isEs
+                          ? `Quiero reclamar el #${displayNum}`
+                          : `I'd like to claim #${displayNum}`,
+                      )}
+                      className="mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-400/30 text-emerald-50 text-[11px] font-semibold hover:bg-emerald-500/40 transition-colors"
+                    >
+                      <i className="fas fa-hand-holding-heart text-[10px]" aria-hidden="true" />
+                      {isEs ? 'Reclamar solo este' : 'Claim this one'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </li>
+          )
+        })}
+        {searchItems.length > 25 && (
+          <li className={`text-[11px] ${t.sub} text-center pt-0.5`}>
+            {isEs ? `+${searchItems.length - 25} más` : `+${searchItems.length - 25} more`}
+          </li>
+        )}
+      </ul>
+    </ToolCardShell>
+  )
+}
+
+function ToolResultCard({ toolResult, language = 'en', onSuggestionClick, allowedCommunityIds = null }) {
   if (!toolResult) return null
 
   const { tool } = toolResult
   const result = toolResult.result ?? toolResult
   const ok = (result?.success === true || toolResult.ok === true) && !result?.error
 
-  const searchItems = result.listings ?? result.results ?? []
+  const rawSearchItems = result.listings ?? result.results ?? []
+  const searchBrowseTools = [
+    'search_food_near_user',
+    'search_food_nearby',
+    'get_recent_listings',
+    'get_community_listings',
+  ]
+  const searchItems = searchBrowseTools.includes(tool)
+    ? rawSearchItems.filter((item) => {
+        // If community_id was stripped by an older polish path, trust the
+        // backend (already community-scoped). Only hide when we know the id
+        // and it is outside the viewer's own community.
+        if (item?.community_id == null || item?.community_id === '') return true
+        return listingVisibleToCommunityScope(item, allowedCommunityIds)
+      })
+    : rawSearchItems
   if ((tool === 'search_food_near_user' || tool === 'search_food_nearby' || tool === 'get_recent_listings' || tool === 'get_my_claims' || tool === 'get_community_listings' || tool === 'get_user_listings') && searchItems.length > 0) {
-    const t = TOOL_CARD_TOKENS.search
+    const cardKind = tool === 'get_user_listings'
+      ? 'mylistings'
+      : tool === 'get_my_claims'
+        ? 'myclaims'
+        : tool === 'get_community_listings'
+          ? 'community'
+          : 'search'
+    const t = TOOL_CARD_TOKENS[cardKind] || TOOL_CARD_TOKENS.search
+
+    // Claimable browse results: multi-select + claim several at once.
+    if (['search_food_near_user', 'search_food_nearby', 'get_recent_listings', 'get_community_listings'].includes(tool)) {
+      return (
+        <SearchResultsClaimList
+          searchItems={searchItems}
+          tool={tool}
+          language={language}
+          t={t}
+          cardKind={cardKind}
+          onSuggestionClick={onSuggestionClick}
+        />
+      )
+    }
 
     /** Format an ISO date string (YYYY-MM-DD) as a short human-readable label. */
     const fmtDate = (iso) => {
       if (!iso) return null
       try {
-        // Parse as local date (slice to YYYY-MM-DD avoids UTC-shift on date-only strings)
         const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number)
         return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
       } catch {
@@ -459,33 +769,23 @@ function ToolResultCard({ toolResult, language = 'en' }) {
     }
 
     return (
-      <ToolCardShell kind="search" language={language} titleOverride={`${t.title[language] || t.title.en} · ${searchItems.length}`}>
+      <ToolCardShell kind={cardKind} language={language} titleOverride={`${t.title[language] || t.title.en} · ${searchItems.length}`}>
         <ul className="space-y-1.5">
-          {searchItems.slice(0, 5).map((item, idx) => {
+          {searchItems.slice(0, 25).map((item, idx) => {
             const displayNum = item.display_index ?? (idx + 1)
-            // Backend returns km; the rest of the app uses miles, so
-            // convert for display. Fall back to distance_miles if the
-            // tool already returned that, or hide if neither is set.
             const miles = item.distance_miles != null
               ? Number(item.distance_miles)
               : (item.distance_km != null ? Number(item.distance_km) * 0.621371 : null)
             const distance = miles != null && Number.isFinite(miles)
               ? `${miles.toFixed(miles < 10 ? 1 : 0)} mi`
               : null
-
             const qtyLabel = item.quantity != null
               ? `${item.quantity}${item.unit ? ` ${item.unit}` : ''} available`
               : null
-
-            // Expiry: prefer expiry_date, fall back to pickup_by
             const expiryRaw = item.expiry_date || item.pickup_by || null
             const expiryLabel = fmtDate(expiryRaw)
-
             const meta = [distance, qtyLabel, item.category, expiryLabel ? `Exp ${expiryLabel}` : null].filter(Boolean).join(' · ')
             const address = item.address || item.full_address || item.pickup_location || null
-            // Only show the real listing photo. We deliberately do NOT fall
-            // back to a category placeholder so the chat thumbnail always
-            // matches the photo the donor actually attached to the listing.
             const photoUrl = typeof item.image_url === 'string' && /^https?:\/\//i.test(item.image_url)
               ? item.image_url
               : null
@@ -516,30 +816,54 @@ function ToolResultCard({ toolResult, language = 'en' }) {
                         <span className="break-words">{address}</span>
                       </div>
                     )}
-                    {item.community_name && (
-                      <div className={`${t.sub} text-[11px] mt-0.5 flex items-center gap-1`}>
-                        <i className="fas fa-people-group text-[10px] opacity-70" aria-hidden="true" />
-                        <span>{item.community_name}</span>
-                      </div>
-                    )}
-                    {item.dietary_tags?.length > 0 && (
-                      <div className="flex gap-1 mt-1.5 flex-wrap">
-                        {item.dietary_tags.map(tag => (
-                          <span key={tag} className={`${t.tag} text-[10px] px-1.5 py-0.5 rounded border`}>{tag}</span>
-                        ))}
-                      </div>
-                    )}
                   </div>
                 </div>
               </li>
             )
           })}
-          {searchItems.length > 5 && (
-            <li className={`text-[11px] ${t.sub} text-center pt-0.5`}>
-              {language === 'es' ? `+${searchItems.length - 5} más en el mapa` : `+${searchItems.length - 5} more on the map`}
-            </li>
-          )}
         </ul>
+      </ToolCardShell>
+    )
+  }
+
+  if (tool === 'claim_listings') {
+    const claimed = Array.isArray(result.claimed) ? result.claimed : []
+    const failed = Array.isArray(result.failed) ? result.failed : []
+    if (claimed.length === 0 && failed.length === 0 && !result.summary) return null
+    return (
+      <ToolCardShell
+        kind={failed.length && !claimed.length ? 'claimfail' : 'claim'}
+        language={language}
+        titleOverride={
+          language === 'es'
+            ? `Reclamos · ${claimed.length} ok${failed.length ? `, ${failed.length} fallaron` : ''}`
+            : `Multi-claim · ${claimed.length} ok${failed.length ? `, ${failed.length} failed` : ''}`
+        }
+      >
+        {claimed.length > 0 && (
+          <ul className="space-y-1.5 mb-2">
+            {claimed.map((c, i) => (
+              <li key={c.listing_id || c.claim_id || i} className="text-white text-[12px]">
+                <span className="font-semibold">{c.title || c.listing_id || 'Listing'}</span>
+                {c.quantity != null && (
+                  <span className="text-emerald-50"> · {c.quantity} {c.unit || ''}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {failed.length > 0 && (
+          <ul className="space-y-1 text-red-100 text-[11px]">
+            {failed.map((f, i) => (
+              <li key={f.listing_id || i}>
+                {f.title || f.listing_id || `#${f.index ?? i + 1}`}: {f.error || 'failed'}
+              </li>
+            ))}
+          </ul>
+        )}
+        {(result.summary || result.message) && (
+          <div className="text-white text-[12px] mt-1">{result.summary || result.message}</div>
+        )}
       </ToolCardShell>
     )
   }
@@ -548,7 +872,7 @@ function ToolResultCard({ toolResult, language = 'en' }) {
     const errText = result?.error || toolResult.summary
     return (
       <ToolCardShell kind="claimfail" language={language}>
-        <div className="text-red-100">{errText}</div>
+        <div className="text-white">{errText}</div>
         {result?.next_step && (
           <div className={`${TOOL_CARD_TOKENS.claimfail.sub} text-[11px] mt-1.5`}>{result.next_step}</div>
         )}
@@ -576,27 +900,27 @@ function ToolResultCard({ toolResult, language = 'en' }) {
           )}
           <div className="min-w-0 flex-1">
             {result.title && (
-              <div className="text-emerald-100">
+              <div className="text-white">
                 {result.quantity ? <span className="font-medium">{result.quantity} {result.unit || ''} </span> : null}
                 {result.quantity ? (language === 'es' ? 'de ' : 'of ') : null}
                 <span className="font-semibold">{result.title}</span>
-                {result.category && <span className="text-emerald-400/70"> · {result.category}</span>}
+                {result.category && <span className="text-emerald-50"> · {result.category}</span>}
               </div>
             )}
             {result.pickup_location && (
-              <div className="text-emerald-400/80 text-[11px] mt-1 flex items-start gap-1">
+              <div className="text-white text-[11px] mt-1 flex items-start gap-1">
                 <i className="fas fa-location-dot text-[10px] mt-[2px] opacity-70" aria-hidden="true" />
                 <span className="break-words">{result.pickup_location}</span>
               </div>
             )}
             {result.community_name && (
-              <div className="text-emerald-400/80 text-[11px] mt-0.5 flex items-center gap-1">
+              <div className="text-white text-[11px] mt-0.5 flex items-center gap-1">
                 <i className="fas fa-people-group text-[10px] opacity-70" aria-hidden="true" />
                 <span>{result.community_name}</span>
               </div>
             )}
             {(result.summary || result.message) && (
-              <div className="text-emerald-400/70 text-[12px] mt-1">{result.summary || result.message}</div>
+              <div className="text-white text-[12px] mt-1">{result.summary || result.message}</div>
             )}
           </div>
         </div>
@@ -607,7 +931,49 @@ function ToolResultCard({ toolResult, language = 'en' }) {
   if (tool === 'create_reminder' && (result?.success || result?.created)) {
     return (
       <ToolCardShell kind="reminder" language={language}>
-        <span className="text-blue-100">{result.summary || (language === 'es' ? 'Te avisaré.' : "I'll ping you.")}</span>
+        <span className="text-white">{result.summary || (language === 'es' ? 'Te avisaré.' : "I'll ping you.")}</span>
+      </ToolCardShell>
+    )
+  }
+
+  if ((tool === 'post_food_listings' || tool === 'bulk_post_food_listings' || tool === 'bulk_import_listings') && ok) {
+    const posted = Array.isArray(result.posted) ? result.posted : (Array.isArray(result.listings) ? result.listings : [])
+    const failed = Array.isArray(result.failed) ? result.failed : []
+    const count = result.count_posted ?? posted.length
+    return (
+      <ToolCardShell
+        kind="post"
+        language={language}
+        titleOverride={
+          language === 'es'
+            ? `Publicado · ${count} listado${count === 1 ? '' : 's'}`
+            : `Posted · ${count} listing${count === 1 ? '' : 's'}`
+        }
+      >
+        {posted.length > 0 && (
+          <ul className="space-y-1.5 mb-2">
+            {posted.slice(0, 12).map((row, i) => (
+              <li key={row.listing_id || row.id || i} className="text-white text-[12px]">
+                <span className="font-semibold">{row.title || row.listing_id || `Item ${i + 1}`}</span>
+                {row.quantity != null && (
+                  <span className="text-fuchsia-50"> · {row.quantity} {row.unit || ''}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {failed.length > 0 && (
+          <ul className="space-y-1 text-red-100 text-[11px] mb-1">
+            {failed.slice(0, 8).map((f, i) => (
+              <li key={f.listing_id || i}>
+                {f.title || f.listing_id || `#${i + 1}`}: {f.error || 'failed'}
+              </li>
+            ))}
+          </ul>
+        )}
+        {(result.summary || result.message) && (
+          <div className="text-white text-[12px] mt-1">{result.summary || result.message}</div>
+        )}
       </ToolCardShell>
     )
   }
@@ -616,7 +982,7 @@ function ToolResultCard({ toolResult, language = 'en' }) {
     const errText = result?.error || toolResult.summary
     return (
       <ToolCardShell kind="claimfail" language={language} titleOverride={language === 'es' ? 'No se pudo publicar' : 'Could not post'}>
-        <div className="text-red-100">{errText}</div>
+        <div className="text-white">{errText}</div>
         {result?.next_step && (
           <div className={`${TOOL_CARD_TOKENS.claimfail.sub} text-[11px] mt-1.5`}>{result.next_step}</div>
         )}
@@ -628,32 +994,32 @@ function ToolResultCard({ toolResult, language = 'en' }) {
     return (
       <ToolCardShell kind="post" language={language}>
         {result.title && (
-          <div className="text-fuchsia-100">
+          <div className="text-white">
             <span className="font-semibold">{result.title}</span>
-            {result.quantity != null && <span className="text-fuchsia-300/80"> · {result.quantity} {result.unit || ''}</span>}
-            {result.category && <span className="text-fuchsia-300/80"> · {result.category}</span>}
+            {result.quantity != null && <span className="text-white"> · {result.quantity} {result.unit || ''}</span>}
+            {result.category && <span className="text-white"> · {result.category}</span>}
           </div>
         )}
         {result.address && (
-          <div className="text-fuchsia-300/80 text-[11px] mt-1 flex items-start gap-1">
+          <div className="text-white text-[11px] mt-1 flex items-start gap-1">
             <i className="fas fa-map-marker-alt mt-[2px] text-[10px] opacity-70" aria-hidden="true" />
             <span className="break-words">{result.address}</span>
           </div>
         )}
         {result.community_name && (
-          <div className="text-fuchsia-300/80 text-[11px] mt-0.5 flex items-center gap-1">
+          <div className="text-white text-[11px] mt-0.5 flex items-center gap-1">
             <i className="fas fa-people-group text-[10px] opacity-70" aria-hidden="true" />
             <span>{result.community_name}</span>
           </div>
         )}
         {result.on_map === false && (
-          <div className="text-amber-300/90 text-[11px] mt-1 flex items-center gap-1">
+          <div className="text-amber-50 text-[11px] mt-1 flex items-center gap-1">
             <i className="fas fa-triangle-exclamation text-[10px]" aria-hidden="true" />
             <span>{language === 'es' ? 'Sin coordenadas — no aparecerá en el mapa' : 'No coordinates — listing will not appear on the map'}</span>
           </div>
         )}
         {(result.summary || result.message) && (
-          <div className="text-fuchsia-300/75 mt-1">{result.summary || result.message}</div>
+          <div className="text-white mt-1">{result.summary || result.message}</div>
         )}
       </ToolCardShell>
     )
@@ -692,7 +1058,7 @@ function ToolResultCard({ toolResult, language = 'en' }) {
           )}
           <div className="min-w-0 flex-1">
             {item.title && (
-              <div className="text-violet-100 font-semibold">{item.title}</div>
+              <div className="text-white font-semibold">{item.title}</div>
             )}
             <div className={`${TOOL_CARD_TOKENS.updated.sub} text-[11px] mt-0.5 space-y-0.5`}>
               {qtyLabel && (
@@ -718,7 +1084,7 @@ function ToolResultCard({ toolResult, language = 'en' }) {
               )}
             </div>
             {(result.summary || result.message) && (
-              <div className="text-violet-300/75 text-[11px] mt-1">{result.summary || result.message}</div>
+              <div className="text-white text-[11px] mt-1">{result.summary || result.message}</div>
             )}
           </div>
         </div>
@@ -729,7 +1095,7 @@ function ToolResultCard({ toolResult, language = 'en' }) {
   if ((tool === 'update_food_listing' || tool === 'update_listing' || tool === 'edit_listing') && !ok) {
     return (
       <ToolCardShell kind="claimfail" language={language} titleOverride={language === 'es' ? 'No se pudo actualizar' : 'Could not update'}>
-        <div className="text-red-100">{result?.error || result?.message || result?.summary}</div>
+        <div className="text-white">{result?.error || result?.message || result?.summary}</div>
       </ToolCardShell>
     )
   }
@@ -739,7 +1105,7 @@ function ToolResultCard({ toolResult, language = 'en' }) {
     const titles = result.titles || (result.title ? [result.title] : [])
     return (
       <ToolCardShell kind="deleted" language={language}>
-        <div className="text-slate-100">
+        <div className="text-white">
           {count > 1 ? (
             language === 'es'
               ? `Eliminados ${count} listados duplicados.`
@@ -752,7 +1118,7 @@ function ToolResultCard({ toolResult, language = 'en' }) {
           )}
         </div>
         {(result.summary || result.message) && (
-          <div className="text-slate-300/75 mt-1">{result.summary || result.message}</div>
+          <div className="text-white mt-1">{result.summary || result.message}</div>
         )}
       </ToolCardShell>
     )
@@ -761,11 +1127,11 @@ function ToolResultCard({ toolResult, language = 'en' }) {
   if (tool === 'delete_listing' && !ok) {
     return (
       <ToolCardShell kind="error" language={language}>
-        <div className="text-red-200 font-medium">
+        <div className="text-white font-medium">
           {language === 'es' ? 'No se pudo eliminar' : 'Could not delete listing'}
         </div>
         {(result.error || result.message || result.summary) && (
-          <div className="text-red-300/80 mt-1">{result.error || result.message || result.summary}</div>
+          <div className="text-white mt-1">{result.error || result.message || result.summary}</div>
         )}
       </ToolCardShell>
     )
@@ -780,7 +1146,7 @@ function ToolResultCard({ toolResult, language = 'en' }) {
             <span className="font-semibold">{result.title}</span>
           </div>
         )}
-        {result.summary && <div className="text-amber-400/75 mt-1">{result.summary}</div>}
+        {result.summary && <div className="text-amber-50 mt-1">{result.summary}</div>}
       </ToolCardShell>
     )
   }
@@ -794,7 +1160,7 @@ function ToolResultCard({ toolResult, language = 'en' }) {
             <span className="font-semibold">{result.title}</span>
           </div>
         )}
-        {result.summary && <div className="text-sky-300/75 mt-1">{result.summary}</div>}
+        {result.summary && <div className="text-white mt-1">{result.summary}</div>}
       </ToolCardShell>
     )
   }
@@ -810,7 +1176,7 @@ function ToolResultCard({ toolResult, language = 'en' }) {
   if (ok && !SILENT_UI_TOOLS.has(tool) && (result?.summary || result?.message)) {
     return (
       <ToolCardShell kind="generic" language={language} titleOverride={tool?.replace(/_/g, ' ') || (language === 'es' ? 'Acción' : 'Action')}>
-        <div className="text-slate-200 text-[12px]">{result.summary || result.message}</div>
+        <div className="text-white text-[12px]">{result.summary || result.message}</div>
       </ToolCardShell>
     )
   }
@@ -872,7 +1238,7 @@ function ConfirmationBar({ language, pendingAction, onConfirm, onCancel, onEdit,
   return (
     <div className="mt-2 p-3 rounded-xl bg-amber-50 border border-amber-200 ring-1 ring-amber-200/60">
       {summary && (
-        <div className="text-amber-900 text-xs mb-2.5 leading-snug">
+        <div className="text-amber-950 text-xs mb-2.5 leading-snug font-medium">
           {isEs ? 'Acción pendiente: ' : 'Pending: '}
           <span className="font-medium">{summary}</span>
         </div>
@@ -891,7 +1257,7 @@ function ConfirmationBar({ language, pendingAction, onConfirm, onCancel, onEdit,
           type="button"
           onClick={onEdit}
           disabled={disabled}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white hover:bg-gray-50 text-gray-700 border border-gray-300 disabled:opacity-40"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white hover:bg-gray-50 text-gray-900 border border-gray-400 disabled:opacity-40"
         >
           <i className="fas fa-pen text-[10px]" aria-hidden="true" />
           {isEs ? 'Editar' : 'Edit'}
@@ -900,7 +1266,7 @@ function ConfirmationBar({ language, pendingAction, onConfirm, onCancel, onEdit,
           type="button"
           onClick={onCancel}
           disabled={disabled}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white hover:bg-gray-50 text-gray-600 border border-gray-300 disabled:opacity-40"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white hover:bg-gray-50 text-gray-800 border border-gray-400 disabled:opacity-40"
         >
           <i className="fas fa-xmark text-[10px]" aria-hidden="true" />
           {isEs ? 'Cancelar' : 'Cancel'}
@@ -918,6 +1284,7 @@ function MessageBubble({
   onConfirmAction,
   isLoading,
   currentUser,
+  allowedCommunityIds = null,
   onRetry,
   onRegenerate,
   showRegenerate = false,
@@ -1007,7 +1374,7 @@ function MessageBubble({
                 ? 'bg-gradient-to-br from-[#2CABE3] to-emerald-500 text-white rounded-br-md shadow-md shadow-[#2CABE3]/20 ring-1 ring-[#2CABE3]/20'
                 : msg.isError
                   ? 'bg-red-50 text-red-800 border border-red-200 rounded-bl-md backdrop-blur-sm'
-                  : 'bg-white/85 text-gray-800 rounded-bl-md border border-[#2CABE3]/10 backdrop-blur-sm shadow-sm'
+                  : 'bg-white text-gray-900 rounded-bl-md border border-[#2CABE3]/15 shadow-sm'
             }`}
           >
             {/* Inline photo message: show thumbnail instead of raw URL */}
@@ -1082,7 +1449,13 @@ function MessageBubble({
 
           {/* Tool result cards */}
           {msg.toolResults?.map((tr, i) => (
-            <ToolResultCard key={i} toolResult={tr} language={language} />
+            <ToolResultCard
+              key={i}
+              toolResult={tr}
+              language={language}
+              onSuggestionClick={onSuggestionClick}
+              allowedCommunityIds={allowedCommunityIds}
+            />
           ))}
 
           {/* Suggested actions — only on the latest assistant turn so stale
@@ -1183,7 +1556,7 @@ function MessageBubble({
 
 // ─── Suggested action button ───────────────────────────
 function SuggestedActionButton({ action, onSuggestionClick, disabled = false, compact = false }) {
-  const navigate = useNavigate()
+  const { executeUIAction } = useUIControl()
 
   const asObject = action && typeof action === 'object'
   const label = asObject
@@ -1199,8 +1572,14 @@ function SuggestedActionButton({ action, onSuggestionClick, disabled = false, co
   const handleClick = () => {
     if (disabled) return
 
-    if (actionType === 'navigate' && asObject && (action.target || action.href)) {
-      navigate(action.target || action.href)
+    if (actionType === 'navigate' && asObject && (action.target || action.href || action.path)) {
+      const target = action.target || action.href || action.path
+      executeUIAction({
+        ok: true,
+        action: 'navigate',
+        path: typeof target === 'string' && target.startsWith('/') ? target : undefined,
+        target: typeof target === 'string' && !target.startsWith('/') ? target : undefined,
+      })
       return
     }
 
@@ -1212,8 +1591,8 @@ function SuggestedActionButton({ action, onSuggestionClick, disabled = false, co
   if (!label) return null
 
   const styleClass = actionType === 'navigate'
-    ? 'bg-blue-50 text-blue-700 hover:bg-blue-100 border-blue-200/60'
-    : 'bg-[#2CABE3]/10 text-[#2CABE3] hover:bg-[#2CABE3]/15 border-[#2CABE3]/20'
+    ? 'bg-blue-50 text-blue-800 hover:bg-blue-100 border-blue-300 font-medium'
+    : 'bg-[#2CABE3]/15 text-[#1a7a9e] hover:bg-[#2CABE3]/25 border-[#2CABE3]/30 font-medium'
 
   return (
     <button
@@ -1227,7 +1606,18 @@ function SuggestedActionButton({ action, onSuggestionClick, disabled = false, co
 }
 
 // ─── Bulk upload preview (photo + CSV → bulk listings) ───────
-function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpdateRow, onRemoveRow }) {
+function BulkUploadPreview({
+  pending,
+  busy,
+  language,
+  preferredCommunityId,
+  preferredLocation,
+  onCancel,
+  onConfirm,
+  onUpdateRow,
+  onUpdateRows,
+  onRemoveRow,
+}) {
   const isEs = language === 'es'
   const kindLabel = pending.kind === 'photo'
     ? (isEs ? 'Borrador desde foto' : 'Draft from photo')
@@ -1237,32 +1627,104 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
   const ringClass = pending.kind === 'photo'
     ? 'border-fuchsia-500/40 shadow-fuchsia-500/10'
     : 'border-emerald-500/40 shadow-emerald-500/10'
-  const headerClass = pending.kind === 'photo' ? 'text-fuchsia-300' : 'text-emerald-300'
+  const headerClass = pending.kind === 'photo' ? 'text-fuchsia-200' : 'text-emerald-200'
 
   // Lazy-load active communities once so the preview can offer a selector.
-  // Cheap query (id+name only); silently degrades to "no community" if it fails.
   const [communities, setCommunities] = useState([])
+  const [communitiesError, setCommunitiesError] = useState(null)
+  const [communitiesLoading, setCommunitiesLoading] = useState(true)
+  // CSV: select rows and apply shared values (location, community, …).
+  const [selectedRowIndexes, setSelectedRowIndexes] = useState(() => new Set())
+  const [bulkLocation, setBulkLocation] = useState(() => String(preferredLocation || '').trim())
+  const [bulkCommunityId, setBulkCommunityId] = useState(() =>
+    preferredCommunityId != null && preferredCommunityId !== ''
+      ? String(preferredCommunityId)
+      : ''
+  )
+  const [bulkCategory, setBulkCategory] = useState('')
+  const [bulkExpiry, setBulkExpiry] = useState('')
+  // When true, Apply only fills rows that are still missing that field.
+  const [fillEmptyOnly, setFillEmptyOnly] = useState(true)
+  const loadCommunities = useCallback(async () => {
+    setCommunitiesLoading(true)
+    setCommunitiesError(null)
+    try {
+      const { data, error } = await supabase
+        .from('communities')
+        .select('id, name')
+        .eq('is_active', true)
+        .order('name', { ascending: true })
+      if (error) throw error
+      setCommunities(data || [])
+    } catch (err) {
+      setCommunities([])
+      setCommunitiesError(err?.message || (isEs ? 'No se pudieron cargar las comunidades' : 'Could not load communities'))
+    } finally {
+      setCommunitiesLoading(false)
+    }
+  }, [isEs])
   useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const { data, error } = await supabase
-          .from('communities')
-          .select('id, name')
-          .eq('is_active', true)
-          .order('name', { ascending: true })
-        if (cancelled || error) return
-        setCommunities(data || [])
-      } catch {
-        /* ignore — selector just stays empty */
+    loadCommunities()
+  }, [loadCommunities])
+
+  // Default CSV selection to all rows when the batch arrives / row count changes.
+  useEffect(() => {
+    if (pending?.kind !== 'csv') return
+    const n = pending?.rows?.length || 0
+    setSelectedRowIndexes(new Set(Array.from({ length: n }, (_, i) => i)))
+    setBulkLocation((prev) => {
+      if (String(prev || '').trim()) return prev
+      return String(preferredLocation || '').trim()
+    })
+    setBulkCommunityId((prev) => {
+      if (String(prev || '').trim()) return prev
+      return preferredCommunityId != null && preferredCommunityId !== ''
+        ? String(preferredCommunityId)
+        : ''
+    })
+  }, [pending?.kind, pending?.rows?.length, preferredLocation, preferredCommunityId])
+
+  // Resolve per-row community from CSV (name → id) and only prefill the
+  // importer's community when a row has neither id nor name. Never overwrite
+  // a CSV / picker community with the donor profile default (warehouse leak).
+  useEffect(() => {
+    if (!communities.length) return
+    const currentRows = pending?.rows || []
+    if (!currentRows.length) return
+    const preferred = preferredCommunityId
+      ? communities.find((c) => String(c.id) === String(preferredCommunityId))
+      : null
+    currentRows.forEach((row, idx) => {
+      if (row?.community_id) {
+        if (!row.community_name) {
+          const byId = communities.find((c) => String(c.id) === String(row.community_id))
+          if (byId) onUpdateRow(idx, { community_name: byId.name })
+        }
+        return
       }
-    })()
-    return () => { cancelled = true }
-  }, [])
+      if (row?.community_name) {
+        const match = matchCommunityByName(row.community_name, communities)
+        if (match) {
+          onUpdateRow(idx, {
+            community_id: String(match.id),
+            community_name: match.name,
+          })
+        }
+        return
+      }
+      if (preferred) {
+        onUpdateRow(idx, {
+          community_id: String(preferred.id),
+          community_name: preferred.name,
+        })
+      }
+    })
+    // Intentionally omit onUpdateRow / pending.rows identity to avoid loops —
+    // re-run when communities arrive or row count / kind changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [communities, preferredCommunityId, pending?.rows?.length, pending?.kind])
 
   // ALL hooks must be declared before any early return (Rules of Hooks).
-  // filledLog drives a Map used in the success render path; computing it
-  // up-front keeps the hook count stable across error/analyzing/empty branches.
   const filledLog = Array.isArray(pending.filledLog) ? pending.filledLog : []
   const filledByIndex = useMemo(() => {
     const m = new Map()
@@ -1272,6 +1734,89 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
     return m
   }, [filledLog])
 
+  const rows = pending?.rows || []
+  const missingCommunity = rows.some((r) => !r?.community_id && !String(r?.community_name || '').trim())
+  const isCsv = pending.kind === 'csv'
+  const allSelected = isCsv && rows.length > 0 && selectedRowIndexes.size === rows.length
+  const someSelected = isCsv && selectedRowIndexes.size > 0 && selectedRowIndexes.size < rows.length
+
+  const toggleSelectAll = () => {
+    if (allSelected) {
+      setSelectedRowIndexes(new Set())
+    } else {
+      setSelectedRowIndexes(new Set(rows.map((_, i) => i)))
+    }
+  }
+
+  const toggleRowSelected = (idx) => {
+    setSelectedRowIndexes((prev) => {
+      const next = new Set(prev)
+      if (next.has(idx)) next.delete(idx)
+      else next.add(idx)
+      return next
+    })
+  }
+
+  const applyPatchToSelected = (patch, isEmptyRow) => {
+    if (!patch || typeof onUpdateRows !== 'function' || !selectedRowIndexes.size) return
+    const indexes = Array.from(selectedRowIndexes).filter((idx) => {
+      if (!fillEmptyOnly) return true
+      if (typeof isEmptyRow !== 'function') return true
+      return isEmptyRow(rows[idx])
+    })
+    if (!indexes.length) return
+    onUpdateRows(indexes, patch)
+  }
+
+  const applyLocationToSelected = () => {
+    const location = String(bulkLocation || '').trim()
+    if (!location) return
+    applyPatchToSelected(
+      { location },
+      (r) => !String(r?.location || '').trim(),
+    )
+  }
+
+  const applyCommunityToSelected = () => {
+    const id = String(bulkCommunityId || '').trim()
+    if (!id) return
+    const match = communities.find((c) => String(c.id) === id)
+    if (!match) return
+    applyPatchToSelected(
+      {
+        community_id: String(match.id),
+        community_name: match.name,
+      },
+      (r) => !r?.community_id && !String(r?.community_name || '').trim(),
+    )
+  }
+
+  const applyCategoryToSelected = () => {
+    const category = String(bulkCategory || '').trim()
+    if (!category) return
+    applyPatchToSelected(
+      { category },
+      (r) => !String(r?.category || '').trim() || String(r?.category).toLowerCase() === 'other',
+    )
+  }
+
+  const applyExpiryToSelected = () => {
+    const expiry = String(bulkExpiry || '').trim()
+    if (!expiry) return
+    applyPatchToSelected(
+      { expiry_date: expiry },
+      (r) => !String(r?.expiry_date || '').trim(),
+    )
+  }
+
+  const applyAllMissingToSelected = () => {
+    // One-click: push every filled bulk field onto empty cells of selected rows.
+    if (String(bulkLocation || '').trim()) applyLocationToSelected()
+    if (String(bulkCommunityId || '').trim()) applyCommunityToSelected()
+    if (String(bulkCategory || '').trim()) applyCategoryToSelected()
+    if (String(bulkExpiry || '').trim()) applyExpiryToSelected()
+  }
+
   if (pending.error) {
     const allErrors = [pending.error, ...(pending.parseErrors || []).slice(1)].filter(Boolean)
     return (
@@ -1279,8 +1824,8 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
         <div className="flex items-start gap-3">
           <i className={`fas ${icon} ${headerClass} mt-0.5`} aria-hidden="true" />
           <div className="flex-1 min-w-0">
-            <div className="text-xs font-semibold text-slate-300">{kindLabel}</div>
-            <div className="text-xs text-slate-400 truncate mb-1">{pending.filename}</div>
+            <div className="text-xs font-semibold text-slate-100">{kindLabel}</div>
+            <div className="text-xs text-slate-300 truncate mb-1">{pending.filename}</div>
             {allErrors.map((e, i) => (
               <div key={i} className="text-sm text-rose-300">{e}</div>
             ))}
@@ -1288,7 +1833,7 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
           <button
             type="button"
             onClick={onCancel}
-            className="text-xs text-slate-400 hover:text-slate-200 px-2 py-1 rounded-md hover:bg-slate-800/60 flex-shrink-0"
+            className="text-xs text-slate-300 hover:text-white px-2 py-1 rounded-md hover:bg-slate-800/60 flex-shrink-0"
           >
             {isEs ? 'Cerrar' : 'Dismiss'}
           </button>
@@ -1297,7 +1842,7 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
           <button
             type="button"
             onClick={downloadCsvTemplate}
-            className="mt-2 w-full flex items-center justify-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 border border-emerald-500/20 transition-colors"
+            className="mt-2 w-full flex items-center justify-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-emerald-500/25 text-emerald-50 hover:bg-emerald-500/35 border border-emerald-400/40 transition-colors"
           >
             <i className="fas fa-download text-[10px]" aria-hidden="true" />
             {isEs ? 'Descargar plantilla CSV' : 'Download CSV template'}
@@ -1312,8 +1857,8 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
       <div className={`mx-3 mb-2 rounded-xl border ${ringClass} bg-slate-900/80 backdrop-blur-sm p-3 flex items-center gap-3 shadow-sm`}>
         <i className={`fas ${icon} ${headerClass}`} aria-hidden="true" />
         <div className="flex-1 min-w-0">
-          <div className="text-xs font-semibold text-slate-300">{kindLabel}</div>
-          <div className="text-xs text-slate-400 truncate">{pending.filename}</div>
+          <div className="text-xs font-semibold text-slate-100">{kindLabel}</div>
+          <div className="text-xs text-slate-300 truncate">{pending.filename}</div>
           <div className="mt-1 text-sm text-slate-200">
             <i className="fas fa-wand-magic-sparkles mr-1.5 text-cyan-300 animate-pulse" aria-hidden="true" />
             {pending.enriching
@@ -1325,11 +1870,15 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
     )
   }
 
-  const rows = pending.rows || []
   if (rows.length === 0) return null
-  const previewRows = rows.slice(0, 5)
-  const extra = rows.length - previewRows.length
+  // CSV: show all rows (scrollable) so select-all + one location works.
+  // Photo drafts stay capped at 5 for compactness.
+  const previewRows = isCsv ? rows : rows.slice(0, 5)
+  const extra = isCsv ? 0 : rows.length - previewRows.length
   const totalFilled = filledLog.length
+  const selectAllRef = (el) => {
+    if (el) el.indeterminate = someSelected
+  }
 
   return (
     <div className={`mx-3 mb-2 rounded-xl border ${ringClass} bg-slate-900/80 backdrop-blur-sm p-3 shadow-sm`}>
@@ -1339,15 +1888,15 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
           {kindLabel} · {rows.length} {rows.length === 1 ? (isEs ? 'fila' : 'row') : (isEs ? 'filas' : 'rows')}
         </div>
         {typeof pending.confidence === 'number' && pending.kind === 'photo' && (
-          <span className="text-[10px] text-slate-400 ml-auto">
+          <span className="text-[10px] text-slate-300 ml-auto">
             {isEs ? 'Confianza' : 'Confidence'}: {Math.round(pending.confidence * 100)}%
           </span>
         )}
       </div>
-      <div className="text-[11px] text-slate-400 mb-2 truncate" title={pending.filename}>{pending.filename}</div>
+      <div className="text-[11px] text-slate-300 mb-2 truncate" title={pending.filename}>{pending.filename}</div>
 
       {pending.enriched && (
-        <div className="mb-2 flex items-start gap-1.5 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-2 py-1.5 text-[11px] text-cyan-200">
+        <div className="mb-2 flex items-start gap-1.5 rounded-lg border border-cyan-500/30 bg-cyan-500/15 px-2 py-1.5 text-[11px] text-cyan-50">
           <i className="fas fa-wand-magic-sparkles mt-0.5" aria-hidden="true" />
           <span className="flex-1">
             {pending.enrichSummary
@@ -1362,9 +1911,180 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
         </div>
       )}
 
-      <div className="space-y-1.5 max-h-44 overflow-y-auto nourish-scrollbar pr-1">
+      {isCsv && (
+        <div className="mb-2 rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-2 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <label className="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer select-none">
+              <input
+                ref={selectAllRef}
+                type="checkbox"
+                checked={allSelected}
+                onChange={toggleSelectAll}
+                disabled={busy || rows.length === 0}
+                className="rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500/40"
+                aria-label={isEs ? 'Seleccionar todas las filas' : 'Select all rows'}
+              />
+              <span className="font-medium">
+                {isEs ? 'Seleccionar todas' : 'Select all'}
+              </span>
+              <span className="text-slate-300">
+                ({selectedRowIndexes.size}/{rows.length})
+              </span>
+            </label>
+            <label className="flex items-center gap-1.5 text-[11px] text-slate-200 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={fillEmptyOnly}
+                onChange={(e) => setFillEmptyOnly(e.target.checked)}
+                disabled={busy}
+                className="rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500/40"
+              />
+              <span>
+                {isEs ? 'Solo rellenar vacíos' : 'Only fill empty'}
+              </span>
+            </label>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-1.5 items-stretch sm:items-center">
+            <label className="flex-1 flex items-center gap-1.5 min-w-0 text-[11px]">
+              <i className="fas fa-people-group text-emerald-300 flex-shrink-0" aria-hidden="true" />
+              <select
+                value={bulkCommunityId}
+                onChange={(e) => setBulkCommunityId(e.target.value)}
+                disabled={busy || communitiesLoading || communities.length === 0}
+                className="flex-1 min-w-0 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-slate-100 outline-none focus:border-emerald-500/50"
+                aria-label={isEs ? 'Comunidad compartida' : 'Shared community'}
+              >
+                <option value="">
+                  {communitiesLoading
+                    ? (isEs ? 'Cargando comunidades…' : 'Loading communities…')
+                    : (isEs ? 'Una comunidad para las seleccionadas…' : 'One community for selected rows…')}
+                </option>
+                {communities.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={applyCommunityToSelected}
+              disabled={busy || !String(bulkCommunityId || '').trim() || selectedRowIndexes.size === 0}
+              className="flex-shrink-0 text-[11px] px-2.5 py-1 rounded-md bg-emerald-500/35 text-emerald-50 border border-emerald-400/50 hover:bg-emerald-500/45 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {isEs
+                ? `Aplicar comunidad (${selectedRowIndexes.size})`
+                : `Apply community (${selectedRowIndexes.size})`}
+            </button>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-1.5 items-stretch sm:items-center">
+            <label className="flex-1 flex items-center gap-1.5 min-w-0 text-[11px]">
+              <i className="fas fa-location-dot text-emerald-300 flex-shrink-0" aria-hidden="true" />
+              <input
+                type="text"
+                value={bulkLocation}
+                onChange={(e) => setBulkLocation(e.target.value)}
+                disabled={busy}
+                placeholder={isEs ? 'Una dirección de recogida para las seleccionadas…' : 'One pickup address for selected rows…'}
+                className="flex-1 min-w-0 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-slate-100 placeholder:text-slate-400 outline-none focus:border-emerald-500/50"
+                aria-label={isEs ? 'Dirección compartida' : 'Shared pickup address'}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={applyLocationToSelected}
+              disabled={busy || !String(bulkLocation || '').trim() || selectedRowIndexes.size === 0}
+              className="flex-shrink-0 text-[11px] px-2.5 py-1 rounded-md bg-emerald-500/35 text-emerald-50 border border-emerald-400/50 hover:bg-emerald-500/45 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {isEs
+                ? `Aplicar dirección (${selectedRowIndexes.size})`
+                : `Apply address (${selectedRowIndexes.size})`}
+            </button>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-1.5 items-stretch sm:items-center">
+            <label className="flex-1 flex items-center gap-1.5 min-w-0 text-[11px]">
+              <i className="fas fa-tag text-emerald-300 flex-shrink-0" aria-hidden="true" />
+              <select
+                value={bulkCategory}
+                onChange={(e) => setBulkCategory(e.target.value)}
+                disabled={busy}
+                className="flex-1 min-w-0 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-slate-100 outline-none focus:border-emerald-500/50"
+                aria-label={isEs ? 'Categoría compartida' : 'Shared category'}
+              >
+                <option value="">{isEs ? 'Categoría (opcional)…' : 'Category (optional)…'}</option>
+                {['produce', 'bakery', 'dairy', 'pantry', 'meat', 'prepared', 'other'].map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex-1 flex items-center gap-1.5 min-w-0 text-[11px]">
+              <i className="fas fa-calendar-day text-emerald-300 flex-shrink-0" aria-hidden="true" />
+              <input
+                type="date"
+                value={bulkExpiry}
+                onChange={(e) => setBulkExpiry(e.target.value)}
+                disabled={busy}
+                className="flex-1 min-w-0 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-slate-100 outline-none focus:border-emerald-500/50"
+                aria-label={isEs ? 'Caducidad compartida' : 'Shared expiry'}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                if (String(bulkCategory || '').trim()) applyCategoryToSelected()
+                if (String(bulkExpiry || '').trim()) applyExpiryToSelected()
+              }}
+              disabled={
+                busy
+                || selectedRowIndexes.size === 0
+                || (!String(bulkCategory || '').trim() && !String(bulkExpiry || '').trim())
+              }
+              className="flex-shrink-0 text-[11px] px-2.5 py-1 rounded-md bg-emerald-500/35 text-emerald-50 border border-emerald-400/50 hover:bg-emerald-500/45 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {isEs ? 'Aplicar' : 'Apply'}
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={applyAllMissingToSelected}
+            disabled={
+              busy
+              || selectedRowIndexes.size === 0
+              || (
+                !String(bulkLocation || '').trim()
+                && !String(bulkCommunityId || '').trim()
+                && !String(bulkCategory || '').trim()
+                && !String(bulkExpiry || '').trim()
+              )
+            }
+            className="w-full text-[11px] px-2.5 py-1.5 rounded-md bg-cyan-500/25 text-cyan-50 border border-cyan-400/40 hover:bg-cyan-500/35 disabled:opacity-40 disabled:cursor-not-allowed transition-colors font-medium"
+          >
+            {fillEmptyOnly
+              ? (isEs
+                  ? `Aplicar todo a campos vacíos (${selectedRowIndexes.size} filas)`
+                  : `Apply all to empty fields (${selectedRowIndexes.size} rows)`)
+              : (isEs
+                  ? `Aplicar todo a seleccionadas (${selectedRowIndexes.size})`
+                  : `Apply all to selected (${selectedRowIndexes.size})`)}
+          </button>
+        </div>
+      )}
+
+      <div className={`space-y-1.5 overflow-y-auto nourish-scrollbar pr-1 ${isCsv ? 'max-h-64' : 'max-h-44'}`}>
         {previewRows.map((row, idx) => (
           <div key={idx} className="rounded-lg border border-slate-700/60 bg-slate-800/40 p-2 flex items-start gap-2">
+            {isCsv && (
+              <input
+                type="checkbox"
+                checked={selectedRowIndexes.has(idx)}
+                onChange={() => toggleRowSelected(idx)}
+                disabled={busy}
+                className="mt-1 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500/40 flex-shrink-0"
+                aria-label={isEs ? `Seleccionar fila ${idx + 1}` : `Select row ${idx + 1}`}
+              />
+            )}
             {/* Auto-assigned image thumbnail */}
             {row.image_url && (
               <img
@@ -1386,7 +2106,7 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
                 />
                 {filledByIndex.has(idx) && (
                   <span
-                    className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 whitespace-nowrap"
+                    className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded-full bg-cyan-500/25 text-cyan-50 border border-cyan-400/40 whitespace-nowrap"
                     title={`${isEs ? 'IA rellenó' : 'AI filled'}: ${filledByIndex.get(idx).join(', ')}`}
                   >
                     <i className="fas fa-wand-magic-sparkles mr-0.5" aria-hidden="true" />
@@ -1394,7 +2114,7 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
                   </span>
                 )}
               </div>
-              <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-slate-400">
+              <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-slate-300">
                 <input
                   type="number"
                   step="0.1"
@@ -1402,7 +2122,7 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
                   value={row.quantity ?? ''}
                   onChange={(e) => onUpdateRow(idx, { quantity: Number(e.target.value) })}
                   disabled={busy}
-                  className="w-16 bg-transparent outline-none focus:bg-slate-900/60 px-1 py-0.5 rounded text-slate-200"
+                  className="w-16 bg-transparent outline-none focus:bg-slate-900/60 px-1 py-0.5 rounded text-slate-100"
                   aria-label="Quantity"
                 />
                 <input
@@ -1410,15 +2130,15 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
                   value={row.unit || ''}
                   onChange={(e) => onUpdateRow(idx, { unit: e.target.value })}
                   disabled={busy}
-                  className="w-16 bg-transparent outline-none focus:bg-slate-900/60 px-1 py-0.5 rounded text-slate-200"
+                  className="w-16 bg-transparent outline-none focus:bg-slate-900/60 px-1 py-0.5 rounded text-slate-100"
                   aria-label="Unit"
                 />
-                <span className="text-slate-500">·</span>
+                <span className="text-slate-300">·</span>
                 <select
                   value={row.category || 'other'}
                   onChange={(e) => onUpdateRow(idx, { category: e.target.value })}
                   disabled={busy}
-                  className="bg-slate-900/60 border border-slate-700/60 rounded px-1 py-0.5 text-slate-200"
+                  className="bg-slate-900 border border-slate-600 rounded px-1 py-0.5 text-slate-100"
                   aria-label="Category"
                 >
                   {['produce','bakery','dairy','pantry','meat','prepared','other'].map(c => (
@@ -1432,50 +2152,96 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
                   and a category-based expiry suggestion by the backend. */}
               <div className="mt-1 grid grid-cols-1 sm:grid-cols-3 gap-1 text-[11px]">
                 <label className="flex items-center gap-1 min-w-0">
-                  <i className="fas fa-location-dot text-slate-500 flex-shrink-0" aria-hidden="true" />
+                  <i className="fas fa-location-dot text-slate-400 flex-shrink-0" aria-hidden="true" />
                   <input
                     type="text"
                     value={row.location || ''}
                     onChange={(e) => onUpdateRow(idx, { location: e.target.value })}
                     disabled={busy}
                     placeholder={isEs ? 'Dirección de recogida' : 'Pickup address'}
-                    className="flex-1 min-w-0 bg-transparent outline-none focus:bg-slate-900/60 px-1 py-0.5 rounded text-slate-200 placeholder:text-slate-500"
+                    className="flex-1 min-w-0 bg-transparent outline-none focus:bg-slate-900/60 px-1 py-0.5 rounded text-slate-100 placeholder:text-slate-400"
                     aria-label={isEs ? 'Dirección de recogida' : 'Pickup address'}
                   />
                 </label>
                 <label className="flex items-center gap-1 min-w-0">
-                  <i className="fas fa-calendar-day text-slate-500 flex-shrink-0" aria-hidden="true" />
+                  <i className="fas fa-calendar-day text-slate-400 flex-shrink-0" aria-hidden="true" />
                   <input
                     type="date"
                     value={row.expiry_date || ''}
                     onChange={(e) => onUpdateRow(idx, { expiry_date: e.target.value })}
                     disabled={busy}
-                    className="flex-1 min-w-0 bg-transparent outline-none focus:bg-slate-900/60 px-1 py-0.5 rounded text-slate-200"
+                    className="flex-1 min-w-0 bg-transparent outline-none focus:bg-slate-900/60 px-1 py-0.5 rounded text-slate-100"
                     aria-label={isEs ? 'Fecha de caducidad' : 'Expiry date'}
                   />
                 </label>
                 <label className="flex items-center gap-1 min-w-0">
-                  <i className="fas fa-people-group text-slate-500 flex-shrink-0" aria-hidden="true" />
-                  <select
-                    value={row.community_id || ''}
-                    onChange={(e) => onUpdateRow(idx, { community_id: e.target.value || undefined })}
-                    disabled={busy || communities.length === 0}
-                    className="flex-1 min-w-0 bg-slate-900/60 border border-slate-700/60 rounded px-1 py-0.5 text-slate-200"
-                    aria-label={isEs ? 'Comunidad' : 'Community'}
-                  >
-                    <option value="">{isEs ? 'Sin comunidad' : 'No community'}</option>
-                    {communities.map(c => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
+                  <i className="fas fa-people-group text-slate-400 flex-shrink-0" aria-hidden="true" />
+                  {communities.length > 0 ? (
+                    <select
+                      value={row.community_id || ''}
+                      onChange={(e) => {
+                        const id = e.target.value || ''
+                        const match = communities.find((c) => String(c.id) === String(id))
+                        onUpdateRow(idx, {
+                          community_id: id || undefined,
+                          community_name: match?.name,
+                        })
+                      }}
+                      disabled={busy}
+                      className={`flex-1 min-w-0 bg-slate-900 border rounded px-1 py-0.5 text-slate-100 ${
+                        row.community_id ? 'border-slate-600' : 'border-amber-400'
+                      }`}
+                      aria-label={isEs ? 'Comunidad / escuela' : 'Community / school'}
+                      required
+                    >
+                      <option value="">
+                        {isEs ? 'Elige escuela o comunidad…' : 'Choose school or community…'}
+                      </option>
+                      {communities.map(c => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={row.community_name || ''}
+                      onChange={(e) => onUpdateRow(idx, {
+                        community_name: e.target.value || undefined,
+                        community_id: undefined,
+                      })}
+                      disabled={busy || communitiesLoading}
+                      placeholder={
+                        communitiesLoading
+                          ? (isEs ? 'Cargando comunidades…' : 'Loading communities…')
+                          : (isEs ? 'Nombre de escuela o comunidad' : 'School or community name')
+                      }
+                      className={`flex-1 min-w-0 bg-transparent outline-none focus:bg-slate-900/60 px-1 py-0.5 rounded text-slate-100 placeholder:text-slate-400 ${
+                        row.community_name ? '' : 'ring-1 ring-amber-400 rounded'
+                      }`}
+                      aria-label={isEs ? 'Comunidad / escuela' : 'Community / school'}
+                    />
+                  )}
                 </label>
               </div>
+              {communitiesError && (
+                <div className="mt-1 flex items-center gap-2 text-[10px] text-amber-200">
+                  <span>{communitiesError}</span>
+                  <button
+                    type="button"
+                    onClick={loadCommunities}
+                    disabled={busy || communitiesLoading}
+                    className="underline hover:text-amber-100 disabled:opacity-40"
+                  >
+                    {isEs ? 'Reintentar' : 'Retry'}
+                  </button>
+                </div>
+              )}
             </div>
             <button
               type="button"
               onClick={() => onRemoveRow(idx)}
               disabled={busy}
-              className="text-slate-500 hover:text-rose-400 text-xs p-1 disabled:opacity-40"
+              className="text-slate-400 hover:text-rose-300 text-xs p-1 disabled:opacity-40"
               aria-label={`Remove row ${idx + 1}`}
               title={isEs ? 'Quitar' : 'Remove'}
             >
@@ -1484,16 +2250,25 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
           </div>
         ))}
         {extra > 0 && (
-          <div className="text-[11px] text-slate-500 italic px-1">
+          <div className="text-[11px] text-slate-300 italic px-1">
             {isEs ? `…y ${extra} más` : `…and ${extra} more`}
           </div>
         )}
       </div>
 
       {pending.parseErrors && pending.parseErrors.length > 0 && (
-        <div className="mt-2 text-[11px] text-amber-300/80">
+        <div className="mt-2 text-[11px] text-amber-200">
           <i className="fas fa-triangle-exclamation mr-1" aria-hidden="true" />
           {pending.parseErrors.length} {isEs ? 'fila(s) omitida(s)' : 'row(s) skipped'}
+        </div>
+      )}
+
+      {missingCommunity && (
+        <div className="mt-2 text-[11px] text-amber-200">
+          <i className="fas fa-triangle-exclamation mr-1" aria-hidden="true" />
+          {isEs
+            ? 'Elige una escuela o comunidad para cada fila (usa “Aplicar comunidad” arriba para todas a la vez).'
+            : 'Choose a school or community for each row (use “Apply community” above to set them all at once).'}
         </div>
       )}
 
@@ -1502,14 +2277,14 @@ function BulkUploadPreview({ pending, busy, language, onCancel, onConfirm, onUpd
           type="button"
           onClick={onCancel}
           disabled={busy}
-          className="text-xs px-3 py-1.5 rounded-full bg-slate-800/80 text-slate-300 hover:bg-slate-700/80 border border-slate-700/60 disabled:opacity-40"
+          className="text-xs px-3 py-1.5 rounded-full bg-slate-700 text-slate-50 hover:bg-slate-600 border border-slate-700/60 disabled:opacity-40"
         >
           {isEs ? 'Cancelar' : 'Cancel'}
         </button>
         <button
           type="button"
           onClick={onConfirm}
-          disabled={busy || rows.length === 0}
+          disabled={busy || rows.length === 0 || missingCommunity}
           className={`text-xs px-3 py-1.5 rounded-full text-white font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-all ml-auto bg-gradient-to-r ${
             tint === 'fuchsia'
               ? 'from-fuchsia-500 to-purple-500 hover:from-fuchsia-400 hover:to-purple-400 shadow-md shadow-fuchsia-500/20'
@@ -1553,7 +2328,11 @@ function AIChatPanel() {
 
   const { applyToolResults, clearAIOverlays } = useMapContext()
   const { registerHandler, executeUIActionsFromToolResults, executeUIAction } = useUIControl()
-  const { user: authUser } = useAuthContext() || {}
+  const { user: authUser, isAdmin } = useAuthContext() || {}
+  const allowedCommunityIds = useMemo(
+    () => browseCommunityIdsForUser(authUser, { isAdmin }),
+    [authUser?.community_id, isAdmin],
+  )
   const communityRole = useCommunityRole()
   // Photo / CSV attach is donor-only (list food, attach listing photos, bulk CSV).
   const canAttachFiles = communityRole !== 'recipient'
@@ -1593,6 +2372,11 @@ function AIChatPanel() {
       if ((tr.tool === 'claim_listing' || tr.tool === 'claim_food') && ok) {
         lastToastedClaimRef.current = key
         // Claim success is shown in the chat card — skip duplicate toast.
+        window.dispatchEvent(new CustomEvent('foodShared'))
+      }
+      if (tr.tool === 'claim_listings' && ok) {
+        lastToastedClaimRef.current = key
+        window.dispatchEvent(new CustomEvent('foodShared'))
       }
       if (tr.tool === 'cancel_claim' && ok) {
         lastToastedClaimRef.current = key
@@ -1619,7 +2403,9 @@ function AIChatPanel() {
   // as the last message doesn't leave the map blank.
   const MAP_TOOLS = useMemo(() => new Set([
     'search_food_near_user', 'search_food_nearby', 'get_recent_listings',
-    'get_mapbox_route', 'query_distribution_centers',
+    'get_community_listings', 'get_user_listings', 'get_my_claims',
+    'get_mapbox_route', 'show_route_to_listing', 'query_distribution_centers',
+    'optimize_pickup_route',
   ]), [])
   useEffect(() => {
     if (!messages || messages.length === 0) return
@@ -1635,6 +2421,16 @@ function AIChatPanel() {
         const navCount = executeUIActionsFromToolResults(last.toolResults)
         if (navCount === 0 && last.action && !last.fromHistory) {
           executeUIAction({ ok: true, ...last.action })
+        }
+        // Route optimizer hint → open dashboard so PickupRouteOptimizer can render stops.
+        const wantsRouteUi = last.toolResults.some((tr) => {
+          const r = tr.result ?? tr
+          const hint = r?.frontend_hint || tr.frontend_hint
+          return tr.tool === 'optimize_pickup_route'
+            || hint?.component === 'RouteOptimizer'
+        })
+        if (wantsRouteUi) {
+          executeUIAction({ ok: true, action: 'navigate', path: '/dashboard' })
         }
       }
       return
@@ -1733,6 +2529,15 @@ function AIChatPanel() {
       return
     }
     ;(async () => {
+      // Bump upload session so in-flight photo/CSV work cannot reinstate stale drafts.
+      uploadSessionRef.current += 1
+      setPendingUpload(null)
+      setPendingChatPhotos((photos) => {
+        photos.forEach((p) => {
+          if (p.previewUrl) URL.revokeObjectURL(p.previewUrl)
+        })
+        return []
+      })
       await clearHistory()
       toast.info(
         language === 'es'
@@ -2086,13 +2891,15 @@ function AIChatPanel() {
     requestAnimationFrame(() => inputRef.current?.focus())
   }, [isLoading, sendMessage])
 
-  // Quick-suggestion chip rail above the input. Shows curated starter
-  // prompts only when the conversation would otherwise stall (no backend
-  // suggestions to render inside the last assistant bubble) so we don't
-  // duplicate the per-bubble chips or crowd the WelcomeHero.
+  // Quick-suggestion chip rail above the input.
+  // Conversation start: always show role-aware starter chips.
+  // Mid-conversation: never mirror bubble suggestions onto the rail
+  // (and no generic lazy chips — those would clash with claim/qty turns).
   const railChips = useMemo(() => {
-    if (messages.length <= 1) return []
     if (isLoading || pendingUpload || voiceMode || pendingChatPhotos.length > 0) return []
+    if (messages.length <= 1) {
+      return resolveInputChips([], language, communityRole, { allowLazy: true })
+    }
     let lastAssistant = null
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
@@ -2101,9 +2908,9 @@ function AIChatPanel() {
         break
       }
     }
-    if (lastAssistant?.requiresConfirmation) return []
-    const backendSuggestions = Array.isArray(lastAssistant?.suggestions) ? lastAssistant.suggestions : []
-    return resolveInputChips(backendSuggestions, language, communityRole)
+    if (!lastAssistant || lastAssistant.requiresConfirmation) return []
+    const backendSuggestions = Array.isArray(lastAssistant.suggestions) ? lastAssistant.suggestions : []
+    return resolveInputChips(backendSuggestions, language, communityRole, { allowLazy: false })
   }, [messages, isLoading, pendingUpload, voiceMode, language, communityRole, pendingChatPhotos.length])
 
   // ─── File uploads (photo + CSV → bulk-listings) ───────
@@ -2248,13 +3055,22 @@ function AIChatPanel() {
     setUploadBusy(true)
     setPendingUpload({ kind: 'photo', rows: [], filename: file.name, analyzing: true })
     try {
+      // Shrink large phone photos once for both vision + storage upload.
+      let uploadFile = file
+      try {
+        const { compressImage } = await import('../../utils/compressImage.js')
+        uploadFile = await compressImage(file)
+      } catch (err) {
+        console.warn('Photo compress skipped:', err?.message || err)
+      }
+
       // Kick off the storage upload and the vision call in parallel so the
       // user sees the preview faster. Storage upload is optional; if it fails
       // (no auth, bucket missing) we fall back to a category-based image.
       const uploadPromise = (async () => {
         if (!authUser?.id) return null
         try {
-          const res = await dataService.uploadFile(file, 'food-images')
+          const res = await dataService.uploadFile(uploadFile, 'food-images')
           return res?.url || null
         } catch (err) {
           console.warn('Photo storage upload failed; falling back to stock image:', err?.message || err)
@@ -2262,7 +3078,7 @@ function AIChatPanel() {
         }
       })()
 
-      const { draft, confidence } = await aiChatService.visionListing(file, { userId: authUser?.id })
+      const { draft, confidence } = await aiChatService.visionListing(uploadFile, { userId: authUser?.id })
       if (sessionId !== uploadSessionRef.current) return  // user cancelled / new upload
 
       if (!draft?.title) {
@@ -2286,14 +3102,19 @@ function AIChatPanel() {
       const enrichedDraft = {
         ...draft,
         image_url: uploadedUrl || assignFoodImage(draft),
+        // Carry profile community when vision did not set one so the
+        // school selector is not stuck on Do Good Warehouse by accident.
+        community_id: draft.community_id || authUser?.community_id || undefined,
+        location: draft.location || authUser?.address || undefined,
       }
+      const row = visionDraftToRow(enrichedDraft) || enrichedDraft
 
-      setPendingUpload({ kind: 'photo', rows: [enrichedDraft], filename: file.name, confidence })
+      setPendingUpload({ kind: 'photo', rows: [row], filename: file.name, confidence })
       appendLocalMessage({
         role: 'assistant',
         message: language === 'es'
-          ? `Detecté: **${draft.title}** (${draft.quantity} ${draft.unit}, ${draft.category}). Revisa el borrador abajo y confirma para publicar.`
-          : `I detected: **${draft.title}** (${draft.quantity} ${draft.unit}, ${draft.category}). Review the draft below and confirm to publish.`,
+          ? `Detecté: ${draft.title} (${draft.quantity} ${draft.unit}, ${draft.category}). Elige la escuela/comunidad abajo, revisa el borrador y confirma para publicar.`
+          : `I detected: ${draft.title} (${draft.quantity} ${draft.unit}, ${draft.category}). Pick the school/community below, review the draft, and confirm to publish.`,
       })
     } catch (err) {
       if (sessionId !== uploadSessionRef.current) return
@@ -2307,7 +3128,7 @@ function AIChatPanel() {
     } finally {
       if (sessionId === uploadSessionRef.current) setUploadBusy(false)
     }
-  }, [appendLocalMessage, authUser?.id, language])
+  }, [appendLocalMessage, authUser?.id, authUser?.community_id, authUser?.address, language])
 
   const handleCsvSelected = useCallback(async (e) => {
     const file = e.target.files?.[0]
@@ -2447,14 +3268,40 @@ function AIChatPanel() {
       })
       return
     }
+    const missingSchool = pendingUpload.rows.some(
+      (r) => !r?.community_id && !String(r?.community_name || '').trim(),
+    )
+    if (missingSchool) {
+      toast.error(
+        language === 'es'
+          ? 'Elige una escuela o comunidad para cada publicación.'
+          : 'Choose a school or community for each listing.',
+        { position: 'top-center' },
+      )
+      return
+    }
     setUploadBusy(true)
     try {
-      const result = await aiChatService.bulkCreateListings(pendingUpload.rows, { userId: authUser.id })
-      const { created, failed } = result
+      const rowsToCreate = pendingUpload.rows.map((r) => {
+        const cleaned = sanitizeListingExpiry(r)
+        return {
+          ...cleaned,
+          community_id: cleaned.community_id != null
+            ? String(cleaned.community_id)
+            : undefined,
+          community_name: cleaned.community_name || undefined,
+        }
+      })
+      const result = await aiChatService.bulkCreateListings(rowsToCreate, { userId: authUser.id })
+      const { created, failed, ids, awaitingApproval } = result
       toast.success(
         language === 'es'
-          ? `✅ ${created} publicación${created === 1 ? '' : 'es'} creada${created === 1 ? '' : 's'} correctamente${failed ? ` (${failed} fallaron)` : ''}`
-          : `✅ ${created} listing${created === 1 ? '' : 's'} created successfully${failed ? ` — ${failed} failed` : ''}`,
+          ? awaitingApproval
+            ? `✅ ${created} publicación${created === 1 ? '' : 'es'} enviada${created === 1 ? '' : 's'} para aprobación del admin${failed ? ` (${failed} fallaron)` : ''}`
+            : `✅ ${created} publicación${created === 1 ? '' : 'es'} creada${created === 1 ? '' : 's'} correctamente${failed ? ` (${failed} fallaron)` : ''}`
+          : awaitingApproval
+            ? `✅ ${created} listing${created === 1 ? '' : 's'} submitted for admin approval${failed ? ` — ${failed} failed` : ''}`
+            : `✅ ${created} listing${created === 1 ? '' : 's'} created successfully${failed ? ` — ${failed} failed` : ''}`,
         { autoClose: 5000, position: 'top-center' }
       )
       setPendingUpload(null)
@@ -2464,11 +3311,14 @@ function AIChatPanel() {
 
       // Build a rich context prompt so Nouri responds naturally to what just happened.
       const isEs = language === 'es'
-      const itemNames = pendingUpload.rows
+      const itemNames = rowsToCreate
         .slice(0, 5)
-        .map(r => `${r.title} (${r.quantity} ${r.unit}, ${r.category})`)
+        .map((r) => {
+          const school = r.community_name || `community #${r.community_id}`
+          return `${r.title} (${r.quantity} ${r.unit}, ${r.category}, under ${school})`
+        })
         .join('; ')
-      const moreItemsCount = pendingUpload.rows.length - 5
+      const moreItemsCount = rowsToCreate.length - 5
       const moreItems = moreItemsCount > 0
         ? (isEs ? ` y ${moreItemsCount} más` : ` and ${moreItemsCount} more`)
         : ''
@@ -2478,9 +3328,17 @@ function AIChatPanel() {
       const kindLabel = pendingUpload.kind === 'photo'
         ? (isEs ? 'foto' : 'photo upload')
         : (isEs ? 'importación CSV' : 'bulk CSV upload')
+      const idList = Array.isArray(ids) && ids.length
+        ? ids.slice(0, 8).join(', ')
+        : ''
+      const approvalNote = awaitingApproval
+        ? (isEs
+          ? ' Estado: pendiente de aprobación del admin — NO digas que ya están en Find Food hasta que un admin apruebe.'
+          : ' Status: pending admin approval — do NOT say they are live on Find Food until an admin approves.')
+        : ''
       const prompt = isEs
-        ? `[Acción ya completada por el sistema] El sistema acaba de guardar ${created} publicación${created === 1 ? '' : 'es'} de comida en la base de datos mediante ${kindLabel}${failNote}. Artículos: ${itemNames}${moreItems}. NO llames a post_food_listing, create_food_listing, bulk_post_food_listings ni bulk_import_listings — la publicación YA está guardada y volver a llamar crearía duplicados. Solo responde en español, felicítame brevemente y ofrece 2-3 sugerencias de próximos pasos (revisar mis publicaciones, compartir más, ver el impacto).`
-        : `[Action already completed by the system] The system just saved ${created} food listing${created === 1 ? '' : 's'} to the database via ${kindLabel}${failNote}. Items: ${itemNames}${moreItems}. DO NOT call post_food_listing, create_food_listing, bulk_post_food_listings, or bulk_import_listings — the listing is ALREADY saved and calling again would create duplicates. Just reply with a brief congratulation and 2-3 helpful next-step suggestions (reviewing listings, sharing more, checking impact).`
+        ? `[Acción ya completada por el sistema] El sistema acaba de guardar ${created} publicación${created === 1 ? '' : 'es'} de comida en la base de datos mediante ${kindLabel}${failNote}. Artículos: ${itemNames}${moreItems}.${idList ? ` IDs: ${idList}.` : ''}${approvalNote} NO llames a post_food_listing / create_food_listing / bulk_post_food_listings / bulk_import_listings — YA están guardadas. Si el usuario pide cambiar la comunidad/escuela, cantidad, título o dirección, usa update_food_listing con listing_id. Si pregunta por SUS publicaciones, usa get_user_listings (search_food_near_user oculta las propias). Solo responde en español: felicítame brevemente y ofrece 2-3 próximos pasos (cambiar comunidad, ver mis publicaciones pendientes, compartir más).`
+        : `[Action already completed by the system] The system just saved ${created} food listing${created === 1 ? '' : 's'} to the database via ${kindLabel}${failNote}. Items: ${itemNames}${moreItems}.${idList ? ` Listing IDs: ${idList}.` : ''}${approvalNote} DO NOT call post_food_listing, create_food_listing, bulk_post_food_listings, or bulk_import_listings — they are ALREADY saved. If the user wants to change community/school, quantity, title, or address, call update_food_listing with listing_id. If they ask about THEIR listings, call get_user_listings (search_food_near_user hides the donor's own posts). Reply with a brief congratulations and 2–3 next steps (change community, review my pending listings, share more).`
       sendSilentMessage(prompt)
     } catch (err) {
       const msg = err?.message || (language === 'es' ? 'Falló la creación.' : 'Bulk create failed.')
@@ -2498,6 +3356,16 @@ function AIChatPanel() {
     setPendingUpload(prev => {
       if (!prev?.rows) return prev
       const rows = prev.rows.map((r, i) => (i === idx ? { ...r, ...patch } : r))
+      return { ...prev, rows }
+    })
+  }, [])
+
+  const updatePendingRows = useCallback((indices, patch) => {
+    const indexSet = new Set(Array.isArray(indices) ? indices : [])
+    if (!indexSet.size || !patch || typeof patch !== 'object') return
+    setPendingUpload(prev => {
+      if (!prev?.rows) return prev
+      const rows = prev.rows.map((r, i) => (indexSet.has(i) ? { ...r, ...patch } : r))
       return { ...prev, rows }
     })
   }, [])
@@ -2541,10 +3409,17 @@ function AIChatPanel() {
       source.connect(analyser)
       analyserRef.current = analyser
 
-      // Start MediaRecorder
+      // Prefer formats Whisper accepts reliably. Safari often lacks webm;
+      // fall back to mp4 so we don't upload a mystery container labelled .webm.
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
-        : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : ''
+        : MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : MediaRecorder.isTypeSupported('audio/mp4')
+            ? 'audio/mp4'
+            : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')
+              ? 'audio/ogg;codecs=opus'
+              : ''
       const recorder = mimeType
         ? new MediaRecorder(stream, { mimeType })
         : new MediaRecorder(stream)
@@ -2572,8 +3447,9 @@ function AIChatPanel() {
         }
 
         const audioBlob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' })
-        // Skip tiny recordings (< 0.5s of data, ~noise)
-        if (audioBlob.size < 5000) {
+        // Skip tiny recordings (empty breath / click). ~2KB is enough for a
+        // short "yes"/"hi" in opus; the old 5KB floor dropped real speech.
+        if (audioBlob.size < 1500) {
           setIsVoiceListening(false)
           if (handsFreeRef.current) endHandsFreeTurnRef.current?.()
           return
@@ -2602,13 +3478,13 @@ function AIChatPanel() {
       // Voice Activity Detection — stop recording after silence
       let speechDetected = false
       let silenceStart = 0
-      const SILENCE_THRESHOLD = 15  // RMS level below which = silence
-      const SILENCE_DURATION = 1800 // ms of silence before auto-stop
+      const SILENCE_THRESHOLD = 12  // RMS level below which = silence
+      const SILENCE_DURATION = 2200 // ms of silence before auto-stop
       const MAX_DURATION = 30000    // max recording duration
       // If the user never starts speaking (e.g. a hands-free re-arm where they
       // had nothing to add), don't hold the mic for the full MAX_DURATION —
       // give up after a short grace window so we can stand down to standby.
-      const NO_SPEECH_TIMEOUT = 7000
+      const NO_SPEECH_TIMEOUT = 9000
       const dataArray = new Uint8Array(analyser.frequencyBinCount)
       const startTime = Date.now()
 
@@ -3350,7 +4226,7 @@ function AIChatPanel() {
           <div className="relative w-full flex items-center justify-between gap-2 z-10">
             <button
               onClick={exitVoiceMode}
-              className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-white px-2.5 py-1.5 rounded-lg hover:bg-white/5 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+              className="inline-flex items-center gap-1.5 text-xs text-slate-600 hover:text-slate-900 px-2.5 py-1.5 rounded-lg hover:bg-slate-900/5 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
               aria-label={language === 'es' ? 'Salir del modo de voz' : 'Exit voice mode'}
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -3361,7 +4237,7 @@ function AIChatPanel() {
 
             {/* Language pill — confirms which language Whisper is listening for. */}
             <span
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/5 ring-1 ring-white/10 text-[10px] font-semibold tracking-wider uppercase text-slate-300 backdrop-blur-sm"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/5 ring-1 ring-slate-300/60 text-[10px] font-semibold tracking-wider uppercase text-slate-700 backdrop-blur-sm"
               title={language === 'es' ? 'Idioma del modo de voz' : 'Voice mode language'}
             >
               <span aria-hidden="true">{language === 'es' ? '🇪🇸' : '🇺🇸'}</span>
@@ -3374,8 +4250,8 @@ function AIChatPanel() {
                 onClick={toggleWakeWord}
                 className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold tracking-wide ring-1 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 ${
                   wakeWordEnabled
-                    ? 'bg-emerald-500/15 ring-emerald-400/40 text-emerald-300'
-                    : 'bg-white/5 ring-white/10 text-slate-400 hover:text-emerald-200'
+                    ? 'bg-emerald-500/15 ring-emerald-500/50 text-emerald-800'
+                    : 'bg-slate-900/5 ring-slate-300/70 text-slate-600 hover:text-emerald-800'
                 }`}
                 title={
                   wakeWordEnabled
@@ -3531,14 +4407,14 @@ function AIChatPanel() {
               {voiceTranscript ? (
                 <p
                   className={`text-sm italic text-center max-w-[300px] leading-snug transition-colors duration-300 ${
-                    isVoiceListening ? 'text-white/80' : 'text-slate-400/70'
+                    isVoiceListening ? 'text-white/90' : 'text-slate-600'
                   }`}
                   aria-live="polite"
                 >
                   &ldquo;{voiceTranscript}&rdquo;
                 </p>
               ) : (
-                <p className="text-[12px] text-slate-500/40 italic text-center max-w-[280px]">
+                <p className="text-[12px] text-slate-500 italic text-center max-w-[280px]">
                   {isVoiceListening
                     ? (language === 'es' ? 'Te estoy escuchando...' : 'I&apos;m listening...')
                     : isVoiceSpeaking
@@ -3554,14 +4430,14 @@ function AIChatPanel() {
             <div
               className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-medium tracking-wide transition-all duration-300 ring-1 ${
                 voiceError
-                  ? 'bg-rose-500/10 text-rose-300 ring-rose-500/30'
+                  ? 'bg-rose-500/10 text-rose-700 ring-rose-500/40'
                   : isVoiceSpeaking
-                    ? 'bg-teal-500/10 text-teal-300 ring-teal-500/30'
+                    ? 'bg-teal-500/10 text-teal-800 ring-teal-500/40'
                     : isLoading
-                      ? 'bg-violet-500/10 text-violet-300 ring-violet-500/30'
+                      ? 'bg-violet-500/10 text-violet-800 ring-violet-500/40'
                       : isVoiceListening
-                        ? 'bg-blue-500/10 text-blue-300 ring-blue-500/30'
-                        : 'bg-white/5 text-slate-400 ring-white/10'
+                        ? 'bg-blue-500/10 text-blue-700 ring-blue-500/40'
+                        : 'bg-slate-900/5 text-slate-600 ring-slate-300/70'
               }`}
               role="status"
               aria-live="polite"
@@ -3670,6 +4546,7 @@ function AIChatPanel() {
                     onConfirmAction={confirmPendingAction}
                     isLoading={isLoading}
                     currentUser={authUser}
+                    allowedCommunityIds={allowedCommunityIds}
                     onRetry={retryMessage}
                     onRegenerate={regenerateLast}
                     showRegenerate={idx === lastAssistantIdx}
@@ -3699,9 +4576,12 @@ function AIChatPanel() {
           pending={pendingUpload}
           busy={uploadBusy}
           language={language}
+          preferredCommunityId={authUser?.community_id}
+          preferredLocation={authUser?.address}
           onCancel={cancelPendingUpload}
           onConfirm={confirmBulkCreate}
           onUpdateRow={updatePendingRow}
+          onUpdateRows={updatePendingRows}
           onRemoveRow={removePendingRow}
         />
       )}
@@ -3760,9 +4640,9 @@ function AIChatPanel() {
             ))}
           </div>
         )}
-        {/* Quick-suggestion chip rail — appears mid-conversation when the
-            backend didn't return per-turn suggestions, giving the user a
-            one-tap way to keep the conversation moving. */}
+        {/* Quick-suggestion chip rail — starter chips on every new conversation;
+            mid-conversation only when the backend didn't return per-turn
+            bubble suggestions. */}
         {railChips.length > 0 && (
           <div
             role="toolbar"
@@ -3775,7 +4655,7 @@ function AIChatPanel() {
                 type="button"
                 onClick={() => handleQuickAction(chip)}
                 disabled={isLoading}
-                className="whitespace-nowrap flex-shrink-0 text-[11px] px-2.5 py-1 rounded-full border border-[#2CABE3]/25 bg-white/70 text-[#2299c7] hover:bg-[#2CABE3]/10 hover:border-[#2CABE3]/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="whitespace-nowrap flex-shrink-0 text-[11px] px-2.5 py-1 rounded-full border border-[#2CABE3]/30 bg-white/90 text-[#1a7a9e] font-medium hover:bg-[#2CABE3]/10 hover:border-[#2CABE3]/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {chip}
               </button>
@@ -3977,14 +4857,14 @@ function AIChatPanel() {
         </div>
 
         {/* Keyboard / status hint — subtle so it doesn't add visual noise */}
-        <div className="flex items-center justify-between px-1 text-[10px] text-slate-500/80">
+        <div className="flex items-center justify-between px-1 text-[10px] text-slate-600">
           <span className="hidden sm:inline">
             {language === 'es'
               ? 'Enter para enviar · Shift+Enter para línea nueva'
               : 'Enter to send · Shift+Enter for new line'}
           </span>
           <span className={`ml-auto tabular-nums transition-colors ${
-            inputText.length > 4000 ? 'text-rose-400' : inputText.length > 2000 ? 'text-amber-300/80' : 'text-slate-500/60'
+            inputText.length > 4000 ? 'text-rose-600 font-medium' : inputText.length > 2000 ? 'text-amber-700' : 'text-slate-500'
           }`}>
             {inputText.length > 0 ? `${inputText.length}` : ''}
           </span>

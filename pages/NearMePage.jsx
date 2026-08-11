@@ -1,23 +1,43 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import FoodList from '../components/food/FoodList';
 import { FilterPanel } from '../components/food/FilterPanel';
 import { useEffectiveLocation } from '../utils/hooks/useLocation';
 import Button from '../components/common/Button';
 import dataService from '../utils/dataService';
+import { useAuthContext } from '../utils/AuthContext';
+import { browseCommunityIdsForUser, listingVisibleToCommunityScope } from '../utils/communityScope';
+
+function distanceKm(lat1, lng1, lat2, lng2) {
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lng2 - lng1) * Math.PI / 180;
+    const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat1 * Math.PI / 180) *
+        Math.cos(lat2 * Math.PI / 180) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+}
 
 function NearMePage() {
+    const { user, isAdmin } = useAuthContext();
+    const allowedCommunityIds = useMemo(
+        () => browseCommunityIdsForUser(user, { isAdmin }),
+        [user?.community_id, isAdmin]
+    );
+
     const [filters, setFilters] = useState({
-        radius: 10,
         foodType: '',
         dietaryPreferences: [],
         pickupTime: ''
     });
 
-    const { 
-        location, 
-        loading: locationLoading, 
+    const {
+        location,
+        loading: locationLoading,
         error: locationError,
-        enableLocation 
+        enableLocation
     } = useEffectiveLocation();
 
     const [nearbyListings, setNearbyListings] = useState([]);
@@ -30,15 +50,20 @@ function NearMePage() {
     const lat = location?.latitude;
     const lng = location?.longitude;
     const dietaryKey = (filters.dietaryPreferences || []).join(',');
+    const communityKey = allowedCommunityIds == null ? 'all' : allowedCommunityIds.join(',');
     useEffect(() => {
         fetchNearbyListings();
-    }, [lat, lng, filters.radius, filters.foodType, dietaryKey, filters.pickupTime]);
+    }, [lat, lng, filters.foodType, dietaryKey, filters.pickupTime, communityKey, user?.id]);
 
     const fetchNearbyListings = async () => {
         setLoading(true);
         try {
-            // Fetch all approved and active listings
-            const rawListings = await dataService.getFoodListings({ status: ['approved', 'active'] });
+            const rawListings = await dataService.getFoodListings({
+                status: ['approved', 'active'],
+                listing_type: 'donation',
+                ...(user?.id ? { exclude_user_id: user.id } : {}),
+                ...(allowedCommunityIds != null ? { community_ids: allowedCommunityIds } : {}),
+            });
             // Defensive dedupe by id in case the query returns duplicates
             // (e.g. via joins or realtime echo).
             const seen = new Set();
@@ -48,59 +73,48 @@ function NearMePage() {
                 seen.add(l.id);
                 allListings.push(l);
             }
-            
-            // Filter by distance if location is available
+
+            let result = allListings.filter(listing =>
+                listingVisibleToCommunityScope(listing, allowedCommunityIds)
+            );
+
+            // Sort by distance when location is available — no radius cutoff.
             if (location && location.latitude && location.longitude) {
-                // Separate listings with coordinates (can be distance-filtered) from those without
                 const withCoords = [];
                 const withoutCoords = [];
-                allListings.forEach(listing => {
-                    if (listing.latitude && listing.longitude) {
+                result.forEach(listing => {
+                    if (listing.latitude != null && listing.longitude != null) {
+                        listing._distance = distanceKm(
+                            location.latitude,
+                            location.longitude,
+                            listing.latitude,
+                            listing.longitude
+                        );
                         withCoords.push(listing);
                     } else {
                         withoutCoords.push(listing);
                     }
                 });
-
-                const filtered = withCoords.filter(listing => {
-                    // Calculate distance using Haversine formula
-                    const R = 6371; // Earth's radius in km
-                    const dLat = (listing.latitude - location.latitude) * Math.PI / 180;
-                    const dLon = (listing.longitude - location.longitude) * Math.PI / 180;
-                    const a = 
-                        Math.sin(dLat/2) * Math.sin(dLat/2) +
-                        Math.cos(location.latitude * Math.PI / 180) * 
-                        Math.cos(listing.latitude * Math.PI / 180) *
-                        Math.sin(dLon/2) * Math.sin(dLon/2);
-                    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-                    const distance = R * c;
-                    listing._distance = distance;
-                    
-                    // Convert radius from miles to km (1 mile = 1.60934 km)
-                    const radiusKm = filters.radius * 1.60934;
-                    return distance <= radiusKm;
-                });
-                
-                // Combine: nearby items first (sorted by distance), then items without coords
-                let result = [...filtered.sort((a, b) => (a._distance || 0) - (b._distance || 0)), ...withoutCoords];
-                
-                if (filters.foodType) {
-                    result = result.filter(listing => listing.category === filters.foodType);
-                }
-                
-                if (filters.dietaryPreferences && filters.dietaryPreferences.length > 0) {
-                    result = result.filter(listing => {
-                        if (!listing.dietary_tags) return false;
-                        return filters.dietaryPreferences.some(pref => 
-                            listing.dietary_tags.includes(pref.toLowerCase())
-                        );
-                    });
-                }
-                
-                setNearbyListings(result);
-            } else {
-                setNearbyListings(allListings);
+                result = [
+                    ...withCoords.sort((a, b) => (a._distance || 0) - (b._distance || 0)),
+                    ...withoutCoords,
+                ];
             }
+
+            if (filters.foodType) {
+                result = result.filter(listing => listing.category === filters.foodType);
+            }
+
+            if (filters.dietaryPreferences && filters.dietaryPreferences.length > 0) {
+                result = result.filter(listing => {
+                    if (!listing.dietary_tags) return false;
+                    return filters.dietaryPreferences.some(pref =>
+                        listing.dietary_tags.includes(pref.toLowerCase())
+                    );
+                });
+            }
+
+            setNearbyListings(result);
         } catch (error) {
             const msg = error?.message || '';
             if (error?.name === 'AbortError' || error?.code === '20' || msg.includes('aborted')) {
@@ -139,7 +153,7 @@ function NearMePage() {
                             </span>
                         </h1>
                         <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
-                            Find free food shared by neighbors and local organizations within a distance you choose.
+                            Find free food shared by neighbors and local organizations in your community.
                         </p>
                     </div>
                 </div>
@@ -151,23 +165,19 @@ function NearMePage() {
                     {/* Step-by-step guide */}
                     <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
                         <h2 className="text-lg font-semibold text-green-800 mb-3 flex items-center">
-                            <span className="mr-2">ℹ️</span> How it works — 4 quick steps
+                            <span className="mr-2">ℹ️</span> How it works — 3 quick steps
                         </h2>
                         <ol className="space-y-2 text-sm text-gray-700">
                             <li>
                                 <span className="font-semibold text-green-700">1. Enable location</span> —
-                                click <em>Enable Location</em> below so we can show food near you. We never store your exact location.
+                                click <em>Enable Location</em> below so we can sort food by distance. We never store your exact location.
                             </li>
                             <li>
-                                <span className="font-semibold text-green-700">2. Set your distance</span> —
-                                use the radius (in miles) to control how far you’re willing to travel.
-                            </li>
-                            <li>
-                                <span className="font-semibold text-green-700">3. Filter (optional)</span> —
+                                <span className="font-semibold text-green-700">2. Filter (optional)</span> —
                                 narrow results by food type, dietary needs, or pickup time.
                             </li>
                             <li>
-                                <span className="font-semibold text-green-700">4. Claim & pick up</span> —
+                                <span className="font-semibold text-green-700">3. Claim & pick up</span> —
                                 tap a listing to see details, then claim it and coordinate pickup with the donor.
                             </li>
                         </ol>
@@ -176,7 +186,7 @@ function NearMePage() {
                     {!location && !locationLoading && (
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
                             <p className="text-sm text-gray-700 flex-1">
-                                Ready to start? Share your location and we'll show food nearby.
+                                Ready to start? Share your location and we'll sort food by distance.
                                 Your coordinates stay on your device.
                             </p>
                             <Button
@@ -188,7 +198,7 @@ function NearMePage() {
                             </Button>
                         </div>
                     )}
-                    
+
                     {locationError && (
                         <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
                             <p className="text-red-600">
@@ -200,10 +210,7 @@ function NearMePage() {
 
                 {/* Always show listings — with filters when location available, all listings otherwise */}
                 {location && (
-                    <FilterPanel
-                        onFilterChange={handleFilterChange}
-                        initialRadius={filters.radius}
-                    />
+                    <FilterPanel onFilterChange={handleFilterChange} />
                 )}
                 <div className={location ? "mt-6" : ""}>
                     {location && !loading && nearbyListings.length > 0 && (
@@ -211,19 +218,21 @@ function NearMePage() {
                             className="text-sm text-gray-600 mb-3"
                             title="Listings are sorted by distance from you. Tap any listing to view details and claim it."
                         >
-                            Showing <span className="font-semibold">{nearbyListings.length}</span> listing{nearbyListings.length === 1 ? '' : 's'} within {filters.radius} mile{filters.radius === 1 ? '' : 's'}.
+                            Showing <span className="font-semibold">{nearbyListings.length}</span> listing{nearbyListings.length === 1 ? '' : 's'}
+                            {location ? ', nearest first' : ''}.
                             Tap a listing to view details and claim it.
                         </p>
                     )}
                     {location && !loading && nearbyListings.length === 0 && (
                         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4 text-sm text-gray-700">
-                            No listings found in this area. Try widening the radius or clearing filters.
+                            No listings found right now. Try clearing filters or check back later.
                         </div>
                     )}
                     <FoodList
                         foods={nearbyListings}
                         loading={loading}
                         showDistance={!!location}
+                        showFilters={false}
                     />
                 </div>
             </div>

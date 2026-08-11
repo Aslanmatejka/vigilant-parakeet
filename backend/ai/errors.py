@@ -96,6 +96,14 @@ class AIDatabaseError(AIError):
     retryable = True
 
 
+class AIInvalidInput(AIError):
+    """Caller sent unusable input (e.g. unintelligible voice audio)."""
+    status_code = 400
+    canned_key = "invalid_input"
+    error_code = "invalid_input"
+    retryable = False
+
+
 # ---------------------------------------------------------------------------
 # Language detection
 # ---------------------------------------------------------------------------
@@ -118,5 +126,6 @@ __all__ = [
     "AIUpstreamError",
     "AIServiceUnavailable",
     "AIDatabaseError",
+    "AIInvalidInput",
     "resolve_lang",
 ]

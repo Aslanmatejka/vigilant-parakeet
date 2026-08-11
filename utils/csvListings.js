@@ -58,6 +58,15 @@ const HEADER_ALIASES = {
   allergy: 'allergens',
   allergies: 'allergens',
   'allergy info': 'allergens',
+  community: 'community_name',
+  community_name: 'community_name',
+  'community name': 'community_name',
+  school: 'community_name',
+  'school name': 'community_name',
+  'school/community': 'community_name',
+  community_id: 'community_id',
+  'community id': 'community_id',
+  school_id: 'community_id',
 }
 
 const REQUIRED = ['title', 'quantity', 'unit', 'category']
@@ -169,7 +178,7 @@ export function parseListingsCsv(text) {
       rows: [],
       errors: [
         'Your CSV only has a header row — please add at least one data row below the headers.',
-        `Expected columns: title, quantity, unit, category (and optionally: description, expiry_date, location, dietary_tags, allergens)`,
+        `Expected columns: title, quantity, unit, category (and optionally: description, expiry_date, location, dietary_tags, allergens, community)`,
       ],
       headers: rawRows[0]?.map(h => h.trim()) || [],
       delimiter,
@@ -223,21 +232,103 @@ export function parseListingsCsv(text) {
     if (obj.location) row.location = obj.location.slice(0, 200)
     if (obj.dietary_tags) row.dietary_tags = parseListField(obj.dietary_tags)
     if (obj.allergens) row.allergens = parseListField(obj.allergens)
-    rows.push(row)
+    // Per-row community — never discard. Recipients only see food for their
+    // school (+ warehouse); wrong community_id at import looks like a leak.
+    const rawCid = String(obj.community_id || '').trim()
+    const rawCname = String(obj.community_name || '').trim()
+    if (rawCid) {
+      if (/^\d+$/.test(rawCid)) {
+        row.community_id = rawCid.slice(0, 64)
+      } else if (!rawCname) {
+        // Non-numeric "community_id" cell is usually a school name.
+        row.community_name = rawCid.slice(0, 200)
+      } else {
+        row.community_id = rawCid.slice(0, 64)
+      }
+    }
+    if (rawCname) row.community_name = rawCname.slice(0, 200)
+    rows.push(sanitizeListingExpiry(row))
   }
 
   return { rows, errors, headers: rawHeaders, delimiter }
+}
+
+/** YYYY-MM-DD for today + N days (local calendar). */
+function datePlusDays(days) {
+  const d = new Date()
+  d.setDate(d.getDate() + days)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+/**
+ * Suggested default expiry (days from today) by category when missing/past.
+ * Find Food hides rows with expiry_date < today, so past dates look like
+ * "only one listing posted".
+ */
+const CATEGORY_EXPIRY_DAYS = {
+  produce: 5,
+  bakery: 3,
+  dairy: 7,
+  meat: 3,
+  prepared: 2,
+  pantry: 180,
+  other: 14,
+}
+
+/**
+ * If expiry is missing or already past, replace with a category-based
+ * future date so CSV imports remain visible on Find Food.
+ *
+ * @param {object} row
+ * @returns {object}
+ */
+export function sanitizeListingExpiry(row) {
+  if (!row || typeof row !== 'object') return row
+  const today = datePlusDays(0)
+  const raw = String(row.expiry_date || '').trim().slice(0, 10)
+  if (raw && /^\d{4}-\d{2}-\d{2}$/.test(raw) && raw >= today) {
+    return row
+  }
+  const cat = String(row.category || 'other').toLowerCase()
+  const days = CATEGORY_EXPIRY_DAYS[cat] ?? CATEGORY_EXPIRY_DAYS.other
+  return { ...row, expiry_date: datePlusDays(days) }
+}
+
+/**
+ * Match a free-text community/school label to a community row.
+ * Used after CSV parse so per-row names become community_id before publish.
+ */
+export function matchCommunityByName(query, communities) {
+  const q = String(query || '').trim().toLowerCase()
+  if (!q || !Array.isArray(communities) || !communities.length) return null
+  const exact = communities.find(
+    (c) => String(c?.name || '').trim().toLowerCase() === q,
+  )
+  if (exact) return exact
+  const contains = communities.find((c) => {
+    const name = String(c?.name || '').trim().toLowerCase()
+    return name && (name.includes(q) || q.includes(name))
+  })
+  return contains || null
 }
 
 /**
  * Generate and trigger a download of the CSV template file.
  */
 export function downloadCsvTemplate() {
-  const headers = ['title', 'quantity', 'unit', 'category', 'description', 'expiry_date', 'dietary_tags', 'allergens', 'location']
+  const headers = [
+    'title', 'quantity', 'unit', 'category', 'description', 'expiry_date',
+    'dietary_tags', 'allergens', 'location', 'community',
+  ]
+  // Keep example expiry dates in the future so the template itself is usable.
+  // Different community names show that each row can target a different school.
   const examples = [
-    ['Fresh Apples', '10', 'lbs', 'produce', 'Crisp Fuji apples from local farm', '2026-06-10', 'vegan,gluten-free', '', '123 Main St'],
-    ['Whole Wheat Bread', '5', 'loaves', 'bakery', 'Freshly baked today', '2026-05-31', 'vegetarian', 'gluten', ''],
-    ['Canned Beans', '20', 'cans', 'pantry', 'Black beans, unopened', '2027-01-01', 'vegan,gluten-free', '', ''],
+    ['Fresh Apples', '10', 'lbs', 'produce', 'Crisp Fuji apples from local farm', datePlusDays(5), 'vegan,gluten-free', '', '', 'Do Good Warehouse'],
+    ['Whole Wheat Bread', '5', 'loaves', 'bakery', 'Freshly baked today', datePlusDays(3), 'vegetarian', 'gluten', '', ''],
+    ['Canned Beans', '20', 'cans', 'pantry', 'Black beans, unopened', datePlusDays(180), 'vegan,gluten-free', '', '', ''],
   ]
   const csvContent = [
     headers.join(','),
@@ -276,6 +367,7 @@ export function visionDraftToRow(draft) {
     location: draft.location ? String(draft.location).slice(0, 200) : undefined,
     expiry_date: draft.expiry_date ? String(draft.expiry_date).slice(0, 40) : undefined,
     community_id: draft.community_id ? String(draft.community_id).slice(0, 64) : undefined,
+    community_name: draft.community_name ? String(draft.community_name).slice(0, 200) : undefined,
   }
 }
 

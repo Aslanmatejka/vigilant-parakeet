@@ -153,6 +153,11 @@ export function useAIChat() {
               toolResults: Array.isArray(msg.metadata?.actions)
                 ? normalizeToolResults(msg.metadata.actions)
                 : [],
+              suggestions: Array.isArray(msg.metadata?.suggestions)
+                ? msg.metadata.suggestions
+                : [],
+              requiresConfirmation: !!msg.metadata?.requires_confirmation,
+              pendingAction: msg.metadata?.pending_action || null,
               fromHistory: true,
               timestamp: msg.created_at,
             }
@@ -470,6 +475,8 @@ export function useAIChat() {
         toolResults: result.toolResults || [],
         suggestions: result.suggestions || [],
         action: normalizeAssistantAction(result.action),
+        requiresConfirmation: !!result.requiresConfirmation,
+        pendingAction: result.pendingAction || null,
         source: 'voice',
         degraded: !!result.degraded,
         requestId: result.requestId || null,

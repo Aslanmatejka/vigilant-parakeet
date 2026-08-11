@@ -10,6 +10,9 @@ python-multipart>=0.0.6
 # directly instead of relying on the langchain-community transitive dep,
 # so future langchain upgrades cannot silently break production boot).
 sqlalchemy>=2.0,<3.0
+# Drivers used by DATABASE_URL schemes in production / local scripts.
+psycopg2-binary>=2.9.9
+pymysql>=1.1.0
 
 # OpenAI SDK
 openai>=1.10.0

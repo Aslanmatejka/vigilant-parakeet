@@ -57,7 +57,24 @@ def generate_referral_code():
     alphabet = string.ascii_uppercase + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(8))
 
-app = FastAPI(title="DoGoods Agentic API", version="1.0.0")
+# Docs: on in local/dev; off in production unless ENABLE_API_DOCS=true.
+# Note: Railway/env vars are set before process start (load_dotenv runs after
+# this line and only affects vars not already present).
+_IS_PROD = os.getenv(
+    "ENVIRONMENT", os.getenv("RAILWAY_ENVIRONMENT", "")
+).strip().lower() in {"production", "prod"}
+_ENABLE_API_DOCS = os.getenv("ENABLE_API_DOCS", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+_DOCS_URL = "/docs" if (_ENABLE_API_DOCS or not _IS_PROD) else None
+_REDOC_URL = "/redoc" if (_ENABLE_API_DOCS or not _IS_PROD) else None
+
+app = FastAPI(
+    title="DoGoods Agentic API",
+    version="1.0.0",
+    docs_url=_DOCS_URL,
+    redoc_url=_REDOC_URL,
+)
 load_aws_secrets()
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
@@ -195,8 +212,9 @@ MAX_API_BODY_BYTES = 64 * 1024
 # their own size caps. Keep these slightly above the handler cap so we don't
 # pre-empt the handler's friendlier error message.
 UPLOAD_PATH_LIMITS = {
-    "/api/ai/voice": 26 * 1024 * 1024,        # handler caps at 25MB
-    "/api/ai/upload_image": 9 * 1024 * 1024,  # handler caps at 8MB
+    "/api/ai/voice": 26 * 1024 * 1024,           # handler caps at 25MB
+    "/api/ai/upload_image": 9 * 1024 * 1024,     # handler caps at 8MB
+    "/api/ai/vision-listing": 9 * 1024 * 1024,   # handler caps at 8MB
 }
 
 
@@ -895,6 +913,18 @@ app.include_router(ai_router)
 # Create tables
 @app.on_event("startup")
 async def startup_event():
+    # Fail loud in production when the live Supabase path is misconfigured.
+    # Hermetic tests stay on ENVIRONMENT!=production so they can boot without keys.
+    if _IS_PROD:
+        from backend.ai_engine import SUPABASE_SERVICE_KEY, SUPABASE_URL
+
+        if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+            raise RuntimeError(
+                "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_KEY) "
+                "are required when ENVIRONMENT/RAILWAY_ENVIRONMENT is production. "
+                "Without them Find Food / Nouri return empty results silently."
+            )
+
     # Ensure tables exist
     Base.metadata.create_all(bind=engine)
     # Recover any listings stuck in 'pending_confirmation' from a previous
@@ -2661,21 +2691,34 @@ async def update_trust_score(
     db: Session = Depends(get_db),
     credentials: HTTPAuthorizationCredentials = Depends(security)
 ):
-    """Update user trust score (internal use or admin)"""
+    """Admin-only trust score mutation.
+
+    Previously any authenticated user could self-bump score / mark
+    email|phone verified. Trust changes must come from verified server
+    flows (e.g. email verification) or admins.
+    """
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        user_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
-        if user_id is None:
+        actor_id = int(payload.get("sub")) if payload and payload.get("sub") is not None else None
+        if actor_id is None:
             raise HTTPException(status_code=401, detail="Invalid token")
-        
+
+        actor = db.query(User).filter(User.id == actor_id).first()
+        if not actor or actor.role != UserRole.ADMIN:
+            raise HTTPException(status_code=403, detail="Admin role required")
+
         data = await request.json()
-        action = data.get('action')  # 'completed_exchange', 'positive_feedback', 'verified_pickup', etc.
-        
-        user = db.query(User).filter(User.id == user_id).first()
+        action = data.get('action')
+        target_id = data.get('user_id') or actor_id
+        try:
+            target_id = int(target_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="user_id must be an integer")
+
+        user = db.query(User).filter(User.id == target_id).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        # Update based on action
+
         trust_increase = 0
         if action == 'completed_exchange':
             user.completed_exchanges = getattr(user, 'completed_exchanges', 0) + 1
@@ -2692,26 +2735,27 @@ async def update_trust_score(
         elif action == 'phone_verified':
             user.phone_verified = True
             trust_increase = 5
-        
-        # Update trust score (cap at 100)
+        else:
+            raise HTTPException(status_code=400, detail="Unknown or missing action")
+
         current_score = getattr(user, 'trust_score', 50)
         user.trust_score = min(100, current_score + trust_increase)
-        
+
         db.commit()
-        
+
         return {
             "success": True,
             "new_trust_score": user.trust_score,
-            "increase": trust_increase
+            "increase": trust_increase,
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/listings/create")
-async def create_listing(donor_id: int, title: str, desc: str, category: FoodCategory, qty: float, unit: str, perishability: PerishabilityLevel, address: str,  pickup_start: str, pickup_end: str, est_w: float = 0, images: Optional[str] = None, db: Session = Depends(get_db), credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_security)):
+async def create_listing(donor_id: int, title: str, desc: str, category: FoodCategory, qty: float, unit: str, perishability: PerishabilityLevel, address: str,  pickup_start: str, pickup_end: str, est_w: float = 0, images: Optional[str] = None, db: Session = Depends(get_db), credentials: HTTPAuthorizationCredentials = Depends(security)):
     """
     Create a FoodResource and attempt server-side geocoding using Mapbox when an address is provided
     and coords are not supplied. Returns the created listing as JSON.
@@ -2719,34 +2763,28 @@ async def create_listing(donor_id: int, title: str, desc: str, category: FoodCat
     `images` may be a JSON-encoded array of URL strings (e.g. paths returned by
     /api/ai/upload_image) to attach as listing photos.
 
-    SECURITY: the authoritative donor_id is taken from the JWT (Authorization
-    header). The legacy `donor_id` URL parameter is kept for backward
-    compatibility but is IGNORED when a valid token is present — otherwise a
-    stale `localStorage.current_user` on the client could cause a listing to
-    be attributed to the wrong user (and surface that user's profile address
-    on the listing card).
+    SECURITY: JWT is required. The authoritative donor_id is taken from the
+    token `sub`. The legacy `donor_id` parameter is kept for backward
+    compatibility but is always overridden by the authenticated user.
     """
     try:
-        # Resolve the authenticated donor from the JWT. Fall back to the URL
-        # parameter only if no token was supplied (legacy callers); never
-        # silently trust a client-supplied id when auth context disagrees.
-        authed_donor_id: Optional[int] = None
-        if credentials and getattr(credentials, "credentials", None):
-            try:
-                payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-                sub = payload.get("sub") if isinstance(payload, dict) else None
-                if sub is not None:
-                    authed_donor_id = int(sub)
-            except Exception:
-                raise HTTPException(status_code=401, detail="Your session is missing or expired. Please sign in to continue.")
+        try:
+            payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            sub = payload.get("sub") if isinstance(payload, dict) else None
+            if sub is None:
+                raise HTTPException(status_code=401, detail="Invalid token")
+            authed_donor_id = int(sub)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=401, detail="Your session is missing or expired. Please sign in to continue.")
 
-        if authed_donor_id is not None:
-            if int(donor_id) != authed_donor_id:
-                try:
-                    print(f"[create_listing] overriding client donor_id={donor_id} with authenticated id={authed_donor_id}")
-                except Exception:
-                    pass
-            donor_id = authed_donor_id
+        if int(donor_id) != authed_donor_id:
+            try:
+                print(f"[create_listing] overriding client donor_id={donor_id} with authenticated id={authed_donor_id}")
+            except Exception:
+                pass
+        donor_id = authed_donor_id
 
         # Enforce that donor has a phone number on file
         donor = db.query(User).filter(User.id == int(donor_id)).first()

@@ -1,6 +1,14 @@
-import React, { useEffect } from 'react';
-import { Navigate } from 'react-router-dom';
+import React from 'react';
+import { Navigate, useLocation } from 'react-router-dom';
 import { useAuthContext } from '../../utils/AuthContext';
+
+function LoadingScreen() {
+  return (
+    <div className="flex items-center justify-center min-h-screen">
+      <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-[#2CABE3]" />
+    </div>
+  );
+}
 
 /**
  * AdminRoute - Protected route component that redirects to login if:
@@ -9,27 +17,22 @@ import { useAuthContext } from '../../utils/AuthContext';
  */
 function AdminRoute({ children }) {
   const { isAuthenticated, isAdmin, loading, initialized } = useAuthContext();
+  const location = useLocation();
 
-  // If localStorage says admin, show page immediately (even during init)
-  if (isAuthenticated && isAdmin) {
-    return children;
+  if (loading || !initialized) {
+    return <LoadingScreen />;
   }
 
-  // Show loading state while checking authentication
-  if (loading || !initialized) {
+  if (!isAuthenticated) {
+    const redirectPath = location.pathname + location.search;
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-[#2CABE3]"></div>
-      </div>
+      <Navigate
+        to={`/login?redirect=${encodeURIComponent(redirectPath || '/admin')}`}
+        replace
+      />
     );
   }
 
-  // Redirect to login if not authenticated
-  if (!isAuthenticated) {
-    return <Navigate to="/login?redirect=/admin" replace />;
-  }
-
-  // Redirect to homepage if authenticated but not admin
   if (!isAdmin) {
     return <Navigate to="/" replace />;
   }

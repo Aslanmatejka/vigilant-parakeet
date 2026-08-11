@@ -38,7 +38,7 @@ export function useCommunityRole() {
         }
     }, [user?.id, user?.community_role])
 
-    return String(role || '').toLowerCase()
+    return String(role || '').trim().toLowerCase()
 }
 
 export default useCommunityRole

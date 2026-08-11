@@ -22,7 +22,52 @@ from backend.ai.conversation_flow import (
     is_finding_flow,
     is_request_flow,
     posting_tool_block_reason,
+    update_new_share_block_reason,
 )
+
+
+class TestUpdateNewShareGuard:
+    """A fresh share of a new food must not overwrite an existing listing."""
+
+    def test_blocks_update_on_fresh_share(self):
+        history = [
+            {"role": "user", "message": "I want to share 5 apples"},
+            {"role": "assistant", "message": "Posted! Apples are up."},
+        ]
+        reason = update_new_share_block_reason(
+            "update_food_listing",
+            {"title": "Carrots", "quantity": 3},
+            "I want to share 3 carrots",
+            history,
+            "u-1",
+        )
+        assert reason is not None
+        assert "post_food_listing" in reason
+
+    def test_allows_explicit_edit_verb(self):
+        reason = update_new_share_block_reason(
+            "update_food_listing",
+            {"title": "Apples", "quantity": 10},
+            "update the apples to 10",
+            [],
+            "u-1",
+        )
+        assert reason is None
+
+    def test_allows_index_reference(self):
+        reason = update_new_share_block_reason(
+            "update_food_listing",
+            {"quantity": 10},
+            "share #2 change qty to 10",
+            [],
+            "u-1",
+        )
+        assert reason is None
+
+    def test_ignores_non_update_tools(self):
+        assert update_new_share_block_reason(
+            "post_food_listing", {}, "I want to share bread", [], "u-1",
+        ) is None
 
 
 class TestFlowDetection:
@@ -62,6 +107,34 @@ class TestFlowDetection:
         ]
         msg = "i have a large family of 10 people, i need some food"
         assert detect_conversation_flow(msg, history) == "finding"
+
+    def test_want_some_food_is_finding(self):
+        assert detect_conversation_flow("i want some food") == "finding"
+        assert is_finding_flow("Something easy to prepare")
+
+    def test_phantom_claim_qty_loop_breaks_on_denial(self):
+        """Help menu → mistaken qty ask must not trap the user in claiming."""
+        history = [
+            {
+                "role": "assistant",
+                "message": (
+                    "You can find free food near you, check pickups, or see events. "
+                    "Which one would you like to try first?"
+                ),
+            },
+            {"role": "user", "message": "Something easy to prepare"},
+            {
+                "role": "assistant",
+                "message": (
+                    "Looks like you're already in the middle of claiming some food. "
+                    "How many would you like from that option?"
+                ),
+            },
+        ]
+        assert detect_conversation_flow("i want some food", history) == "finding"
+        assert detect_conversation_flow("i dont have any", history) == "finding"
+        assert detect_conversation_flow("we havent talked about anything", history) == "finding"
+        assert detect_conversation_flow("which claim is it?", history) == "finding"
 
     def test_multi_pick_not_posting(self):
         history = [
@@ -124,10 +197,23 @@ class TestClaimQuantity:
         assert "listing" in r.lower()
 
     def test_active_claim_on_vague_qty_answer(self):
+        # Qty wait only sticks when search/listing context exists (avoids
+        # phantom claim loops after help-menu mistakes).
         history = [
+            {
+                "role": "assistant",
+                "message": "Here's what's close near you: 1. Bread — 6 loaves",
+            },
+            {"role": "user", "message": "1"},
             {"role": "assistant", "message": "Nice choice — how many do you want?"},
         ]
         assert detect_conversation_flow("certain amount of them", history) == "claiming"
+
+    def test_qty_ask_without_search_is_not_claiming(self):
+        history = [
+            {"role": "assistant", "message": "Nice choice — how many do you want?"},
+        ]
+        assert detect_conversation_flow("certain amount of them", history) != "claiming"
 
     def test_resolve_listing_index_to_uuid(self):
         listings = [

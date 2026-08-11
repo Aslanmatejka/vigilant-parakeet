@@ -1,5 +1,5 @@
 import React from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import Avatar from "../components/common/Avatar";
 import Button from "../components/common/Button";
 import ProfileStats from "../components/profile/ProfileStats";
@@ -14,11 +14,17 @@ import { reportError } from '../utils/helpers';
 
 function ProfilePageContent() {
     const navigate = useNavigate();
+    const location = useLocation();
     const { user: authUser, isAuthenticated, uploadAvatar } = useAuthContext();
     const { profile, loading: profileLoading, error: profileError } = useUserProfile(authUser?.id);
     const { listings, loading: listingsLoading, error: listingsError, deleteListing } = useFoodListings({ user_id: authUser?.id });
 
-    const [activeTab, setActiveTab] = React.useState('profile');
+    const searchParams = new URLSearchParams(location.search);
+    const tabParam = searchParams.get('tab');
+    const filterParam = searchParams.get('filter');
+    const [activeTab, setActiveTab] = React.useState(
+        tabParam === 'listings' ? 'listings' : 'profile'
+    );
     const [impact, setImpact] = React.useState(null);
     const [impactLoading, setImpactLoading] = React.useState(true);
     const [uploading, setUploading] = React.useState(false);
@@ -40,6 +46,12 @@ function ProfilePageContent() {
             setUploading(false);
         }
     };
+
+    React.useEffect(() => {
+        if (tabParam === 'listings') {
+            setActiveTab('listings');
+        }
+    }, [tabParam]);
 
     React.useEffect(() => {
         if (!isAuthenticated) {
@@ -69,7 +81,7 @@ function ProfilePageContent() {
             setImpact({
                 totalListings: 0,
                 activeListings: 0,
-                pendingListings: 0,
+                expiredListings: 0,
                 claimedListings: 0,
                 totalFoodShared: 0,
                 foodClaimed: 0,
@@ -130,6 +142,11 @@ function ProfilePageContent() {
     }, [fetchUserImpact, authUser]);
 
     const handleEditListing = (listing) => {
+        // Food requests have no photos and use the request form, not Share Food.
+        if (String(listing?.listing_type || '').toLowerCase() === 'request') {
+            navigate('/request');
+            return;
+        }
         navigate(`/share?edit=${listing.id}`);
     };
 
@@ -286,6 +303,11 @@ function ProfilePageContent() {
                                 listings={listings || []}
                                 onEdit={handleEditListing}
                                 onDelete={handleDeleteListing}
+                                initialFilter={
+                                    ['pending', 'active', 'completed', 'all', 'requests'].includes(filterParam)
+                                        ? filterParam
+                                        : 'active'
+                                }
                             />
                         )}
                     </div>

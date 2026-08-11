@@ -5,15 +5,22 @@ import Button from '../common/Button';
 import { useAuthContext } from '../../utils/AuthContext';
 import supabase from '../../utils/supabaseClient';
 import { API_CONFIG } from '../../utils/config';
+import dataService from '../../utils/dataService';
 
 function FoodForm({
     initialData = null,
     onSubmit,
     loading = false
 }) {
-    const { user } = useAuthContext();
+    const { user, isAdmin } = useAuthContext();
     const [communities, setCommunities] = useState([]);
     const [loadingCommunities, setLoadingCommunities] = useState(true);
+    const [requireApproval, setRequireApproval] = useState(true);
+    const communityLocked = Boolean(
+        initialData?.lockCommunity
+        || initialData?.community_id
+        || initialData?.fulfilling_request_id
+    );
     
     const [formData, setFormData] = useState({
         title: '',
@@ -30,13 +37,13 @@ function FoodForm({
         donor_city: '',
         donor_state: '',
         school_district: '',
+        community_id: null,
         donor_email: '',
         donor_phone: '',
         full_address: '',
         latitude: null,
         longitude: null,
         image: null,
-        status: 'pending',
         dietary_tags: [],
         allergens: [],
         ingredients: '',
@@ -49,18 +56,13 @@ function FoodForm({
     useEffect(() => {
         const fetchCommunities = async () => {
             try {
-                console.log('Fetching communities from database...');
                 const { data, error } = await supabase
                     .from('communities')
                     .select('id, name')
                     .eq('is_active', true)
                     .order('name', { ascending: true });
 
-                if (error) {
-                    console.error('Error fetching communities:', error);
-                    throw error;
-                }
-                console.log('Fetched communities:', data);
+                if (error) throw error;
                 setCommunities(data || []);
             } catch (error) {
                 console.error('Error fetching communities:', error);
@@ -71,33 +73,105 @@ function FoodForm({
         };
 
         fetchCommunities();
+        dataService.getRequireListingApproval().then(setRequireApproval).catch(() => setRequireApproval(true));
     }, []);
 
-    // Pre-fill donor information from user profile
+    // Prefill donor fields + default school community from signup (non-admins).
+    // When fulfilling a food request, never overwrite the request's community.
     useEffect(() => {
-        if (user && !initialData) {
-            setFormData(prev => ({
+        if (!user) return;
+
+        const userCommunity = communities.find(
+            (c) => String(c.id) === String(user.community_id)
+        );
+        setFormData((prev) => ({
+            ...prev,
+            donor_name: prev.donor_name || user.name || '',
+            donor_email: prev.donor_email || user.email || '',
+            donor_phone: prev.donor_phone || user.phone || '',
+            donor_city: prev.donor_city || user.city || '',
+            donor_state: prev.donor_state || user.state || '',
+            donor_zip: prev.donor_zip || user.zip_code || '',
+            school_district:
+                prev.school_district
+                || (communityLocked ? '' : (!isAdmin && userCommunity?.name) || '')
+                || '',
+            community_id: prev.community_id || (communityLocked ? null : user.community_id) || null,
+        }));
+    }, [user, communities, isAdmin, communityLocked]);
+
+    // Apply initialData when it arrives (edit listing async load, request prefill).
+    useEffect(() => {
+        if (!initialData) return;
+
+        setFormData((prev) => ({
+            ...prev,
+            title: initialData.title ?? prev.title,
+            description: initialData.description ?? prev.description,
+            category: initialData.category ?? prev.category,
+            quantity: initialData.quantity ?? prev.quantity,
+            unit: initialData.unit ?? prev.unit,
+            expiry_date: initialData.expiry_date ?? prev.expiry_date,
+            pickup_by: initialData.pickup_by ?? prev.pickup_by,
+            donor_type: initialData.donor_type ?? prev.donor_type,
+            donor_name: initialData.donor_name ?? prev.donor_name,
+            donor_occupation: initialData.donor_occupation ?? prev.donor_occupation,
+            donor_zip: initialData.donor_zip ?? prev.donor_zip,
+            donor_city: initialData.donor_city ?? prev.donor_city,
+            donor_state: initialData.donor_state ?? prev.donor_state,
+            school_district: initialData.school_district ?? prev.school_district,
+            community_id: initialData.community_id ?? prev.community_id,
+            donor_email: initialData.donor_email ?? prev.donor_email,
+            donor_phone: initialData.donor_phone ?? prev.donor_phone,
+            full_address: initialData.full_address ?? prev.full_address,
+            latitude: initialData.latitude ?? prev.latitude,
+            longitude: initialData.longitude ?? prev.longitude,
+            dietary_tags: initialData.dietary_tags ?? prev.dietary_tags,
+            allergens: initialData.allergens ?? prev.allergens,
+            ingredients: initialData.ingredients ?? prev.ingredients,
+        }));
+    }, [initialData]);
+
+    // Resolve community name from community_id (request fulfill / Nouri deep link).
+    useEffect(() => {
+        if (!communities.length) return;
+        const cid = formData.community_id || initialData?.community_id;
+        if (!cid) return;
+        const match = communities.find((c) => String(c.id) === String(cid));
+        if (!match) return;
+        setFormData((prev) => {
+            if (
+                String(prev.community_id) === String(match.id)
+                && prev.school_district === match.name
+            ) {
+                return prev;
+            }
+            return {
                 ...prev,
-                donor_name: user.name || '',
-                donor_email: user.email || '',
-                donor_phone: user.phone || '',
-                donor_city: user.city || '',
-                donor_state: user.state || '',
-                donor_zip: user.zip_code || '',
-            }));
-        }
-    }, [user, initialData]);
-    // Show approval info
-    const approvalInfo = (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+                community_id: match.id,
+                school_district: match.name,
+            };
+        });
+    }, [communities, formData.community_id, initialData?.community_id]);
+
+    const sharingGuidelines = (
+        <div className={`${requireApproval ? 'bg-amber-50 border-amber-200' : 'bg-blue-50 border-blue-200'} border rounded-lg p-4 mb-6`}>
             <div className="flex items-start">
                 <div className="flex-shrink-0 pt-0.5">
-                    <i className="fas fa-info-circle text-blue-500" aria-hidden="true"></i>
+                    <i className={`fas fa-info-circle ${requireApproval ? 'text-amber-500' : 'text-blue-500'}`} aria-hidden="true"></i>
                 </div>
                 <div className="ml-3">
-                    <h3 className="text-sm font-medium text-blue-800">Food Donation Approval Required</h3>
-                    <div className="mt-2 text-sm text-blue-700">
-                        <p>Thank you for your generosity. Every donation goes through an approval process with our small team to ensure the safety of our donors and recipients. This process may take some time. You will receive an update once your donation is approved with instructions on where to bring your donation.</p>
+                    <h3 className={`text-sm font-medium ${requireApproval ? 'text-amber-800' : 'text-blue-800'}`}>
+                        {requireApproval
+                            ? 'Your listing will wait for admin approval'
+                            : 'Your listing goes live immediately'}
+                    </h3>
+                    <div className={`mt-2 text-sm ${requireApproval ? 'text-amber-700' : 'text-blue-700'}`}>
+                        <p>
+                            {requireApproval
+                                ? 'Thank you for your generosity. An admin reviews new posts before they appear on Find Food. Please only share food that is safe and correctly labeled.'
+                                : 'Thank you for your generosity. Neighbors can claim it on Find Food right away. Please only share food that is safe and correctly labeled.'}
+                        </p>
                     </div>
                 </div>
             </div>
@@ -321,7 +395,6 @@ function FoodForm({
         if (!formData.donor_city) newErrors.donor_city = 'City is required';
         if (!formData.donor_state) newErrors.donor_state = 'State is required';
         if (!formData.donor_email && !formData.donor_phone) newErrors.donor_email = 'Email or phone is required';
-        if (!formData.donor_occupation) newErrors.donor_occupation = 'Occupation is required';
         if (!formData.full_address) newErrors.full_address = 'Full address is required for map location';
         // Only require geocoding if address is provided and geocoding is not in progress
         if (formData.full_address && (!formData.latitude || !formData.longitude) && !geocoding) {
@@ -367,8 +440,8 @@ function FoodForm({
 
         if (validateForm()) {
             try {
-                // Set status to pending
-                await onSubmit({ ...formData, status: 'pending' });
+                // Publish — status resolved by dataService (pending when approval required).
+                await onSubmit({ ...formData });
             } catch (error) {
                 console.error('Form submission error:', error);
                 setSubmitError('Failed to submit listing. Please try again.');
@@ -384,7 +457,7 @@ function FoodForm({
             aria-label="Food listing form"
             noValidate
         >
-            {approvalInfo}
+            {sharingGuidelines}
             {submitError && (
                 <div 
                     className="bg-red-50 border border-red-200 rounded-lg p-4" 
@@ -500,17 +573,53 @@ function FoodForm({
                         name="school_district"
                         type="select"
                         value={formData.school_district}
-                        onChange={handleChange}
+                        onChange={(e) => {
+                            const name = e.target.value;
+                            const match = communities.find((c) => c.name === name);
+                            setFormData((prev) => ({
+                                ...prev,
+                                school_district: name,
+                                community_id: match?.id || null,
+                            }));
+                            if (errors.school_district) {
+                                setErrors((prev) => {
+                                    const next = { ...prev };
+                                    delete next.school_district;
+                                    return next;
+                                });
+                            }
+                        }}
                         error={errors.school_district}
-                        disabled={loadingCommunities}
+                        disabled={
+                            loadingCommunities
+                            || communityLocked
+                            || (!isAdmin && !!user?.community_id)
+                        }
                         options={[
                             { value: '', label: loadingCommunities ? 'Loading communities...' : 'Select Community' },
-                            ...communities.map(community => ({
-                                value: community.name,
-                                label: community.name
-                            }))
+                            ...communities
+                                .filter((community) => {
+                                    if (communityLocked && formData.community_id) {
+                                        return String(community.id) === String(formData.community_id);
+                                    }
+                                    if (communityLocked && formData.school_district) {
+                                        return community.name === formData.school_district;
+                                    }
+                                    if (isAdmin || !user?.community_id) return true;
+                                    return String(community.id) === String(user.community_id);
+                                })
+                                .map(community => ({
+                                    value: community.name,
+                                    label: community.name
+                                }))
                         ]}
-                        helperText="choose a community"
+                        helperText={
+                            communityLocked
+                                ? 'Locked to the community of the food request'
+                                : (!isAdmin && user?.community_id
+                                    ? 'Locked to your signup community'
+                                    : 'Choose a community')
+                        }
                     />
                     <Input
                         label="Email"
@@ -575,9 +684,8 @@ function FoodForm({
                         value={formData.donor_occupation}
                         onChange={handleChange}
                         error={errors.donor_occupation}
-                        required
                         maxLength={100}
-                        helperText="Your occupation or role in the organization."
+                        helperText="Optional — your occupation or role in the organization."
                     />
                     <Input
                     label="Donor Type"

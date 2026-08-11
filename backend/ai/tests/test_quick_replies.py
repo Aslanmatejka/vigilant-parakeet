@@ -87,6 +87,26 @@ def test_yes_no_fallback_only_when_truly_yes_no():
     assert "Yes" in out and "No" in out
 
 
+def test_help_menu_does_not_get_claim_pick_chips():
+    """Regression: orientation menus used to emit 1/2/3 + easy-to-prepare."""
+    out = generate_quick_replies(
+        "You can find free food near you, check pickups, or see events. "
+        "Which one would you like to try first?"
+    )
+    assert "Something easy to prepare" not in out
+    assert "1" not in out
+    joined = " ".join(out).lower()
+    assert "find" in joined or "share" in joined or "pickup" in joined
+
+
+def test_real_search_results_still_get_pick_chips():
+    out = generate_quick_replies(
+        "Here's what's close near you: 1. Bread 2. Apples. Which one would you like?"
+    )
+    assert "1" in out
+    assert "Something easy to prepare" in out
+
+
 # ---------------------------------------------------------------------------
 # Spanish coverage — every English branch must have a working ES counterpart.
 # ---------------------------------------------------------------------------
@@ -194,7 +214,7 @@ def test_foolproof_help_menu_chips():
     assert len(out) >= 3
     joined = " ".join(out).lower()
     assert "food" in joined
-    assert "pickup" in joined or "share" in joined
+    assert "request" in joined or "share" in joined
 
 
 def test_foolproof_share_starter_chips():

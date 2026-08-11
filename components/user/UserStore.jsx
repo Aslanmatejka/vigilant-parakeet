@@ -8,9 +8,9 @@ import { reportError } from '../../utils/helpers';
 
 // Tab configuration
 const TABS = [
-    { id: 'active', label: 'Active', status: 'available' },
-    { id: 'completed', label: 'Completed', status: 'completed' },
-    { id: 'expired', label: 'Expired', status: 'expired' }
+    { id: 'active', label: 'Active', statuses: ['approved', 'active'] },
+    { id: 'completed', label: 'Completed', statuses: ['completed', 'claimed'] },
+    { id: 'expired', label: 'Expired', statuses: ['expired'] }
 ];
 
 function UserStore({
@@ -26,7 +26,7 @@ function UserStore({
 
     const filteredListings = listings?.filter(listing => {
         const tab = TABS.find(tab => tab.id === activeTab);
-        return listing.status === tab?.status;
+        return tab?.statuses?.includes(listing.status);
     });
 
     const handleNewListing = () => {
@@ -159,7 +159,9 @@ UserStore.propTypes = {
     listings: PropTypes.arrayOf(PropTypes.shape({
         objectId: PropTypes.string.isRequired,
         title: PropTypes.string.isRequired,
-        status: PropTypes.oneOf(['available', 'completed', 'expired']).isRequired
+        status: PropTypes.oneOf([
+            'pending', 'approved', 'active', 'claimed', 'completed', 'expired', 'declined', 'cancelled'
+        ]).isRequired
     })),
     onEdit: PropTypes.func.isRequired,
     onDelete: PropTypes.func.isRequired,

@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import dataService from '../../utils/dataService';
-import supabase from '../../utils/supabaseClient';
 import { useAuthContext } from '../../utils/AuthContext';
 import { debugAuthState } from '../../utils/authDebug';
 import AdminLayout from '../../pages/admin/AdminLayout';
@@ -48,6 +47,9 @@ const SECTION_GROUPS = [
         label: 'Operations',
         items: [
             { label: 'Food Distribution',     description: 'Plan and manage events.',                 icon: 'fa-box-open',          path: '/admin/distribution',  color: 'orange' },
+            { label: 'Listing Approvals',     description: 'Approve donor and Nouri food posts.',     icon: 'fa-clipboard-list',    path: '/admin/listing-approvals', color: 'amber' },
+            { label: 'Request Approvals',     description: 'Approve recipient food need requests.',  icon: 'fa-inbox',            path: '/admin/request-approvals', color: 'emerald' },
+            { label: 'Claim Approvals',       description: 'Approve recipient pickup claims.',       icon: 'fa-hand-holding-heart', path: '/admin/claim-approvals', color: 'rose' },
             { label: 'Distribution Attendees', description: 'Who signed up where.',                    icon: 'fa-users-rectangle',   path: '/admin/attendees',     color: 'teal' },
             { label: 'Share Food',            description: 'Post listings on behalf of the org.',     icon: 'fa-utensils',          path: '/admin/share-food',    color: 'lime' },
             { label: 'Communities',           description: 'Manage community groups.',                icon: 'fa-city',              path: '/admin/communities',   color: 'cyan' },
@@ -71,9 +73,11 @@ const SECTION_GROUPS = [
 
 const QUICK_ACTIONS = [
     { label: 'Send broadcast',   icon: 'fa-bullhorn',         path: '/admin/broadcasts',    color: 'from-pink-500 to-rose-500' },
+    { label: 'Review listings',  icon: 'fa-clipboard-list',   path: '/admin/listing-approvals', color: 'from-amber-500 to-orange-500' },
+    { label: 'Review requests',  icon: 'fa-inbox',            path: '/admin/request-approvals', color: 'from-emerald-500 to-teal-500' },
+    { label: 'Review claims',    icon: 'fa-hand-holding-heart', path: '/admin/claim-approvals', color: 'from-rose-500 to-pink-500' },
     { label: 'Review users',     icon: 'fa-user-check',       path: '/admin/users',         color: 'from-blue-500 to-cyan-500' },
     { label: 'New distribution', icon: 'fa-box-open',         path: '/admin/distribution',  color: 'from-orange-500 to-amber-500' },
-    { label: 'Open reports',     icon: 'fa-chart-line',       path: '/admin/reports',       color: 'from-emerald-500 to-teal-500' },
 ];
 
 // ───────────────────────── Helpers ───────────────────────────────────────
@@ -196,10 +200,6 @@ function AdminDashboard() {
     const navigate = useNavigate();
     const { user } = useAuthContext();
 
-    const [foods, setFoods] = useState([]);
-    const [loadingFoods, setLoadingFoods] = useState(false);
-    const [actionStatus, setActionStatus] = useState({});
-
     const [stats, setStats] = useState(null);
     const [loadingStats, setLoadingStats] = useState(true);
     const [recentListings, setRecentListings] = useState([]);
@@ -213,24 +213,6 @@ function AdminDashboard() {
         debugAuthState().then((state) => {
             console.log('Auth state in AdminDashboard:', state);
         });
-    }, []);
-
-    // Pending listings + real-time subscription (preserved behavior)
-    useEffect(() => {
-        fetchPendingFoods();
-        const subscription = supabase
-            .channel('admin-food-listings')
-            .on(
-                'postgres_changes',
-                { event: '*', schema: 'public', table: 'food_listings' },
-                (payload) => {
-                    console.log('Food listing changed:', payload);
-                    fetchPendingFoods();
-                }
-            )
-            .subscribe();
-
-        return () => { supabase.removeChannel(subscription); };
     }, []);
 
     // KPI stats + recent activity — both best-effort, dashboard still renders if they fail.
@@ -265,34 +247,10 @@ function AdminDashboard() {
         return () => { cancelled = true; };
     }, []);
 
-    async function fetchPendingFoods() {
-        setLoadingFoods(true);
-        try {
-            const listings = await dataService.getFoodListings({ status: 'pending' });
-            setFoods(listings || []);
-        } catch (_) {
-            setFoods([]);
-        } finally {
-            setLoadingFoods(false);
-        }
-    }
-
-    async function handleAction(id, action) {
-        setActionStatus((s) => ({ ...s, [id]: 'loading' }));
-        try {
-            await dataService.updateFoodListingStatus(id, action);
-            setActionStatus((s) => ({ ...s, [id]: action }));
-            fetchPendingFoods();
-        } catch (_) {
-            setActionStatus((s) => ({ ...s, [id]: 'error' }));
-        }
-    }
-
-    const pendingCount = foods.length;
     const adminName = user?.name?.split(' ')?.[0] || 'there';
 
     return (
-        <AdminLayout active="dashboard" pendingApprovals={pendingCount}>
+        <AdminLayout active="dashboard">
             <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto space-y-8">
                 {/* ───────────── Welcome header ───────────── */}
                 <header className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-[#2CABE3] via-[#2196b8] to-emerald-500 text-white p-6 sm:p-8 shadow-lg">
@@ -309,10 +267,7 @@ function AdminDashboard() {
                                 {greetingFor()}, {adminName}.
                             </h1>
                             <p className="mt-2 text-white/85 text-[14px] sm:text-[15px] max-w-xl">
-                                Here&apos;s what&apos;s happening on DoGoods today.{' '}
-                                {pendingCount > 0
-                                    ? <span className="font-semibold">{pendingCount} listing{pendingCount === 1 ? '' : 's'} need your review.</span>
-                                    : 'No pending approvals — nice work staying ahead.'}
+                                Here&apos;s what&apos;s happening on DoGoods today.
                             </p>
                         </div>
                         {/* Quick actions */}
@@ -334,7 +289,7 @@ function AdminDashboard() {
                 {/* ───────────── KPI tiles ───────────── */}
                 <section aria-labelledby="kpi-heading">
                     <h2 id="kpi-heading" className="sr-only">Key metrics</h2>
-                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
                         <KpiTile
                             icon="fa-users"
                             accent={{ bg: 'bg-blue-100', fg: 'text-blue-700' }}
@@ -349,15 +304,23 @@ function AdminDashboard() {
                             label="Food listings"
                             value={stats?.totalListings}
                             loading={loadingStats}
-                            onClick={() => navigate('/admin/share-food')}
+                            onClick={() => navigate('/admin/distribution')}
                         />
                         <KpiTile
-                            icon="fa-hourglass-half"
+                            icon="fa-clipboard-list"
                             accent={{ bg: 'bg-amber-100', fg: 'text-amber-700' }}
-                            label="Pending approvals"
-                            value={pendingCount}
-                            hint={pendingCount > 0 ? 'Tap below to review now' : 'All clear'}
-                            loading={loadingFoods}
+                            label="Pending listings"
+                            value={stats?.pendingApprovals}
+                            loading={loadingStats}
+                            onClick={() => navigate('/admin/listing-approvals')}
+                        />
+                        <KpiTile
+                            icon="fa-inbox"
+                            accent={{ bg: 'bg-emerald-100', fg: 'text-emerald-700' }}
+                            label="Pending requests"
+                            value={stats?.pendingRequests}
+                            loading={loadingStats}
+                            onClick={() => navigate('/admin/request-approvals')}
                         />
                         <KpiTile
                             icon="fa-hand-holding-heart"
@@ -369,129 +332,6 @@ function AdminDashboard() {
                         />
                     </div>
                 </section>
-
-                {/* ───────────── Pending approvals (always visible when > 0) ───────────── */}
-                {pendingCount > 0 && (
-                    <section
-                        aria-labelledby="pending-heading"
-                        className="bg-white rounded-2xl border border-amber-200/80 shadow-sm overflow-hidden"
-                    >
-                        <header className="px-5 py-4 border-b border-amber-100 bg-gradient-to-r from-amber-50 to-white flex flex-wrap items-center justify-between gap-3">
-                            <div className="flex items-center gap-3">
-                                <div className="h-10 w-10 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center">
-                                    <i className="fas fa-hourglass-half" aria-hidden="true" />
-                                </div>
-                                <div>
-                                    <h2 id="pending-heading" className="text-base font-semibold text-slate-900">Pending approvals</h2>
-                                    <p className="text-[12px] text-slate-500">
-                                        <span className="font-semibold text-amber-700 tabular-nums">{pendingCount}</span> listing{pendingCount === 1 ? '' : 's'} waiting for review
-                                    </p>
-                                </div>
-                            </div>
-                            <button
-                                onClick={fetchPendingFoods}
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition"
-                                aria-label="Refresh pending listings"
-                            >
-                                <i className={`fas fa-rotate text-[11px] ${loadingFoods ? 'animate-spin' : ''}`} aria-hidden="true" />
-                                Refresh
-                            </button>
-                        </header>
-
-                        <div className="p-5 grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
-                            {foods.slice(0, 6).map((food) => {
-                                const status = actionStatus[food.id];
-                                const isLoadingAction = status === 'loading';
-                                return (
-                                    <article
-                                        key={food.id}
-                                        className="border border-slate-200 rounded-xl overflow-hidden flex flex-col bg-white hover:shadow-md transition-shadow"
-                                    >
-                                        {food.image_url ? (
-                                            <img
-                                                src={food.image_url}
-                                                alt={food.title || food.name}
-                                                loading="lazy"
-                                                className="w-full h-32 object-cover"
-                                            />
-                                        ) : (
-                                            <div className="w-full h-32 bg-gradient-to-br from-slate-100 to-slate-200 flex items-center justify-center text-slate-400">
-                                                <i className="fas fa-image text-3xl" aria-hidden="true" />
-                                            </div>
-                                        )}
-                                        <div className="p-3 flex flex-col flex-1">
-                                            <h3 className="font-semibold text-[14px] text-slate-900 mb-1 line-clamp-1">{food.title || food.name}</h3>
-                                            {food.description && (
-                                                <p className="text-[12px] text-slate-500 mb-2 line-clamp-2">{food.description}</p>
-                                            )}
-                                            <div className="flex flex-wrap gap-1.5 mb-3 text-[10px]">
-                                                {food.category && (
-                                                    <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">{food.category}</span>
-                                                )}
-                                                {food.quantity && (
-                                                    <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 font-medium">
-                                                        {food.quantity} {food.unit || ''}
-                                                    </span>
-                                                )}
-                                                {food.expiry_date && (
-                                                    <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 font-medium">
-                                                        Exp: {food.expiry_date}
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <div className="mt-auto flex gap-2">
-                                                <button
-                                                    className="flex-1 inline-flex items-center justify-center gap-1.5 bg-emerald-500 hover:bg-emerald-600 text-white px-3 py-2 rounded-lg text-[12px] font-medium disabled:opacity-50 disabled:cursor-not-allowed transition"
-                                                    onClick={() => handleAction(food.id, 'approved')}
-                                                    disabled={food.status !== 'pending' || isLoadingAction}
-                                                >
-                                                    {isLoadingAction ? (
-                                                        <i className="fas fa-spinner fa-spin text-[10px]" aria-hidden="true" />
-                                                    ) : (
-                                                        <i className="fas fa-check text-[10px]" aria-hidden="true" />
-                                                    )}
-                                                    Approve
-                                                </button>
-                                                <button
-                                                    className="flex-1 inline-flex items-center justify-center gap-1.5 bg-white border border-rose-200 hover:bg-rose-50 text-rose-700 px-3 py-2 rounded-lg text-[12px] font-medium disabled:opacity-50 disabled:cursor-not-allowed transition"
-                                                    onClick={() => handleAction(food.id, 'declined')}
-                                                    disabled={food.status !== 'pending' || isLoadingAction}
-                                                >
-                                                    <i className="fas fa-xmark text-[10px]" aria-hidden="true" />
-                                                    Decline
-                                                </button>
-                                            </div>
-                                            {status === 'approved' && (
-                                                <p className="text-emerald-600 text-[10px] mt-2 flex items-center gap-1">
-                                                    <i className="fas fa-check-circle" aria-hidden="true" /> Approved
-                                                </p>
-                                            )}
-                                            {status === 'declined' && (
-                                                <p className="text-rose-600 text-[10px] mt-2 flex items-center gap-1">
-                                                    <i className="fas fa-circle-xmark" aria-hidden="true" /> Declined
-                                                </p>
-                                            )}
-                                            {status === 'error' && (
-                                                <p className="text-rose-600 text-[10px] mt-2">Error — try again</p>
-                                            )}
-                                        </div>
-                                    </article>
-                                );
-                            })}
-                        </div>
-
-                        {pendingCount > 6 && (
-                            <div className="px-5 py-3 border-t border-slate-100 bg-slate-50/50 text-center">
-                                <button
-                                    onClick={() => navigate('/admin/share-food')}
-                                    className="text-[13px] font-semibold text-[#2CABE3] hover:underline"
-                                >
-                                    View all {pendingCount} pending listings →
-                                </button>
-                            </div>
-                        )}
-                    </section>
-                )}
 
                 {/* ───────────── Main content + recent activity rail ───────────── */}
                 <div className="grid gap-6 lg:grid-cols-3">

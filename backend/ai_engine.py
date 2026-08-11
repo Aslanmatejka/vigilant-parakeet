@@ -1370,9 +1370,12 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "### ANNOUNCE LISTING POST SUCCESS\n"
         "After post_food_listing returns success, lead with 'Posted!' (or "
         "'Your listing is up!') and include the listing title and the "
-        "listing_id. Briefly mention what happens next (recipients can "
-        "claim it; you'll be notified). After post_food_request returns "
-        "success, lead with 'Request posted!' and the request id.\n"
+        "listing_id. If status=pending / awaiting_approval=true (or the "
+        "summary says awaiting admin approval), say it is submitted and "
+        "waiting for admin review — NEVER say it is live on Find Food. "
+        "Only say recipients can claim it when status is approved. After "
+        "post_food_request returns success, lead with 'Request posted!' "
+        "and the request id.\n"
         "\n"
         "### ALWAYS CONFIRM COMPLETION (CRITICAL — APPLIES TO EVERY TOOL)\n"
         "After ANY action tool returns successfully, your reply MUST start "
@@ -1384,7 +1387,8 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "then add the relevant id / title / value from the tool result so "
         "they can verify it, then (optional) one helpful next step.\n"
         "Per-tool completion phrases:\n"
-        "  • post_food_listing      -> 'Posted! Listing #N is live at <addr>.'\n"
+        "  • post_food_listing      -> if awaiting_approval: 'Posted! Listing #N "
+        "is awaiting admin approval.' else 'Posted! Listing #N is live at <addr>.'\n"
         "  • post_food_request      -> 'Request posted! #N is live for nearby donors.'\n"
         "  • bulk_import_listings   -> 'Bulk import complete: X/Y posted, Z verified live.'\n"
         "  • claim_listing          -> 'Claimed <title> for you. Pick up at <address> — let me know when you\\'ve got it!'\n"
@@ -1604,7 +1608,10 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "moving on. The address you record is where recipients will "
         "see the pin on the map, so it must be right.\n"
         "  5. COMMUNITY — which school/community this listing is shared "
-        "with. ALWAYS CONFIRM, NEVER ASSUME. NEVER SKIP THIS STEP. "
+        "with. ALWAYS CONFIRM, NEVER ASSUME. NEVER SKIP THIS STEP — "
+        "EXCEPT when fulfilling an open community food request: pass "
+        "fulfilling_request_id so the server locks community to that "
+        "request (do not ask which community). "
         "THIS IS A HARD GATE: after confirming the address (step 4), "
         "the VERY NEXT question must be about community — before "
         "freshness, before allergens, before anything else. Ask "
@@ -1615,7 +1622,8 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "aren't sure. Do NOT call post_food_listing until they confirm "
         "— then pass community_name (or community_id) AND "
         "community_confirmed=true. CRITICAL: Even if the donor seems "
-        "impatient, you MUST still ask for community confirmation. "
+        "impatient, you MUST still ask for community confirmation "
+        "(unless fulfilling_request_id applies). "
         "This is non-negotiable and cannot be shortcut.\n"
         "Strongly recommended (ASK if not volunteered, don't skip):\n"
         "  6. FRESHNESS / EXPIRATION — 'When was it made?' / 'best by "
@@ -1679,10 +1687,11 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "their reply ('yes but make it 4 loaves'), update and "
         "re-confirm in one turn.\n"
         "After post_food_listing returns success, say 'Posted! "
-        "Listing #N is live at <address>' (read the address back from "
-        "the tool result so the donor can verify the pin landed at the "
-        "right spot — this is what reassures them their listing will "
-        "actually show up on the map). Then stop — don't ask follow-up "
+        "Listing #N is live at <address>' when status is approved — read "
+        "the address back from the tool result so the donor can verify "
+        "the pin. If status=pending / awaiting_approval=true, say "
+        "'Posted! Listing #N is awaiting admin approval' instead and do "
+        "NOT claim it is on Find Food yet. Then stop — don't ask follow-up "
         "questions unless something is missing (e.g. 'still want to "
         "add a photo?').\n"
         "\n"
@@ -1827,9 +1836,10 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "'Noted.'). No long preambles, no listing-style summaries "
         "until the final confirm sentence.\n"
         "  8. SAME PATTERN for post_food_request (gather → confirm → "
-        "post). For requests, instead of allergens/photo, ask about "
+        "post). For requests, NEVER ask for a photo or image — requests "
+        "are text-only. Instead of allergens/photo, ask about "
         "household size, urgency, dietary restrictions, and pickup "
-        "vs. delivery preference.\n"
+        "preference.\n"
         "  9. LISTINGS ARE ALWAYS POSTED IN ENGLISH (CRITICAL). Even "
         "when the donor is talking to you in Spanish or any other "
         "language, the `title`, `description`, `unit`, `allergens`, "
@@ -2167,11 +2177,11 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "for perishable goods near or past their date.\n"
         "\n"
         "  • LOCATION — 'what's closest?', 'within walking distance', "
-        "'within 5 km', 'public transport', 'near my workplace'. For "
-        "walking distance use radius_km=1.5, biking 5, driving 15. "
-        "Public transport / 'near workplace': we don't store workplace "
-        "yet — say 'Tell me the address or zip and I'll search around "
-        "it' (we don't override the user's home location unless asked).\n"
+        "'near my workplace'. Search returns the full community inventory "
+        "(no radius cutoff); sort/mention nearer items first when distance "
+        "is available. Public transport / 'near workplace': we don't store "
+        "workplace yet — say 'Tell me the address or zip' if they want a "
+        "different starting point (we don't override home unless asked).\n"
         "\n"
         "  • ACCOUNT SUPPORT — 'forgot password', 'update email', "
         "'change phone', 'delete account', 'why am I blocked', 'how do "
@@ -2251,9 +2261,9 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "Translate everyday phrases into tool arguments before calling. "
         "Never refuse a search just because the wording isn't a category "
         "name. Use this table:\n"
-        "  • IMPERIAL UNITS — 'within 1 mile' → radius_km=1.6; '5 miles' "
-        "→ radius_km=8; '10 miles' → radius_km=16. 'feet' / 'blocks' → "
-        "treat as walking distance (radius_km=1.5).\n"
+        "  • IMPERIAL UNITS — distance phrases ('within 1 mile', '5 miles') "
+        "are ignored for filtering; search returns the full community set "
+        "and sorts nearer items first when coords exist.\n"
         "  • CONDITION ADJECTIVES — 'fresh', 'chilled', 'cold', 'raw' "
         "are NOT categories; pass food_type only if a real food word is "
         "also present (e.g. 'fresh bread' → food_type='bakery'). Otherwise "
@@ -3557,7 +3567,7 @@ def _annotate_no_results(fn_name: str, result: dict[str, Any]) -> dict[str, Any]
     an error. Without a clear signal the model sometimes invents listings or
     tells the user it "couldn't search". A `status: no_results` marker makes
     the empty case unambiguous so the model says "nothing found right now"
-    and suggests a next step (widen radius, check back later).
+    and suggests a next step (check back later).
     """
     if not isinstance(result, dict) or result.get("error"):
         return result
@@ -3637,7 +3647,7 @@ class ConversationEngine:
 
     def __init__(self) -> None:
         self.training_data = _load_training_data()
-        from backend.tools import TOOL_DEFINITIONS, execute_tool
+        from backend.ai.tools import TOOL_DEFINITIONS, execute_tool
         self.tool_definitions = TOOL_DEFINITIONS
         self._execute_tool = execute_tool
         # Derived at boot: every tool whose JSON schema declares a `user_id`
@@ -5063,6 +5073,16 @@ def compute_next_step(
         tool = entry.get("tool") or ""
         raw_result = entry.get("result")
         result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
+        # Live Nouri actions flatten listing fields onto the entry itself.
+        if not result:
+            result = {
+                k: entry[k]
+                for k in (
+                    "listings", "results", "total", "count", "image_url",
+                    "photo_url", "has_photo", "listing", "listing_id",
+                )
+                if k in entry and entry[k] is not None
+            }
 
         # 1) After a claim → review pickup details
         if tool in _NEXT_STEP_CLAIM_TOOLS:
@@ -5083,6 +5103,7 @@ def compute_next_step(
                 or result.get("has_photo")
                 or listing.get("image_url")
                 or listing.get("has_photo")
+                or entry.get("image_url")
             )
             if not has_photo:
                 return {
@@ -5094,9 +5115,14 @@ def compute_next_step(
 
         # 3) After a broad search → narrow it
         if tool in _NEXT_STEP_SEARCH_TOOLS:
-            results = result.get("results") or result.get("listings") or []
-            total = result.get("total")
-            count_field = result.get("count")
+            results = (
+                result.get("results")
+                or result.get("listings")
+                or entry.get("listings")
+                or []
+            )
+            total = result.get("total", entry.get("total"))
+            count_field = result.get("count", entry.get("count"))
             # Prefer the server-reported total over the visible page size:
             # a paginated response may return 8 visible + total=42, and we
             # still want to offer the narrow chip in that case.
@@ -5136,6 +5162,16 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
     # Only suggest when the AI is actually asking the user something,
     # otherwise chips would clutter every reply.
     if "?" not in full and "¿" not in full:
+        return []
+
+    # Successful share completion — never show Yes/post/Cancel after "All set! … are shared?"
+    if any(k in full for k in (
+        "are shared", "is shared", "posted!", "posted your", "listing is live",
+        "listings are live", "successfully posted", "ya está publicado",
+        "ya esta publicado", "your listing is live", "baskets are shared",
+        "is now live", "went live", "anything else you want to share",
+        "anything else you'd like to share",
+    )):
         return []
 
     # Scope keyword matching to the LAST question in the message. The AI

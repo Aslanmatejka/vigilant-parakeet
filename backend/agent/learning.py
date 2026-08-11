@@ -8,7 +8,6 @@ Learns:
 - Frequently searched food types
 - Preferred communities
 - Typical claim quantities
-- Search radius preferences
 - Conversation patterns
 
 Stores preferences in Supabase `user_preferences` table (JSONB column).
@@ -99,7 +98,6 @@ def _get_default_preferences() -> Dict[str, Any]:
     """Get default preferences structure."""
     return {
         "food_types": {},  # {category: count}
-        "search_radius": 10,  # Default km
         "communities": {},  # {community_id: count}
         "typical_quantities": {},  # {category: avg_quantity}
         "dietary_tags": [],
@@ -123,15 +121,6 @@ def _update_search_preferences(
         food_types = preferences.get("food_types", {})
         food_types[food_type] = food_types.get(food_type, 0) + 1
         preferences["food_types"] = food_types
-    
-    # Track search radius
-    radius = entities.get("radius")
-    if radius:
-        # Running average
-        current_avg = preferences.get("search_radius", 10)
-        search_count = preferences.get("search_count", 0)
-        new_avg = (current_avg * search_count + radius) / (search_count + 1)
-        preferences["search_radius"] = round(new_avg, 1)
     
     preferences["search_count"] = preferences.get("search_count", 0) + 1
     preferences["last_updated"] = datetime.now(timezone.utc).isoformat()
@@ -225,7 +214,6 @@ def get_preferred_search_params(preferences: Dict[str, Any]) -> Dict[str, Any]:
     preferred_food_type = max(food_types, key=food_types.get) if food_types else None
     
     return {
-        "radius_km": preferences.get("search_radius", 10),
         "food_type": preferred_food_type,
         "dietary_tags": preferences.get("dietary_tags", []),
     }

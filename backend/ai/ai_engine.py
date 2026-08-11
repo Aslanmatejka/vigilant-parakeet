@@ -172,12 +172,14 @@ CANNED_RESPONSES = {
         "api_down": "I can't reach my AI service right now. You can still browse listings and check your dashboard — I'll be back shortly!",
         "general_error": "Something went wrong on my end. Please try again, or contact support if the issue persists.",
         "tool_error": "I couldn't look that up right now, but I can still help with general questions.",
+        "invalid_input": "I didn't quite catch that. Please try speaking again or type your message.",
     },
     "es": {
         "timeout": "Estoy tardando más de lo normal — inténtalo de nuevo en un momento. Mientras tanto puedes explorar comida en Buscar Comida.",
         "api_down": "No puedo conectarme a mi servicio de IA en este momento. Aún puedes explorar los listados y revisar tu panel.",
         "general_error": "Algo salió mal. Inténtalo de nuevo o contacta a soporte.",
         "tool_error": "No pude buscar esa información, pero puedo ayudarte con preguntas generales.",
+        "invalid_input": "No te escuché con claridad. Intenta hablar de nuevo o escribe tu mensaje.",
     },
 }
 
@@ -397,6 +399,12 @@ def _build_action_policy() -> str:
         "address back so the donor can verify the pin landed correctly, "
         "and if `verified=false`, be honest ('Posted, but the address "
         "didn't geocode yet — it won't show on the map until we fix it.'). "
+        "If the tool result has status=pending or awaiting_approval=true "
+        "(or the summary says awaiting admin approval), tell the donor it "
+        "is submitted and waiting for admin review — NEVER say it is live "
+        "on Find Food until status is approved. "
+        "For claim_listing / claim_listings, tell the recipient the claim "
+        "is recorded and to wait for admin approval before pickup. "
         "For bulk imports, report posted/total.\n"
         "\n"
         "## Listing id resolution\n"
@@ -412,11 +420,22 @@ def _build_action_policy() -> str:
         "user to enable GPS, share coordinates, or open a picker. For "
         "ANY 'I'm hungry' / 'find food' / 'nearby' request, call "
         "search_food_near_user with their user_id — it uses their saved "
-        "profile address. If results are empty, retry with a larger "
-        "radius (25 or 50 km) and relax dietary filters. Show whatever "
-        "comes back; distance can be missing and that's OK. Listings "
-        "marked is_own_listing are the user's own — mention them but "
-        "note they can't claim their own food.\n"
+        "profile address and returns every listing in their community "
+        "only (not other schools; warehouse food only if they belong to "
+        "warehouse), sorted by distance when coords exist. Prefer "
+        "max_results=25. There is NO radius cutoff — do not ask about "
+        "distance limits or pass radius_km. If results are empty, relax "
+        "dietary filters and retry. Distance can be missing and that's OK. NEVER show "
+        "or offer the user's own donations in Find Food — search already "
+        "excludes them. If they ask about their own posts, use "
+        "get_user_listings (Share / My Listings), not claim tools.\n"
+        "Community scope (critical): search_food_near_user / "
+        "get_recent_listings only return the user's own community. "
+        "NEVER invent, mention, or "
+        "offer food from other schools/communities (including DoGoods "
+        "Warehouse unless the user belongs to it). If results are empty, "
+        "say nothing is available in their community right now — do not "
+        "suggest another school's listings.\n"
         "\n"
         "## Food insecurity is urgent — read every turn\n"
         "Users write in plain, emotional, imperfect English or Spanish. "
@@ -435,10 +454,11 @@ def _build_action_policy() -> str:
         "immediately. Parse household size ('2 daughters + 1 son' ≈ 4), "
         "diet, allergens, mobility from the message + profile. After "
         "cards render, ONE simple question: 'Which one works for you?'. "
-        "If search returns zero, widen the radius silently and retry; "
-        "still zero → say nothing matched nearby and suggest widening "
-        "search or checking back later. Do NOT push post_food_request — "
-        "recipients find and claim existing listings only.\n"
+        "If search returns zero, relax dietary filters and retry once; "
+        "still zero → say nothing matched in their community and suggest "
+        "checking back later. Do NOT push post_food_request during distress "
+        "unless they explicitly ask to post a request — prefer finding "
+        "existing listings first.\n"
         "\n"
         "## Claiming feels like texting a neighbor\n"
         "Once options are shown, ONE short question per turn: quantity "
@@ -446,9 +466,16 @@ def _build_action_policy() -> str:
         "'Got it') before the next question. Duplicate titles are "
         "separate listings — never sum quantities across them. On "
         "success: lead with what was claimed + pickup address/deadline, "
-        "then ONE optional next step (directions?). On 'already have an "
-        "active claim' → offer cancel_claim. Never expose UUIDs / tool "
-        "names / raw ids.\n"
+        "then ONE optional next step — if they want directions, call "
+        "show_route_to_listing with the listing UUID (or search #N). "
+        "On 'already have an active claim' → offer cancel_claim. Never "
+        "expose UUIDs / tool names / raw ids in chat text.\n"
+        "\n"
+        "Directions: when they ask 'how do I get there?' / 'directions' / "
+        "'route', call show_route_to_listing (NOT get_mapbox_route with "
+        "made-up coordinates). Use the listing from the last search (#N) "
+        "or their latest claim. If they lack a profile address, tell them "
+        "to add one in Profile — do not invent a route.\n"
         "\n"
         "Parse every claim message end-to-end BEFORE asking questions. "
         "'Claim 2 oranges' already contains the quantity (2) AND the food "
@@ -469,6 +496,11 @@ def _build_action_policy() -> str:
         "resolve the new one. Do NOT keep saying a claim is in progress "
         "for a listing they just abandoned. One short 'switching to the "
         "apples' ack, then continue from the new pick.\n"
+        "\n"
+        "If the user says they have NO claim / 'we haven't talked about "
+        "anything' / 'which claim?' / 'I want some food' with no numbered "
+        "pick yet — there is NO claim in progress. Immediately call "
+        "search_food_near_user. Never invent an active claim to finish.\n"
         "\n"
         "After a claim succeeds, that intake is DONE — if they ask for "
         "available food or a new search, call search_food_near_user "
@@ -491,6 +523,14 @@ def _build_action_policy() -> str:
         "using their profile community or the nearest match from "
         "get_active_communities. Only pass community_confirmed=true "
         "after they say yes (or pick a different one).\n"
+        "EXCEPTION — fulfilling a community food request: if the donor "
+        "is sharing food for a specific open request (from Community "
+        "Requests / dispatch queue), pass fulfilling_request_id with "
+        "that request's id. The server locks community_id to the "
+        "request's community — do NOT ask which community. For guided "
+        "mode, open Share Food with navigate_ui target=create and query "
+        "including request, community_id, community, and "
+        "fulfilling_request_id.\n"
         "\n"
         "Expiration: ask naturally ('When does it expire?' / 'best-by "
         "date?' / 'how long is it good?'). Map to an ISO date. Never "
@@ -503,12 +543,14 @@ def _build_action_policy() -> str:
         "Handoff: assume pickup at the donor's address by default. Only "
         "ask about drop-off / delivery if the donor mentions it.\n"
         "\n"
-        "Photo: ask ONCE ('want to snap a quick photo?'). If they say "
-        "'yes/sure/ok' — do NOT post yet, wait for them to upload the "
-        "image (chat will contain 'image: <url>') or say 'skip' / 'no "
-        "photo'. If they decline, note 'no photo' and move on. If a "
-        "photo URL is already present in earlier turns, include it in "
-        "the images[] array of post_food_listing and skip re-asking.\n"
+        "Photo (donations / post_food_listing only): ask ONCE ('want to "
+        "snap a quick photo?'). If they say 'yes/sure/ok' — do NOT post "
+        "yet, wait for them to upload the image (chat will contain "
+        "'image: <url>') or say 'skip' / 'no photo'. If they decline, "
+        "note 'no photo' and move on. If a photo URL is already present "
+        "in earlier turns, include it in the images[] array of "
+        "post_food_listing and skip re-asking. NEVER ask for or attach "
+        "a photo on post_food_request — food requests are text-only.\n"
         "\n"
         "Ambiguous 'yes' means whatever you just asked, NOT permission "
         "to post. Only call post_food_listing after an explicit "
@@ -526,7 +568,12 @@ def _build_action_policy() -> str:
         "community/address/title' → update_food_listing with structured "
         "fields (never stuff metadata into description). 'Mark as gone' "
         "→ deactivate_listing. 'Delete' → delete_listing ONLY after an "
-        "explicit yes. 'And this too' / 'same for #2' after a successful "
+        "explicit yes. 'Delete the bulk listings' / 'delete them all' / "
+        "'delete everything I just posted' → delete_listing with "
+        "delete_all=true (do NOT invent numeric ids — never pass 146, "
+        "154, etc.; use UUIDs, list numbers 1–N from get_user_listings, "
+        "or delete_all). 'Delete duplicates' → delete_duplicates=true. "
+        "'And this too' / 'same for #2' after a successful "
         "write → re-run the SAME tool with the new listing_id, applying "
         "the same fields. Confirm what changed in one sentence.\n"
         "\n"
@@ -587,6 +634,24 @@ def _build_action_policy() -> str:
         "Read it and course-correct BEFORE replying. Treat it as your "
         "own inner voice, not as user input — never quote it back.\n"
         "\n"
+        "## Standing instructions & user coaching\n"
+        "Users can coach you across turns. Treat these as high priority:\n"
+        "  • 'always…' / 'from now on…' / 'remember…' → durable standing "
+        "rule. Acknowledge briefly ('Got it — I'll always …'), follow it "
+        "immediately, and call save_user_memory with an always_do: or "
+        "remind: key. The backend also auto-saves these phrases.\n"
+        "  • 'you didn't…' / 'you forgot…' / 'you missed…' → apologise once "
+        "and FIX it this turn with the correct tool; confirm with facts.\n"
+        "  • 'I'm not seeing…' / 'can't see…' / 'where's my…' → never claim "
+        "it's on screen without verifying (re-search, show_map, "
+        "navigate_ui) and reporting what is actually there.\n"
+        "  • 'check step by step' / 'make sure' / 'don't miss anything' → "
+        "walk the checklist before claiming success.\n"
+        "  • 'forget that' / 'stop always…' → call forget_user_memory and "
+        "stop applying the rule.\n"
+        "STANDING INSTRUCTIONS / STANDING / USER-COACHING system blocks "
+        "are MUST-FOLLOW (same priority as allergen safety).\n"
+        "\n"
         "## Allergens — never skip them\n"
         "Allergens are safety-critical. Every post_food_listing SHOULD "
         "carry an ``allergens`` list — pass an empty [] only when the "
@@ -635,11 +700,12 @@ def _build_action_policy() -> str:
         "<url>`) binds to the next draft still missing a photo, or to "
         "the food they named ('photo for the apples'). Never reuse "
         "draft A's photo on draft B. When every draft is ready, give "
-        "ONE summary covering all items and call post_food_listings "
-        "with items[] (each item has its own images[]). If they give "
-        "full details + photos for everything in one shot, still do a "
-        "short summary confirm, then post_food_listings. For a single "
-        "food, keep using post_food_listing.\n"
+        "ONE short summary and ask 'Ready to post these?' — a single "
+        "yes is enough; then call post_food_listings immediately. "
+        "Do NOT re-ask community, expiry, photo, or confirmation after "
+        "they already answered. If they give full details + photos in "
+        "one shot, still do that one summary confirm, then post. For a "
+        "single food, keep using post_food_listing.\n"
         "\n"
         "## Multi-item claim (2+ listings)\n"
         "When the recipient picks TWO OR MORE listings ('#1 and #3', "
@@ -647,11 +713,13 @@ def _build_action_policy() -> str:
         "the bananas'), keep a claim draft queue — do NOT claim only "
         "the first. Resolve each against the last search results. Ask "
         "missing quantities ONE question per turn ('How many of the "
-        "oranges?'). When every draft has listing_id + qty, give a "
-        "brief confirm if needed and call claim_listings with items[]. "
-        "If indices/titles + quantities are already given, confirm "
-        "briefly and claim_listings. For a single listing, keep using "
-        "claim_listing.\n"
+        "oranges?'). When every draft has listing_id + qty, give ONE "
+        "short summary and ask 'Ready to claim these?' — after they "
+        "say yes, call claim_listings with items[]. If they already "
+        "gave indices/titles + quantities AND said claim/yes, call "
+        "claim_listings. When showing search results, briefly mention "
+        "they can claim several at once (tap #1 & #2, or say both). "
+        "For a single listing, keep using claim_listing.\n"
         "\n"
         "## Non-food / off-scope requests\n"
         "DoGoods is FOOD only. Old couches, cash, gift cards, cars, "
@@ -678,6 +746,21 @@ def _build_action_policy() -> str:
         "'which one sounds like you?'. Don't dump a feature list. If "
         "the user is clearly in distress, skip the menu and search "
         "food immediately.\n"
+        "\n"
+        "## Assistance mode — ask first on find / share / request (default)\n"
+        "When someone starts FINDING food, SHARING food, or REQUESTING food "
+        "(and they are NOT in food-insecurity distress), ask ONCE before tools:\n"
+        "  1) Do it for me — you handle the whole flow in chat "
+        "(search/claim, ask-and-post donation, or post_food_request).\n"
+        "  2) Guide me step by step — open the right page with "
+        "navigate_ui (find → target=list /find; share → target=create "
+        "/share; request → target=request /request) and coach 3–5 short "
+        "UI steps so they do it themselves.\n"
+        "Skip this ask when: they already chose a mode this session, "
+        "said 'do it for me' / 'guide me', named concrete qty+food to "
+        "post, or are mid-claim with listings already shown. Distress "
+        "('hungry', 'nothing to eat') → skip and search immediately "
+        "(do not push a food request unless they ask).\n"
         "\n"
         "## Recipient AI helpers (open via navigate_ui, ONE per turn)\n"
         "  • meal-suggestions — recipes from claimed / expiring food.\n"
@@ -1025,8 +1108,9 @@ def _scope_safe_query(fn_args: dict, auth_user_id) -> dict:
 # returns a confirmation request to the frontend.
 _CONFIRM_TOOLS: frozenset[str] = frozenset({
     "cancel_claim",
-    "post_food_listing",
-    "post_food_listings",
+    # post_food_listing / post_food_listings are confirmed in-chat via
+    # "Ready to post?" (conversation_flow). Re-gating them here forced
+    # donors to say yes multiple times for the same share.
     "post_food_request",
     "bulk_import_listings",
     "delete_listing",
@@ -1195,6 +1279,14 @@ def _build_confirmation_summary(tool_name: str, args: dict) -> str:
         title = args.get("title") or args.get("title_lookup") or "this listing"
         bulk = args.get("listing_ids") or []
         dup_count = args.get("_bulk_delete_count") or len(bulk)
+        if args.get("delete_all"):
+            scope = args.get("_delete_scope") or "listings"
+            n = dup_count or len(bulk)
+            if scope == "last_bulk" and n:
+                return f"permanently delete your last bulk batch ({n} listings)"
+            if n:
+                return f"permanently delete all {n} of your active listings"
+            return "permanently delete all of your active listings"
         if args.get("delete_duplicates") and dup_count:
             return f"delete {dup_count} duplicate listing(s) (keep one copy of each title)"
         if bulk and len(bulk) > 1:
@@ -1215,6 +1307,15 @@ class ConversationEngine:
         from backend.ai.tools import TOOL_DEFINITIONS, execute_tool
         self.tool_definitions = TOOL_DEFINITIONS
         self._execute_tool = execute_tool
+        self._tools_taking_user_id: frozenset[str] = frozenset(
+            t["function"]["name"]
+            for t in self.tool_definitions
+            if isinstance(t, dict)
+            and isinstance(t.get("function"), dict)
+            and "user_id" in (
+                (t["function"].get("parameters") or {}).get("properties") or {}
+            )
+        )
         # Pending confirmation envelopes keyed by user_id (int).
         # Format: {tool, args, expires_at (ISO str), auth_user_id, lang, summary}
         # Single-process only — use Redis for multi-worker deployments.
@@ -1405,19 +1506,36 @@ class ConversationEngine:
             facts=facts,
         )
 
-        conversation_id = await self._persist_conversation(
-            user_id, user_message, response_text, lang
-        )
-
         action_entry: dict = {"tool": tool_name, "ok": ok, "summary": summary}
         if isinstance(result, dict):
             action_entry = enrich_tool_action(tool_name, result, action_entry)
             for extra_key in (
                 "listing_id", "coords_lat", "coords_lng", "address",
                 "verified", "verify_issues", "route", "action", "target", "view", "focus",
+                "frontend_hint",
             ):
                 if result.get(extra_key) is not None:
                     action_entry[extra_key] = result[extra_key]
+
+        suggestions = await self._build_suggestion_chips(
+            response_text,
+            lang,
+            user_message=user_message,
+            user_id=str(user_id),
+            actions=[action_entry],
+        )
+        conversation_id = await self._persist_conversation(
+            user_id,
+            user_message,
+            response_text,
+            lang,
+            metadata={
+                "actions": [action_entry],
+                "suggestions": suggestions,
+                "requires_confirmation": False,
+                "pending_action": None,
+            },
+        )
 
         audio_b64 = None
         if include_audio:
@@ -1431,7 +1549,7 @@ class ConversationEngine:
             "conversation_id": str(conversation_id) if conversation_id else None,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "actions": [action_entry],
-            "suggestions": [],
+            "suggestions": suggestions,
             "requires_confirmation": False,
             "pending_action": None,
         }
@@ -1629,11 +1747,26 @@ class ConversationEngine:
                     .all()
                 )
                 rows.reverse()
+                def _parse_meta(raw):
+                    if not raw:
+                        return {}
+                    if isinstance(raw, dict):
+                        return raw
+                    if isinstance(raw, str):
+                        try:
+                            parsed = json.loads(raw)
+                            return parsed if isinstance(parsed, dict) else {}
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            return {}
+                    return {}
+
                 return [
                     {
+                        "id": str(r.id) if getattr(r, "id", None) is not None else None,
                         "role": r.role,
                         "message": r.message,
                         "created_at": r.created_at.isoformat() if r.created_at else "",
+                        "metadata": _parse_meta(getattr(r, "meta", None)),
                     }
                     for r in rows
                 ]
@@ -1770,9 +1903,10 @@ class ConversationEngine:
         return None
 
     async def _load_user_memories(self, user_id: str) -> list[dict]:
-        """Load the top-10 learned preferences from AIUserPreference."""
+        """Load learned preferences, prioritizing standing instructions."""
         from backend.app import SessionLocal
         from backend.ai.models import AIUserPreference
+        from backend.ai.standing_instructions import is_standing_memory_key
 
         def _sync() -> list[dict]:
             db = SessionLocal()
@@ -1781,10 +1915,14 @@ class ConversationEngine:
                     db.query(AIUserPreference)
                     .filter(AIUserPreference.user_id == user_id)
                     .order_by(AIUserPreference.last_seen_at.desc())
-                    .limit(10)
+                    .limit(30)
                     .all()
                 )
-                return [{"key": p.key, "value": p.value} for p in prefs]
+                rows = [{"key": p.key, "value": p.value} for p in prefs]
+                standing = [r for r in rows if is_standing_memory_key(r["key"])]
+                soft = [r for r in rows if not is_standing_memory_key(r["key"])]
+                # Cap: all standing (up to 12) + remaining soft prefs.
+                return standing[:12] + soft[:10]
             except Exception as exc:
                 logger.debug("Load memories failed (non-fatal): %s", exc)
                 return []
@@ -1796,90 +1934,98 @@ class ConversationEngine:
     async def _check_proactive(
         self, user_id: str, profile: Optional[dict], lang: str
     ) -> list[str]:
-        """Post-turn proactive opportunity check.
+        """Post-turn proactive opportunity check against live Supabase listings.
 
-        Runs two quick SQL queries after each turn:
-        • Recipients: are there new listings near them posted in the last 2 hours?
-        • Donors:     do they have listings expiring within 48 hours?
-
-        Returns at most 2 suggestion strings to append to the chips list.
+        • Recipients: new approved/active listings near them in the last 2 hours
+        • Donors: their live listings expiring within 48 hours
         """
-        if not profile:
+        if not profile or not user_id:
             return []
 
-        role = (profile.get("role") or "").lower()
-
-        def _sync() -> list[str]:
-            from backend.app import SessionLocal
-            from backend.models import FoodResource
-
-            db = SessionLocal()
-            try:
-                results: list[str] = []
-                now = _utcnow()
-
-                if role in ("recipient", "member", ""):
-                    lat = profile.get("lat")
-                    lng = profile.get("lng")
-                    if lat and lng:
-                        two_hours_ago = now - timedelta(hours=2)
-                        new_listings = (
-                            db.query(FoodResource)
-                            .filter(
-                                FoodResource.status == "available",
-                                FoodResource.created_at >= two_hours_ago,
-                            )
-                            .limit(10)
-                            .all()
-                        )
-                        nearby = [
-                            lx for lx in new_listings
-                            if getattr(lx, "coords_lat", None) is not None
-                            and getattr(lx, "coords_lng", None) is not None
-                            and abs(lx.coords_lat - lat) < 0.15
-                            and abs(lx.coords_lng - lng) < 0.15
-                        ]
-                        if nearby:
-                            count = len(nearby)
-                            if lang == "es":
-                                results.append(f"Ver los {count} anuncio(s) nuevos cerca de ti")
-                            else:
-                                results.append(f"View {count} new listing(s) near you")
-
-                if role in ("donor", "admin"):
-                    cutoff = now + timedelta(hours=48)
-                    expiring = (
-                        db.query(FoodResource)
-                        .filter(
-                            FoodResource.user_id == user_id,
-                            FoodResource.status == "available",
-                        )
-                        .limit(10)
-                        .all()
-                    )
-                    expiring_soon = [
-                        lx for lx in expiring
-                        if getattr(lx, "expiry_date", None) is not None
-                        and now <= lx.expiry_date <= cutoff
-                    ]
-                    if expiring_soon:
-                        count = len(expiring_soon)
-                        if lang == "es":
-                            results.append(f"Tienes {count} anuncio(s) que vencen pronto")
-                        else:
-                            results.append(f"You have {count} listing(s) expiring soon")
-
-                return results[:2]
-            except Exception as exc:
-                logger.debug("Proactive check failed (non-fatal): %s", exc)
-                return []
-            finally:
-                db.close()
+        role = (profile.get("role") or profile.get("community_role") or "").lower()
+        results: list[str] = []
+        now = _utcnow()
 
         try:
-            return await asyncio.get_event_loop().run_in_executor(None, _sync)
-        except Exception:
+            from backend.ai_engine import supabase_get
+
+            if role in ("recipient", "member", ""):
+                lat = profile.get("lat") or profile.get("latitude")
+                lng = profile.get("lng") or profile.get("longitude")
+                if lat is not None and lng is not None:
+                    two_hours_ago = (now - timedelta(hours=2)).isoformat()
+                    try:
+                        rows = await supabase_get("food_listings", {
+                            "status": "in.(approved,active)",
+                            "created_at": f"gte.{two_hours_ago}",
+                            "select": "id,latitude,longitude,user_id,community_id",
+                            "limit": "25",
+                        })
+                    except Exception as exc:
+                        logger.debug("proactive near-listings fetch failed: %s", exc)
+                        rows = []
+                    from backend.tools import (
+                        _allowed_community_id_strings,
+                        _is_admin_flag,
+                        _listing_in_community_scope,
+                    )
+                    allowed = _allowed_community_id_strings(
+                        _is_admin_flag(profile.get("is_admin")),
+                        profile.get("community_id"),
+                    )
+                    nearby = []
+                    for lx in rows or []:
+                        if str(lx.get("user_id") or "") == str(user_id):
+                            continue
+                        if not _listing_in_community_scope(lx, allowed):
+                            continue
+                        try:
+                            rlat = float(lx.get("latitude"))
+                            rlng = float(lx.get("longitude"))
+                        except (TypeError, ValueError):
+                            continue
+                        if abs(rlat - float(lat)) < 0.15 and abs(rlng - float(lng)) < 0.15:
+                            nearby.append(lx)
+                    if nearby:
+                        count = len(nearby)
+                        if lang == "es":
+                            results.append(f"Ver los {count} anuncio(s) nuevos cerca de ti")
+                        else:
+                            results.append(f"View {count} new listing(s) near you")
+
+            if role in ("donor", "admin", "organizer"):
+                cutoff = (now + timedelta(hours=48)).date().isoformat()
+                today = now.date().isoformat()
+                try:
+                    rows = await supabase_get("food_listings", {
+                        "user_id": f"eq.{user_id}",
+                        "status": "in.(approved,active)",
+                        "expiry_date": f"lte.{cutoff}",
+                        "select": "id,expiry_date,title",
+                        "limit": "25",
+                    })
+                except Exception as exc:
+                    logger.debug("proactive expiring fetch failed: %s", exc)
+                    rows = []
+                expiring_soon = []
+                for lx in rows or []:
+                    raw = lx.get("expiry_date")
+                    if not raw:
+                        continue
+                    day = str(raw)[:10]
+                    if today <= day <= cutoff:
+                        expiring_soon.append(lx)
+                if expiring_soon:
+                    count = len(expiring_soon)
+                    if lang == "es":
+                        results.append(f"Tienes {count} anuncio(s) que vencen pronto")
+                    else:
+                        results.append(f"You have {count} listing(s) expiring soon")
+        except Exception as exc:
+            logger.debug("Proactive check failed (non-fatal): %s", exc)
             return []
+
+        return results[:2]
 
     # ---- Main chat --------------------------------------------------------
 
@@ -1951,8 +2097,24 @@ class ConversationEngine:
                     situation="User cancelled a pending action before it ran.",
                     facts={"pending_action": pending.get("summary"), "cancelled": True},
                 )
+                suggestions = await self._build_suggestion_chips(
+                    cancelled_text,
+                    lang,
+                    user_message=message,
+                    user_id=str(user_id),
+                    actions=[],
+                )
                 conversation_id = await self._persist_conversation(
-                    user_id, message, cancelled_text, lang
+                    user_id,
+                    message,
+                    cancelled_text,
+                    lang,
+                    metadata={
+                        "actions": [{"tool": pending.get("tool"), "ok": False, "summary": "Cancelled by user"}],
+                        "suggestions": suggestions,
+                        "requires_confirmation": False,
+                        "pending_action": None,
+                    },
                 )
                 return {
                     "text": cancelled_text,
@@ -1963,7 +2125,7 @@ class ConversationEngine:
                     "conversation_id": str(conversation_id) if conversation_id else None,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "actions": [{"tool": pending.get("tool"), "ok": False, "summary": "Cancelled by user"}],
-                    "suggestions": [],
+                    "suggestions": suggestions,
                     "requires_confirmation": False,
                     "pending_action": None,
                 }
@@ -2113,17 +2275,54 @@ class ConversationEngine:
         except Exception as exc:  # pragma: no cover
             logger.debug("role prompt build failed: %s", exc)
 
-        # Inject learned preferences so the model applies them automatically.
-        if memories:
-            mem_lines = "\n".join(f"  - {m['key']}: {m['value']}" for m in memories)
-            messages.append({
-                "role": "system",
-                "content": (
-                    "Learned preferences about this user (from prior conversations):\n"
-                    f"{mem_lines}\n"
-                    "Apply these automatically — do NOT ask again for things you already know."
-                ),
-            })
+        # Standing instructions ("always do X") + soft learned preferences.
+        # Standing keys get MUST-FOLLOW language; soft prefs stay advisory.
+        try:
+            from backend.ai.standing_instructions import (
+                format_soft_preferences_block,
+                format_standing_memories_block,
+                sync_standing_instructions,
+            )
+            standing_block = format_standing_memories_block(memories, lang=lang)
+            if standing_block:
+                messages.append({"role": "system", "content": standing_block})
+            soft_block = format_soft_preferences_block(memories, lang=lang)
+            if soft_block:
+                messages.append({"role": "system", "content": soft_block})
+            # Detect this-turn coaching ("you didn't…", "I'm not seeing…",
+            # "always…", "check step by step") → persist durable rules and
+            # inject a MUST-FIX reminder before the model replies.
+            standing_sync = await sync_standing_instructions(
+                str(user_id), message, memories=memories, lang=lang,
+            )
+            # Newly saved standing rules also need to appear this turn.
+            for item in standing_sync.get("saved") or []:
+                memories.append({"key": item["key"], "value": item["value"]})
+            if standing_sync.get("saved"):
+                standing_block2 = format_standing_memories_block(memories, lang=lang)
+                if standing_block2 and standing_block2 != standing_block:
+                    messages.append({"role": "system", "content": standing_block2})
+            if standing_sync.get("reminder"):
+                messages.append({
+                    "role": "system",
+                    "content": standing_sync["reminder"],
+                })
+        except Exception as exc:  # pragma: no cover — advisory only
+            logger.debug("standing instructions skipped: %s", exc)
+            if memories:
+                mem_lines = "\n".join(
+                    f"  - {m['key']}: {m['value']}" for m in memories
+                )
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Learned preferences about this user "
+                        "(from prior conversations):\n"
+                        f"{mem_lines}\n"
+                        "Apply these automatically — do NOT ask again for "
+                        "things you already know."
+                    ),
+                })
 
         for msg in history:
             content = msg["message"]
@@ -2171,7 +2370,19 @@ class ConversationEngine:
             build_claim_execute_reminder,
             build_last_search_snapshot_reminder,
             build_fresh_search_after_claim_reminder,
+            clear_last_search_listings,
+            _user_clears_claim_flow,
+            _recent_search_context,
+            is_finding_flow,
         )
+        # Escape hatch: user denies a stuck claim, or asks for food with no
+        # search results in-thread — drop stale server search cache so we
+        # don't keep injecting VISIBLE LISTINGS into a phantom qty loop.
+        if _user_clears_claim_flow(message) or (
+            is_finding_flow(message, history) and not _recent_search_context(history)
+        ):
+            clear_last_search_listings(str(user_id))
+
         turn_reminder, _ = build_turn_reminder(
             message, history, lang=lang, user_id=str(user_id),
         )
@@ -2206,6 +2417,16 @@ class ConversationEngine:
         posting_reminder = build_posting_step_reminder(message, history, lang=lang)
         if posting_reminder:
             messages.append({"role": "system", "content": posting_reminder})
+
+        try:
+            from backend.ai.conversation_flow import build_assistance_mode_reminder
+            assist_reminder = build_assistance_mode_reminder(
+                message, history, lang=lang,
+            )
+            if assist_reminder:
+                messages.append({"role": "system", "content": assist_reminder})
+        except Exception as exc:  # pragma: no cover — advisory only
+            logger.debug("assistance mode reminder skipped: %s", exc)
 
         try:
             from backend.ai.conversation_flow import (
@@ -2361,19 +2582,36 @@ class ConversationEngine:
         except Exception as exc:  # pragma: no cover — advisory only
             logger.debug("reflection capture skipped: %s", exc)
 
+        # Persist after chips/actions are known so history can restore them.
+        pending_action_entry = next(
+            (a for a in actions if a.get("type") == "requires_confirmation"),
+            None,
+        )
+
+        suggestions = await self._build_suggestion_chips(
+            response_text,
+            lang,
+            user_message=message,
+            user_id=str(user_id),
+            actions=actions,
+        )
+
         conversation_id = await self._persist_conversation(
-            user_id, message, response_text, lang
+            user_id,
+            message,
+            response_text,
+            lang,
+            metadata={
+                "actions": actions,
+                "suggestions": suggestions,
+                "requires_confirmation": pending_action_entry is not None,
+                "pending_action": pending_action_entry,
+            },
         )
 
         audio_b64 = None
         if include_audio:
             audio_b64 = await self._generate_audio_b64(response_text, lang=lang)
-
-        # No heuristic quick-reply chips — let the model's own words drive the turn.
-        pending_action_entry = next(
-            (a for a in actions if a.get("type") == "requires_confirmation"),
-            None,
-        )
 
         return {
             "text": response_text,
@@ -2384,19 +2622,28 @@ class ConversationEngine:
             "conversation_id": str(conversation_id) if conversation_id else None,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "actions": actions,
-            "suggestions": [],
+            "suggestions": suggestions,
             "requires_confirmation": pending_action_entry is not None,
             "pending_action": pending_action_entry,
         }
 
     async def _persist_conversation(
-        self, user_id: str, user_msg: str, assistant_msg: str, lang: str
+        self,
+        user_id: str,
+        user_msg: str,
+        assistant_msg: str,
+        lang: str,
+        *,
+        metadata: dict | None = None,
     ) -> Optional[int]:
         try:
+            assistant_meta = {"lang": lang}
+            if metadata:
+                assistant_meta.update(metadata)
             _, row_id = await asyncio.gather(
                 self.store_message(user_id, "user", user_msg),
                 self.store_message(
-                    user_id, "assistant", assistant_msg, metadata={"lang": lang}
+                    user_id, "assistant", assistant_msg, metadata=assistant_meta
                 ),
             )
             return row_id
@@ -2766,13 +3013,47 @@ class ConversationEngine:
                 # pickups) and write tools (claim, cancel, update, post).
                 if not isinstance(fn_args, dict):
                     fn_args = {}
-                if auth_user_id is not None and "user_id" in fn_args:
+                if auth_user_id is not None and fn_name in self._tools_taking_user_id:
+                    fn_args["user_id"] = str(auth_user_id)
+                elif auth_user_id is not None and "user_id" in fn_args:
+                    fn_args["user_id"] = str(auth_user_id)
+                # Find-food reads must always scope to the signed-in user so
+                # their own donations are excluded even if the model omitted
+                # user_id (get_recent_listings) or hallucinated another id.
+                if auth_user_id is not None and fn_name in {
+                    "search_food_near_user",
+                    "get_recent_listings",
+                    "get_community_listings",
+                    "claim_listing",
+                    "claim_listings",
+                    "claim_food",
+                }:
                     fn_args["user_id"] = str(auth_user_id)
                 # run_safe_query: force a caller-scoped filter on any entity
                 # that has a user column, so the model can't enumerate other
                 # users' listings/requests or read the users table freely.
                 if fn_name == "run_safe_query" and auth_user_id is not None:
                     fn_args = _scope_safe_query(fn_args, auth_user_id)
+
+                try:
+                    from backend.ai.conversation_flow import (
+                        assistance_mode_tool_block_reason,
+                    )
+                    assist_block = assistance_mode_tool_block_reason(
+                        fn_name, user_text, chat_history,
+                    )
+                    if assist_block:
+                        tool_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": json.dumps({
+                                "error": "assistance_mode_required",
+                                "message": assist_block,
+                            }),
+                        })
+                        continue
+                except Exception:  # pragma: no cover — advisory only
+                    pass
 
                 # Recipient-side allergen / dietary enrichment. Applies to
                 # any tool where filtering the food set matters: search,
@@ -2806,31 +3087,26 @@ class ConversationEngine:
                     except Exception:  # pragma: no cover — advisory only
                         pass
 
-                if fn_name == "search_food_near_user" and not fn_args.get("title_query"):
+                if fn_name == "search_food_near_user":
                     try:
-                        from backend.ai.conversation_flow import (
-                            _mentioned_food_hint_from_message,
+                        from backend.ai.conversation_flow import enrich_search_food_args
+                        fn_args = enrich_search_food_args(
+                            fn_args, user_text, chat_history,
                         )
-                        hint = _mentioned_food_hint_from_message(user_text)
-                        if hint:
-                            fn_args["title_query"] = hint
                     except Exception:  # pragma: no cover — advisory only
                         pass
-
-                if fn_name == "post_food_request":
-                    tool_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "content": json.dumps({
-                            "error": "feature_not_available",
-                            "message": (
-                                "DoGoods does not support posting food requests. "
-                                "Use search_food_near_user with title_query to find "
-                                "available listings the user can claim."
-                            ),
-                        }),
-                    })
-                    continue
+                    # Single leftover food still auto-injects when model omitted
+                    # title_query; multi-food enrich already set the OR query.
+                    if not fn_args.get("title_query"):
+                        try:
+                            from backend.ai.conversation_flow import (
+                                _mentioned_food_hint_from_message,
+                            )
+                            hint = _mentioned_food_hint_from_message(user_text)
+                            if hint:
+                                fn_args["title_query"] = hint
+                        except Exception:  # pragma: no cover — advisory only
+                            pass
 
                 if fn_name == "attach_photos_to_listing" and auth_user_id is not None:
                     from backend.ai.conversation_flow import enrich_attach_photos_args
@@ -2921,6 +3197,25 @@ class ConversationEngine:
                             "content": json.dumps({
                                 "error": "posting_flow_incomplete",
                                 "message": block_reason,
+                            }),
+                        })
+                        continue
+
+                if fn_name in {"update_food_listing", "update_listing", "edit_listing"} and auth_user_id is not None:
+                    from backend.ai.conversation_flow import (
+                        update_new_share_block_reason,
+                    )
+                    new_share_block = update_new_share_block_reason(
+                        fn_name, fn_args, user_text, chat_history,
+                        str(auth_user_id),
+                    )
+                    if new_share_block:
+                        tool_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": json.dumps({
+                                "error": "use_post_food_listing",
+                                "message": new_share_block,
                             }),
                         })
                         continue
@@ -3257,6 +3552,11 @@ class ConversationEngine:
                         and result.get("listing_id")
                     ):
                         posted_listing_id = str(result["listing_id"])
+                        if auth_user_id is not None:
+                            from backend.ai.conversation_flow import clear_share_drafts
+                            # Single-item posts must also clear the queue so a
+                            # later "share carrots" doesn't keep bananas around.
+                            clear_share_drafts(str(auth_user_id))
 
                     if (
                         fn_name == "post_food_listings"
@@ -3275,9 +3575,24 @@ class ConversationEngine:
                         if actions_out is not None and isinstance(result, dict):
                             # Ensure success copy can hit post-success markers.
                             if not result.get("summary"):
-                                result["summary"] = (
-                                    f"Posted! {result.get('count_posted', 0)} listings are live."
+                                posted_rows = result.get("posted") or []
+                                awaiting = sum(
+                                    1 for p in posted_rows
+                                    if isinstance(p, dict) and (
+                                        p.get("awaiting_approval")
+                                        or str(p.get("status") or "").lower() == "pending"
+                                    )
                                 )
+                                n = result.get("count_posted", 0)
+                                if awaiting and awaiting >= n:
+                                    result["summary"] = (
+                                        f"Posted! {n} listings awaiting admin approval. "
+                                        "Please wait for admin approval."
+                                    )
+                                else:
+                                    result["summary"] = (
+                                        f"Posted! {n} listings are live."
+                                    )
 
                     if (
                         fn_name == "claim_listings"
@@ -3286,13 +3601,46 @@ class ConversationEngine:
                         and (result.get("count_claimed") or 0) > 0
                     ):
                         if auth_user_id is not None:
-                            from backend.ai.conversation_flow import clear_claim_drafts
-                            clear_claim_drafts(str(auth_user_id))
+                            from backend.ai.conversation_flow import (
+                                clear_claim_drafts,
+                                remove_claimed_from_drafts,
+                            )
+                            claimed_rows = result.get("claimed") or []
+                            claimed_ids = [
+                                row.get("listing_id")
+                                for row in claimed_rows
+                                if isinstance(row, dict) and row.get("listing_id")
+                            ]
+                            # Keep failed drafts so the user can retry those.
+                            if (result.get("count_failed") or 0) > 0 and claimed_ids:
+                                remove_claimed_from_drafts(
+                                    str(auth_user_id), claimed_ids
+                                )
+                            else:
+                                clear_claim_drafts(str(auth_user_id))
                         if actions_out is not None and isinstance(result, dict):
                             if not result.get("summary"):
                                 result["summary"] = (
-                                    f"Claimed! {result.get('count_claimed', 0)} listings reserved."
+                                    f"Claimed! {result.get('count_claimed', 0)} listings reserved. "
+                                    "Please wait for admin approval before pickup."
                                 )
+
+                    if (
+                        fn_name == "claim_listing"
+                        and ok
+                        and isinstance(result, dict)
+                        and result.get("success")
+                        and auth_user_id is not None
+                    ):
+                        # Drop leftover single-item drafts so the next claim
+                        # isn't forced into stale claim_listings mode.
+                        from backend.ai.conversation_flow import (
+                            clear_claim_drafts,
+                            get_claim_drafts,
+                        )
+                        leftovers = get_claim_drafts(str(auth_user_id))
+                        if leftovers:
+                            clear_claim_drafts(str(auth_user_id))
 
                     if (
                         fn_name in {"update_food_listing", "update_listing", "edit_listing"}
@@ -3369,15 +3717,24 @@ class ConversationEngine:
 
     # ---- Whisper + TTS ---------------------------------------------------
 
-    async def transcribe_audio(self, audio_bytes: bytes, filename: str = "audio.webm") -> str:
+    async def transcribe_audio(
+        self,
+        audio_bytes: bytes,
+        filename: str = "audio.webm",
+        content_type: str | None = None,
+    ) -> str:
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY not configured")
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+        # OpenAI infers format from the filename extension AND the part's
+        # Content-Type. Passing both avoids 400s when the client labelled
+        # the blob oddly (e.g. Safari mp4 bytes uploaded as audio.webm).
+        mime = (content_type or "").split(";")[0].strip() or "application/octet-stream"
         resp = await _openai_with_retry(
             "POST",
             f"{OPENAI_BASE_URL}/audio/transcriptions",
             headers=headers,
-            files={"file": (filename, audio_bytes)},
+            files={"file": (filename, audio_bytes, mime)},
             data={"model": WHISPER_MODEL, "response_format": "json"},
             timeout=60,
         )
@@ -3419,16 +3776,105 @@ class ConversationEngine:
         *,
         user_message: str,
         user_id: str,
-    ) -> list[str]:
-        communities = await _fetch_active_community_names(user_id)
-        suggested = await _suggested_community_name(user_id)
-        return generate_quick_replies(
-            response_text,
-            lang,
-            user_message=user_message,
-            communities=communities,
-            suggested_community=suggested,
+        actions: Optional[list] = None,
+        pending_suggestions: Optional[list] = None,
+    ) -> list:
+        """Contextual pre-chips for the assistant bubble.
+
+        Prefer tool-aware chips (Claim #N, next-step after post/claim) and
+        reply-matched quick replies. Never pad with generic menu chips — empty
+        is better than irrelevant suggestions.
+        """
+        from backend.agent.suggestion_chips import (
+            build_turn_suggestions,
+            should_load_active_communities,
         )
+
+        communities: list[str] = []
+        suggested: Optional[str] = None
+        reply_l = (response_text or "").lower()
+        needs_communities = (
+            should_load_active_communities(
+                response_text or "",
+                last_user_message=user_message or "",
+                user_context=None,
+            )
+            or _user_picked_different_community(user_message or "")
+            or (
+                ("?" in reply_l or "¿" in reply_l)
+                and any(
+                    k in reply_l
+                    for k in (
+                        "community", "school", "district", "comunidad", "escuela",
+                        "list under", "listed under", "post under",
+                    )
+                )
+            )
+        )
+        if needs_communities:
+            communities = await _fetch_active_community_names(user_id)
+            suggested = await _suggested_community_name(user_id)
+
+        user_context = {
+            "active_communities": communities,
+            "suggested_community": suggested,
+        }
+        try:
+            chips = build_turn_suggestions(
+                response_text or "",
+                lang or "en",
+                tool_results=list(actions or []),
+                pending_suggestions=pending_suggestions,
+                last_user_message=user_message or "",
+                user_context=user_context,
+                min_chips=0,
+            )
+        except Exception as exc:
+            logger.warning("suggestion chips failed (non-fatal): %s", exc)
+            return generate_quick_replies(
+                response_text or "",
+                lang or "en",
+                user_message=user_message or "",
+                communities=communities or None,
+                suggested_community=suggested,
+            )
+
+        return _serialize_suggestion_chips(chips)
+
+
+def _serialize_suggestion_chips(chips: list) -> list:
+    """Normalize chips to FE-safe strings / {label, message} dicts."""
+    out: list = []
+    seen: set[str] = set()
+    for chip in chips or []:
+        if isinstance(chip, str):
+            label = chip.strip()
+            if not label or label.lower() in seen:
+                continue
+            seen.add(label.lower())
+            out.append(label)
+            continue
+        if not isinstance(chip, dict):
+            continue
+        label = str(
+            chip.get("label") or chip.get("message") or chip.get("prompt") or ""
+        ).strip()
+        message = str(
+            chip.get("message") or chip.get("prompt") or chip.get("label") or ""
+        ).strip()
+        if not label or label.lower() in seen:
+            continue
+        seen.add(label.lower())
+        item: dict = {"label": label[:60], "message": message or label}
+        if chip.get("kind"):
+            item["kind"] = chip["kind"]
+        if chip.get("href") or chip.get("target"):
+            item["action"] = "navigate"
+            item["target"] = chip.get("target") or chip.get("href")
+        out.append(item)
+        if len(out) >= 6:
+            break
+    return out[:6]
 
 
 def _user_picked_different_community(user_message: str) -> bool:
@@ -3535,6 +3981,17 @@ def generate_quick_replies(
     if "?" not in t and "¿" not in t:
         return []
 
+    # Successful share/claim completion — never show Yes/post/Cancel chips.
+    # "All set! … are shared … Anything else?" has a "?" but is NOT a post ask.
+    if any(k in t for k in (
+        "are shared", "is shared", "posted!", "posted your", "listing is live",
+        "listings are live", "successfully posted", "ya está publicado",
+        "ya esta publicado", "your listing is live", "baskets are shared",
+        "is now live", "went live", "anything else you want to share",
+        "anything else you'd like to share", "¿algo más que quieras compartir",
+    )):
+        return []
+
     # An "open-ended" question is one that asks WHAT / WHICH / WHEN /
     # WHERE / HOW MANY / HOW MUCH — never answerable with yes/no.
     # NOTE on Spanish: only match accented "qué " (the question word).
@@ -3548,7 +4005,31 @@ def generate_quick_replies(
         )
     )
 
-    # AI showed food options after a hunger/distress search — pick by number.
+    # Help / orientation menus — MUST run before food-pick chips.
+    # "Which one would you like to try first?" used to match pick_food_keys
+    # and offer Claim-style "1/2/3 / Something easy to prepare", which trapped
+    # users in a phantom claim qty loop with no search results shown.
+    help_menu_keys = (
+        "try first", "would you like to try", "what can you do",
+        "how does dogoods", "how does this work", "where do i start",
+        "not sure", "don't know", "dont know", "i'm lost", "im lost",
+        "qué puedo hacer", "como funciona", "cómo funciona", "por dónde empiezo",
+    )
+    if any(k in t for k in help_menu_keys):
+        if es:
+            add("Buscar comida gratis", "Compartir comida extra", "Solicitar comida")
+        else:
+            add("Find free food", "Share extra food", "Request food")
+        return out
+
+    # AI showed food options after a search — pick by number.
+    # Require search-result cues so generic "which one would you like" menus
+    # never get Claim # chips.
+    search_result_cues = (
+        "here's what's", "here are the", "near you", "close to you",
+        "closest", "options near", "found ", "number below", "pick a number",
+        "opciones cerca", "cerca de ti", "elige un número", "elige un numero",
+    )
     pick_food_keys = (
         "which one would you like", "which one sounds good", "which number",
         "which would you like", "reply with the number", "pick one",
@@ -3558,7 +4039,7 @@ def generate_quick_replies(
         "cuál te gustaría", "cual te gustaria", "cuál quieres", "cual quieres",
         "elige un número", "elige un numero", "opciones cerca", "número abajo",
     )
-    if any(k in t for k in pick_food_keys):
+    if any(k in t for k in search_result_cues) and any(k in t for k in pick_food_keys):
         add("1", "2", "3")
         if es:
             add("El más cercano", "Algo fácil de preparar")
@@ -3576,11 +4057,25 @@ def generate_quick_replies(
         "share", "donate", "post", "publish", "listing", "donation",
         "compartir", "donar", "publicar", "donación",
     ))
-    if not posting_context and any(k in t for k in qty_keys):
+    menu_qty_context = any(k in t for k in (
+        "try first", "would you like to try", "what can you do",
+    ))
+    claim_qty_context = any(k in t for k in (
+        "nice choice", "good pick", "great choice", "from that",
+        "of those", "of the", "loaves", "units", "available",
+        "listing", "claimed", "claim", "they have", "there are",
+        "of it", "from this", "from the",
+    ))
+    if (
+        not posting_context
+        and not menu_qty_context
+        and claim_qty_context
+        and any(k in t for k in qty_keys)
+    ):
         if es:
-            add("1", "2", "Todos")
+            add("1", "2", "3", "Todos")
         else:
-            add("1", "2", "All of them")
+            add("1", "2", "3", "All of them")
         return out
 
     # Homebound / mobility — when AI or user mentions trouble getting to pickup.
@@ -3654,6 +4149,20 @@ def generate_quick_replies(
             add(*communities[:4])
             return out
 
+    # Assistance mode fork — do it for me vs guide me step by step
+    if any(k in t for k in (
+            "do it for me", "handle everything", "guide me step by step",
+            "walk you through", "do everything for you", "yourself step by step",
+            "in chat for you", "pages yourself",
+            "hazlo por mí", "hazlo por mi", "paso a paso",
+            "yo te guío", "yo te guio",
+    )):
+        if es:
+            add("Hazlo por mí", "Guíame paso a paso")
+        else:
+            add("Do it for me", "Guide me step by step")
+        return out
+
     # User seems lost — offer the 3 main paths
     if any(k in t for k in (
             "what can you do", "how does dogoods", "how does this work",
@@ -3664,42 +4173,74 @@ def generate_quick_replies(
             "qué hago", "que hago", "no sé qué", "no se que", "no estoy seguro",
     )):
         if es:
-            add("Buscar comida gratis", "Compartir comida extra", "Ver mis recogidas")
+            add("Buscar comida gratis", "Compartir comida extra", "Solicitar comida")
         else:
-            add("Find free food", "Share extra food", "Check my pickups")
+            add("Find free food", "Share extra food", "Request food")
         return out
 
-    # User wants to share but hasn't said what yet
+    # User wants to share but hasn't said what yet — and hasn't picked mode
     if any(k in t for k in (
             "share some food", "share food", "donate food", "post a listing",
             "give away food", "have extra food", "food to donate",
             "compartir comida", "donar comida", "publicar un listado",
             "tengo comida", "sobra comida",
     )) and not any(k in t for k in ("what food", "qué comida", "how much", "cuánto")):
+        # Prefer mode chips when Nouri is asking the fork; otherwise food examples.
+        if any(k in t for k in (
+            "do it for me", "handle everything", "guide me", "step by step",
+            "hazlo por", "paso a paso",
+        )):
+            if es:
+                add("Hazlo por mí", "Guíame paso a paso")
+            else:
+                add("Do it for me", "Guide me step by step")
+            return out
         if es:
             add("5 manzanas", "Pan y huevos", "Verduras — 2 cajas", "Usa mi dirección guardada")
         else:
             add("5 apples", "Bread and eggs", "Vegetables — 2 boxes", "Use my saved address")
         return out
 
-    # Final confirm: any phrasing where the AI is asking the donor/recipient
-    # to greenlight posting the listing/request. The AI's confirm summary
-    # always ends with one of these — match generously so chips are right.
+    # Address confirmation — BEFORE post-confirm so "does that look good?"
+    # about a street address doesn't mis-fire as a publish prompt.
+    address_cues = (
+        "address", "street", " st ", " st.", " ave", "location", "pickup at",
+        "dirección", "direccion", "calle", "main st", "your profile",
+    )
+    if any(c in t for c in address_cues) and any(k in t for k in (
+            "profile address", "use your address", "different one", "what address",
+            "does that look good", "does this look good", "look good to you",
+            "look right", "right address", "correct address", "that address",
+            "dirección de tu perfil", "dirección del perfil", "tu dirección guardada",
+            "uso tu dirección", "uso la dirección", "qué dirección", "que direccion",
+            "otra dirección", "distinta", "diferente",
+    )):
+        if es:
+            add("Sí, usa esa", "Es otra dirección", "No tengo una guardada")
+        else:
+            add("Yes, use that one", "Use a different address", "I don't have one saved")
+        return out
+
+    # Final confirm: AI is asking the donor to greenlight posting.
+    # Keep keys tight — bare "all set" / "looks good" match success copy
+    # and re-opened loops after the listing was already posted.
     confirm_post_keys = (
-        "post it", "post that", "post this", "post the listing",
+        "post it", "post that", "post this", "post the listing", "post these",
         "publish it", "publish that", "publish this", "publish the listing",
         "should i post", "shall i post", "want me to post", "ok to post",
         "ready to post", "ready to publish", "go ahead and post",
-        "good to post", "good to publish", "look good", "looks good",
-        "sound good", "sounds good", "all set", "all good",
-        "confirm?", "confirm and post", "shall i go ahead", "should i go ahead",
+        "good to post", "good to publish", "confirm and post",
+        "shall i go ahead", "should i go ahead", "before i post",
         # Spanish
         "publicarlo", "publicar la", "publicar el", "publico la", "publico el",
+        "lo publique", "que lo publique", "quieres que lo publique",
         "¿confirmas", "¿lo publico", "¿lo publicamos", "¿publicamos",
-        "¿está bien", "¿esta bien", "¿se ve bien", "¿todo bien",
         "listo para publicar",
     )
-    if any(k in t for k in confirm_post_keys):
+    if any(k in t for k in confirm_post_keys) or (
+        ("look good" in t or "looks good" in t or "sound good" in t or "sounds good" in t)
+        and any(k in t for k in ("post", "publish", "listing"))
+    ):
         if es:
             add("Sí, publícalo", "Espera, edítalo", "Cancelar")
         else:
@@ -3725,19 +4266,6 @@ def generate_quick_replies(
                 add("5 millas", "10 millas")
             else:
                 add("Within 5 mi", "Within 10 mi")
-        return out
-
-    # Address confirmation
-    if any(k in t for k in (
-            "profile address", "use your address", "different one", "what address",
-            "dirección de tu perfil", "dirección del perfil", "tu dirección guardada",
-            "uso tu dirección", "uso la dirección", "qué dirección", "que direccion",
-            "otra dirección", "distinta", "diferente",
-    )):
-        if es:
-            add("Sí, usa esa", "Es otra dirección", "No tengo una guardada")
-        else:
-            add("Yes, use that one", "Use a different address", "I don't have one saved")
         return out
 
     # Allergens

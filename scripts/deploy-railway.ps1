@@ -1,5 +1,8 @@
 # Deploy DoGoods backend to Railway (uploads current workspace).
-# Prereq: railway login  &&  railway link  (once per machine)
+#
+# Auth options (either works):
+#   1. Project token in .env:  RAILWAY_TOKEN=<token from Project → Settings → Tokens>
+#   2. Interactive login:      railway login  (once per machine)
 #
 # Usage (from repo root):
 #   .\scripts\deploy-railway.ps1
@@ -16,15 +19,15 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
-# Load RAILWAY_TOKEN from .env / .env.local if not already set
-if (-not $env:RAILWAY_TOKEN) {
-    foreach ($envFile in @(".env", ".env.local")) {
-        $path = Join-Path (Get-Location) $envFile
-        if (Test-Path $path) {
-            Get-Content $path | ForEach-Object {
-                if ($_ -match '^\s*RAILWAY_TOKEN=(.*)$') {
-                    $env:RAILWAY_TOKEN = $matches[1].Trim().Trim('"').Trim("'")
-                }
+# Prefer RAILWAY_TOKEN from .env / .env.local over a stale shell value.
+# Project tokens are UUID-shaped and fail `railway whoami`, but work with
+# `railway up -p/-s/-e`.
+foreach ($envFile in @(".env", ".env.local")) {
+    $path = Join-Path (Get-Location) $envFile
+    if (Test-Path $path) {
+        Get-Content $path | ForEach-Object {
+            if ($_ -match '^\s*RAILWAY_TOKEN=(.*)$') {
+                $env:RAILWAY_TOKEN = $matches[1].Trim().Trim('"').Trim("'")
             }
         }
     }
@@ -39,28 +42,35 @@ if (-not (Get-Command railway -ErrorAction SilentlyContinue)) {
     Fail "Railway CLI not found. Install: npm i -g @railway/cli"
 }
 
-Write-Host "Checking Railway auth..."
-railway whoami 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    Fail @"
-Not logged in to Railway. In an interactive terminal run:
-  railway login
-Or set a project deploy token:
-  `$env:RAILWAY_TOKEN = '<token from Railway dashboard → Project → Settings → Tokens>'
+$hasProjectToken = [bool]$env:RAILWAY_TOKEN
+if ($hasProjectToken) {
+    Write-Host "Using RAILWAY_TOKEN from env/.env (project tokens skip whoami)."
+} else {
+    Write-Host "Checking Railway auth (interactive session)..."
+    railway whoami 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Fail @"
+Not logged in to Railway. Either:
+  1. Set a project deploy token in .env:
+       RAILWAY_TOKEN=<token from Railway → Project → Settings → Tokens>
+  2. Or run interactively:
+       railway login
 "@
-}
+    }
 
-Write-Host "Checking project link..."
-$status = railway status 2>&1
-if ($LASTEXITCODE -ne 0 -or ($status -match "No linked project")) {
-    Fail @"
+    Write-Host "Checking project link..."
+    $status = railway status 2>&1
+    if ($LASTEXITCODE -ne 0 -or ($status -match "No linked project")) {
+        Fail @"
 No Railway project linked in this folder. Run once:
   railway link
 Pick the dogoods-backend (production) project and service.
+Or set RAILWAY_TOKEN in .env and re-run (no link needed).
 "@
+    }
+    Write-Host $status
 }
 
-Write-Host $status
 Write-Host ""
 Write-Host "Deploying backend to Railway (railway up)..."
 Write-Host "Message: $Message"

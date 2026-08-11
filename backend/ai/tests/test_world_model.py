@@ -45,6 +45,22 @@ class TestFoodKindDetection:
         entry = detect_food_kind("I have canned beans to share")
         assert entry["kind"] == "canned"
 
+    def test_tomatoes_default_to_produce_not_canned(self):
+        entry = detect_food_kind("1 basket of tomatoes")
+        assert entry is not None
+        assert entry["kind"] != "canned"
+        assert "produce" in entry["kind"]
+
+    def test_i_can_share_tomatoes_not_canned(self):
+        entry = detect_food_kind("I can share tomatoes today")
+        assert entry is not None
+        assert entry["kind"] != "canned"
+
+    def test_cans_of_tomatoes_is_canned(self):
+        entry = detect_food_kind("2 cans of tomatoes")
+        assert entry is not None
+        assert entry["kind"] == "canned"
+
     def test_rice_is_bulk_dry(self):
         entry = detect_food_kind("some rice for the pantry")
         assert entry and entry["kind"] == "bulk_dry"

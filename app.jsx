@@ -11,6 +11,8 @@ import MainLayout from './components/layout/MainLayout';
 import ProfilePage from './pages/ProfilePage';
 import UserDashboard from './pages/UserDashboard';
 import ShareFoodPage from './pages/ShareFoodPage';
+import RequestFoodPage from './pages/RequestFoodPage';
+import CommunityRequestsPage from './pages/CommunityRequestsPage';
 import UserSettings from './pages/UserSettings';
 import Notifications from './pages/Notifications';
 import UserListings from './pages/UserListings';
@@ -50,26 +52,24 @@ import VerificationManagement from './pages/admin/VerificationManagement.jsx';
 import ApprovalCodeManagement from './pages/admin/ApprovalCodeManagement.jsx';
 import CommunityManagement from './pages/admin/CommunityManagement.jsx';
 import AdminShareFood from './pages/admin/AdminShareFood.jsx';
+import ListingApprovals from './pages/admin/ListingApprovals.jsx';
+import RequestApprovals from './pages/admin/RequestApprovals.jsx';
+import ClaimApprovals from './pages/admin/ClaimApprovals.jsx';
 import { AuthProvider, useAuthContext } from './utils/AuthContext';
 import { GoodsProvider } from './utils/stores/goodsStore.jsx';
 import { MapProvider } from './utils/MapContext.jsx';
 import { UIControlProvider } from './utils/UIControlContext.jsx';
 import AdminRoute from './components/admin/AdminRoute.jsx';
 import ErrorBoundary from './components/common/ErrorBoundary';
+import RecipientRoute from './components/common/RecipientRoute.jsx';
+import DonorOrganizerRoute from './components/common/DonorOrganizerRoute.jsx';
 
 // ProtectedRoute defined outside AppContent to prevent remounts on every render
 // Uses declarative <Navigate> instead of useEffect for synchronous, predictable redirects
 const ProtectedRoute = ({ children }) => {
     const { isAuthenticated, loading, initialized } = useAuthContext();
     const currentLocation = useLocation();
-    
-    // If localStorage says authenticated, show page immediately (even during init)
-    // This prevents the flash/redirect on page refresh
-    if (isAuthenticated) {
-        return children;
-    }
-    
-    // Not authenticated per localStorage - wait for init to confirm
+
     if (loading || !initialized) {
         return (
             <div className="min-h-screen flex items-center justify-center">
@@ -80,10 +80,13 @@ const ProtectedRoute = ({ children }) => {
             </div>
         );
     }
-    
-    // Init complete and still not authenticated - redirect to login
-    const redirectPath = currentLocation.pathname + currentLocation.search;
-    return <Navigate to={`/login?redirect=${encodeURIComponent(redirectPath)}`} replace />;
+
+    if (!isAuthenticated) {
+        const redirectPath = currentLocation.pathname + currentLocation.search;
+        return <Navigate to={`/login?redirect=${encodeURIComponent(redirectPath)}`} replace />;
+    }
+
+    return children;
 };
 
 function AppContent() {
@@ -134,26 +137,31 @@ function AppContent() {
                 <Route path="/faqs" element={<FAQs />} />
                 <Route path="/contact" element={<ContactPage />} />
                 <Route path="/donate" element={<DonatePage />} />
-                <Route path="/find" element={<FindFoodPage />} />
-                <Route path="/near-me" element={<ProtectedRoute><NearMePage /></ProtectedRoute>} />
+                <Route path="/find" element={<RecipientRoute allowGuest><FindFoodPage /></RecipientRoute>} />
+                <Route path="/near-me" element={<RecipientRoute><NearMePage /></RecipientRoute>} />
                 <Route path="/blog" element={<ProtectedRoute><Blog /></ProtectedRoute>} />
                 <Route path="/success" element={<ProtectedRoute><Success /></ProtectedRoute>} />
-                <Route path="/how-it-works" element={<ProtectedRoute><HowItWorks /></ProtectedRoute>} />
-                <Route path="/terms" element={<ProtectedRoute><TermsOfService /></ProtectedRoute>} />
-                <Route path="/privacy" element={<ProtectedRoute><PrivacyPolicy /></ProtectedRoute>} />
-                <Route path="/cookies" element={<ProtectedRoute><CookiesPolicy /></ProtectedRoute>} />
+                <Route path="/how-it-works" element={<HowItWorks />} />
+                <Route path="/terms" element={<TermsOfService />} />
+                <Route path="/privacy" element={<PrivacyPolicy />} />
+                <Route path="/cookies" element={<CookiesPolicy />} />
                 <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
                 <Route path="/dashboard" element={<ProtectedRoute><UserDashboard /></ProtectedRoute>} />
-                <Route path="/share" element={<ProtectedRoute><ShareFoodPage /></ProtectedRoute>} />
-                <Route path="/claim" element={<ProtectedRoute><ClaimFoodForm /></ProtectedRoute>} />
+                <Route path="/share" element={<DonorOrganizerRoute><ShareFoodPage /></DonorOrganizerRoute>} />
+                <Route path="/request" element={<RecipientRoute><RequestFoodPage /></RecipientRoute>} />
+                <Route path="/community-requests" element={<DonorOrganizerRoute redirectTo="/profile?tab=listings"><CommunityRequestsPage /></DonorOrganizerRoute>} />
+                <Route path="/claim" element={<RecipientRoute><ClaimFoodForm /></RecipientRoute>} />
                 <Route path="/settings" element={<ProtectedRoute><UserSettings /></ProtectedRoute>} />
                 <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
-                <Route path="/listings" element={<ProtectedRoute><UserListings /></ProtectedRoute>} />
+                <Route path="/listings" element={<DonorOrganizerRoute><UserListings /></DonorOrganizerRoute>} />
                 <Route path="/receipts" element={<ProtectedRoute><UserReceipts /></ProtectedRoute>} />
                 <Route path="/donations" element={<ProtectedRoute><DonationSchedules /></ProtectedRoute>} />
                 <Route path="/admin" element={<AdminRoute><AdminDashboard /></AdminRoute>} />
                 <Route path="/admin/users" element={<AdminRoute><UserManagement /></AdminRoute>} />
                 <Route path="/admin/distribution" element={<AdminRoute><FoodDistributionManagement /></AdminRoute>} />
+                <Route path="/admin/listing-approvals" element={<AdminRoute><ListingApprovals /></AdminRoute>} />
+                <Route path="/admin/request-approvals" element={<AdminRoute><RequestApprovals /></AdminRoute>} />
+                <Route path="/admin/claim-approvals" element={<AdminRoute><ClaimApprovals /></AdminRoute>} />
                 <Route path="/admin/attendees" element={<AdminRoute><DistributionAttendees /></AdminRoute>} />
                 <Route path="/admin/settings" element={<AdminRoute><AdminSettings /></AdminRoute>} />
                 <Route path="/admin/reports" element={<AdminRoute><AdminReports /></AdminRoute>} />

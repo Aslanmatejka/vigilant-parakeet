@@ -8,7 +8,7 @@ import { useAuthContext } from '../utils/AuthContext';
 function CommunityDetailPage() {
     const { id } = useParams();
     const navigate = useNavigate();
-    const { isAuthenticated, user } = useAuthContext();
+    const { isAuthenticated, user, isAdmin } = useAuthContext();
     const [community, setCommunity] = useState(null);
     const [foodListings, setFoodListings] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -37,24 +37,52 @@ function CommunityDetailPage() {
                 
                 setCommunity(mergedCommunity);
 
+                // Only members (or admins) may see this community's food listings.
+                // Warehouse is not a public broadcast to other schools.
+                const allowed =
+                    Boolean(isAdmin) ||
+                    (isAuthenticated && String(user?.community_id) === String(id));
+                if (!allowed) {
+                    setFoodListings([]);
+                    return;
+                }
+
                 // Fetch food donation listings for this community (both approved and active).
                 // Exclude expired items. All listings are donations (food offers users can claim).
                 // Use local date to avoid dropping today's listings after 4 PM Pacific (UTC-8)
                 // when toISOString() rolls to the next UTC day.
                 const _t = new Date();
                 const todayStr = [_t.getFullYear(), String(_t.getMonth() + 1).padStart(2, '0'), String(_t.getDate()).padStart(2, '0')].join('-');
-                const { data: listings, error: listingsError } = await supabase
-                    .from('food_listings')
-                    .select('*')
+                const communityLabel = communityData?.name || null;
+                const listingFilters = (query) => query
                     .eq('community_id', id)
                     .eq('listing_type', 'donation')
                     .in('status', ['approved', 'active'])
                     .or(`expiry_date.is.null,expiry_date.gte.${todayStr}`)
                     .order('created_at', { ascending: false });
 
+                const normalizeListings = (rows) => (rows || []).map((listing) => {
+                    const comm = listing.communities;
+                    const communityRecord = Array.isArray(comm) ? comm[0] : comm;
+                    return {
+                        ...listing,
+                        community_name: communityRecord?.name || communityLabel,
+                    };
+                });
+
+                let listings = null;
+                let listingsError = null;
+                ({ data: listings, error: listingsError } = await listingFilters(
+                    supabase.from('food_listings').select('*, communities(id, name)'),
+                ));
+                if (listingsError?.code === 'PGRST200' || listingsError?.message?.includes('relationship')) {
+                    ({ data: listings, error: listingsError } = await listingFilters(
+                        supabase.from('food_listings').select('*'),
+                    ));
+                }
                 if (listingsError) throw listingsError;
 
-                setFoodListings(listings || []);
+                setFoodListings(normalizeListings(listings));
             } catch (err) {
                 console.error('Error fetching community data:', err);
                 setError(err.message);
@@ -66,7 +94,7 @@ function CommunityDetailPage() {
         if (id) {
             fetchCommunityData();
         }
-    }, [id]);
+    }, [id, isAuthenticated, isAdmin, user?.community_id]);
 
     const handleClaim = (food) => {
         if (!isAuthenticated) {
@@ -110,10 +138,9 @@ function CommunityDetailPage() {
         );
     }
 
-    const WAREHOUSE_COMMUNITY_ID = 1;
-    const canViewListings = !isAuthenticated || 
-        String(id) === String(WAREHOUSE_COMMUNITY_ID) || 
-        String(user?.community_id) === String(id);
+    const canViewListings =
+        Boolean(isAdmin) ||
+        (isAuthenticated && String(user?.community_id) === String(id));
 
     const foodGivenValue = Math.round(parseFloat(community.food_given_lb) || 0);
     const familiesHelpedValue = parseInt(community.families_helped) || 0;
@@ -197,7 +224,7 @@ function CommunityDetailPage() {
             </div>
 
             {/* Food Listings Section — only visible to members of this community or for the warehouse */}
-            {canViewListings && (
+            {canViewListings ? (
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
                 <div className="mb-8">
                     <h2 className="text-2xl font-bold text-gray-800 mb-2">
@@ -230,10 +257,31 @@ function CommunityDetailPage() {
                                 food={food}
                                 onClaim={() => handleClaim(food)}
                                 showClaimButton={true}
+                                communityName={food.community_name || community.name}
                             />
                         ))}
                     </div>
                 )}
+            </div>
+            ) : (
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+                <div className="bg-white rounded-lg shadow-sm p-10 text-center border border-amber-100">
+                    <i className="fas fa-lock text-4xl text-amber-400 mb-4" aria-hidden="true" />
+                    <h2 className="text-xl font-semibold text-gray-800 mb-2">Members only</h2>
+                    <p className="text-gray-600 mb-6 max-w-lg mx-auto">
+                        Food listings for this community are only visible to people who signed up
+                        with that community&apos;s approval code.
+                        {isAuthenticated
+                            ? ' Browse Find Food for food in your own community.'
+                            : ' Sign in with your school approval code to view available food.'}
+                    </p>
+                    <button
+                        onClick={() => navigate(isAuthenticated ? '/find' : '/login')}
+                        className="px-6 py-2 bg-[#2CABE3] text-white rounded-lg hover:bg-[#2398c7] transition-colors"
+                    >
+                        {isAuthenticated ? 'Go to Find Food' : 'Sign in'}
+                    </button>
+                </div>
             </div>
             )}
         </div>

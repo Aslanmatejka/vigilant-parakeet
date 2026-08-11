@@ -8,6 +8,10 @@ import { useFoodListings } from "../utils/hooks/useSupabase";
 import { useAuthContext } from "../utils/AuthContext";
 import UrgencyService from "../utils/urgencyService";
 import supabase from "../utils/supabaseClient";
+import {
+    browseCommunityIdsForUser,
+    listingVisibleToCommunityScope,
+} from "../utils/communityScope";
 
 // Category mapping for URL parameters
 const CATEGORY_MAPPING = {
@@ -77,9 +81,22 @@ const calculateDistance = (lat1, lon1, lat2, lon2) => {
 function FindFoodPage({ initialCategory }) {
     const navigate = useNavigate();
     const routerLocation = useRouterLocation();
-    const { isAuthenticated, user } = useAuthContext();
-    
-    const { listings: foods, loading: foodsLoading, error: foodsError, fetchListings } = useFoodListings({ status: ['approved', 'active'] });
+    const { isAuthenticated, user, isAdmin } = useAuthContext();
+
+    const allowedCommunityIds = useMemo(
+        () => browseCommunityIdsForUser(user, { isAdmin }),
+        [user?.community_id, isAdmin]
+    );
+
+    const foodListFilters = useMemo(() => ({
+        status: ['approved', 'active'],
+        listing_type: 'donation',
+        ...(user?.id ? { exclude_user_id: user.id } : {}),
+        // Recipients only fetch their own community. Admins are unrestricted.
+        ...(allowedCommunityIds != null ? { community_ids: allowedCommunityIds } : {}),
+    }), [user?.id, allowedCommunityIds]);
+
+    const { listings: foods, loading: foodsLoading, error: foodsError, fetchListings } = useFoodListings(foodListFilters);
 
     const profileLocation = useMemo(() => {
         const lat = user?.latitude;
@@ -116,12 +133,16 @@ function FindFoodPage({ initialCategory }) {
         }
 
         if (communityParam) {
-            setFilters(prev => ({ ...prev, community: communityParam }));
+            // Non-admins may only filter within their own community.
+            const allowed = browseCommunityIdsForUser(user, { isAdmin });
+            if (
+                allowed == null ||
+                allowed.map(String).includes(String(communityParam))
+            ) {
+                setFilters(prev => ({ ...prev, community: communityParam }));
+            }
         }
-    }, [routerLocation.search]);
-
-    // NOTE: intentionally NOT auto-filtering by the user's community —
-    // users should see all available food, not just from their own community.
+    }, [routerLocation.search, user?.community_id, isAdmin]);
 
     useEffect(() => {
         let cancelled = false;
@@ -238,14 +259,15 @@ function FindFoodPage({ initialCategory }) {
             result = result.filter(food => food.category === filters.category);
         }
 
+        // Hard scope: never show another school's food to a code-scoped user.
+        result = result.filter(food =>
+            listingVisibleToCommunityScope(food, allowedCommunityIds)
+        );
+
         if (filters.community) {
-            const WAREHOUSE_COMMUNITY_ID = '1';
             result = result.filter(food =>
-                // Listings without a community are visible to everyone (e.g. AI photo uploads)
-                food.community_id == null || food.community_id === '' ||
                 String(food.community_id) === String(filters.community) ||
-                food.community === filters.community ||
-                String(food.community_id) === WAREHOUSE_COMMUNITY_ID
+                food.community === filters.community
             );
         }
 
@@ -274,7 +296,7 @@ function FindFoodPage({ initialCategory }) {
         }
 
         return result;
-    }, [foods, debouncedSearch, filters, profileLocation]);
+    }, [foods, debouncedSearch, filters, profileLocation, allowedCommunityIds]);
 
     // Count of listings whose urgency is critical or high — surfaced in the
     // listings header so the user sees "3 expiring soon" at a glance.
@@ -358,6 +380,15 @@ function FindFoodPage({ initialCategory }) {
                         </h1>
                         <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
                             Browse nearby food listings and claim what you need. All requests are confidential.
+                        </p>
+                        <p className="mt-4">
+                            <Link
+                                to="/request"
+                                className="inline-flex items-center gap-2 text-sm font-semibold text-amber-800 hover:text-amber-950 underline-offset-4 hover:underline"
+                            >
+                                <i className="fas fa-hand-holding-heart text-amber-600" aria-hidden="true" />
+                                Can&apos;t find what you need? Request food
+                            </Link>
                         </p>
                     </div>
                 </div>
@@ -569,6 +600,13 @@ function FindFoodPage({ initialCategory }) {
                                                     Clear search
                                                 </button>
                                             )}
+                                            <Link
+                                                to="/request"
+                                                className="inline-flex items-center gap-1.5 rounded-full bg-amber-600 text-white px-3 py-1.5 text-xs font-semibold hover:bg-amber-700"
+                                            >
+                                                <i className="fas fa-hand-holding-heart text-[10px]" aria-hidden="true" />
+                                                Request this food
+                                            </Link>
                                             {activeFilterCount === 0 && (
                                                 <Link
                                                     to="/share"

@@ -7,11 +7,14 @@ import re
 from typing import Literal, Optional
 
 FlowKind = Literal["idle", "posting", "claiming", "finding", "requesting"]
+AssistanceMode = Literal["hands_on", "guided"]
+AssistanceGoal = Literal["find", "share", "request"]
 
 _PHOTO_URL_RE = re.compile(
     r"(?:^|\s)image:\s*\S+"
     r"|/uploads/ai/\S+"
-    r"|https?://\S+/storage/v1/object/public/\S+",
+    r"|https?://\S+/storage/v1/object/public/\S+"
+    r"|https?://\S+\.(?:jpg|jpeg|png|webp|gif)(?:\?\S*)?",
     re.IGNORECASE,
 )
 
@@ -19,8 +22,27 @@ _PHOTO_DECLINE_PHRASES: tuple[str, ...] = (
     "no photo", "skip photo", "without a photo", "without photo",
     "no picture", "sin foto", "no foto", "skip the photo",
     "don't have a photo", "dont have a photo",
-    "post without", "post now", "publish without",
-    "sin imagen", "sin foto", "publicar sin foto",
+    "post without", "publish without", "post without a photo",
+    "post without photo", "sin imagen", "publicar sin foto",
+)
+
+_PHOTO_ALREADY_SHARED_PHRASES: tuple[str, ...] = (
+    "already shared the photo", "already shared the photos",
+    "already sent the photo", "already sent the photos",
+    "already uploaded the photo", "already uploaded the photos",
+    "already uploaded photo", "already uploaded photos",
+    "already gave you the photo", "already gave you the photos",
+    "i already shared the photo", "i already shared the photos",
+    "i already sent the photo", "i already sent the photos",
+    "photos with you", "photo with you",
+    "i sent the photo", "i sent the photos", "photos i sent",
+    "ya compartí la foto", "ya envié la foto", "ya te mandé la foto",
+)
+
+_PHOTO_RECEIVED_ASSISTANT: tuple[str, ...] = (
+    "photos received", "photo received", "got both photos", "got your photos",
+    "got the photos", "thanks for the photo", "thanks for the photos",
+    "fotos recibidas", "recibí las fotos", "gracias por la foto",
 )
 
 _DISTRESS_TRIGGERS = (
@@ -54,7 +76,26 @@ _FIND_TRIGGERS = (
     "show me food", "nearby", "looking for food", "available food",
     "what food is available", "show available", "any food available",
     "food available", "search for food", "new food", "more food",
-    "buscar comida", "cerca", "busco comida",
+    "want some food", "want food", "need some food", "need food",
+    "get some food", "get food", "some food", "i want food",
+    "something easy", "easy to prepare", "easy food", "ready to eat",
+    "help me find", "help finding", "what can i claim", "show options",
+    "buscar comida", "cerca", "busco comida", "quiero comida",
+    "necesito comida", "algo fácil", "algo facil",
+)
+
+# User explicitly rejects / questions a phantom mid-claim lock.
+_CLAIM_CLEAR_TRIGGERS = (
+    "i don't have", "i dont have", "don't have any", "dont have any",
+    "we haven't talked", "we havent talked", "haven't talked about",
+    "havent talked about", "which claim", "what claim", "no claim",
+    "there is no claim", "i'm not claiming", "im not claiming",
+    "not claiming", "start over", "start again", "forget that",
+    "never mind the claim", "cancel the claim", "no listing",
+    "we never", "nothing yet", "no option", "what option",
+    "which option", "what food option", "no food option",
+    "no tengo", "no hay reclamo", "cuál reclamo", "cual reclamo",
+    "no estamos reclamando", "empezar de nuevo",
 )
 
 _CLEAR_SHORT_REPLIES: frozenset[str] = frozenset({
@@ -202,12 +243,461 @@ def is_request_flow(message: str, history: list | None = None) -> bool:
     return False
 
 
+def _user_clears_claim_flow(message: str) -> bool:
+    """True when the user denies / questions a stuck claim-intake loop."""
+    t = (message or "").strip().lower()
+    if not t:
+        return False
+    return any(k in t for k in _CLAIM_CLEAR_TRIGGERS)
+
+
+# ---------------------------------------------------------------------------
+# Assistance mode: "do it for me" vs "guide me step by step"
+# ---------------------------------------------------------------------------
+
+_HANDS_ON_MODE_PHRASES: tuple[str, ...] = (
+    "do it for me", "do everything for me", "handle it for me",
+    "handle everything", "you do it", "you handle it", "just do it",
+    "take care of it", "nouri do it", "do it in chat",
+    "hazlo por mí", "hazlo por mi", "hazlo todo", "tú hazlo", "tu hazlo",
+    "hazlo tú", "hazlo tu", "encárgate", "encargate",
+)
+
+_GUIDED_MODE_PHRASES: tuple[str, ...] = (
+    "guide me", "guide me step by step", "walk me through",
+    "step by step", "show me how", "show me the steps",
+    "i'll do it myself", "ill do it myself", "i can do it myself",
+    "teach me", "how do i do it myself",
+    "guíame", "guiame", "paso a paso", "enséñame", "ensename",
+    "yo lo hago", "lo hago yo", "muéstrame cómo", "muestrame como",
+)
+
+_ASSIST_MODE_ASK_MARKERS: tuple[str, ...] = (
+    "do it for me", "handle everything", "guide me step by step",
+    "walk you through", "do everything for you", "yourself step by step",
+    "in chat for you", "pages yourself",
+    "hazlo por mí", "hazlo por mi", "paso a paso", "guíame", "guiame",
+    "yo te guío", "yo te guio", "tú lo haces", "tu lo haces",
+)
+
+_FRESH_FIND_ASK_TRIGGERS: tuple[str, ...] = (
+    "find food", "find free food", "food near me", "near me",
+    "looking for food", "want to find", "i want to find",
+    "help me find", "search for food", "available food",
+    "show me food", "what food is available", "i want food",
+    "want some food", "need some food", "get some food",
+    "buscar comida", "comida cerca", "quiero comida", "necesito comida",
+)
+
+_FRESH_SHARE_ASK_TRIGGERS: tuple[str, ...] = (
+    "share food", "share extra", "share some food", "want to share",
+    "i want to share", "donate food", "post a listing", "give away food",
+    "have extra food", "food to donate",
+    "compartir comida", "donar comida", "quiero compartir", "tengo comida extra",
+)
+
+_FRESH_REQUEST_ASK_TRIGGERS: tuple[str, ...] = (
+    "request food", "food request", "post a request", "post food request",
+    "want to request", "i want to request", "ask for food", "need a request",
+    "solicitar comida", "pedir comida", "publicar solicitud", "quiero solicitar",
+    "hacer una solicitud",
+)
+
+
+def detect_assistance_mode(message: str) -> Optional[AssistanceMode]:
+    """Return hands_on / guided when the user explicitly picks a mode."""
+    t = (message or "").strip().lower()
+    if not t:
+        return None
+    # Prefer guided when both match ("guide me" contains no hands-on, but
+    # "do it for me step by step" is rare — check hands_on first for clarity).
+    if any(k in t for k in _HANDS_ON_MODE_PHRASES):
+        return "hands_on"
+    if any(k in t for k in _GUIDED_MODE_PHRASES):
+        return "guided"
+    return None
+
+
+def detect_assistance_goal(
+    message: str,
+    history: list | None = None,
+) -> Optional[AssistanceGoal]:
+    """Fresh find/share/request intent that should offer the assistance-mode fork."""
+    if _is_distress(message):
+        return None
+    t = (message or "").strip().lower()
+    if not t:
+        # Mode reply after Nouri asked — infer goal from prior user turn.
+        if history and _assistant_asked_assistance_mode(history):
+            return _goal_from_recent_user_intent(history)
+        return None
+
+    mode = detect_assistance_mode(message)
+    if mode and _assistant_asked_assistance_mode(history):
+        return _goal_from_recent_user_intent(history)
+
+    # Concrete item specs → skip the fork; user already wants hands-on action.
+    if _looks_like_food_quantity_spec(message) and any(k in t for k in _SHARE_TRIGGERS):
+        return None
+    if _looks_like_listing_pick(message) and _recent_search_context(history):
+        return None
+
+    request_hit = any(k in t for k in _FRESH_REQUEST_ASK_TRIGGERS) or any(
+        k in t for k in _REQUEST_TRIGGERS
+    )
+    share_hit = any(k in t for k in _FRESH_SHARE_ASK_TRIGGERS)
+    find_hit = any(k in t for k in _FRESH_FIND_ASK_TRIGGERS) or (
+        is_finding_flow(message, history)
+        and not share_hit
+        and not request_hit
+        and not any(k in t for k in _CLAIM_TRIGGERS)
+    )
+
+    if request_hit and not share_hit:
+        if _request_already_underway(history):
+            return None
+        return "request"
+    if share_hit and not any(k in t for k in _DISTRESS_TRIGGERS):
+        # Mid-post details already in flight → don't re-ask.
+        if _posting_already_underway(history):
+            return None
+        return "share"
+    if find_hit and not share_hit and not request_hit:
+        if _finding_already_underway(history):
+            return None
+        return "find"
+    return None
+
+
+def _goal_from_recent_user_intent(history: list | None) -> Optional[AssistanceGoal]:
+    if not history:
+        return None
+    for msg in reversed(history[-8:]):
+        if msg.get("role") != "user":
+            continue
+        text = (msg.get("message") or "").lower()
+        if any(k in text for k in _FRESH_REQUEST_ASK_TRIGGERS) or any(
+            k in text for k in _REQUEST_TRIGGERS
+        ):
+            return "request"
+        if any(k in text for k in _FRESH_SHARE_ASK_TRIGGERS) or any(
+            k in text for k in _SHARE_TRIGGERS
+        ):
+            return "share"
+        if any(k in text for k in _FRESH_FIND_ASK_TRIGGERS) or any(
+            k in text for k in _FIND_TRIGGERS
+        ):
+            return "find"
+    return None
+
+
+def _assistant_asked_assistance_mode(history: list | None) -> bool:
+    if not history:
+        return False
+    for msg in reversed(history[-4:]):
+        if msg.get("role") != "assistant":
+            continue
+        text = (msg.get("message") or "").lower()
+        return any(k in text for k in _ASSIST_MODE_ASK_MARKERS)
+    return False
+
+
+def _assistance_mode_from_history(history: list | None) -> Optional[AssistanceMode]:
+    """Mode already chosen earlier in this find/share/request session."""
+    if not history:
+        return None
+    asked = False
+    for msg in reversed(history[-10:]):
+        role = msg.get("role")
+        text = (msg.get("message") or "").lower()
+        if role == "assistant" and any(k in text for k in _ASSIST_MODE_ASK_MARKERS):
+            asked = True
+            continue
+        if role == "user":
+            mode = detect_assistance_mode(text)
+            if mode:
+                return mode
+            # User jumped past the fork with concrete action — treat as hands_on.
+            if asked and (
+                _looks_like_food_quantity_spec(text)
+                or any(k in text for k in (
+                    "near me", "search", "post", "claim", "apples", "bread",
+                    "request", "solicitud",
+                ))
+            ):
+                return "hands_on"
+    return None
+
+
+def _posting_already_underway(history: list | None) -> bool:
+    if not history:
+        return False
+    blob = " ".join(
+        (m.get("message") or "").lower()
+        for m in history[-8:]
+        if m.get("role") == "assistant"
+    )
+    return any(k in blob for k in (
+        "what food and how much", "quick photo", "snap a photo",
+        "which school", "which community", "ready to post", "post it?",
+        "best by", "when does it expire", "qué comida", "foto rápida",
+        "opened share food", "share food page",
+    ))
+
+
+def _finding_already_underway(history: list | None) -> bool:
+    if not history:
+        return False
+    if _recent_search_context(history):
+        return True
+    blob = " ".join(
+        (m.get("message") or "").lower()
+        for m in history[-8:]
+        if m.get("role") == "assistant"
+    )
+    return any(k in blob for k in (
+        "found ", "near you", "here's what's", "pick a number",
+        "opened find food", "find food page", "opciones", "cerca de ti",
+    ))
+
+
+def _request_already_underway(history: list | None) -> bool:
+    if not history:
+        return False
+    blob = " ".join(
+        (m.get("message") or "").lower()
+        for m in history[-8:]
+        if m.get("role") == "assistant"
+    )
+    return any(k in blob for k in (
+        "what do you need", "food request", "household size",
+        "opened request food", "request food page",
+        "qué necesitas", "solicitud de comida",
+        "post a food request for", "request posted",
+    ))
+
+
+def needs_assistance_mode_choice(
+    message: str,
+    history: list | None = None,
+) -> bool:
+    """True when Nouri should ask do-it-for-me vs guide-me before acting."""
+    if _is_distress(message):
+        return False
+    if detect_assistance_mode(message):
+        return False
+    if _assistance_mode_from_history(history):
+        return False
+    goal = detect_assistance_goal(message, history)
+    return goal is not None
+
+
+def resolve_assistance_mode(
+    message: str,
+    history: list | None = None,
+) -> Optional[AssistanceMode]:
+    """Explicit mode from this turn, or previously chosen in-session."""
+    return detect_assistance_mode(message) or _assistance_mode_from_history(history)
+
+
+def _assistance_action_label(goal: AssistanceGoal, lang: str = "en") -> str:
+    if lang == "es":
+        if goal == "share":
+            return "compartir comida"
+        if goal == "request":
+            return "solicitar comida"
+        return "buscar comida"
+    if goal == "share":
+        return "share food"
+    if goal == "request":
+        return "request food"
+    return "find food"
+
+
+def build_assistance_mode_reminder(
+    message: str,
+    history: list | None = None,
+    lang: str = "en",
+) -> Optional[str]:
+    """Per-turn injection: ask for mode, or run hands_on / guided path."""
+    if _is_distress(message):
+        return None
+
+    mode = resolve_assistance_mode(message, history)
+    goal = detect_assistance_goal(message, history)
+    if goal is None and mode and _assistant_asked_assistance_mode(history):
+        goal = _goal_from_recent_user_intent(history)
+
+    if mode is None and needs_assistance_mode_choice(message, history):
+        goal = goal or detect_assistance_goal(message, history) or "find"
+        action = _assistance_action_label(goal, lang)
+        if lang == "es":
+            return (
+                f"MODO DE AYUDA (obligatorio este turno):\n"
+                f"El usuario quiere {action}. NO llames search_food_near_user, "
+                f"claim_*, ni post_food_* todavía.\n"
+                f"Pregunta UNA vez, cálido y breve: ¿quieres que yo lo haga TODO "
+                f"por ti aquí en el chat, o te guío paso a paso para que lo hagas "
+                f"tú en la app?\n"
+                f"Ofrece exactamente dos caminos (los chips cubren las respuestas)."
+            )
+        return (
+            f"ASSISTANCE MODE (required this turn):\n"
+            f"The user wants to {action}. Do NOT call search_food_near_user, "
+            f"claim_*, or post_food_* yet.\n"
+            f"Ask ONCE, warm and brief: want me to handle everything for you "
+            f"here in chat, or walk you through doing it yourself step by step "
+            f"on the pages?\n"
+            f"Offer exactly those two paths (chips will cover the replies)."
+        )
+
+    if mode == "guided" and goal:
+        if lang == "es":
+            if goal == "share":
+                return (
+                    "MODO GUIADO — COMPARTIR:\n"
+                    "El usuario quiere hacerlo en la app. Llama navigate_ui "
+                    "action=open target=create ESTE turno. Luego explica 3–5 "
+                    "pasos cortos: título/categoría, cantidad, fecha de vencimiento, "
+                    "dirección/comunidad, enviar. UNA pregunta si hace falta. "
+                    "NO publiques tú con post_food_listing a menos que lo pida."
+                )
+            if goal == "request":
+                return (
+                    "MODO GUIADO — SOLICITAR:\n"
+                    "El usuario quiere hacerlo en la app. Llama navigate_ui "
+                    "action=open target=request ESTE turno. Luego explica 3–5 "
+                    "pasos cortos: qué necesita, cantidad, comunidad, fecha, "
+                    "enviar. Quédate como guía — NO llames post_food_request "
+                    "a menos que pida que lo hagas tú."
+                )
+            return (
+                "MODO GUIADO — BUSCAR:\n"
+                "El usuario quiere hacerlo en la app. Llama navigate_ui "
+                "action=open target=list ESTE turno. Luego explica 3–5 pasos "
+                "cortos: revisar listados, filtrar, tocar Reclamar, confirmar "
+                "cantidad, enviar. Quédate como guía — NO llames "
+                "search_food_near_user / claim_* a menos que pida que lo hagas tú."
+            )
+        if goal == "share":
+            return (
+                "GUIDED MODE — SHARE FOOD:\n"
+                "User wants to do it on the pages. Call navigate_ui "
+                "action=open target=create THIS turn. Then explain 3–5 short "
+                "steps: title/category, quantity, expiry, address/community, "
+                "submit. One follow-up question only if needed. Do NOT post "
+                "via post_food_listing unless they ask you to take over."
+            )
+        if goal == "request":
+            return (
+                "GUIDED MODE — REQUEST FOOD:\n"
+                "User wants to do it on the pages. Call navigate_ui "
+                "action=open target=request THIS turn. Then explain 3–5 short "
+                "steps: what they need, quantity, community, needed-by date, "
+                "submit. No photo step — requests never include images. Stay "
+                "a coach — do NOT call post_food_request unless they ask you "
+                "to take over in chat."
+            )
+        return (
+            "GUIDED MODE — FIND FOOD:\n"
+            "User wants to do it on the pages. Call navigate_ui "
+            "action=open target=list THIS turn. Then explain 3–5 short steps: "
+            "browse listings, filter if needed, tap Claim, confirm quantity, "
+            "submit. Stay a coach — do NOT call search_food_near_user / claim_* "
+            "unless they ask you to take over in chat."
+        )
+
+    if mode == "hands_on" and goal:
+        if lang == "es":
+            if goal == "share":
+                return (
+                    "MODO MANOS A LA OBRA — COMPARTIR:\n"
+                    "El usuario quiere que lo hagas tú en el chat. Sigue el "
+                    "flujo normal de publicación (preguntar solo lo que falte, "
+                    "luego post_food_listing). No abras la página Share Food."
+                )
+            if goal == "request":
+                return (
+                    "MODO MANOS A LA OBRA — SOLICITAR:\n"
+                    "El usuario quiere que lo hagas tú en el chat. Pregunta "
+                    "solo lo que falte (qué necesita, cantidad, comunidad) y "
+                    "llama post_food_request. No abras Request Food para guiar la UI."
+                )
+            return (
+                "MODO MANOS A LA OBRA — BUSCAR:\n"
+                "El usuario quiere que lo hagas tú en el chat. Llama "
+                "search_food_near_user ESTE turno y continúa el flujo de "
+                "reclamo. No abras Find Food para guiar la UI."
+            )
+        if goal == "share":
+            return (
+                "HANDS-ON MODE — SHARE FOOD:\n"
+                "User wants you to handle it in chat. Follow the normal "
+                "posting flow (ask only what's missing, then post_food_listing). "
+                "Do not open the Share Food page for UI coaching."
+            )
+        if goal == "request":
+            return (
+                "HANDS-ON MODE — REQUEST FOOD:\n"
+                "User wants you to handle it in chat. Ask only what's missing "
+                "(what they need, quantity, community) then call "
+                "post_food_request. Do not open the Request Food page for UI coaching."
+            )
+        return (
+            "HANDS-ON MODE — FIND FOOD:\n"
+            "User wants you to handle it in chat. Call search_food_near_user "
+            "THIS turn and continue the claim flow. Do not open Find Food "
+            "for UI coaching."
+        )
+
+    return None
+
+
+def assistance_mode_tool_block_reason(
+    tool_name: str,
+    message: str,
+    history: list | None = None,
+) -> Optional[str]:
+    """Block find/share/request write tools until the user picks assistance mode."""
+    if not needs_assistance_mode_choice(message, history):
+        return None
+    blocked = {
+        "search_food_near_user",
+        "get_recent_listings",
+        "claim_listing",
+        "claim_listings",
+        "post_food_listing",
+        "post_food_listings",
+        "post_food_request",
+        "bulk_import_listings",
+    }
+    if tool_name not in blocked:
+        return None
+    return (
+        "Ask the user first: do everything for them in chat, or guide them "
+        "step by step on the pages. Do not call this tool until they choose."
+    )
+
+
 def is_finding_flow(message: str, history: list | None = None) -> bool:
     if _is_distress(message):
         return True
     t = (message or "").lower()
+    # Explicit food-request posts are a different flow.
+    if any(k in t for k in _REQUEST_TRIGGERS):
+        return False
+    if _user_clears_claim_flow(message):
+        return True
     if any(k in t for k in _FIND_TRIGGERS):
         return True
+    # Generic "food" + desire verbs — "food" is not in _FOOD_WORDS (produce
+    # lexicon), so without this branch "i want some food" never entered finding.
+    if "food" in t and any(k in t for k in (
+        "want", "need", "find", "get", "looking", "search", "show",
+        "busco", "quiero", "necesito", "hay",
+    )):
+        if not any(k in t for k in _SHARE_TRIGGERS):
+            return True
     words = _tokenize_words(message)
     if any(w in _FOOD_WORDS for w in words):
         if any(k in t for k in (
@@ -250,7 +740,9 @@ _CLAIM_QTY_ASK_MARKERS = (
     "how many do you want", "how many would you like", "how many of the",
     "how many loaves", "how many units", "how many cans", "how many can you",
     "how much do you want", "how much would you like",
+    "how many",  # e.g. "How many tomatoes?" after a listing pick
     "cuántos quieres", "cuántas quieres", "cuantos quieres", "cuantas quieres",
+    "cuántos", "cuántas",
     "nice choice", "good pick", "great choice", "buena elección",
 )
 
@@ -283,10 +775,13 @@ def _claim_intake_open(message: str, history: list | None) -> bool:
         return False
     if _is_distress(message) or is_finding_flow(message, history):
         return False
-    if _user_wants_fresh_search(message):
+    if _user_clears_claim_flow(message) or _user_wants_fresh_search(message):
         return False
+    # Qty-waiting is only valid after real search results / a listing pick.
+    # Without this gate, a mistaken "how many?" from the model traps every
+    # later turn in a phantom claim loop (no listings ever shown).
     if _assistant_awaiting_quantity(history):
-        return True
+        return _recent_search_context(history) or _user_picked_listing_in_history(history)
 
     last_asst = _last_assistant_text(history)
     if not last_asst:
@@ -382,40 +877,52 @@ def _natural_rhythm(lang: str) -> str:
     )
 
 
+_POST_CONFIRM_PHRASES: tuple[str, ...] = (
+    "ready to post", "post it?", "shall i post", "want me to post",
+    "go ahead and post", "publish it?", "post this?", "sound good to post",
+    "post these?", "ready to share", "shall i share", "want me to share",
+    "look right", "look good", "does this look", "sound right",
+    "before i post", "before i share", "before i go ahead",
+    "just to confirm", "one last check", "shall i go ahead",
+    "want me to publish", "ok to post", "okay to post",
+    "¿listo para publicar", "¿publico", "¿publicamos", "¿lo publico",
+    "¿lo publicamos", "¿te parece", "¿está bien",
+)
+
+
 def posting_flow_state(message: str, history: list | None) -> dict:
     """Structured posting-step state for reminders, logging, and tool guards."""
-    blob = _history_blob(history, message)
-    blob_l = blob.lower()
-    community_asked = any(p in blob_l for p in (
-        "which community", "which school", "community should",
-        "under which", "go under", "comunidad", "escuela",
-    ))
-    # has_photo is scoped to the CURRENT posting flow so a photo the
-    # donor already used for a previously-posted listing doesn't count
-    # toward this one. Otherwise a second, photo-less listing would
-    # silently reuse the earlier photo (or slip past the photo guard).
+    # Scope the whole posting checklist to the CURRENT share session so a
+    # community/expiry confirmation from bananas doesn't skip those steps
+    # when the donor starts a fresh carrot/tomato share.
     boundary = _current_posting_boundary_index(history)
     scoped_hist = (history or [])[boundary:] if boundary else (history or [])
     scoped_blob = _history_blob(scoped_hist, message)
     scoped_blob_l = scoped_blob.lower()
+    community_asked = any(p in scoped_blob_l for p in (
+        "which community", "which school", "community should",
+        "under which", "go under", "comunidad", "escuela",
+    ))
     has_photo = bool(_PHOTO_URL_RE.search(scoped_blob))
+    # Donor insists photos were already sent, or assistant already ack'd them.
+    msg_l = (message or "").lower()
+    if any(p in msg_l for p in _PHOTO_ALREADY_SHARED_PHRASES):
+        has_photo = True
+    if any(p in scoped_blob_l for p in _PHOTO_RECEIVED_ASSISTANT):
+        has_photo = True
     photo_asked = any(p in scoped_blob_l for p in (
         "photo", "picture", "snap a", "upload a", "foto", "imagen",
     ))
     photo_declined = _user_declined_photo(scoped_hist, message)
-    post_summary_offered = any(p in blob_l for p in (
-        "ready to post", "post it?", "shall i post", "want me to post",
-        "go ahead and post", "¿listo para publicar", "¿publico",
-        "publish it?", "post this?", "sound good to post",
-    ))
-    expiry_asked = any(p in blob_l for p in (
+    post_summary_offered = any(p in scoped_blob_l for p in _POST_CONFIRM_PHRASES)
+    expiry_asked = any(p in scoped_blob_l for p in (
         "expire", "expiry", "best by", "best-by", "use by", "how fresh",
         "how long", "when was it made", "good until", "best before",
         "vence", "caduca", "fecha de vencimiento", "cuándo vence",
     ))
-    expiry_provided = bool(re.search(r"\d{4}-\d{2}-\d{2}", blob)) or bool(
-        _extract_expiry_from_text(blob)
-    )
+    expiry_provided = bool(_best_user_expiry_from_thread(message, history)) or bool(
+        re.search(r"\d{4}-\d{2}-\d{2}", scoped_blob)
+    ) or bool(_extract_expiry_from_text(scoped_blob))
     awaiting_photo = photo_asked and not has_photo and not photo_declined
     return {
         "has_photo": has_photo,
@@ -423,7 +930,7 @@ def posting_flow_state(message: str, history: list | None) -> dict:
         "photo_declined": photo_declined,
         "awaiting_photo": awaiting_photo,
         "community_asked": community_asked,
-        "community_confirmed": _community_was_confirmed(history),
+        "community_confirmed": _community_was_confirmed(scoped_hist),
         "post_summary_offered": post_summary_offered,
         "expiry_asked": expiry_asked,
         "expiry_provided": expiry_provided,
@@ -431,7 +938,12 @@ def posting_flow_state(message: str, history: list | None) -> dict:
 
 
 def _extract_expiry_from_text(text: str) -> Optional[str]:
-    """Parse YYYY-MM-DD or common spoken dates from chat text."""
+    """Parse YYYY-MM-DD or common spoken dates from chat text.
+
+    Month-name forms ("24th July", "July 24th this year") are required —
+    without them the model invents a wrong year (often a past year) and
+    traps the donor in an expiry confirmation loop.
+    """
     if not text:
         return None
     m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
@@ -444,6 +956,7 @@ def _extract_expiry_from_text(text: str) -> Optional[str]:
     if m:
         from backend.tools import _normalize_expiry_date
         return _normalize_expiry_date(m.group(0))
+
     blob = text.lower()
     if any(k in blob for k in ("today", "tonight", "hoy", "esta noche")):
         from datetime import date
@@ -451,6 +964,165 @@ def _extract_expiry_from_text(text: str) -> Optional[str]:
     if any(k in blob for k in ("tomorrow", "mañana")):
         from datetime import date, timedelta
         return (date.today() + timedelta(days=1)).isoformat()
+
+    relative = _parse_relative_expiry_date(blob)
+    if relative:
+        return relative
+
+    spoken = _parse_spoken_expiry_date(blob)
+    if spoken:
+        return spoken
+    return None
+
+
+def _best_user_expiry_from_thread(
+    message: str,
+    history: list | None,
+) -> Optional[str]:
+    """Prefer the donor's own spoken/typed expiry over model-invented dates.
+
+    Scanning assistant lines picks up traps like 'July 24th, 2024 is in the
+    past' — those must never override 'july 24th this year' from the user.
+    """
+    exp = _extract_expiry_from_text(message or "")
+    if exp:
+        return exp
+    for msg in reversed(history or []):
+        if msg.get("role") != "user":
+            continue
+        exp = _extract_expiry_from_text(msg.get("message") or "")
+        if exp:
+            return exp
+    return None
+
+
+_MONTH_NAME_TO_NUM: dict[str, int] = {
+    "january": 1, "jan": 1, "febrero": 2, "february": 2, "feb": 2,
+    "march": 3, "mar": 3, "marzo": 3, "april": 4, "apr": 4, "abril": 4,
+    "may": 5, "mayo": 5, "june": 6, "jun": 6, "junio": 6,
+    "july": 7, "jul": 7, "julio": 7, "august": 8, "aug": 8, "agosto": 8,
+    "september": 9, "sep": 9, "sept": 9, "septiembre": 9,
+    "october": 10, "oct": 10, "octubre": 10,
+    "november": 11, "nov": 11, "noviembre": 11,
+    "december": 12, "dec": 12, "diciembre": 12,
+}
+
+
+def _parse_spoken_expiry_date(blob: str) -> Optional[str]:
+    """Parse '24th july', 'july 24', 'july 24th this year', 'july 24 2026'."""
+    from datetime import date
+    from calendar import monthrange
+
+    if not blob:
+        return None
+    months = "|".join(sorted(_MONTH_NAME_TO_NUM.keys(), key=len, reverse=True))
+    # Day-first: 24th july [2026|this year]
+    m = re.search(
+        rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({months})"
+        rf"(?:\s*,?\s*(\d{{4}}|this year|next year))?\b",
+        blob,
+        re.I,
+    )
+    # Month-first: july 24th [2026|this year]
+    if not m:
+        m = re.search(
+            rf"\b({months})\s+(\d{{1,2}})(?:st|nd|rd|th)?"
+            rf"(?:\s*,?\s*(\d{{4}}|this year|next year))?\b",
+            blob,
+            re.I,
+        )
+        if not m:
+            return None
+        month_raw, day_raw, year_raw = m.group(1), m.group(2), m.group(3)
+    else:
+        day_raw, month_raw, year_raw = m.group(1), m.group(2), m.group(3)
+
+    try:
+        day = int(day_raw)
+        month = _MONTH_NAME_TO_NUM.get(month_raw.lower())
+        if not month or day < 1 or day > 31:
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    today = date.today()
+    year_token = (year_raw or "").strip().lower()
+    if year_token.isdigit() and len(year_token) == 4:
+        year = int(year_token)
+    elif year_token == "this year":
+        year = today.year
+    elif year_token == "next year":
+        year = today.year + 1
+    else:
+        # No year: pick the next upcoming occurrence (never invent a past year).
+        year = today.year
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            return None
+        if candidate < today:
+            year = today.year + 1
+
+    try:
+        last_day = monthrange(year, month)[1]
+        if day > last_day:
+            return None
+        resolved = date(year, month, day)
+    except ValueError:
+        return None
+
+    # Explicit "this year" that lands in the past — still return it so the
+    # validation layer can ask for a correction rather than inventing 2024.
+    return resolved.isoformat()
+
+
+_WEEKDAY_TO_NUM: dict[str, int] = {
+    "monday": 0, "mon": 0, "lunes": 0,
+    "tuesday": 1, "tue": 1, "tues": 1, "martes": 1,
+    "wednesday": 2, "wed": 2, "miercoles": 2, "miércoles": 2,
+    "thursday": 3, "thu": 3, "thur": 3, "thurs": 3, "jueves": 3,
+    "friday": 4, "fri": 4, "viernes": 4,
+    "saturday": 5, "sat": 5, "sabado": 5, "sábado": 5,
+    "sunday": 6, "sun": 6, "domingo": 6,
+}
+
+
+def _parse_relative_expiry_date(blob: str) -> Optional[str]:
+    """Parse 'in 3 days', 'next friday', 'this friday', bare weekday names."""
+    from datetime import date, timedelta
+
+    if not blob:
+        return None
+    text = blob.lower()
+
+    m = re.search(
+        r"\b(?:in|within)\s+(\d{1,3})\s+days?\b",
+        text,
+    )
+    if m:
+        try:
+            days = int(m.group(1))
+            if 0 < days <= 365:
+                return (date.today() + timedelta(days=days)).isoformat()
+        except (TypeError, ValueError):
+            pass
+
+    weekdays = "|".join(sorted(_WEEKDAY_TO_NUM.keys(), key=len, reverse=True))
+    m = re.search(rf"\b(?:next|this|on)?\s*({weekdays})\b", text)
+    if m:
+        target = _WEEKDAY_TO_NUM.get(m.group(1).lower())
+        if target is not None:
+            today = date.today()
+            delta = (target - today.weekday()) % 7
+            if delta == 0 and "next" in text:
+                delta = 7
+            elif delta == 0 and "this" not in text and "on" not in text:
+                # Bare "Friday" → next occurrence (today counts if same weekday).
+                delta = 7 if today.weekday() == target else delta
+            if delta == 0:
+                delta = 0
+            return (today + timedelta(days=delta)).isoformat()
+
     return None
 
 
@@ -462,12 +1134,14 @@ def _assistant_last_asked_kind(history: list | None) -> str | None:
         if msg.get("role") != "assistant":
             continue
         text = (msg.get("message") or "").lower()
-        if any(k in text for k in (
-            "ready to post", "post it?", "shall i post", "want me to post",
-            "go ahead and post", "publish it?", "post this?", "sound good to post",
-            "¿listo para publicar", "¿publico", "¿publicamos",
-        )):
+        if any(k in text for k in _POST_CONFIRM_PHRASES):
             return "post_confirm"
+        if any(k in text for k in (
+            "ready to claim", "claim these", "claim both", "claim all of these",
+            "shall i claim", "want me to claim", "claim them now",
+            "listo para reclamar", "reclamar estos", "reclamo estos",
+        )):
+            return "claim_confirm"
         if any(k in text for k in (
             "expire", "expiry", "best by", "best-by", "use by", "how fresh",
             "how long", "when was it made", "good until", "vence", "caduca",
@@ -509,11 +1183,29 @@ def _community_was_confirmed(history: list | None) -> bool:
                 continue
             u = (history[j].get("message") or "").strip()
             ul = u.lower()
-            if _is_affirmative_post_confirm(u):
+            if _is_affirmative_post_confirm(u) or _is_short_affirmative(u):
                 return True
-            if len(ul) >= 3 and ul not in {
-                "yes", "y", "yeah", "yep", "ok", "okay", "sure", "si", "sí",
+            # Free-text confirmation: look like a school/community name, not
+            # qty/expiry/address filler ("5 loaves", "tomorrow", "wait").
+            if len(ul) < 3:
+                continue
+            if re.search(r"\d", ul) and not re.search(
+                r"(school|academy|college|community|unified|elementary|middle|high)",
+                ul,
+            ):
+                continue
+            if ul in {
+                "wait", "hold on", "tomorrow", "later", "idk", "not sure",
+                "maybe", "hmm", "ok wait",
             }:
+                continue
+            if any(k in ul for k in (
+                "loaf", "loaves", "egg", "eggs", "pound", "lb", "box",
+                "bag", "portion", "serving", "photo", "picture", "address",
+            )):
+                continue
+            # Likely a name answer ("Alameda High", "Ruby Bridges", "my school").
+            if len(ul.split()) >= 1 and not ul.startswith(("http", "image:")):
                 return True
     return False
 
@@ -839,6 +1531,10 @@ _POST_SUCCESS_MARKERS: tuple[str, ...] = (
     "done!", "done —", "done -", "all set!", "all set —", "all set -",
     "shared!", "shared your", "successfully posted", "is now live",
     "now live", "went live", "donation is live", "is up under",
+    "are live", "listings are live", "both are live", "they're live",
+    "they are live", "posted under", "listed under", "went up under",
+    "awaiting admin approval", "awaiting approval", "submitted for approval",
+    "waiting for admin",
     "listo!", "listo —", "ya está publicado", "ya esta publicado",
 )
 
@@ -866,15 +1562,39 @@ def _current_posting_boundary_index(history: list | None) -> int:
 
 
 def _user_declined_photo(history: list | None, message: str = "") -> bool:
-    """True only when the donor explicitly skips adding a photo."""
+    """True only when the donor explicitly skips adding a photo.
+
+    Requires photo context (assistant recently asked for a photo, or the
+    phrase itself mentions skipping a photo) so "post now" / bare "without"
+    does not accidentally count as a decline after an unrelated turn.
+    """
+    def _matches(ul: str) -> bool:
+        return any(p in ul for p in _PHOTO_DECLINE_PHRASES)
+
+    blob = _history_blob(history or [], message).lower()
+    photo_context = any(p in blob for p in (
+        "photo", "picture", "snap a", "upload a", "foto", "imagen",
+    ))
+    ul = (message or "").lower()
+    if _matches(ul) and (photo_context or any(
+        k in ul for k in ("photo", "picture", "foto", "imagen", "without")
+    )):
+        # Exclude bare post-confirm phrases that are not photo skips.
+        if ul.strip() in {"post now", "publish now", "post it", "post them"}:
+            return False
+        return True
     for msg in history or []:
         if msg.get("role") != "user":
             continue
-        ul = (msg.get("message") or "").lower()
-        if any(p in ul for p in _PHOTO_DECLINE_PHRASES):
+        hl = (msg.get("message") or "").lower()
+        if _matches(hl) and (
+            photo_context
+            or any(k in hl for k in ("photo", "picture", "foto", "imagen", "without"))
+        ):
+            if hl.strip() in {"post now", "publish now", "post it", "post them"}:
+                continue
             return True
-    ul = (message or "").lower()
-    return any(p in ul for p in _PHOTO_DECLINE_PHRASES)
+    return False
 
 
 def normalize_public_image_url(url: str | None) -> str | None:
@@ -980,7 +1700,7 @@ _share_drafts_by_user: dict[str, list[dict]] = {}
 
 _SHARE_ITEM_RE = re.compile(
     r"(?P<qty>\d{1,4}(?:\.\d+)?)\s+"
-    r"(?:(?P<unit>loaves?|trays?|boxes?|bags?|bunches?|pieces?|packs?|"
+    r"(?:(?P<unit>loaves?|trays?|boxes?|bags?|baskets?|sacks?|bunches?|pieces?|packs?|"
     r"packets?|cartons?|cans?|jars?|containers?|bottles?|"
     r"pounds?|lbs?|kg|kilos?|grams?|cups?|units?|portions?|"
     r"servings?|slices?|dozen)\s+(?:of\s+)?)?"
@@ -991,7 +1711,7 @@ _SHARE_ITEM_RE = re.compile(
 _ALSO_FOOD_RE = re.compile(
     r"(?:also|and|plus|y)\s+"
     r"(?:some\s+|a\s+|an\s+)?"
-    r"(?:(?P<unit>loaves?|trays?|boxes?|bags?|bunches?|pieces?|packs?|"
+    r"(?:(?P<unit>loaves?|trays?|boxes?|bags?|baskets?|sacks?|bunches?|pieces?|packs?|"
     r"packets?|cartons?|cans?|jars?|containers?|bottles?|"
     r"pounds?|lbs?|dozen)\s+(?:of\s+)?)?"
     r"(?P<title>[a-zA-Z][a-zA-Z'\-]+(?:\s+[a-zA-Z][a-zA-Z'\-]*){0,2})",
@@ -1116,6 +1836,143 @@ def _parse_share_items_from_text(text: str) -> list[dict]:
     return items
 
 
+_FRESH_SHARE_INTENT = (
+    "i want to share", "want to share", "i'm sharing", "im sharing",
+    "sharing ", "share some", "share food", "donate", "giving away",
+    "give away", "post a listing", "list some",
+    "quiero compartir", "voy a compartir", "compartir comida", "donar",
+)
+
+_RESTRICT_SHARE_INTENT = (
+    "we are listing", "we're listing", "just listing", "only listing",
+    "only sharing", "just sharing", "not the", "forget the",
+    "don't share", "dont share", "skip the", "not listing",
+    "listing tomatoes", "listing carrots", "please just",
+    "estamos listando", "solo listando", "solo compartiendo",
+)
+
+
+def _is_fresh_share_intent(message: str) -> bool:
+    t = (message or "").strip().lower()
+    if not t:
+        return False
+    return any(k in t for k in _FRESH_SHARE_INTENT)
+
+
+def _user_restricts_share_foods(message: str) -> bool:
+    t = (message or "").strip().lower()
+    if not t:
+        return False
+    return any(k in t for k in _RESTRICT_SHARE_INTENT)
+
+
+def _food_titles_from_text(text: str) -> set[str]:
+    """Normalized food title keys mentioned in text (including singulars)."""
+    titles: set[str] = set()
+    for item in _parse_share_items_from_text(text or ""):
+        key = str(item.get("title") or "").strip().lower()
+        if key:
+            titles.add(key)
+            # Treat carrot/carrots as the same family for pruning.
+            if key.endswith("oes"):
+                titles.add(key[:-2])  # tomatoes → tomato
+            elif key.endswith("s") and len(key) > 3:
+                titles.add(key[:-1])
+            else:
+                titles.add(key + "s")
+                if key.endswith("o"):
+                    titles.add(key + "es")  # tomato → tomatoes
+    # Bare lexicon hits when parser only finds one item.
+    for w in re.findall(r"[a-zA-Z']+", (text or "").lower()):
+        if w in _FOOD_WORDS and w not in _QTY_UNIT_WORDS:
+            titles.add(w)
+            if w.endswith("s") and len(w) > 3:
+                titles.add(w[:-1])
+            else:
+                titles.add(w + "s")
+    return {t for t in titles if t}
+
+
+def _scoped_user_food_titles(history: list | None, message: str) -> set[str]:
+    boundary = _current_posting_boundary_index(history)
+    scoped = (history or [])[boundary:]
+    parts = [
+        (m.get("message") or "")
+        for m in scoped
+        if m.get("role") == "user"
+    ]
+    parts.append(message or "")
+    return _food_titles_from_text(" . ".join(parts))
+
+
+def _draft_title_matches_active(title: str, active: set[str]) -> bool:
+    key = str(title or "").strip().lower()
+    if not key:
+        return False
+    if key in active:
+        return True
+    stem = key[:-1] if key.endswith("s") and len(key) > 3 else key
+    return stem in active or (stem + "s") in active or (stem + "es") in active
+
+
+def _prune_stale_share_drafts(
+    user_id: str,
+    message: str,
+    history: list | None,
+) -> None:
+    """Drop draft foods that belong to a previous share / aren't in this turn.
+
+    Fixes the banana→carrot/tomato contamination: in-memory drafts survived
+    after a prior post (or weak 'Posted!' copy), then stole photos and
+    drove reminders about the wrong food.
+    """
+    uid = str(user_id or "").strip()
+    existing = get_share_drafts(uid)
+    if not existing:
+        return
+
+    active = _scoped_user_food_titles(history, message)
+    restrict = _user_restricts_share_foods(message)
+    fresh = _is_fresh_share_intent(message)
+    msg_foods = _food_titles_from_text(message or "")
+
+    # Explicit "we are listing tomatoes and carrots" → keep only named foods.
+    if restrict and msg_foods:
+        keep = [
+            d for d in existing
+            if _draft_title_matches_active(d.get("title") or "", msg_foods)
+        ]
+        set_share_drafts(uid, keep)
+        return
+
+    # New share intent with named foods → replace the queue entirely.
+    if fresh and msg_foods:
+        clear_share_drafts(uid)
+        return
+
+    # After a prior Posted! boundary, drop titles that never appear in the
+    # current scoped segment (stale bananas sitting in server memory).
+    boundary = _current_posting_boundary_index(history)
+    if boundary > 0 and active:
+        keep = [
+            d for d in existing
+            if _draft_title_matches_active(d.get("title") or "", active)
+        ]
+        if len(keep) != len(existing):
+            set_share_drafts(uid, keep)
+        return
+
+    # Even without a boundary: if this message names foods and existing
+    # drafts include foods NOT in the scoped thread, prune the orphans.
+    if msg_foods and active and len(existing) > len(msg_foods):
+        keep = [
+            d for d in existing
+            if _draft_title_matches_active(d.get("title") or "", active)
+        ]
+        if keep and len(keep) < len(existing):
+            set_share_drafts(uid, keep)
+
+
 def upsert_share_drafts_from_message(
     user_id: str,
     message: str,
@@ -1170,8 +2027,8 @@ def upsert_share_drafts_from_message(
                 "dietary_tags": [],
             }
 
-    # Apply expiry from this message to drafts that still need one.
-    exp = _extract_expiry_from_text(message or "")
+    # Apply expiry from this message or earlier donor turns in the thread.
+    exp = _best_user_expiry_from_thread(message, history)
     if exp:
         for d in by_title.values():
             if not d.get("expiry"):
@@ -1301,6 +2158,7 @@ def sync_share_drafts(
     uid = str(user_id or "").strip()
     if not uid:
         return []
+    _prune_stale_share_drafts(uid, message, history)
     drafts = upsert_share_drafts_from_message(uid, message, history)
     if len(drafts) >= 1:
         drafts = assign_photos_to_drafts(uid, history, message)
@@ -1353,8 +2211,13 @@ def build_share_drafts_reminder(
         )
     elif not state.get("community_confirmed"):
         gap = " Community not confirmed yet."
+    elif _posting_ready_to_execute(message, history):
+        gap = " Donor confirmed — call post_food_listings NOW (no second yes)."
     else:
-        gap = " All item fields ready — confirm summary then post_food_listings."
+        gap = (
+            " All item fields ready — ONE summary + 'Ready to post these?', "
+            "then post on their first yes."
+        )
     return f"{tip}\nDrafts:\n{body}.{gap}"
 
 
@@ -1435,6 +2298,16 @@ def enrich_post_food_listings_args(
                 item["expiration_date"] = draft["expiry"]
         out["items"] = items
 
+    # Batch-wide expiry from the thread applies to every item still missing one.
+    thread_exp = _best_user_expiry_from_thread(message, history)
+    if thread_exp:
+        for item in out.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if not (item.get("expiration_date") or item.get("expiry_date")):
+                item["expiration_date"] = thread_exp
+                item["expiry_date"] = thread_exp
+
     return out
 
 
@@ -1464,6 +2337,8 @@ def posting_batch_tool_block_reason(
             "post_food_listings with community_name and community_confirmed=true."
         )
 
+    thread_exp = _best_user_expiry_from_thread(message, history)
+
     # Prefer explicit items[] gaps when provided; else draft queue.
     if items:
         gaps = []
@@ -1476,7 +2351,12 @@ def posting_batch_tool_block_reason(
                 miss.append("title")
             if item.get("qty") is None and item.get("quantity") is None:
                 miss.append("qty")
-            if not (item.get("expiration_date") or item.get("expiry_date")):
+            has_exp = bool(
+                item.get("expiration_date")
+                or item.get("expiry_date")
+                or thread_exp
+            )
+            if not has_exp:
                 miss.append("expiry")
             imgs = item.get("images") if isinstance(item.get("images"), list) else []
             if not imgs:
@@ -1507,16 +2387,7 @@ def posting_batch_tool_block_reason(
                 "Ask for the next missing field (one at a time), then retry."
             )
 
-    if _is_affirmative_post_confirm(message) and not state["post_summary_offered"]:
-        last_asked = _assistant_last_asked_kind(history)
-        if last_asked != "post_confirm":
-            return (
-                "Give a one-sentence summary of ALL items (food, qty, community, "
-                "photo yes/no each) and ask 'Ready to post these?' before calling "
-                "post_food_listings."
-            )
-
-    return None
+    return _post_confirm_needed_reason(message, history)
 
 
 def enrich_post_food_listing_args(
@@ -1556,12 +2427,11 @@ def enrich_post_food_listing_args(
         else:
             out.pop("images", None)
 
-    exp = (
-        out.get("expiration_date")
-        or out.get("expiry_date")
-        or _extract_expiry_from_text(message or "")
-        or _extract_expiry_from_text(_history_blob(history, message, limit=12))
-    )
+    user_exp = _best_user_expiry_from_thread(message, history)
+    model_exp = out.get("expiration_date") or out.get("expiry_date")
+    # Always prefer the donor's spoken/typed date — the model inventing
+    # a past year (e.g. 2024 for "July 24th") was trapping share flows.
+    exp = user_exp or model_exp
     if exp:
         out["expiration_date"] = exp
         out["expiry_date"] = exp
@@ -1631,6 +2501,7 @@ def posting_tool_block_reason(
     state = posting_flow_state(message, history)
     last_asked = _assistant_last_asked_kind(history)
     args = fn_args or {}
+    ready = _posting_ready_to_execute(message, history)
 
     community_confirmed = bool(args.get("community_confirmed")) or state["community_confirmed"]
     if not community_confirmed:
@@ -1644,12 +2515,36 @@ def posting_tool_block_reason(
         args.get("expiration_date")
         or args.get("expiry_date")
         or state["expiry_provided"]
+        or _best_user_expiry_from_thread(message, history)
     )
     if not has_expiry:
         return (
             "Ask when the food expires or its best-by date before posting. "
             "Map their answer to expiration_date (YYYY-MM-DD). Do not guess silently."
         )
+
+    # After "Shall I post? / yes", post immediately — but still require the
+    # photo step to have happened at least once (ask OR upload OR decline).
+    if ready:
+        if not state["photo_asked"] and not state["has_photo"] and not state["photo_declined"]:
+            return (
+                "Ask for a photo once before calling post_food_listing "
+                "(the donor may decline)."
+            )
+        # Re-asking photo after a Ready-to-post yes is what trapped the
+        # tomatoes/carrots share — only keep waiting if no summary was offered yet.
+        if state["awaiting_photo"] and not state["post_summary_offered"]:
+            if last_asked == "photo" and _is_short_affirmative(message):
+                return (
+                    "The donor said yes/ok but no photo URL is in the chat yet. "
+                    "Ask them to upload/attach the photo in chat, or say 'skip photo' "
+                    "to continue without one. Do NOT call post_food_listing yet."
+                )
+            return (
+                "Still waiting for a photo upload (image: … URL in chat) or an "
+                "explicit 'no photo' / 'skip photo' before posting."
+            )
+        return None
 
     if not state["photo_asked"] and not state["has_photo"]:
         return (
@@ -1670,15 +2565,7 @@ def posting_tool_block_reason(
                 "explicit 'no photo' / 'skip photo' before posting."
             )
 
-    if _is_affirmative_post_confirm(message) and not state["post_summary_offered"]:
-        if last_asked != "post_confirm":
-            return (
-                "Give a one-sentence summary (food, qty, community, address, "
-                "photo yes/no) and ask 'Ready to post?' before calling "
-                "post_food_listing. A bare 'yes' is not enough."
-            )
-
-    return None
+    return _post_confirm_needed_reason(message, history)
 
 
 def build_posting_step_reminder(
@@ -1692,6 +2579,8 @@ def build_posting_step_reminder(
 
     state = posting_flow_state(message, history)
     last_asked = _assistant_last_asked_kind(history)
+    parsed_exp = _best_user_expiry_from_thread(message, history)
+    ready = _posting_ready_to_execute(message, history)
 
     if lang == "es":
         if not state["community_confirmed"]:
@@ -1711,6 +2600,27 @@ def build_posting_step_reminder(
                 "Sugerencia: todavía no dieron la fecha — espera y "
                 "mapéala a expiration_date (YYYY-MM-DD)."
             )
+        if state["expiry_provided"] and last_asked == "expiry":
+            exp_hint = (
+                f" Usa expiration_date={parsed_exp} — ya la dieron en el chat."
+                if parsed_exp else " Usa la fecha que ya dieron."
+            )
+            return (
+                "Sugerencia: el donante ya dio la fecha de vencimiento."
+                f"{exp_hint} No la vuelvas a pedir — sigue con foto o resumen."
+            )
+        if ready and (
+            state["photo_asked"] or state["has_photo"] or state["photo_declined"]
+        ):
+            exp_hint = (
+                f" Usa expiration_date={parsed_exp} exactamente."
+                if parsed_exp else ""
+            )
+            return (
+                "Confirmaron — llama post_food_listing (o post_food_listings "
+                f"si hay 2+ borradores) AHORA.{exp_hint} No vuelvas a pedir "
+                "foto, fecha, comunidad ni confirmación."
+            )
         if state["awaiting_photo"] and last_asked == "photo" and _is_short_affirmative(message):
             return (
                 "Sugerencia: dijeron sí pero aún no hay foto adjunta. "
@@ -1729,14 +2639,18 @@ def build_posting_step_reminder(
             )
         if not state["post_summary_offered"]:
             return (
-                "Sugerencia: da un resumen de una frase y obtén un 'sí / "
-                "publícalo' explícito antes de llamar post_food_listing."
+                "Sugerencia: da UN resumen corto y pregunta "
+                "'¿Listo para publicar?' UNA vez. Tras su sí, llama al "
+                "tool de inmediato — no pidas confirmar otra vez."
             )
         if last_asked == "post_confirm" and _is_affirmative_post_confirm(message):
-            return "Confirmaron — llama post_food_listing ahora."
+            return (
+                "Confirmaron — llama post_food_listing (o post_food_listings "
+                "si hay 2+ borradores) AHORA. No vuelvas a pedir confirmación."
+            )
         return (
-            "Sugerencia: conversacional — una pregunta por turno, un "
-            "reconocimiento cálido, luego lo que siga naturalmente."
+            "Sugerencia: conversacional — una pregunta por turno. Si ya "
+            "preguntaste '¿listo para publicar?', espera el sí y publica."
         )
 
     if not state["community_confirmed"]:
@@ -1755,6 +2669,28 @@ def build_posting_step_reminder(
             "Nudge: they haven't given the expiry yet — wait for it and "
             "map it to expiration_date (YYYY-MM-DD)."
         )
+    if state["expiry_provided"] and last_asked == "expiry":
+        exp_hint = (
+            f" Use expiration_date={parsed_exp} — already provided in chat."
+            if parsed_exp else " Map the date they already gave."
+        )
+        return (
+            "Nudge: the donor already gave a best-by / expiry date."
+            f"{exp_hint} Do NOT ask again — move on to photo or post summary."
+        )
+    if ready and (
+        state["photo_asked"] or state["has_photo"] or state["photo_declined"]
+    ):
+        exp_hint = (
+            f" Use expiration_date={parsed_exp} exactly — do not invent another year."
+            if parsed_exp else ""
+        )
+        return (
+            "They confirmed — call post_food_listing now "
+            "(or post_food_listings if 2+ share drafts are queued)."
+            f"{exp_hint} Do NOT re-ask for photos, expiry, community, or "
+            "another confirmation."
+        )
     if state["awaiting_photo"] and last_asked == "photo" and _is_short_affirmative(message):
         return (
             "Nudge: they said 'yes/ok' but no photo is attached yet. "
@@ -1769,22 +2705,24 @@ def build_posting_step_reminder(
     if not state["photo_asked"]:
         return (
             "Nudge: ask about a photo once (declining is fine), then give "
-            "a short summary and check 'Ready to post?'."
+            "ONE short summary and check 'Ready to post?'."
         )
     if not state["post_summary_offered"]:
         return (
-            "Nudge: give a one-sentence summary and get an explicit "
-            "'yes / post it' before calling post_food_listing "
-            "(or post_food_listings when 2+ drafts are queued)."
+            "Nudge: give ONE short summary and ask 'Ready to post?' once. "
+            "After they say yes, call the post tool immediately — do NOT "
+            "ask them to confirm again."
         )
     if last_asked == "post_confirm" and _is_affirmative_post_confirm(message):
         return (
             "They confirmed — call post_food_listing now "
-            "(or post_food_listings if 2+ share drafts are queued)."
+            "(or post_food_listings if 2+ share drafts are queued). "
+            "Do NOT re-ask for confirmation."
         )
     return (
-        "Nudge: keep it conversational — one question per turn, warm "
-        "quick ack, then the next natural thing."
+        "Nudge: keep it conversational — one question per turn. If you "
+        "already asked 'Ready to post?', wait for yes and post — don't "
+        "repeat the same confirmation."
     )
 
 
@@ -1793,14 +2731,87 @@ def _is_affirmative_post_confirm(message: str) -> bool:
     if not t:
         return False
     keys = (
-        "yes", "post it", "go ahead", "confirm", "publish", "use that",
-        "that one", "sounds good", "do it", "sí", "si ", "publicalo",
+        "yes", "yep", "yeah", "yup", "post it", "post them", "post these",
+        "post now", "publish now", "go ahead", "confirm", "publish",
+        "use that", "that one",
+        "sounds good", "looks good", "looks right", "do it", "please do",
+        "sí", "si ", "publicalo", "publícalo", "dale", "adelante",
+        "yes, confirm", "yes confirm", "yes, post", "yes post",
     )
     return any(k in t for k in keys)
 
 
+def _posting_ready_to_execute(message: str, history: list | None) -> bool:
+    """True when the donor already greenlit posting this turn."""
+    last = _assistant_last_asked_kind(history)
+    state = posting_flow_state(message, history)
+    affirmative = (
+        _is_affirmative_post_confirm(message)
+        or _is_short_affirmative(message)
+    )
+    if not affirmative:
+        return False
+    if last == "post_confirm":
+        return True
+    if state.get("post_summary_offered"):
+        return True
+    t = (message or "").lower()
+    # Explicit publish language even if the assistant phrased the ask oddly.
+    return any(k in t for k in (
+        "post it", "post them", "post these", "publish it",
+        "yes, post", "yes post", "go ahead and post", "yes, confirm",
+    ))
+
+
+def _post_confirm_needed_reason(message: str, history: list | None) -> str | None:
+    """Ask for exactly one Ready-to-post confirm — never a second one."""
+    if _posting_ready_to_execute(message, history):
+        return None
+    last = _assistant_last_asked_kind(history)
+    state = posting_flow_state(message, history)
+    if last == "post_confirm" or state.get("post_summary_offered"):
+        if _is_affirmative_post_confirm(message) or _is_short_affirmative(message):
+            return None
+        return (
+            "They have already seen a post summary. Wait for a clear yes / "
+            "'post it' — then call the post tool immediately. Do NOT restate "
+            "the same confirmation question."
+        )
+    return (
+        "Give ONE short summary of the ready listing(s) and ask "
+        "'Ready to post these?' — then wait. After they say yes, call the "
+        "post tool immediately. Do NOT ask them to confirm twice."
+    )
+
+
 def _posting_checklist(message: str, history: list | None, lang: str) -> str:
     """Legacy checklist — prefer build_posting_step_reminder for live turns."""
+    if needs_assistance_mode_choice(message, history):
+        if lang == "es":
+            return (
+                "FLUJO ACTIVO — COMPARTIR (elegir modo primero):\n"
+                "Pregunta si quieres que Nouri lo publique TODO en el chat, o te "
+                "guíe paso a paso en Share Food. NO llames post_food_listing aún."
+            )
+        return (
+            "ACTIVE FLOW — SHARE FOOD (choose mode first):\n"
+            "Ask whether they want Nouri to handle the whole post in chat, or "
+            "guide them step by step on Share Food. Do NOT call "
+            "post_food_listing yet."
+        )
+    mode = resolve_assistance_mode(message, history)
+    if mode == "guided":
+        if lang == "es":
+            return (
+                "FLUJO ACTIVO — COMPARTIR (modo guiado):\n"
+                "Abre Share Food con navigate_ui (target=create) y explica los "
+                "pasos. No publiques en el chat a menos que lo pidan."
+            )
+        return (
+            "ACTIVE FLOW — SHARE FOOD (guided):\n"
+            "Open Share Food via navigate_ui (target=create) and coach the steps. "
+            "Do not post in chat unless they ask you to take over."
+        )
     contextual = build_posting_step_reminder(message, history, lang=lang)
     if contextual:
         return contextual
@@ -1814,27 +2825,61 @@ def _claim_checklist(lang: str) -> str:
     if lang == "es":
         return (
             "Estás ayudando a reclamar comida — habla con calidez, no como formulario.\n"
-            "• Si acaban de elegir: pregunta cuántos quieren de ESE listing.\n"
-            "• Si ya dijeron cantidad: llama claim_listing ahora y confirma el resultado.\n"
+            "• Pueden reclamar VARIOS ítems a la vez (#1 y #3, ambos, '2 naranjas y 3 panes').\n"
+            "• Si eligen 2+: usa la cola multi-reclamo, pregunta cantidades una por una, "
+            "resume y pregunta '¿Listo para reclamar estos?', luego claim_listings.\n"
+            "• Si eligen uno solo: pregunta cuántos, luego claim_listing.\n"
             "• Si falla: explica el error; no vuelvas a buscar sin que lo pidan."
         )
     return (
         "You're helping them claim food — warm and conversational, not a form.\n"
-        "• If they just picked a listing: ask how many they want from that one.\n"
-        "• If they already gave a quantity: call claim_listing now and confirm the result.\n"
+        "• They can claim MULTIPLE items at once (#1 and #3, both, "
+        "'2 oranges and 3 bread'). Emphasize that when showing results.\n"
+        "• If they pick 2+: keep the multi-claim queue, ask missing qty one "
+        "at a time, then ONE summary + 'Ready to claim these?' and call "
+        "claim_listings with items[]. Never claim only the first.\n"
+        "• If they pick a single listing: ask how many, then claim_listing.\n"
         "• If it fails: explain the error clearly — don't re-search unless they ask."
     )
 
 
-def _assistant_awaiting_quantity(history: list | None) -> bool:
-    """True only when the assistant asked a claim-intake quantity question."""
+def _user_picked_listing_in_history(history: list | None) -> bool:
+    """True if a recent user turn looks like a numbered / claim pick."""
     if not history:
+        return False
+    for msg in reversed(history[-8:]):
+        if msg.get("role") != "user":
+            continue
+        text = msg.get("message") or ""
+        if _looks_like_listing_pick(text):
+            return True
+        if any(k in text.lower() for k in _CLAIM_TRIGGERS):
+            return True
+    return False
+
+
+def _assistant_awaiting_quantity(history: list | None) -> bool:
+    """True only when the assistant asked a claim-intake quantity question.
+
+    Requires search/listing context so a mistaken qty ask cannot lock the
+    conversation when no food options were ever shown.
+    """
+    if not history:
+        return False
+    if not (_recent_search_context(history) or _user_picked_listing_in_history(history)):
         return False
     for msg in reversed(history[-4:]):
         if msg.get("role") == "assistant":
             text = (msg.get("message") or "").lower()
-            if _user_asking_availability(text):
+            # Help / menu questions often contain "how many would you like to
+            # try" — those are not claim quantity prompts.
+            if any(k in text for k in (
+                "try first", "would you like to try", "can you do",
+                "how does this work", "what can i help",
+            )):
                 return False
+            # Availability answers ("how many are left?") are user-side;
+            # never treat the assistant's claim qty ask as that.
             return any(k in text for k in _CLAIM_QTY_ASK_MARKERS)
     return False
 
@@ -1940,15 +2985,47 @@ def build_claim_quantity_reminder(
 
 
 def _finding_checklist(message: str, history: list | None, lang: str) -> str:
+    # Prefer assistance-mode fork over auto-search on a fresh find.
+    if needs_assistance_mode_choice(message, history):
+        if lang == "es":
+            return (
+                "FLUJO ACTIVO — BUSCAR (elegir modo primero):\n"
+                "Pregunta si quieres que Nouri lo haga TODO en el chat, o te "
+                "guíe paso a paso en Find Food. NO llames search_food_near_user aún."
+            )
+        return (
+            "ACTIVE FLOW — FIND FOOD (choose mode first):\n"
+            "Ask whether they want Nouri to handle everything in chat, or "
+            "guide them step by step on Find Food. Do NOT call "
+            "search_food_near_user yet."
+        )
+
+    mode = resolve_assistance_mode(message, history)
+    if mode == "guided":
+        if lang == "es":
+            return (
+                "FLUJO ACTIVO — BUSCAR (modo guiado):\n"
+                "Abre Find Food con navigate_ui (target=list) y explica los "
+                "pasos. No busques ni reclames en el chat a menos que lo pidan."
+            )
+        return (
+            "ACTIVE FLOW — FIND FOOD (guided):\n"
+            "Open Find Food via navigate_ui (target=list) and coach the steps. "
+            "Do not search/claim in chat unless they ask you to take over."
+        )
+
     blob_l = _history_blob(history, message, 8).lower()
     searched = any(k in blob_l for k in (
         "found ", "near you", "here's what's", "opciones", "cerca de ti",
     ))
+    clear_stuck = _user_clears_claim_flow(message) or _user_wants_fresh_search(message)
     if lang == "es":
-        if not searched or _is_distress(message):
+        if not searched or _is_distress(message) or clear_stuck:
             return (
                 "FLUJO ACTIVO — BUSCAR COMIDA:\n"
                 "Reconoce con calidez, llama search_food_near_user EN ESTE turno. "
+                "NO digas que hay un reclamo en progreso — el usuario está buscando "
+                "comida (o negó un reclamo fantasma). "
                 "NO repitas la lista en texto — las tarjetas abajo muestran las "
                 "opciones. UNA frase + 'Elige un número abajo'."
             )
@@ -1958,12 +3035,17 @@ def _finding_checklist(message: str, history: list | None, lang: str) -> str:
             "Después de elegir, pregunta cuántos quieren de ESE listing antes de "
             "claim_listing. Nunca sumes cantidades de listings con el mismo nombre."
         )
-    if not searched or _is_distress(message):
+    if not searched or _is_distress(message) or clear_stuck:
         return (
             "ACTIVE FLOW — FIND FOOD:\n"
             "Acknowledge warmly, call search_food_near_user THIS turn. "
-            "Do NOT repeat the full list in prose — cards below show options. "
-            "ONE warm sentence + 'Pick a number below'."
+            "If they named MULTIPLE foods (e.g. 'pawpaw and carrots'), pass "
+            "title_query with ALL of them comma-separated so none get dropped. "
+            "Do NOT say a claim is in progress — the user is looking for food "
+            "(or just denied a phantom claim). "
+            "In your reply name each matched food with quantity + pickup address "
+            "from the tool/cards. Do NOT invent missing foods. "
+            "ONE warm sentence (or two if multi-match) + 'Pick a number below'."
         )
     return (
         "ACTIVE FLOW — PICK FOOD:\n"
@@ -1973,17 +3055,44 @@ def _finding_checklist(message: str, history: list | None, lang: str) -> str:
     )
 
 
-def _request_checklist(lang: str) -> str:
+def _request_checklist(message: str, history: list | None, lang: str) -> str:
+    if needs_assistance_mode_choice(message, history):
+        if lang == "es":
+            return (
+                "FLUJO ACTIVO — SOLICITAR (elegir modo primero):\n"
+                "Pregunta si quieres que Nouri publique la solicitud TODO en el chat, "
+                "o te guíe paso a paso en Request Food. NO llames post_food_request aún."
+            )
+        return (
+            "ACTIVE FLOW — REQUEST FOOD (choose mode first):\n"
+            "Ask whether they want Nouri to post the request in chat, or "
+            "guide them step by step on Request Food. Do NOT call "
+            "post_food_request yet."
+        )
+    mode = resolve_assistance_mode(message, history)
+    if mode == "guided":
+        if lang == "es":
+            return (
+                "FLUJO ACTIVO — SOLICITAR (modo guiado):\n"
+                "Abre Request Food con navigate_ui (target=request) y explica los "
+                "pasos. No publiques en el chat a menos que lo pidan."
+            )
+        return (
+            "ACTIVE FLOW — REQUEST FOOD (guided):\n"
+            "Open Request Food via navigate_ui (target=request) and coach the steps. "
+            "Do not post in chat unless they ask you to take over."
+        )
     if lang == "es":
         return (
-            "FLUJO ACTIVO — SOLICITUD EXPLÍCITA (solo si el usuario pidió publicar "
-            "una solicitud):\n"
-            "Primero confirma que quieren una solicitud; si solo buscan comida, "
-            "usa search_food_near_user en su lugar."
+            "FLUJO ACTIVO — SOLICITUD EXPLÍCITA:\n"
+            "Pregunta solo lo que falte (qué necesita, cantidad, comunidad) y "
+            "llama post_food_request. Si solo buscan comida disponible, usa "
+            "search_food_near_user en su lugar."
         )
     return (
-        "ACTIVE FLOW — EXPLICIT REQUEST (only if user asked to post a request):\n"
-        "First confirm they want a request posted; if they're just looking for food, "
+        "ACTIVE FLOW — EXPLICIT REQUEST:\n"
+        "Ask only what's missing (what they need, quantity, community) then "
+        "call post_food_request. If they're just looking for available food, "
         "use search_food_near_user instead."
     )
 
@@ -2017,7 +3126,7 @@ def build_turn_reminder(
         if avail:
             parts.append(avail)
     elif flow == "requesting":
-        parts.append(_request_checklist(lang))
+        parts.append(_request_checklist(message, history, lang))
 
     return "\n\n".join(parts), flow
 
@@ -2061,20 +3170,33 @@ def build_last_search_snapshot_reminder(
         qty = row.get("quantity")
         unit = (row.get("unit") or "").strip()
         lid = row.get("id") or ""
+        addr = (row.get("address") or "").strip()
+        community = (row.get("community_name") or "").strip()
         if qty is not None:
             qty_str = f"{qty} {unit}".strip()
         else:
             qty_str = "quantity unknown"
-        lines.append(f"  #{idx}: {title} — {qty_str} available (listing_id={lid})")
+        place = addr or community or "address unknown"
+        if community and addr and community.lower() not in addr.lower():
+            place = f"{addr} ({community})"
+        elif community and not addr:
+            place = community
+        lines.append(
+            f"  #{idx}: {title} — {qty_str} available — pickup: {place} "
+            f"(listing_id={lid})"
+        )
     if lang == "es":
         header = (
             "LISTADOS VISIBLES (última búsqueda — el usuario los ve como tarjetas):\n"
-            "Usa estos números y cantidades para responder preguntas de disponibilidad."
+            "Usa estos números, cantidades y direcciones para responder. "
+            "Si el usuario pidió varias comidas, nombra CADA una que aparezca aquí."
         )
     else:
         header = (
             "VISIBLE LISTINGS (last search — user sees these as cards below):\n"
-            "Use these numbers and quantities when answering availability questions. "
+            "Use these numbers, quantities, and pickup addresses when answering. "
+            "If the user asked for multiple foods, name EACH one that appears here — "
+            "never say a food is missing when it is listed below. "
             "If a claim completed since this search, run search_food_near_user again "
             "before quoting quantities."
         )
@@ -2161,13 +3283,113 @@ _KNOWN_TYPOS: dict[str, str] = {
 _FOOD_WORDS: frozenset[str] = frozenset({
     "bread", "apple", "apples", "banana", "bananas", "milk", "eggs", "rice",
     "pasta", "soup", "salad", "vegetables", "produce", "chicken", "beef",
-    "fish", "cheese", "yogurt", "cereal", "beans", "tomatoes", "potatoes",
-    "onions", "carrots", "lettuce", "kale", "berries", "fruit", "snacks",
+    "fish", "cheese", "yogurt", "cereal", "beans", "tomatoes", "tomato",
+    "potatoes", "potato", "onions", "onion", "carrots", "carrot",
+    "lettuce", "kale", "berries", "fruit", "snacks",
     "loaf", "loaves", "tray", "trays", "box", "boxes", "bag", "bags",
+    "basket", "baskets", "sack", "sacks",
     "orange", "oranges", "milk", "butter", "cream", "juice", "water",
     "spinach", "broccoli", "cabbage", "corn", "peas", "lentils", "oats",
     "flour", "sugar", "honey", "jam", "nuts", "almonds", "peanut", "peanuts",
+    # Tropical / less-common produce — users ask by name; must not be dropped
+    # when paired with a lexicon food (e.g. "pawpaw and carrots").
+    "pawpaw", "pawpaws", "papaya", "papayas", "mango", "mangoes", "mangos",
+    "avocado", "avocados", "cucumber", "cucumbers", "pepper", "peppers",
+    "celery", "zucchini", "squash", "pumpkin", "garlic", "ginger",
 })
+
+# Stopwords when extracting free-form food pairs ("want X and Y").
+_FOOD_EXTRACT_STOP: frozenset[str] = frozenset({
+    "i", "a", "an", "the", "and", "or", "to", "for", "of", "in", "on", "at",
+    "my", "me", "near", "you", "your", "some", "any", "want", "need", "like",
+    "find", "looking", "search", "get", "grab", "take", "claim", "please",
+    "both", "also", "just", "food", "something", "things", "items", "extra",
+    "available", "address", "right", "now", "today", "nearby", "around",
+    "here", "there", "this", "that", "with", "without", "from", "into",
+})
+
+
+def _mentioned_foods_from_message(message: str) -> list[str]:
+    """All distinct foods the user asked for (supports 'pawpaw and carrots')."""
+    t = (message or "").strip().lower()
+    if not t:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(token: str) -> None:
+        w = (token or "").strip().lower()
+        if not w or w in _FOOD_EXTRACT_STOP or len(w) < 3:
+            return
+        # Prefer singular-ish key for carrots/carrot
+        key = w
+        if key not in seen:
+            seen.add(key)
+            found.append(key)
+
+    for w in re.findall(r"[a-zA-Z']+", t):
+        if w in _FOOD_WORDS:
+            _add(w)
+
+    # Free-form "X and Y" / "X, Y" pairs so unknown fruit names still count.
+    for m in re.finditer(
+        r"\b([a-z']{3,})\s*(?:,|&|and|/)\s*([a-z']{3,})\b",
+        t,
+    ):
+        _add(m.group(1))
+        _add(m.group(2))
+
+    # "looking for X" / "want some X" single trailing nouns already covered
+    # by lexicon; keep order stable.
+    return found
+
+
+def _mentioned_food_hint_from_message(message: str) -> Optional[str]:
+    """Best-guess single food noun (first of any multi-food ask)."""
+    intent = _extract_claim_intent(message)
+    if intent.get("title_hint"):
+        return intent["title_hint"]
+    foods = _mentioned_foods_from_message(message)
+    return foods[0] if foods else None
+
+
+def enrich_search_food_args(
+    args: dict,
+    message: str,
+    history: list | None = None,
+) -> dict:
+    """Ensure multi-food asks become an OR title_query, not a single token.
+
+    Bug: 'I want pawpaw and carrots' + model title_query='pawpaw' dropped
+    carrot listings from the tool payload even when they existed nearby.
+    """
+    out = dict(args or {})
+    foods = _mentioned_foods_from_message(message or "")
+    raw_tq = out.get("title_query") or out.get("title")
+    if isinstance(raw_tq, str):
+        raw_tq = raw_tq.strip() or None
+    else:
+        raw_tq = None
+
+    if len(foods) >= 2:
+        # Always OR across every food the user named this turn.
+        out["title_query"] = ", ".join(foods)
+        out["_multi_food_search"] = True
+        out["_requested_foods"] = foods
+    elif len(foods) == 1 and not raw_tq:
+        out["title_query"] = foods[0]
+        out["_requested_foods"] = foods
+    elif raw_tq and foods:
+        # Merge model hint with any extras from the message.
+        from backend.tools import split_title_query_hints
+        hints = list(dict.fromkeys(
+            split_title_query_hints(raw_tq) + foods
+        ))
+        if len(hints) >= 2:
+            out["title_query"] = ", ".join(hints)
+            out["_multi_food_search"] = True
+            out["_requested_foods"] = hints
+    return out
 
 # Common words that must never be flagged as garbled (e.g. "hungry" ends in -ngry).
 _SAFE_WORDS: frozenset[str] = frozenset({
@@ -2337,15 +3559,27 @@ def build_ambiguous_pick_reminder(
 
 _last_search_by_user: dict[str, list[dict]] = {}
 _last_donor_listings_by_user: dict[str, list[dict]] = {}
+# Listing UUIDs from the most recent CSV / bulk create (chat confirm UI or
+# post_food_listings). Used when the donor says "delete the bulk listings".
+_last_bulk_posted_by_user: dict[str, list[str]] = {}
 _last_write_action_by_user: dict[str, dict] = {}
 
 
 def set_last_search_listings(user_id: str, listings: list[dict]) -> None:
-    _last_search_by_user[str(user_id)] = list(listings or [])
+    uid = str(user_id or "")
+    _last_search_by_user[uid] = list(listings or [])
+    # Fresh search results invalidate an unfinished multi-claim queue —
+    # otherwise leftover drafts force claim_listings forever.
+    _claim_drafts_by_user.pop(uid, None)
 
 
 def get_last_search_listings(user_id: str) -> list[dict]:
     return _last_search_by_user.get(str(user_id), [])
+
+
+def clear_last_search_listings(user_id: str) -> None:
+    """Drop stale search cache (phantom claim / fresh-find pivot)."""
+    _last_search_by_user.pop(str(user_id or ""), None)
 
 
 def update_last_search_listing_after_claim(
@@ -2394,6 +3628,24 @@ def set_last_donor_listings(user_id: str, listings: list[dict]) -> None:
 
 def get_last_donor_listings(user_id: str) -> list[dict]:
     return _last_donor_listings_by_user.get(str(user_id), [])
+
+
+def set_last_bulk_posted_ids(user_id: str, listing_ids: list) -> None:
+    """Remember UUIDs created by the latest bulk/CSV import for this user."""
+    cleaned = [
+        str(x).strip() for x in (listing_ids or [])
+        if x is not None and str(x).strip()
+    ]
+    if cleaned:
+        _last_bulk_posted_by_user[str(user_id)] = cleaned
+
+
+def get_last_bulk_posted_ids(user_id: str) -> list[str]:
+    return list(_last_bulk_posted_by_user.get(str(user_id), []))
+
+
+def clear_last_bulk_posted_ids(user_id: str) -> None:
+    _last_bulk_posted_by_user.pop(str(user_id), None)
 
 
 # ---------------------------------------------------------------------------
@@ -2687,7 +3939,9 @@ def resolve_donor_listing_id(
     s = str(raw_id).strip()
     if re.match(r"^[0-9a-f-]{36}$", s, re.I):
         return s, None
-    if re.fullmatch(r"#?\d{1,2}", s):
+    # Display index from get_user_listings (1–N). Accept up to 3 digits so
+    # donors with large batches (CSV imports) can say "#47".
+    if re.fullmatch(r"#?\d{1,3}", s):
         idx = int(s.lstrip("#"))
         if 1 <= idx <= len(listings):
             lid = listings[idx - 1].get("id")
@@ -3070,6 +4324,54 @@ def update_photo_intent_block_reason(
     )
 
 
+_EDIT_INTENT_VERBS = (
+    "edit", "update", "change", "rename", "fix", "correct", "modify",
+    "set the", "make it", "adjust",
+    "editar", "actualizar", "cambiar", "corregir", "modificar",
+)
+
+
+def update_new_share_block_reason(
+    tool_name: str,
+    args: dict | None,
+    message: str,
+    history: list | None,
+    user_id: str,
+) -> str | None:
+    """Block update_food_listing when the donor is sharing a NEW item.
+
+    Symptom this prevents: the model calls update_food_listing for a fresh
+    'I want to share <new food>' turn, the enrich layer resolves listing_id to
+    a recent listing via title/token overlap, and the existing listing gets
+    OVERWRITTEN — so the original disappears and the new food "replaces" it.
+    A brand-new food must go through post_food_listing (a new row).
+    """
+    if tool_name not in {"update_food_listing", "update_listing", "edit_listing"}:
+        return None
+
+    if not _is_fresh_share_intent(message):
+        return None
+
+    text = (message or "").lower()
+
+    # Respect explicit edit intent — '#2', 'edit the apples', etc. are real edits.
+    if re.search(r"#\d{1,2}\b", text):
+        return None
+    if any(v in text for v in _EDIT_INTENT_VERBS):
+        return None
+
+    # Adding a photo to an existing listing is handled elsewhere.
+    if donor_photo_add_intent(message, history, user_id):
+        return None
+
+    return (
+        "This turn is the donor sharing a NEW food item, not editing an "
+        "existing one. Do NOT call update_food_listing — that would overwrite "
+        "a previous listing and make it disappear. Call post_food_listing "
+        "(or post_food_listings for 2+ items) to create a brand-new listing."
+    )
+
+
 def _normalize_update_food_listing_args(
     args: dict,
     message: str,
@@ -3128,7 +4430,6 @@ def _wants_delete_duplicates(message: str, history: list | None) -> bool:
     keys = (
         "delete all duplicate", "delete the duplicate", "remove duplicate",
         "remove all duplicate", "delete duplicates", "remove duplicates",
-        "delete all of them", "delete them all", "remove them all",
         "eliminar duplicados", "borrar duplicados", "elimina duplicados",
         "borra duplicados", "quitar duplicados",
     )
@@ -3136,13 +4437,77 @@ def _wants_delete_duplicates(message: str, history: list | None) -> bool:
         return True
     if re.search(r"\b\d{1,3}\s+duplicate", blob):
         return True
+    # "delete them all" only means duplicate-cleanup when duplicates were
+    # mentioned — otherwise it is handled by delete_all (bulk wipe).
     return "duplicate" in blob and any(
         k in blob for k in (
             "delete all", "remove all", "delete them", "remove them",
+            "delete them all", "delete all of them", "remove them all",
             "yes delete", "confirm delete", "yes, confirm", "eliminar todo",
             "borrar todo", "sí, confirmar", "si confirmar",
         )
     )
+
+
+def _wants_delete_all_listings(message: str, history: list | None) -> bool:
+    """True when the donor wants to wipe many / all / the last bulk batch."""
+    if _wants_delete_duplicates(message, history):
+        return False
+    blob = _history_blob(history, message, limit=12).lower()
+    keys = (
+        "delete the bulk", "delete bulk listing", "delete bulk listings",
+        "remove the bulk", "remove bulk listing", "remove bulk listings",
+        "delete all my listing", "delete all listings", "delete all my food",
+        "remove all my listing", "remove all listings", "remove all my food",
+        "delete everything i posted", "delete everything i just",
+        "delete everything i shared", "clear all my listing",
+        "wipe my listing", "delete the csv", "delete csv listing",
+        "undo the import", "undo the bulk", "delete those listings",
+        "delete these listings", "remove those listings", "remove these listings",
+        "delete them all", "delete all of them", "remove them all",
+        "eliminar todas", "borrar todas", "elimina todas las publicaciones",
+        "borrar el lote", "eliminar el lote",
+    )
+    if any(k in blob for k in keys):
+        return True
+    # Recent CSV / bulk confirm context + a broad delete ask.
+    bulk_ctx = any(
+        k in blob for k in (
+            "csv", "spreadsheet", "bulk listing", "bulk import",
+            "imported", "created ", "posted ", "listings from",
+        )
+    )
+    if bulk_ctx and any(
+        k in blob for k in (
+            "delete all", "remove all", "delete them", "remove them",
+            "yes delete", "confirm delete", "yes, confirm",
+        )
+    ):
+        return True
+    return False
+
+
+def _resolve_listing_ids_list(raw_ids, user_id: str) -> tuple[list[str], Optional[str]]:
+    """Map a mixed list of UUIDs / display indices to real listing UUIDs."""
+    if not raw_ids:
+        return [], None
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_ids:
+        if raw is None:
+            continue
+        lid, err = resolve_donor_listing_id(raw, user_id)
+        if not lid:
+            # Already a full UUID even if not in the short cache — keep it.
+            s = str(raw).strip()
+            if re.match(r"^[0-9a-f-]{36}$", s, re.I):
+                lid = s
+            else:
+                return [], err or f"Could not resolve listing_id {raw!r}."
+        if lid not in seen:
+            seen.add(lid)
+            resolved.append(lid)
+    return resolved, None
 
 
 def enrich_donor_listing_tool_args(
@@ -3161,8 +4526,55 @@ def enrich_donor_listing_tool_args(
     raw_lid = out.get("listing_id")
     title = out.get("title")
 
-    # Bulk duplicate cleanup takes priority over single-listing delete.
-    if tool_name == "delete_listing" and not out.get("listing_ids") and (
+    # Resolve any model-supplied listing_ids (often display indices like "1")
+    # BEFORE branching into delete_all / delete_duplicates.
+    if tool_name == "delete_listing" and out.get("listing_ids"):
+        resolved_ids, resolve_err = _resolve_listing_ids_list(
+            out.get("listing_ids"), uid,
+        )
+        if resolve_err:
+            out["_resolve_error"] = resolve_err
+            out.pop("listing_ids", None)
+        else:
+            out["listing_ids"] = resolved_ids
+            out["_bulk_delete_count"] = len(resolved_ids)
+            out.pop("listing_id", None)
+
+    # Wipe last bulk batch or all active listings (CSV / "delete them all").
+    if (
+        tool_name == "delete_listing"
+        and not out.get("listing_ids")
+        and (
+            out.get("delete_all")
+            or _wants_delete_all_listings(message, history)
+        )
+    ):
+        out["delete_all"] = True
+        out.pop("listing_id", None)
+        out.pop("delete_duplicates", None)
+        bulk_ids = get_last_bulk_posted_ids(uid)
+        if bulk_ids:
+            out["listing_ids"] = list(bulk_ids)
+            out["_bulk_delete_count"] = len(bulk_ids)
+            out["_delete_scope"] = "last_bulk"
+        else:
+            donor_rows = get_last_donor_listings(uid)
+            all_ids = [
+                str(r["id"]) for r in donor_rows
+                if r.get("id")
+            ]
+            if all_ids:
+                out["listing_ids"] = all_ids
+                out["_bulk_delete_count"] = len(all_ids)
+                out["_delete_scope"] = "all_active"
+            else:
+                # Tool will fetch from Supabase; keep delete_all so confirm
+                # summary + executor know the intent without inventing ids.
+                out["_bulk_delete_count"] = out.get("_bulk_delete_count") or 0
+                out["_delete_scope"] = "all_active"
+
+    # Bulk duplicate cleanup (keeps one copy per title).
+    elif tool_name == "delete_listing" and not out.get("listing_ids") and (
         out.get("delete_duplicates")
         or _wants_delete_duplicates(message, history)
     ):
@@ -3217,6 +4629,22 @@ def enrich_donor_listing_tool_args(
     return out
 
 
+def _is_claim_all_quantity_reply(message: str) -> bool:
+    """True when the user answered a how-many ask with 'all' / 'everything'."""
+    t = (message or "").strip().lower()
+    if not t:
+        return False
+    if t in (
+        "all", "all of them", "all of it", "the whole thing", "everything",
+        "todo", "todos", "toda", "todas", "completo", "completa",
+    ):
+        return True
+    return any(p in t for p in (
+        "all of them", "all of it", "take all", "claim all", "everything left",
+        "the whole thing", "toda la", "todos los",
+    ))
+
+
 def _extract_quantity_from_message(message: str) -> Optional[int]:
     t = (message or "").strip().lower()
     if not t:
@@ -3229,10 +4657,28 @@ def _extract_quantity_from_message(message: str) -> Optional[int]:
     return None
 
 
+def _available_qty_for_listing(user_id: str, listing_id: str | None) -> Optional[int]:
+    """Look up available quantity from the last search cache for a listing."""
+    if not listing_id:
+        return None
+    for row in get_last_search_listings(user_id) or []:
+        if str(row.get("id") or "") != str(listing_id):
+            continue
+        try:
+            q = float(row.get("quantity") or 0)
+        except (TypeError, ValueError):
+            return None
+        if q >= 1:
+            return int(q)
+        return None
+    return None
+
+
 # Words the user glues onto a food noun that we should ignore when
 # matching listings (`2 loaves of bread` → match on "bread").
 _QTY_UNIT_WORDS: frozenset[str] = frozenset({
     "loaf", "loaves", "tray", "trays", "box", "boxes", "bag", "bags",
+    "basket", "baskets", "sack", "sacks",
     "bunch", "bunches", "piece", "pieces", "pack", "packs", "packet",
     "packets", "carton", "cartons", "can", "cans", "jar", "jars",
     "container", "containers", "bottle", "bottles", "pound", "pounds",
@@ -3355,18 +4801,6 @@ def _last_search_food_titles(user_id: str) -> list[str]:
         for row in get_last_search_listings(user_id)
         if row.get("title")
     ]
-
-
-def _mentioned_food_hint_from_message(message: str) -> Optional[str]:
-    """Best-guess food noun the user just referenced."""
-    intent = _extract_claim_intent(message)
-    if intent.get("title_hint"):
-        return intent["title_hint"]
-    words = [w for w in re.findall(r"[a-zA-Z']+", (message or "").lower())]
-    for w in words:
-        if w in _FOOD_WORDS:
-            return w
-    return None
 
 
 def _user_pivoted_claim_target(
@@ -3515,6 +4949,31 @@ def set_claim_drafts(user_id: str, drafts: list[dict] | None) -> None:
 
 def clear_claim_drafts(user_id: str) -> None:
     _claim_drafts_by_user.pop(str(user_id or ""), None)
+
+
+def remove_claimed_from_drafts(user_id: str, claimed_listing_ids: list | None) -> None:
+    """Drop successfully claimed items; keep failed drafts for retry."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return
+    lids = {
+        str(x).strip().lower()
+        for x in (claimed_listing_ids or [])
+        if x is not None and str(x).strip()
+    }
+    if not lids:
+        return
+    drafts = get_claim_drafts(uid)
+    if not drafts:
+        return
+    kept = [
+        d for d in drafts
+        if str(d.get("listing_id") or "").strip().lower() not in lids
+    ]
+    if len(kept) < 2:
+        clear_claim_drafts(uid)
+    else:
+        set_claim_drafts(uid, kept)
 
 
 def _parse_claim_index_picks(message: str, user_id: str) -> list[dict]:
@@ -3672,7 +5131,8 @@ def upsert_claim_drafts_from_message(
             }
 
     # Short qty reply while a draft is missing qty and assistant asked how many.
-    if existing and re.fullmatch(r"\d{1,3}", (message or "").strip()):
+    msg_stripped = (message or "").strip()
+    if existing and re.fullmatch(r"\d{1,3}", msg_stripped):
         qty = _extract_quantity_from_message(message)
         if qty is not None:
             for d in by_key.values():
@@ -3692,6 +5152,33 @@ def upsert_claim_drafts_from_message(
                     if d.get("qty") is None or float(d.get("qty") or 0) <= 0:
                         d["qty"] = float(qty)
                         break
+
+    # "2 each" / "2 of each" → same qty for every draft still missing qty.
+    each_m = re.fullmatch(
+        r"(\d{1,3})\s*(?:each|of each|apiece|for each|para cada uno)?",
+        msg_stripped.lower(),
+    )
+    if existing and each_m and (
+        "each" in msg_stripped.lower()
+        or "apiece" in msg_stripped.lower()
+        or "para cada" in msg_stripped.lower()
+    ):
+        try:
+            each_qty = float(each_m.group(1))
+        except (TypeError, ValueError):
+            each_qty = None
+        if each_qty and each_qty > 0:
+            for d in by_key.values():
+                if d.get("qty") is None or float(d.get("qty") or 0) <= 0:
+                    d["qty"] = each_qty
+
+    # "all of them" after a multi how-many ask → fill missing drafts from cache.
+    if existing and _is_claim_all_quantity_reply(message):
+        for d in by_key.values():
+            if d.get("qty") is not None and float(d.get("qty") or 0) > 0:
+                continue
+            avail = _available_qty_for_listing(uid, d.get("listing_id"))
+            d["qty"] = float(avail) if avail else "all"
 
     # Resolve missing listing_ids from search cache.
     for d in by_key.values():
@@ -3743,7 +5230,18 @@ def claim_drafts_missing(drafts: list[dict] | None) -> list[dict]:
         gaps: list[str] = []
         if not d.get("listing_id"):
             gaps.append("listing")
-        if d.get("qty") is None or float(d.get("qty") or 0) <= 0:
+        qty = d.get("qty")
+        qty_ok = (
+            (isinstance(qty, str) and qty.strip().lower() in {
+                "all", "everything", "todo", "todos",
+            })
+            or (
+                qty is not None
+                and not isinstance(qty, str)
+                and float(qty or 0) > 0
+            )
+        )
+        if not qty_ok:
             gaps.append("qty")
         if gaps:
             missing.append({
@@ -3783,15 +5281,18 @@ def build_claim_drafts_reminder(
     if lang == "es":
         tip = (
             "COLA DE RECLAMOS MÚLTIPLES (2+). Pregunta UN campo faltante "
-            "por turno (cantidad por ítem). Cuando todo esté listo, llama "
-            "claim_listings con items[]. No reclames solo el primero."
+            "por turno (cantidad por ítem). Cuando todo esté listo, da UN "
+            "resumen corto y pregunta '¿Listo para reclamar estos?'; tras "
+            "el sí, llama claim_listings con items[]. No reclames solo el primero."
         )
     else:
         tip = (
             "MULTI-CLAIM DRAFT QUEUE (2+ listings). Ask ONE missing field "
             "per turn (usually qty for the next unfinished item). When all "
-            "drafts have listing_id + qty, call claim_listings with items[]. "
-            "Do NOT claim only the first item with claim_listing."
+            "drafts have listing_id + qty, give ONE short summary and ask "
+            "'Ready to claim these?' — after they say yes, call "
+            "claim_listings with items[]. Do NOT claim only the first item "
+            "with claim_listing. Emphasize they can claim several at once."
         )
     if missing:
         gap = " Still missing: " + "; ".join(
@@ -3799,8 +5300,76 @@ def build_claim_drafts_reminder(
             for m in missing
         )
     else:
-        gap = " All drafts ready — call claim_listings now."
+        if _claiming_ready_to_execute(message, history):
+            gap = (
+                " All drafts ready and user confirmed — call claim_listings "
+                "NOW with items[] for every draft."
+            )
+        else:
+            gap = (
+                " All drafts ready — ONE short summary + ask "
+                "'Ready to claim these?' once, then wait for yes before "
+                "claim_listings."
+            )
     return f"{tip}\nDrafts:\n{body}.{gap}"
+
+
+def _is_affirmative_claim_confirm(message: str) -> bool:
+    t = (message or "").strip().lower()
+    if not t:
+        return False
+    keys = (
+        "yes", "yep", "yeah", "yup", "claim it", "claim them", "claim these",
+        "claim both", "claim all", "claim now", "go ahead", "confirm",
+        "do it", "please do", "sounds good", "looks good",
+        "sí", "si ", "reclama", "reclámalos", "reclamarlos", "dale", "adelante",
+        "yes, claim", "yes claim",
+    )
+    return any(k in t for k in keys)
+
+
+def _claiming_ready_to_execute(message: str, history: list | None) -> bool:
+    """True when the recipient greenlit the multi-claim this turn."""
+    last = _assistant_last_asked_kind(history)
+    affirmative = (
+        _is_affirmative_claim_confirm(message)
+        or _is_short_affirmative(message)
+    )
+    if not affirmative:
+        # Explicit multi-claim language with amounts already in the message.
+        t = (message or "").lower()
+        if any(k in t for k in (
+            "claim these", "claim both", "claim all", "claim them now",
+            "yes, claim", "reclama estos", "reclamar ambos",
+        )):
+            return True
+        return False
+    if last == "claim_confirm":
+        return True
+    t = (message or "").lower()
+    return any(k in t for k in (
+        "claim it", "claim them", "claim these", "claim both", "claim all",
+        "yes, claim", "yes claim", "go ahead and claim",
+    ))
+
+
+def _claim_confirm_needed_reason(message: str, history: list | None) -> str | None:
+    """Ask for exactly one Ready-to-claim confirm when drafts are complete."""
+    if _claiming_ready_to_execute(message, history):
+        return None
+    last = _assistant_last_asked_kind(history)
+    if last == "claim_confirm":
+        if _is_affirmative_claim_confirm(message) or _is_short_affirmative(message):
+            return None
+        return (
+            "You already asked 'Ready to claim these?' — wait for their yes "
+            "(or a quantity change). Do NOT call claim_listings yet."
+        )
+    return (
+        "All multi-claim drafts are ready. Give ONE short summary of what "
+        "they'll get (titles + quantities) and ask 'Ready to claim these?' "
+        "— then wait. After they say yes, call claim_listings with items[]."
+    )
 
 
 def enrich_claim_listings_args(
@@ -3821,11 +5390,18 @@ def enrich_claim_listings_args(
             if not d.get("listing_id"):
                 continue
             item = {"listing_id": d["listing_id"]}
-            if d.get("qty") is not None:
-                try:
-                    item["quantity"] = int(float(d["qty"]))
-                except (TypeError, ValueError):
-                    item["quantity"] = d["qty"]
+            raw_qty = d.get("qty")
+            if raw_qty is not None:
+                if isinstance(raw_qty, str) and raw_qty.strip().lower() in {
+                    "all", "everything", "todo", "todos",
+                }:
+                    avail = _available_qty_for_listing(uid, d.get("listing_id"))
+                    item["quantity"] = avail if avail is not None else "all"
+                else:
+                    try:
+                        item["quantity"] = int(float(raw_qty))
+                    except (TypeError, ValueError):
+                        item["quantity"] = raw_qty
             if d.get("title"):
                 item["title"] = d["title"]
             items.append(item)
@@ -3845,10 +5421,17 @@ def enrich_claim_listings_args(
                     lid = resolved
             draft = by_lid.get(lid)
             if draft and item.get("quantity") is None and draft.get("qty") is not None:
-                try:
-                    item["quantity"] = int(float(draft["qty"]))
-                except (TypeError, ValueError):
-                    item["quantity"] = draft["qty"]
+                raw_qty = draft["qty"]
+                if isinstance(raw_qty, str) and raw_qty.strip().lower() in {
+                    "all", "everything", "todo", "todos",
+                }:
+                    avail = _available_qty_for_listing(uid, lid)
+                    item["quantity"] = avail if avail is not None else "all"
+                else:
+                    try:
+                        item["quantity"] = int(float(raw_qty))
+                    except (TypeError, ValueError):
+                        item["quantity"] = raw_qty
         out["items"] = items
     return out
 
@@ -3880,7 +5463,20 @@ def claiming_batch_tool_block_reason(
             miss = []
             if not item.get("listing_id"):
                 miss.append("listing_id")
-            if item.get("quantity") is None and item.get("qty") is None:
+            raw_q = item.get("quantity")
+            if raw_q is None:
+                raw_q = item.get("qty")
+            qty_ok = False
+            if isinstance(raw_q, str) and raw_q.strip().lower() in {
+                "all", "everything", "todo", "todos",
+            }:
+                qty_ok = True
+            elif raw_q is not None:
+                try:
+                    qty_ok = float(raw_q) > 0
+                except (TypeError, ValueError):
+                    qty_ok = False
+            if not qty_ok:
                 miss.append("qty")
             if miss:
                 gaps.append(f"{item.get('title') or i}: {', '.join(miss)}")
@@ -3902,7 +5498,38 @@ def claiming_batch_tool_block_reason(
                 "Batch claim incomplete — still need: " + "; ".join(bits) + ". "
                 "Ask ONE missing field per turn, then retry claim_listings."
             )
+
+    # Drafts/items complete → one Ready-to-claim confirm (mirrors share flow).
+    items_complete = (
+        isinstance(items, list)
+        and len(items) >= 2
+        and all(
+            isinstance(it, dict)
+            and it.get("listing_id")
+            and _claim_item_qty_ok(it)
+            for it in items
+        )
+    )
+    if claim_drafts_ready(drafts) or items_complete:
+        return _claim_confirm_needed_reason(message, history)
+
     return None
+
+
+def _claim_item_qty_ok(item: dict) -> bool:
+    raw_q = item.get("quantity")
+    if raw_q is None:
+        raw_q = item.get("qty")
+    if isinstance(raw_q, str) and raw_q.strip().lower() in {
+        "all", "everything", "todo", "todos",
+    }:
+        return True
+    if raw_q is None:
+        return False
+    try:
+        return float(raw_q) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def enrich_claim_listing_args(
@@ -3951,11 +5578,19 @@ def enrich_claim_listing_args(
 
     if out.get("quantity") is None:
         if _quantity_step_complete(history, message) or _assistant_awaiting_quantity(history):
-            qty = _extract_quantity_from_message(message)
-            if qty is not None:
-                out["quantity"] = qty
+            if _is_claim_all_quantity_reply(message):
+                # Pass through so _normalize_claim_quantity takes full available.
+                # Never force 1 — that made "All of them" claim a single unit.
+                avail = _available_qty_for_listing(uid, out.get("listing_id"))
+                out["quantity"] = avail if avail is not None else "all"
+            else:
+                qty = _extract_quantity_from_message(message)
+                if qty is not None:
+                    out["quantity"] = qty
     if out.get("quantity") is None and _quantity_step_complete(history, message):
-        out["quantity"] = 1
+        # Last-resort default only when they answered vaguely without all/digit.
+        if not _is_claim_all_quantity_reply(message):
+            out["quantity"] = 1
     return out
 
 
@@ -4038,9 +5673,11 @@ def _user_wants_fresh_search(message: str) -> bool:
         "show me more", "find food", "what else", "another option", "other food",
         "available food", "what's available", "whats available", "show available",
         "any food", "new food", "more food", "food near", "near me", "nearby",
+        "want some food", "want food", "need food", "some food",
+        "something easy", "easy to prepare", "start over", "start again",
         "buscar otra", "otra opción", "algo más", "buscar de nuevo",
-        "buscar comida", "busco comida",
-    ))
+        "buscar comida", "busco comida", "quiero comida", "algo fácil",
+    )) or _user_clears_claim_flow(message)
 
 
 def claiming_distractor_tool_block_reason(

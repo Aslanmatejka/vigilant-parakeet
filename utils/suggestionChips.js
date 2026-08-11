@@ -72,21 +72,28 @@ export function getLazyPreChips(language = 'en', role = null) {
   return LAZY_PRE_CHIPS_EN
 }
 
-/** Chips for the input rail — backend suggestions when present, else lazy defaults. */
-export function resolveInputChips(suggestions, language = 'en', role = null) {
-  if (Array.isArray(suggestions) && suggestions.length > 0) {
-    const r = String(role || '').toLowerCase()
-    if (r === 'donor') {
-      const block = language === 'es' ? RECIPIENT_ONLY_ES : RECIPIENT_ONLY_EN
-      const filtered = suggestions.filter((s) => !block.has(String(s)))
-      return filtered.length ? filtered : getLazyPreChips(language, role)
-    }
-    if (r === 'recipient') {
-      const block = language === 'es' ? DONOR_ONLY_ES : DONOR_ONLY_EN
-      const filtered = suggestions.filter((s) => !block.has(String(s)))
-      return filtered.length ? filtered : getLazyPreChips(language, role)
-    }
-    return suggestions
+function chipLabel(chip) {
+  if (chip == null) return ''
+  if (typeof chip === 'string') return chip
+  if (typeof chip === 'object') {
+    return String(chip.label || chip.message || chip.prompt || chip.text || '')
   }
+  return String(chip)
+}
+
+/**
+ * Input-rail chips. Contextual bubble suggestions own the turn — the rail
+ * stays empty when the backend returns any, to avoid duplicates / mismatched
+ * "Find food" starters under a claim-qty question. Lazy defaults are only for
+ * true idle mid-conversation (no backend chips).
+ */
+export function resolveInputChips(suggestions, language = 'en', role = null, { allowLazy = true } = {}) {
+  if (Array.isArray(suggestions) && suggestions.length > 0) {
+    // Bubble already shows these — do not mirror them on the input rail.
+    return []
+  }
+  if (!allowLazy) return []
   return getLazyPreChips(language, role)
 }
+
+export { chipLabel }

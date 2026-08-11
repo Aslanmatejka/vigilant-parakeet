@@ -34,6 +34,9 @@ export const ADMIN_MENU_GROUPS = [
         label: 'Operations',
         items: [
             { id: 'distribution', label: 'Food Distribution', icon: 'fa-box-open', path: '/admin/distribution' },
+            { id: 'listing-approvals', label: 'Listing Approvals', icon: 'fa-clipboard-list', path: '/admin/listing-approvals' },
+            { id: 'request-approvals', label: 'Request Approvals', icon: 'fa-inbox', path: '/admin/request-approvals' },
+            { id: 'claim-approvals', label: 'Claim Approvals', icon: 'fa-hand-holding-heart', path: '/admin/claim-approvals' },
             { id: 'attendees', label: 'Distribution Attendees', icon: 'fa-users-rectangle', path: '/admin/attendees' },
             { id: 'share-food', label: 'Share Food', icon: 'fa-utensils', path: '/admin/share-food' },
             { id: 'communities', label: 'Communities', icon: 'fa-city', path: '/admin/communities' },

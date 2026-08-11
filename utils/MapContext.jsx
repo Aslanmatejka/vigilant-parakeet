@@ -18,6 +18,8 @@ const initialState = {
   aiMarkers: [],
   // GeoJSON LineString geometry from get_mapbox_route, plus origin/destination
   aiRoute: null,
+  // Stops from optimize_pickup_route frontend_hint for PickupRouteOptimizer
+  aiRouteStops: null,
   // { lat, lng, zoom } – request to center the map
   centerRequest: null,
   // Highlighted listing id (e.g. when AI references a specific result)
@@ -41,6 +43,14 @@ export function MapProvider({ children }) {
     setState(prev => ({
       ...prev,
       aiRoute: route || null,
+      updateNonce: prev.updateNonce + 1,
+    }))
+  }, [])
+
+  const setAIRouteStops = useCallback((stops) => {
+    setState(prev => ({
+      ...prev,
+      aiRouteStops: Array.isArray(stops) ? stops : null,
       updateNonce: prev.updateNonce + 1,
     }))
   }, [])
@@ -85,6 +95,7 @@ export function MapProvider({ children }) {
       ...prev,
       aiMarkers: [],
       aiRoute: null,
+      aiRouteStops: null,
       highlightId: null,
       updateNonce: prev.updateNonce + 1,
     }))
@@ -100,14 +111,22 @@ export function MapProvider({ children }) {
     let nextMarkers = null
     let nextRoute = null
     let nextCenter = null
+    let nextRouteStops = null
 
     for (const entry of toolResults) {
       if (!entry || !entry.tool) continue
       const result = entry.result ?? entry
       const { tool } = entry
 
-      // search_food_near_user → drop food markers and recenter
-      if (tool === 'search_food_near_user' || tool === 'search_food_nearby' || tool === 'get_recent_listings') {
+      // search / listings → drop food markers and recenter
+      if (
+        tool === 'search_food_near_user'
+        || tool === 'search_food_nearby'
+        || tool === 'get_recent_listings'
+        || tool === 'get_community_listings'
+        || tool === 'get_user_listings'
+        || tool === 'get_my_claims'
+      ) {
         const listings = Array.isArray(result.listings)
           ? result.listings
           : (Array.isArray(result.results) ? result.results : [])
@@ -124,7 +143,7 @@ export function MapProvider({ children }) {
               subtitle: [l.category, l.address, l.distance_km ? `${l.distance_km} km` : null]
                 .filter(Boolean)
                 .join(' · '),
-              kind: 'food',
+              kind: tool === 'get_my_claims' ? 'pin' : 'food',
               meta: l,
             }
           })
@@ -133,6 +152,57 @@ export function MapProvider({ children }) {
           nextMarkers = (nextMarkers || []).concat(markers)
           if (!nextCenter) {
             nextCenter = { lat: markers[0].lat, lng: markers[0].lng, zoom: 12 }
+          }
+        }
+      }
+
+      // optimize_pickup_route → waypoints for PickupRouteOptimizer + map pins
+      const hint = result?.frontend_hint || entry.frontend_hint
+      if (
+        (tool === 'optimize_pickup_route' || hint?.component === 'RouteOptimizer')
+        && hint
+        && Array.isArray(hint.waypoints)
+      ) {
+        const stops = (result.stops || []).map((s, i) => ({
+          id: s.id || `ai-stop-${i}`,
+          listing_id: s.listing_id || s.id,
+          title: s.title || s.name || `Stop ${i + 1}`,
+          latitude: Number(s.lat ?? s.latitude),
+          longitude: Number(s.lng ?? s.longitude),
+          location: s.address || s.location || '',
+          pickup_by: s.pickup_by || null,
+          quantity: s.quantity || null,
+          status: s.status || 'approved',
+        })).filter((s) => Number.isFinite(s.latitude) && Number.isFinite(s.longitude))
+
+        if (!stops.length && hint.waypoints.length) {
+          hint.waypoints.forEach((wp, i) => {
+            const lng = Number(Array.isArray(wp) ? wp[0] : wp?.lng)
+            const lat = Number(Array.isArray(wp) ? wp[1] : wp?.lat)
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return
+            stops.push({
+              id: `ai-wp-${i}`,
+              title: `Stop ${i + 1}`,
+              latitude: lat,
+              longitude: lng,
+              location: '',
+            })
+          })
+        }
+
+        if (stops.length) {
+          nextRouteStops = stops
+          const markers = stops.map((s) => ({
+            id: s.id,
+            lat: s.latitude,
+            lng: s.longitude,
+            title: s.title,
+            kind: 'pin',
+            meta: s,
+          }))
+          nextMarkers = (nextMarkers || []).concat(markers)
+          if (!nextCenter) {
+            nextCenter = { lat: stops[0].latitude, lng: stops[0].longitude, zoom: 11 }
           }
         }
       }
@@ -166,45 +236,59 @@ export function MapProvider({ children }) {
         }
       }
 
-      // get_mapbox_route → draw route line + endpoint markers.
+      // get_mapbox_route / show_route_to_listing → draw route + endpoints.
       // Route data can live in three places depending on flow:
       //   - live response: result.geometry / origin / destination
       //   - flat legacy:   entry.route.{geometry, ...}
       //   - rehydrated:    result.route.{geometry, ...} (after normalizer)
-      if (tool === 'get_mapbox_route' && result && !result.error) {
+      if (
+        (tool === 'get_mapbox_route' || tool === 'show_route_to_listing')
+        && result
+        && !result.error
+      ) {
         const routePayload = entry.route || result.route || result
         const geometry = routePayload.geometry || null
         const origin = routePayload.origin || result.origin
         const destination = routePayload.destination || result.destination
+        const profile = routePayload.mode || routePayload.profile || result.profile
         nextRoute = {
           geometry,
           origin,
           destination,
           distance_km: routePayload.distance_km ?? result.distance_km,
           duration_text: routePayload.duration_text ?? result.duration_text,
-          profile: routePayload.profile ?? result.profile,
+          distance_m: routePayload.distance_m ?? result.distance_m,
+          duration_s: routePayload.duration_s ?? result.duration_s,
+          steps: routePayload.steps || result.steps || [],
+          profile,
+          mode: profile,
+          fallback: routePayload.fallback ?? result.fallback,
         }
         if (origin && destination) {
-          const oLat = Number(origin.lat);
-          const oLng = Number(origin.lng);
-          const dLat = Number(destination.lat);
-          const dLng = Number(destination.lng);
-          const endpointsInRegion =
-            isBayAreaCoord(oLat, oLng) && isBayAreaCoord(dLat, dLng);
-          if (endpointsInRegion) {
+          const oLat = Number(origin.lat)
+          const oLng = Number(origin.lng)
+          const dLat = Number(destination.lat)
+          const dLng = Number(destination.lng)
+          const endpointsValid =
+            Number.isFinite(oLat) && Number.isFinite(oLng)
+            && Number.isFinite(dLat) && Number.isFinite(dLng)
+          // Draw for any valid coords — directions must work even when a
+          // pin sits just outside the Bay Area hard-bound filter used for
+          // search markers.
+          if (endpointsValid) {
             const endpointMarkers = [
               {
                 id: 'route-origin',
                 lat: oLat,
                 lng: oLng,
-                title: 'Start',
+                title: origin.address || 'Start',
                 kind: 'pin',
               },
               {
                 id: 'route-destination',
                 lat: dLat,
                 lng: dLng,
-                title: 'Destination',
+                title: destination.title || destination.address || 'Pickup',
                 kind: 'pin',
               },
             ]
@@ -213,7 +297,7 @@ export function MapProvider({ children }) {
               nextCenter = {
                 lat: (oLat + dLat) / 2,
                 lng: (oLng + dLng) / 2,
-                zoom: 11,
+                zoom: 12,
               }
             }
           } else {
@@ -227,6 +311,7 @@ export function MapProvider({ children }) {
       ...prev,
       aiMarkers: nextMarkers !== null ? nextMarkers : prev.aiMarkers,
       aiRoute: nextRoute !== null ? nextRoute : prev.aiRoute,
+      aiRouteStops: nextRouteStops !== null ? nextRouteStops : prev.aiRouteStops,
       centerRequest: nextCenter ? { ...nextCenter, ts: Date.now() } : prev.centerRequest,
       updateNonce: prev.updateNonce + 1,
     }))
@@ -236,11 +321,12 @@ export function MapProvider({ children }) {
     ...state,
     setAIMarkers,
     setAIRoute,
+    setAIRouteStops,
     centerOn,
     highlightListing,
     clearAIOverlays,
     applyToolResults,
-  }), [state, setAIMarkers, setAIRoute, centerOn, highlightListing, clearAIOverlays, applyToolResults])
+  }), [state, setAIMarkers, setAIRoute, setAIRouteStops, centerOn, highlightListing, clearAIOverlays, applyToolResults])
 
   return <MapContext.Provider value={value}>{children}</MapContext.Provider>
 }
@@ -253,11 +339,13 @@ export function useMapContext() {
     return {
       aiMarkers: [],
       aiRoute: null,
+      aiRouteStops: null,
       centerRequest: null,
       highlightId: null,
       updateNonce: 0,
       setAIMarkers: () => {},
       setAIRoute: () => {},
+      setAIRouteStops: () => {},
       centerOn: () => {},
       highlightListing: () => {},
       clearAIOverlays: () => {},

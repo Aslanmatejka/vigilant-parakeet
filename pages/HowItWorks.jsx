@@ -13,13 +13,13 @@ function HowItWorks() {
                 icon: 'fa-user-plus'
             },
             {
-                title: 'List or Find Food',
-                description: 'Share your surplus food or browse available donations and trades in your area.',
+                title: 'Find, Share, or Request',
+                description: 'Browse donations on Find Food, share surplus, or post a Request Food need when nothing matches.',
                 icon: 'fa-search'
             },
             {
                 title: 'Connect & Arrange',
-                description: 'Message other users to arrange pickup or delivery of food items.',
+                description: 'Donors can answer community requests; recipients claim listed food and arrange pickup.',
                 icon: 'fa-comments'
             },
             {
@@ -175,7 +175,34 @@ function HowItWorks() {
                         >
                             Ready to Get Started?
                         </h2>
-                        <div className="flex justify-center space-x-4">
+                        <div className="flex flex-wrap justify-center gap-3 sm:gap-4">
+                            <Button
+                                variant="primary"
+                                size="lg"
+                                onClick={() => navigate('/find')}
+                                aria-label="Find food"
+                            >
+                                <i className="fas fa-search mr-2" aria-hidden="true"></i>
+                                Find Food
+                            </Button>
+                            <Button
+                                variant="secondary"
+                                size="lg"
+                                onClick={() => navigate('/share')}
+                                aria-label="Share food"
+                            >
+                                <i className="fas fa-share-alt mr-2" aria-hidden="true"></i>
+                                Share Food
+                            </Button>
+                            <Button
+                                variant="secondary"
+                                size="lg"
+                                onClick={() => navigate('/request')}
+                                aria-label="Request food"
+                            >
+                                <i className="fas fa-hand-holding-heart mr-2" aria-hidden="true"></i>
+                                Request Food
+                            </Button>
                             <Button
                                 variant="primary"
                                 size="lg"
@@ -183,16 +210,7 @@ function HowItWorks() {
                                 aria-label="Create a new account"
                             >
                                 <i className="fas fa-user-plus mr-2" aria-hidden="true"></i>
-                                Sign Up Now
-                            </Button>
-                            <Button
-                                variant="secondary"
-                                size="lg"
-                                onClick={() => {/* Add demo video functionality */}}
-                                aria-label="Watch platform demonstration video"
-                            >
-                                <i className="fas fa-play mr-2" aria-hidden="true"></i>
-                                Watch Demo
+                                Sign Up
                             </Button>
                         </div>
                     </section>

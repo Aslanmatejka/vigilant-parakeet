@@ -44,6 +44,8 @@ class TestCreateFoodListingExpiry:
     async def test_accepts_expiration_date_alias(self):
         with patch("backend.ai_engine.fetch_donor_listing_defaults", new=AsyncMock(return_value={})), \
              patch("backend.tools._resolve_community", new=AsyncMock(return_value=("c1", "Test Community"))), \
+             patch("backend.tools._resolve_create_listing_status", new=AsyncMock(return_value="approved")), \
+             patch("backend.tools._find_recent_duplicate_listing", new=AsyncMock(return_value=None)), \
              patch("backend.tools._forward_geocode", new=AsyncMock(return_value=(37.8, -122.2))), \
              patch("backend.ai_engine.supabase_post", new=AsyncMock(return_value=[{"id": "listing-1"}])):
             result = await _create_food_listing(
@@ -123,3 +125,33 @@ class TestNormalizeClaimQuantity:
         # Defensive: caller already short-circuits when available <= 0,
         # but the helper must not return 0 either way.
         assert _normalize_claim_quantity(5, 0) == (1, False)
+
+
+class TestMaxClaimPerListing:
+    """Soft abuse ceiling only — available qty and 'all' are the real limits."""
+
+    def test_max_claim_constant_is_soft_ceiling(self):
+        from backend.tools import _MAX_CLAIM_PER_LISTING
+
+        assert _MAX_CLAIM_PER_LISTING >= 10
+
+    def test_all_keyword_not_capped_to_two(self):
+        from backend.tools import _normalize_claim_quantity
+
+        qty, clamped = _normalize_claim_quantity("all", 10)
+        assert qty == 10
+        assert clamped is False
+
+    def test_portion_above_two_allowed(self):
+        from backend.tools import _normalize_claim_quantity
+
+        qty, clamped = _normalize_claim_quantity(5, 10)
+        assert qty == 5
+        assert clamped is False
+
+    def test_none_default_takes_full_available(self):
+        from backend.tools import _normalize_claim_quantity
+
+        qty, clamped = _normalize_claim_quantity(None, 10)
+        assert qty == 10
+        assert clamped is False

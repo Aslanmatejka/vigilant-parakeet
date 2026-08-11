@@ -1,6 +1,7 @@
 import React from 'react';
 import PropTypes from 'prop-types';
 import { Link } from 'react-router-dom';
+import { useCommunityRole } from '../../utils/hooks/useCommunityRole';
 
 function formatNumber(num) {
     if (!num) return '0';
@@ -14,6 +15,10 @@ function ProfileStats({
     impact = null,
     loading = false
 }) {
+    const communityRole = useCommunityRole();
+    const isDonor = communityRole === 'donor';
+    const isRecipient = communityRole === 'recipient';
+
     if (loading) {
         return (
             <div className="bg-white border border-gray-100 rounded-2xl p-6 shadow-sm">
@@ -81,8 +86,8 @@ function ProfileStats({
             iconColor: 'text-[#2CABE3]'
         },
         {
-            label: 'Pending approval',
-            value: impact.pendingListings || 0,
+            label: 'Expired',
+            value: impact.expiredListings || 0,
             total: impact.totalListings || 0,
             icon: 'fa-clock',
             barColor: 'bg-amber-500',
@@ -125,20 +130,58 @@ function ProfileStats({
                         Share or claim food on DoGoods to start tracking your personal impact on the community.
                     </p>
                     <div className="flex flex-wrap gap-2 justify-center">
-                        <Link
-                            to="/share"
-                            className="inline-flex items-center px-4 py-2 rounded-lg bg-[#2CABE3] text-white text-sm font-medium hover:opacity-90"
-                        >
-                            <i className="fas fa-plus mr-2"></i>
-                            Share food
-                        </Link>
-                        <Link
-                            to="/find"
-                            className="inline-flex items-center px-4 py-2 rounded-lg bg-white border border-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-50"
-                        >
-                            <i className="fas fa-search mr-2"></i>
-                            Find food
-                        </Link>
+                        {isRecipient ? (
+                            <>
+                                <Link
+                                    to="/find"
+                                    className="inline-flex items-center px-4 py-2 rounded-lg bg-[#2CABE3] text-white text-sm font-medium hover:opacity-90"
+                                >
+                                    <i className="fas fa-search mr-2"></i>
+                                    Find food
+                                </Link>
+                                <Link
+                                    to="/request"
+                                    className="inline-flex items-center px-4 py-2 rounded-lg bg-white border border-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-50"
+                                >
+                                    <i className="fas fa-hand-holding-heart mr-2"></i>
+                                    Request food
+                                </Link>
+                            </>
+                        ) : isDonor ? (
+                            <>
+                                <Link
+                                    to="/share"
+                                    className="inline-flex items-center px-4 py-2 rounded-lg bg-[#2CABE3] text-white text-sm font-medium hover:opacity-90"
+                                >
+                                    <i className="fas fa-plus mr-2"></i>
+                                    Share food
+                                </Link>
+                                <Link
+                                    to="/community-requests"
+                                    className="inline-flex items-center px-4 py-2 rounded-lg bg-white border border-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-50"
+                                >
+                                    <i className="fas fa-inbox mr-2"></i>
+                                    Community requests
+                                </Link>
+                            </>
+                        ) : (
+                            <>
+                                <Link
+                                    to="/share"
+                                    className="inline-flex items-center px-4 py-2 rounded-lg bg-[#2CABE3] text-white text-sm font-medium hover:opacity-90"
+                                >
+                                    <i className="fas fa-plus mr-2"></i>
+                                    Share food
+                                </Link>
+                                <Link
+                                    to="/find"
+                                    className="inline-flex items-center px-4 py-2 rounded-lg bg-white border border-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-50"
+                                >
+                                    <i className="fas fa-search mr-2"></i>
+                                    Find food
+                                </Link>
+                            </>
+                        )}
                     </div>
                 </div>
             ) : (
@@ -224,7 +267,7 @@ ProfileStats.propTypes = {
     impact: PropTypes.shape({
         totalListings: PropTypes.number,
         activeListings: PropTypes.number,
-        pendingListings: PropTypes.number,
+        expiredListings: PropTypes.number,
         claimedListings: PropTypes.number,
         totalFoodShared: PropTypes.number,
         foodClaimed: PropTypes.number,

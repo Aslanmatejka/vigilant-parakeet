@@ -8,6 +8,7 @@ import RoleInsightsPanel from "../components/assistant/RoleInsightsPanel";
 import AIQueryPanel from "../components/assistant/AIQueryPanel";
 import PickupRouteOptimizer from "../components/donations/PickupRouteOptimizer";
 import { useAuth, useFoodListings, useNotifications } from "../utils/hooks/useSupabase";
+import { useMapContext } from "../utils/MapContext.jsx";
 import supabase from "../utils/supabaseClient";
 
 // Helper function for date formatting
@@ -27,6 +28,7 @@ function UserDashboard() {
     const { user: authUser, isAuthenticated } = useAuth();
     const { listings: userListings, loading: listingsLoading, error: listingsError } = useFoodListings({ user_id: authUser?.id });
     const { notifications, loading: notificationsLoading, error: notificationsError } = useNotifications(authUser?.id);
+    const { aiRouteStops } = useMapContext();
 
     const [receipts, setReceipts] = React.useState([]);
     const [receiptsLoading, setReceiptsLoading] = React.useState(true);
@@ -154,20 +156,20 @@ function UserDashboard() {
     const quickActions = isDonor
         ? [
             { title: 'Share Food', description: 'Post surplus food for the community', icon: 'fa-plus', path: '/share', color: 'bg-[#2CABE3]' },
+            { title: 'Community Requests', description: 'Fulfill what neighbors asked for', icon: 'fa-inbox', path: '/community-requests', color: 'bg-amber-500' },
             { title: 'My Listings', description: 'Manage what you’ve posted', icon: 'fa-list', path: '/listings', color: 'bg-emerald-500' },
-            { title: 'Donation Schedules', description: 'Set up recurring donations', icon: 'fa-calendar', path: '/donations', color: 'bg-purple-500' },
         ]
         : isRecipient
         ? [
             { title: 'Find Food', description: 'Browse available items near you', icon: 'fa-search', path: '/find', color: 'bg-blue-500' },
-            { title: 'Near Me', description: 'See pickups on the map', icon: 'fa-location-dot', path: '/near-me', color: 'bg-emerald-500' },
-            { title: 'My Receipts', description: 'View claims and pickups', icon: 'fa-receipt', path: '/receipts', color: 'bg-purple-500' },
+            { title: 'Request Food', description: 'Ask for food that isn’t listed yet', icon: 'fa-hand-holding-heart', path: '/request', color: 'bg-amber-500' },
+            { title: 'My Receipts', description: 'View your claim history', icon: 'fa-receipt', path: '/receipts', color: 'bg-emerald-500' },
         ]
         : isOrganizer
         ? [
             { title: 'Distribution Events', description: 'Coordinate food pickups', icon: 'fa-calendar', path: '/donations', color: 'bg-[#2CABE3]' },
             { title: 'Find Food', description: 'Browse items to distribute', icon: 'fa-search', path: '/find', color: 'bg-blue-500' },
-            { title: 'Near Me', description: 'Pickups on the map', icon: 'fa-location-dot', path: '/near-me', color: 'bg-emerald-500' },
+            { title: 'Community Requests', description: 'See what neighbors need', icon: 'fa-inbox', path: '/community-requests', color: 'bg-amber-500' },
         ]
         : [
             { title: 'Find Food', description: 'Browse available items', icon: 'fa-search', path: '/find', color: 'bg-blue-500' },
@@ -288,8 +290,13 @@ function UserDashboard() {
             {/* AI Role-Specific Insights */}
             <RoleInsightsPanel className="mb-8" />
 
-            {/* Smart Pickup Route Optimizer — donor/organizer only */}
-            {(isDonor || isOrganizer) && <PickupRouteOptimizer className="mb-8" />}
+            {/* Smart Pickup Route Optimizer — donor/organizer, or when AI pushed stops */}
+            {(isDonor || isOrganizer || Boolean(aiRouteStops?.length)) && (
+              <PickupRouteOptimizer
+                className="mb-8"
+                explicitStops={aiRouteStops?.length ? aiRouteStops : null}
+              />
+            )}
 
             {/* Natural-language Query Panel */}
             <AIQueryPanel className="mb-8" />

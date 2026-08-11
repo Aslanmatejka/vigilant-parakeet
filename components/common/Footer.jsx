@@ -1,11 +1,17 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import PropTypes from 'prop-types';
-import { reportError } from '../../utils/helpers';
+import { useAuthContext } from '../../utils/AuthContext';
+import { useCommunityRole } from '../../utils/hooks/useCommunityRole';
 
 function Footer({
     className = ''
 }) {
+    const { isAuthenticated } = useAuthContext();
+    const communityRole = useCommunityRole();
+    const isDonor = isAuthenticated && communityRole === 'donor';
+    const isOrganizer = isAuthenticated && communityRole === 'organizer';
+
     return (
         <footer
             data-name="footer"
@@ -60,15 +66,88 @@ function Footer({
                         <h3 className="text-xl font-semibold mb-6 text-gray-900">Platform</h3>
                         <nav aria-label="Platform links">
                             <ul className="space-y-4">
-                                <li>
-                                    <a
-                                        href="/find"
-                                        className="text-gray-700 hover:text-gray-900 transition-colors duration-200 flex items-center group"
-                                    >
-                                        <i className="fas fa-search text-gray-600 group-hover:text-gray-900 mr-3" aria-hidden="true"></i>
-                                        <span>Find Food</span>
-                                    </a>
-                                </li>
+                                {isDonor ? (
+                                    <>
+                                        <li>
+                                            <a
+                                                href="/share"
+                                                className="text-gray-700 hover:text-gray-900 transition-colors duration-200 flex items-center group"
+                                            >
+                                                <i className="fas fa-share-alt text-gray-600 group-hover:text-gray-900 mr-3" aria-hidden="true"></i>
+                                                <span>Share Food</span>
+                                            </a>
+                                        </li>
+                                        <li>
+                                            <a
+                                                href="/community-requests"
+                                                className="text-gray-700 hover:text-gray-900 transition-colors duration-200 flex items-center group"
+                                            >
+                                                <i className="fas fa-inbox text-gray-600 group-hover:text-gray-900 mr-3" aria-hidden="true"></i>
+                                                <span>Community Requests</span>
+                                            </a>
+                                        </li>
+                                    </>
+                                ) : isOrganizer ? (
+                                    <>
+                                        <li>
+                                            <a
+                                                href="/share"
+                                                className="text-gray-700 hover:text-gray-900 transition-colors duration-200 flex items-center group"
+                                            >
+                                                <i className="fas fa-share-alt text-gray-600 group-hover:text-gray-900 mr-3" aria-hidden="true"></i>
+                                                <span>Share Food</span>
+                                            </a>
+                                        </li>
+                                        <li>
+                                            <a
+                                                href="/find"
+                                                className="text-gray-700 hover:text-gray-900 transition-colors duration-200 flex items-center group"
+                                            >
+                                                <i className="fas fa-search text-gray-600 group-hover:text-gray-900 mr-3" aria-hidden="true"></i>
+                                                <span>Find Food</span>
+                                            </a>
+                                        </li>
+                                        <li>
+                                            <a
+                                                href="/request"
+                                                className="text-gray-700 hover:text-gray-900 transition-colors duration-200 flex items-center group"
+                                            >
+                                                <i className="fas fa-hand-holding-heart text-gray-600 group-hover:text-gray-900 mr-3" aria-hidden="true"></i>
+                                                <span>Request Food</span>
+                                            </a>
+                                        </li>
+                                        <li>
+                                            <a
+                                                href="/community-requests"
+                                                className="text-gray-700 hover:text-gray-900 transition-colors duration-200 flex items-center group"
+                                            >
+                                                <i className="fas fa-inbox text-gray-600 group-hover:text-gray-900 mr-3" aria-hidden="true"></i>
+                                                <span>Community Requests</span>
+                                            </a>
+                                        </li>
+                                    </>
+                                ) : (
+                                    <>
+                                        <li>
+                                            <a
+                                                href="/find"
+                                                className="text-gray-700 hover:text-gray-900 transition-colors duration-200 flex items-center group"
+                                            >
+                                                <i className="fas fa-search text-gray-600 group-hover:text-gray-900 mr-3" aria-hidden="true"></i>
+                                                <span>Find Food</span>
+                                            </a>
+                                        </li>
+                                        <li>
+                                            <a
+                                                href="/request"
+                                                className="text-gray-700 hover:text-gray-900 transition-colors duration-200 flex items-center group"
+                                            >
+                                                <i className="fas fa-hand-holding-heart text-gray-600 group-hover:text-gray-900 mr-3" aria-hidden="true"></i>
+                                                <span>Request Food</span>
+                                            </a>
+                                        </li>
+                                    </>
+                                )}
                                 {/* TEMPORARILY DISABLED
                                 <li>
                                     <a

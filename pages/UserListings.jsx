@@ -208,18 +208,24 @@ function UserListings() {
                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                                         {listings.map(listing => (
                                             <Card key={listing.id} className="overflow-hidden">
-                                                {listing.image_url && (
+                                                {String(listing.listing_type || '').toLowerCase() !== 'request' && listing.image_url && (
                                                     <img
                                                         src={listing.image_url}
                                                         alt={listing.title}
                                                         className="w-full h-48 object-cover"
                                                     />
                                                 )}
+                                                {String(listing.listing_type || '').toLowerCase() === 'request' && (
+                                                    <div className="h-28 bg-emerald-50 border-b border-emerald-100 flex items-center justify-center text-emerald-700 gap-2">
+                                                        <i className="fas fa-clipboard-list text-2xl" aria-hidden="true" />
+                                                        <span className="text-sm font-semibold">Food request</span>
+                                                    </div>
+                                                )}
                                                 <div className="p-4">
                                                     <div className="flex justify-between items-start mb-2">
                                                         <h3 className="text-lg font-semibold">{listing.title}</h3>
                                                         <span className={`px-2 py-1 text-xs rounded-full ${
-                                                            listing.status === 'active' 
+                                                            listing.status === 'active' || listing.status === 'approved'
                                                                 ? 'bg-primary-100 text-primary-800' 
                                                                 : 'bg-gray-100 text-gray-800'
                                                         }`}>

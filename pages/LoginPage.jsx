@@ -1,5 +1,6 @@
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAuthContext } from "../utils/AuthContext";
+import { safeInternalRedirect } from "../utils/safeRedirect";
 import Button from "../components/common/Button";
 import Input from "../components/common/Input";
 import React from "react";
@@ -22,7 +23,7 @@ function LoginPage() {
     // Redirect if already authenticated
     React.useEffect(() => {
         if (!authLoading && isAuthenticated) {
-            const redirectPath = searchParams.get('redirect') || '/';
+            const redirectPath = safeInternalRedirect(searchParams.get('redirect'), '/');
             navigate(redirectPath, { replace: true });
         }
     }, [isAuthenticated, authLoading, navigate, searchParams]);

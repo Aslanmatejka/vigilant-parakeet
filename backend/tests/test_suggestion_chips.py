@@ -53,7 +53,46 @@ class TestBuildTurnSuggestions:
         )
         labels = [c if isinstance(c, str) else c.get("label") for c in chips]
         assert any("Claim #1" in (l or "") for l in labels)
+        assert any(
+            l and ("Claim #1 & #2" in l or "Claim both" in l)
+            for l in labels
+        )
         assert not any("Find food near me" in (l or "") for l in labels)
+        # Prefer Claim #N over duplicate bare "1"/"2" quick-replies.
+        assert "1" not in labels
+
+    def test_flat_nouri_search_actions_get_claim_chips(self):
+        """Live engine flattens listings onto the action (no nested result)."""
+        tool_results = [{
+            "tool": "search_food_near_user",
+            "ok": True,
+            "listings": [
+                {"title": "Sourdough"},
+                {"title": "Apples"},
+            ],
+            "total": 2,
+        }]
+        chips = build_turn_suggestions(
+            "Here are the closest options. Which number?",
+            "en",
+            tool_results=tool_results,
+        )
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert any("Claim #1" in (l or "") for l in labels)
+        assert any("Sourdough" in (l or "") for l in labels)
+        assert any(
+            l and ("Claim #1 & #2" in l or "Claim both" in l)
+            for l in labels
+        )
+
+    def test_multi_claim_confirm_chips(self):
+        chips = build_turn_suggestions(
+            "Ready to claim these? 2× bread and 3× apples.",
+            "en",
+            tool_results=[],
+        )
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert any(l and "Yes, claim these" in l for l in labels)
 
     def test_contextual_chips_not_padded_with_lazy_defaults(self):
         text = "Would you like me to claim this listing for you?"

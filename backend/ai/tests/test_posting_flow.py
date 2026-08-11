@@ -184,3 +184,86 @@ class TestPostingFlowReminder:
 
     def test_none_when_not_posting(self):
         assert posting_flow_reminder("find food near me", [], lang="en") is None
+
+
+class TestSinglePostConfirm:
+    def test_allows_post_after_one_ready_yes(self):
+        history = [
+            {"role": "user", "message": "share 3 bread and 5 apples"},
+            {"role": "assistant", "message": "List under Alameda Unified?"},
+            {"role": "user", "message": "yes"},
+            {"role": "assistant", "message": "When do they expire?"},
+            {"role": "user", "message": "2026-07-20"},
+            {"role": "user", "message": "image: https://cdn.example.com/bread.jpg"},
+            {"role": "user", "message": "image: https://cdn.example.com/apples.jpg"},
+            {
+                "role": "assistant",
+                "message": (
+                    "Got it — 3 bread + 5 apples under Alameda Unified, "
+                    "expiring 2026-07-20, with photos. Ready to post these?"
+                ),
+            },
+        ]
+        reason = posting_tool_block_reason(
+            "yes",
+            history,
+            {
+                "title": "bread",
+                "qty": 3,
+                "community_name": "Alameda Unified",
+                "community_confirmed": True,
+                "expiration_date": "2026-07-20",
+                "images": ["https://cdn.example.com/bread.jpg"],
+            },
+        )
+        assert reason is None
+
+    def test_looks_good_phrasing_counts_as_post_confirm(self):
+        history = [
+            {"role": "user", "message": "share oranges"},
+            {"role": "assistant", "message": "List under Alameda Unified?"},
+            {"role": "user", "message": "yes"},
+            {"role": "assistant", "message": "Best by?"},
+            {"role": "user", "message": "Friday"},
+            {"role": "user", "message": "image: https://cdn.example.com/o.jpg"},
+            {
+                "role": "assistant",
+                "message": "Does this look right — oranges under Alameda Unified with photo?",
+            },
+        ]
+        reason = posting_tool_block_reason(
+            "looks good",
+            history,
+            {
+                "title": "oranges",
+                "qty": 1,
+                "community_name": "Alameda Unified",
+                "community_confirmed": True,
+                "expiration_date": "2026-07-18",
+                "images": ["https://cdn.example.com/o.jpg"],
+            },
+        )
+        assert reason is None
+
+    def test_blocks_before_any_ready_ask(self):
+        history = [
+            {"role": "user", "message": "share bread image: https://cdn.example.com/b.jpg"},
+            {"role": "assistant", "message": "List under Alameda Unified?"},
+            {"role": "user", "message": "yes"},
+            {"role": "assistant", "message": "Best by?"},
+            {"role": "user", "message": "2026-07-20"},
+        ]
+        reason = posting_tool_block_reason(
+            "2026-07-20",
+            history,
+            {
+                "title": "bread",
+                "qty": 1,
+                "community_name": "Alameda Unified",
+                "community_confirmed": True,
+                "expiration_date": "2026-07-20",
+                "images": ["https://cdn.example.com/b.jpg"],
+            },
+        )
+        assert reason is not None
+        assert "ready to post" in reason.lower() or "summary" in reason.lower()

@@ -1,10 +1,16 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import supabase from '../../utils/supabaseClient';
 import { API_CONFIG } from '../../utils/config';
 import { bayAreaGeocodeParams, isBayAreaCoord } from '../../utils/mapBounds';
 import { useMapContext } from '../../utils/MapContext.jsx';
 import { useEffectiveLocation } from '../../utils/hooks/useLocation';
+import { useAuthContext } from '../../utils/AuthContext';
+import dataService from '../../utils/dataService';
+import {
+    browseCommunityIdsForUser,
+    listingVisibleToCommunityScope,
+} from '../../utils/communityScope';
 import CommunityPinIcon, { getCommunityPinDimensions, renderCommunityPinSvg } from './CommunityPinIcon.jsx';
 
 // Mapbox is loaded via CDN in index.html
@@ -142,6 +148,11 @@ function ensureMapboxControlStyles() {
 
 function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = null, className = '', listings = null }) {
     const navigate = useNavigate();
+    const { user, isAdmin } = useAuthContext();
+    const allowedCommunityIds = useMemo(
+        () => browseCommunityIdsForUser(user, { isAdmin }),
+        [user?.community_id, isAdmin]
+    );
     const mapContainer = useRef(null);
     const map = useRef(null);
     const markersRef = useRef([]);
@@ -242,14 +253,23 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
         // Always fetch communities for map display
         fetchCommunities();
 
-        // If parent provides filtered listings, use those instead of fetching
+        // If the parent provides listings, still enforce community scope at
+        // the map boundary. This prevents a stale/unscoped caller from showing
+        // another school's food pin.
         if (listings !== null) {
-            setFoodListings(listings);
+            setFoodListings(
+                (Array.isArray(listings) ? listings : []).filter(
+                    (listing) => listingVisibleToCommunityScope(
+                        listing,
+                        allowedCommunityIds,
+                    )
+                )
+            );
             setLoading(false);
             return;
         }
 
-        // Otherwise fetch listings independently
+        // Otherwise fetch listings independently (community-scoped)
         fetchFoodListings();
 
         // Re-fetch whenever a new listing is shared (e.g. via AI chat or form)
@@ -257,7 +277,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
         const onFoodShared = () => fetchFoodListings();
         window.addEventListener('foodShared', onFoodShared);
         return () => window.removeEventListener('foodShared', onFoodShared);
-    }, [listings]);
+    }, [listings, user?.id, user?.community_id, isAdmin]);
 
     useEffect(() => {
         if (mapLoaded && (foodListings.length > 0 || communities.length > 0)) {
@@ -348,38 +368,15 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
     const fetchFoodListings = async () => {
         try {
             setLoading(true);
-            
-            // Add timeout to prevent hanging
-            const timeoutPromise = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Food listings fetch timeout')), 8000)
-            );
-            
-            // Fetch donation listings only — food requests should NOT appear as
-            // map markers since they are requests for food, not offers.
-            // Also exclude already-expired listings so the map never shows stale pins.
-            // Use local date (not UTC) so listings don't vanish from the map several
-            // hours before they expire in the user's timezone (e.g. UTC-8 after 4pm).
-            const _now = new Date();
-            const todayStr = [
-                _now.getFullYear(),
-                String(_now.getMonth() + 1).padStart(2, '0'),
-                String(_now.getDate()).padStart(2, '0'),
-            ].join('-');
-            const fetchPromise = supabase
-                .from('food_listings')
-                .select('id,title,description,image_url,quantity,unit,category,status,expiry_date,full_address,location,latitude,longitude,community_id,listing_type')
-                .in('status', ['approved', 'active'])
-                .eq('listing_type', 'donation')
-                .or(`expiry_date.is.null,expiry_date.gte.${todayStr}`)
-                .limit(100);
-
-            const { data, error } = await Promise.race([fetchPromise, timeoutPromise]);
-
-            if (error) {
-                console.error('Supabase error:', error);
-                throw error;
-            }
-            
+            const scopeIds = browseCommunityIdsForUser(user, { isAdmin });
+            const data = await dataService.getFoodListings({
+                status: ['approved', 'active'],
+                listing_type: 'donation',
+                ...(user?.id ? { exclude_user_id: user.id } : {}),
+                ...(scopeIds != null ? { community_ids: scopeIds } : {}),
+                page: 1,
+                limit: 100,
+            });
             setFoodListings(data || []);
         } catch (error) {
             console.error('Error fetching food listings:', error);
@@ -403,6 +400,8 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 throw error;
             }
             
+            // Community pins are public map landmarks. Food access is scoped
+            // separately, so every active community remains visible.
             setCommunities(data || []);
         } catch (error) {
             console.error('Error fetching communities:', error);
@@ -868,6 +867,10 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
 
         // Add AI-driven markers (food, distribution, route endpoints)
         (aiMarkers || []).forEach(m => {
+            if (
+                m.kind === 'food'
+                && !listingVisibleToCommunityScope(m.meta, allowedCommunityIds)
+            ) return;
             if (typeof m.lat !== 'number' || typeof m.lng !== 'number') return;
             if (!isBayAreaCoord(m.lat, m.lng)) return;
             const el = document.createElement('div');
@@ -898,7 +901,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
                 console.error('Failed to add AI marker:', err);
             }
         });
-    }, [aiMarkers, mapLoaded]);
+    }, [aiMarkers, mapLoaded, allowedCommunityIds]);
 
     // Draw AI route line as a GeoJSON layer
     useEffect(() => {

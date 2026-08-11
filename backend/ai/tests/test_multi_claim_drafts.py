@@ -153,6 +153,43 @@ class TestBatchEnrichAndBlock:
         assert reason
         assert "claim_listing" in reason
 
+    def test_ready_drafts_need_confirm_then_allow(self):
+        set_claim_drafts("u-claim", [
+            {"id": "c1", "listing_id": "lid-orange", "title": "Oranges", "qty": 2},
+            {"id": "c2", "listing_id": "lid-bread", "title": "Bread", "qty": 3},
+        ])
+        blocked = claiming_batch_tool_block_reason(
+            "ok",
+            [],
+            {"items": []},
+            user_id="u-claim",
+        )
+        assert blocked
+        assert "ready to claim" in blocked.lower()
+
+        history = [
+            {"role": "assistant", "message": "Ready to claim these? 2× Oranges and 3× Bread."},
+        ]
+        allowed = claiming_batch_tool_block_reason(
+            "yes, claim these",
+            history,
+            {"items": []},
+            user_id="u-claim",
+        )
+        assert allowed is None
+
+    def test_remove_claimed_keeps_failed_drafts(self):
+        from backend.ai.conversation_flow import remove_claimed_from_drafts
+        set_claim_drafts("u-claim", [
+            {"id": "c1", "listing_id": "lid-a", "title": "A", "qty": 1},
+            {"id": "c2", "listing_id": "lid-b", "title": "B", "qty": 1},
+            {"id": "c3", "listing_id": "lid-c", "title": "C", "qty": 1},
+        ])
+        remove_claimed_from_drafts("u-claim", ["lid-a"])
+        left = get_claim_drafts("u-claim")
+        assert len(left) == 2
+        assert {d["listing_id"] for d in left} == {"lid-b", "lid-c"}
+
 
 @pytest.mark.asyncio
 async def test_claim_listings_loops_with_distinct_qty():
@@ -168,6 +205,7 @@ async def test_claim_listings_loops_with_distinct_qty():
             "title": kwargs["listing_id"],
             "quantity": kwargs["quantity"],
             "claim_id": f"c-{len(calls)}",
+            "awaiting_approval": True,
         }
 
     with patch("backend.ai.tools._claim_listing", new=AsyncMock(side_effect=fake_claim)):
@@ -181,6 +219,7 @@ async def test_claim_listings_loops_with_distinct_qty():
 
     assert result["success"] is True
     assert result["count_claimed"] == 2
+    assert "wait for admin approval" in result["summary"].lower()
     assert len(calls) == 2
     assert calls[0]["listing_id"] == "lid-a"
     assert calls[0]["quantity"] == 2

@@ -8,9 +8,16 @@ import { reportError } from "../utils/helpers";
 import { DonateVolunteerButtons } from "./CommunityPage";
 import communitiesStatic from '../utils/communities';
 import supabase from "../utils/supabaseClient";
+import { useAuthContext } from "../utils/AuthContext";
+import { useCommunityRole } from "../utils/hooks/useCommunityRole";
 
 function HomePage() {
     const navigate = useNavigate();
+    const { isAuthenticated } = useAuthContext();
+    const communityRole = useCommunityRole();
+    const isDonor = isAuthenticated && communityRole === 'donor';
+    const isRecipient = isAuthenticated && communityRole === 'recipient';
+    const isOrganizer = isAuthenticated && communityRole === 'organizer';
     const [communities, setCommunities] = React.useState([]);
     const [loadingCommunities, setLoadingCommunities] = React.useState(true);
     const [selectedLocation, setSelectedLocation] = React.useState('all');
@@ -89,27 +96,99 @@ function HomePage() {
                                     >
                                         Find Food, Reduce Waste, Build Community
                                     </h1>
-                                    <p className="text-lg sm:text-xl mb-0 text-white drop-shadow-md">
+                                    <p className="text-lg sm:text-xl mb-6 sm:mb-8 text-white drop-shadow-md">
                                         Join our movement to combat food waste and hunger through community-driven food sharing.
                                     </p>
-                                    {/* <div className="flex gap-6 justify-center items-center max-w-4xl mx-auto">
-                                        <button 
-                                            onClick={() => handleNavigation('/find')}
-                                            aria-label="Find food in your area"
-                                            className="flex-1 px-12 py-8 text-2xl md:text-3xl font-bold bg-[#2CABE3] text-white rounded-2xl shadow-2xl hover:opacity-90 hover:scale-105 transition-all duration-300 transform"
-                                        >
-                                            <i className="fas fa-search mr-3"></i>
-                                            Find Food
-                                        </button>
-                                        <button 
-                                            onClick={() => handleNavigation('/share')}
-                                            aria-label="Share food with the community"
-                                            className="flex-1 px-12 py-8 text-2xl md:text-3xl font-bold bg-[#171366] text-white rounded-2xl shadow-2xl hover:opacity-90 hover:scale-105 transition-all duration-300 transform"
-                                        >
-                                            <i className="fas fa-share-alt mr-3"></i>
-                                            Share Food
-                                        </button>
-                                    </div> */}
+                                    <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 justify-center items-stretch sm:items-center max-w-3xl mx-auto">
+                                        {isDonor ? (
+                                            <>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => navigate('/share')}
+                                                    aria-label="Share food with the community"
+                                                    className="px-6 py-3.5 text-base sm:text-lg font-semibold bg-[#171366] text-white rounded-xl shadow-lg hover:opacity-90 transition-opacity"
+                                                >
+                                                    <i className="fas fa-share-alt mr-2" aria-hidden="true"></i>
+                                                    Share Food
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => navigate('/community-requests')}
+                                                    aria-label="View community food requests"
+                                                    className="px-6 py-3.5 text-base sm:text-lg font-semibold bg-emerald-600 text-white rounded-xl shadow-lg hover:opacity-90 transition-opacity"
+                                                >
+                                                    <i className="fas fa-inbox mr-2" aria-hidden="true"></i>
+                                                    Community Requests
+                                                </button>
+                                            </>
+                                        ) : isRecipient ? (
+                                            <>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => navigate('/find')}
+                                                    aria-label="Find food in your area"
+                                                    className="px-6 py-3.5 text-base sm:text-lg font-semibold bg-[#2CABE3] text-white rounded-xl shadow-lg hover:opacity-90 transition-opacity"
+                                                >
+                                                    <i className="fas fa-search mr-2" aria-hidden="true"></i>
+                                                    Find Food
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => navigate('/request')}
+                                                    aria-label="Request food from the community"
+                                                    className="px-6 py-3.5 text-base sm:text-lg font-semibold bg-emerald-600 text-white rounded-xl shadow-lg hover:opacity-90 transition-opacity"
+                                                >
+                                                    <i className="fas fa-hand-holding-heart mr-2" aria-hidden="true"></i>
+                                                    Request Food
+                                                </button>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => navigate('/find')}
+                                                    aria-label="Find food in your area"
+                                                    className="px-6 py-3.5 text-base sm:text-lg font-semibold bg-[#2CABE3] text-white rounded-xl shadow-lg hover:opacity-90 transition-opacity"
+                                                >
+                                                    <i className="fas fa-search mr-2" aria-hidden="true"></i>
+                                                    Find Food
+                                                </button>
+                                                {(isOrganizer || !isAuthenticated) && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => navigate('/share')}
+                                                        aria-label="Share food with the community"
+                                                        className="px-6 py-3.5 text-base sm:text-lg font-semibold bg-[#171366] text-white rounded-xl shadow-lg hover:opacity-90 transition-opacity"
+                                                    >
+                                                        <i className="fas fa-share-alt mr-2" aria-hidden="true"></i>
+                                                        Share Food
+                                                    </button>
+                                                )}
+                                                {(isOrganizer || !isAuthenticated) && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => navigate('/request')}
+                                                        aria-label="Request food from the community"
+                                                        className="px-6 py-3.5 text-base sm:text-lg font-semibold bg-emerald-600 text-white rounded-xl shadow-lg hover:opacity-90 transition-opacity"
+                                                    >
+                                                        <i className="fas fa-hand-holding-heart mr-2" aria-hidden="true"></i>
+                                                        Request Food
+                                                    </button>
+                                                )}
+                                                {isOrganizer && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => navigate('/community-requests')}
+                                                        aria-label="View community food requests"
+                                                        className="px-6 py-3.5 text-base sm:text-lg font-semibold bg-amber-600 text-white rounded-xl shadow-lg hover:opacity-90 transition-opacity"
+                                                    >
+                                                        <i className="fas fa-inbox mr-2" aria-hidden="true"></i>
+                                                        Community Requests
+                                                    </button>
+                                                )}
+                                            </>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
                         </section>
@@ -193,7 +272,7 @@ function HomePage() {
                                                     3
                                                 </div>
                                                 <h3 className="text-xl font-bold mb-3 text-gray-900">Share & Save</h3>
-                                                <p className="text-gray-600 mb-4">share food, and feel in information and wait for confirmation, for it to listed for claim</p>
+                                                <p className="text-gray-600 mb-4">Share surplus food with a few details — it goes live right away for neighbors to claim.</p>
                                                 <div className="mt-auto pt-4">
                                                     <div className="inline-block bg-orange-50 text-orange-700 text-sm px-4 py-2 rounded-full font-medium">
                                                         Make Impact

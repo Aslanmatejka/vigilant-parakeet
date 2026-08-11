@@ -9,42 +9,26 @@ function FoodList({
     foods = [],
     onClaim,
     loading = false,
-    error = null
+    error = null,
+    showFilters = true,
+    showDistance = false,
 }) {
     const [filteredFoods, setFilteredFoods] = useState(foods);
     const [userLocation, setUserLocation] = useState(null);
     const [filters, setFilters] = useState({
         locationEnabled: false,
-        radius: 10,
         foodType: '',
         dietaryPreferences: [],
         pickupTime: ''
     });
 
     useEffect(() => {
-        if (filters.locationEnabled && userLocation) {
-            updateFoodsWithDistance();
-        }
+        updateFoodsWithDistance();
     }, [userLocation, filters, foods]);
 
     const updateFoodsWithDistance = () => {
         const filtered = foods.filter(food => {
             let matchesFilters = true;
-
-            // Location filter
-            if (filters.locationEnabled && userLocation && (food.latitude != null || food.location?.latitude != null)) {
-                // Prefer dedicated lat/lng columns; fall back to JSONB location dict for legacy rows.
-                const foodLat = food.latitude ?? food.location?.latitude;
-                const foodLng = food.longitude ?? food.location?.longitude;
-                const isNearby = foodLat != null && foodLng != null
-                    ? locationService.isWithinRadius(
-                        userLocation,
-                        { latitude: foodLat, longitude: foodLng },
-                        filters.radius
-                    )
-                    : true; // No coords — keep visible, can't filter by distance.
-                if (!isNearby) matchesFilters = false;
-            }
 
             // Food type filter — compare against food.category (the DB column).
             // filters.foodType holds a DB category value ('produce', 'dairy', etc.)
@@ -168,11 +152,11 @@ function FoodList({
 
     return (
         <div className="food-list-container">
-            <FilterPanel onFilterChange={handleFilterChange} />
+            {showFilters && <FilterPanel onFilterChange={handleFilterChange} />}
             
             <div 
                 data-name="food-list" 
-                className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-4"
+                className={`grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 ${showFilters ? 'mt-4' : ''}`}
                 role="feed"
                 aria-label="Food listings grid"
             >
@@ -182,13 +166,15 @@ function FoodList({
                         food={food}
                         onClaim={onClaim}
                         distance={
-                            userLocation && (food.latitude != null || food.location?.latitude != null)
-                                ? locationService.calculateDistance(
-                                    userLocation.latitude,
-                                    userLocation.longitude,
-                                    food.latitude ?? food.location?.latitude,
-                                    food.longitude ?? food.location?.longitude
-                                )
+                            (showDistance || userLocation) && (food._distance != null || food.latitude != null || food.location?.latitude != null)
+                                ? (food._distance ?? (userLocation
+                                    ? locationService.calculateDistance(
+                                        userLocation.latitude,
+                                        userLocation.longitude,
+                                        food.latitude ?? food.location?.latitude,
+                                        food.longitude ?? food.location?.longitude
+                                    )
+                                    : null))
                                 : null
                         }
                     />
@@ -221,7 +207,9 @@ FoodList.propTypes = {
     onClaim: PropTypes.func,
 
     loading: PropTypes.bool,
-    error: PropTypes.string
+    error: PropTypes.string,
+    showFilters: PropTypes.bool,
+    showDistance: PropTypes.bool
 };
 
 export default FoodList;

@@ -5,7 +5,6 @@ import { locationService } from '../../utils/locationService';
 
 export const FilterPanel = ({ onFilterChange }) => {
     const [filters, setFilters] = useState({
-        radius: 10,
         foodType: '',
         dietaryPreferences: [],
         pickupTime: '',
@@ -67,15 +66,6 @@ export const FilterPanel = ({ onFilterChange }) => {
         }
     };
 
-    const handleRadiusChange = (value) => {
-        const newRadius = parseInt(value) || 10;
-        setFilters(prev => {
-            const updated = { ...prev, radius: newRadius };
-            onFilterChange(updated);
-            return updated;
-        });
-    };
-
     const handleFoodTypeChange = (value) => {
         setFilters(prev => {
             const updated = { ...prev, foodType: value };
@@ -119,9 +109,9 @@ export const FilterPanel = ({ onFilterChange }) => {
             <div className="mb-4">
                 <h3 className="text-lg font-semibold mb-1 flex items-center">
                     Location
-                    <InfoIcon text="Turn on location so we can sort listings by distance. Use the radius field to set how far you’ll travel (in miles)." />
+                    <InfoIcon text="Turn on location so we can sort listings by distance. There is no distance cutoff — all community listings stay visible." />
                 </h3>
-                <p className="text-xs text-gray-500 mb-2">Set how far you’re willing to travel.</p>
+                <p className="text-xs text-gray-500 mb-2">Optional — sorts results nearest first.</p>
                 <div className="flex items-center gap-2">
                     <Button 
                         onClick={enableLocation}
@@ -131,18 +121,6 @@ export const FilterPanel = ({ onFilterChange }) => {
                     >
                         {filters.locationEnabled ? 'Location Enabled' : 'Enable Location'}
                     </Button>
-                    {filters.locationEnabled && (
-                        <Input
-                            type="number"
-                            value={filters.radius}
-                            onChange={(e) => handleRadiusChange(e.target.value)}
-                            placeholder="Radius (mi)"
-                            min="1"
-                            max="50"
-                            className="w-24"
-                            title="Maximum distance in miles"
-                        />
-                    )}
                 </div>
             </div>
 

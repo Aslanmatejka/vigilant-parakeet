@@ -12,6 +12,9 @@ Endpoints:
   GET  /api/ai/health          - Health check
   POST /api/ai/confirm         - Execute a pending confirmation
   GET  /api/ai/goals/{uid}     - User goal history
+  POST /api/ai/bulk-listings   - Create listings from CSV / photo confirm UI
+  POST /api/ai/enrich-listings - AI gap-fill on parsed listing drafts
+  POST /api/ai/vision-listing  - Photo → draft listing via vision model
 
 Authentication: uses the main app's JWT (Bearer token). If the token's "sub"
 matches the request body's user_id, the call is authorised.
@@ -24,7 +27,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-from typing import Optional, List
+from typing import Optional, List, Union
 
 import httpx
 import jwt
@@ -43,6 +46,7 @@ from backend.ai.ai_engine import (
 from backend.ai.errors import (
     AIDatabaseError,
     AIError,
+    AIInvalidInput,
     AIServiceUnavailable,
     AITimeout,
     AIUpstreamError,
@@ -87,7 +91,12 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_A
 # in-process test harness that stubs Supabase auth) we degrade to a
 # best-effort ownership check — a token, if present, is verified, but
 # missing tokens do not block requests.
-AI_REQUIRE_AUTH = os.getenv("AI_REQUIRE_AUTH", "true").lower() not in {"0", "false", "no", ""}
+# Fail closed: unset or blank → require auth. Only explicit falsey values disable.
+_ai_auth_raw = os.getenv("AI_REQUIRE_AUTH")
+if _ai_auth_raw is None or str(_ai_auth_raw).strip() == "":
+    AI_REQUIRE_AUTH = True
+else:
+    AI_REQUIRE_AUTH = str(_ai_auth_raw).strip().lower() in {"1", "true", "yes", "on"}
 
 REMINDER_CHECK_INTERVAL = int(os.getenv("REMINDER_CHECK_INTERVAL", "900"))
 
@@ -356,10 +365,10 @@ class AIChatResponse(BaseModel):
     # action indicators (claiming, listing, posted, etc). Each entry is
     # {tool: str, ok: bool, summary: Optional[str]}.
     actions: List[dict] = []
-    # Up to 4 short tappable quick replies the UI can show under the
-    # assistant bubble (autofill / smart reply chips). Generated from the
-    # reply text + intent of the last AI question.
-    suggestions: List[str] = []
+    # Up to 6 short tappable quick replies under the assistant bubble.
+    # Strings or {label, message[, kind, action, target]} objects — never
+    # padded with generic menu chips when nothing contextual matches.
+    suggestions: List[Union[str, dict]] = []
     # Agentic confirmation gate: True when the engine intercepted a
     # destructive tool and is waiting for an explicit user confirmation
     # before executing it.  The frontend should surface a "Confirm / Cancel"
@@ -423,6 +432,214 @@ class AIToneUpdateRequest(BaseModel):
     tone: str = Field(min_length=1, max_length=32)
 
 
+# ---- CSV / photo bulk listing helpers (chat attach flow) --------------------
+_VALID_FOOD_CATEGORIES = {
+    "produce", "bakery", "dairy", "pantry", "meat", "prepared", "other",
+}
+_DEFAULT_FOOD_CATEGORY = "other"
+_MAX_BULK_LISTINGS = 100
+
+_ENRICH_LISTINGS_PROMPT = (
+    "You help donors clean up bulk food-listing rows before they are published. "
+    "For each row, FILL ONLY MISSING OR EMPTY OPTIONAL FIELDS. NEVER overwrite a "
+    "field the user already provided.\n"
+    "Allowed optional fields you may add: description (<=200 chars, neutral tone), "
+    "dietary_tags (lowercase strings like 'vegetarian','vegan','gluten-free','halal','kosher'), "
+    "allergens (lowercase strings like 'nuts','dairy','gluten','eggs','soy','shellfish'), "
+    "expiry_date (ISO 'YYYY-MM-DD' in the FUTURE only — never invent a past date).\n"
+    "You MAY also correct an obviously-wrong category to one of "
+    "['produce','bakery','dairy','pantry','meat','prepared','other'] — but ONLY if "
+    "the existing value is missing or 'other'. Never invent allergens you cannot "
+    "infer from the title/description.\n"
+    "Output STRICT JSON: {\"rows\":[{...same fields..., \"_filled\":[\"field1\",...]}], "
+    "\"summary\":\"short human sentence in the requested language\"}.\n"
+    "Echo every input row, in order. Keep the user's title, quantity, and unit "
+    "EXACTLY as given. Do NOT add image_url."
+)
+
+_VISION_LISTING_PROMPT = (
+    "You are a food-donation listing assistant. Look at the attached photo and "
+    "extract a single food-listing draft as STRICT JSON with EXACTLY these keys:\n"
+    "{\n"
+    "  \"title\": string (<=80 chars, plain product name),\n"
+    "  \"description\": string (<=240 chars, what you see + condition),\n"
+    "  \"category\": one of ['produce','bakery','dairy','pantry','meat','prepared','other'],\n"
+    "  \"quantity\": number (your best estimate, >0),\n"
+    "  \"unit\": string (e.g. 'items','kg','lbs','loaves','servings','boxes'),\n"
+    "  \"dietary_tags\": string[] (e.g. ['vegetarian','vegan','gluten-free'] or []),\n"
+    "  \"allergens\": string[] (e.g. ['nuts','dairy','gluten'] or []),\n"
+    "  \"confidence\": number 0..1\n"
+    "}\n"
+    "Rules: if the image is not food, return confidence=0 and title=''. "
+    "Never invent allergens you cannot see. Output JSON only — no prose."
+)
+
+
+class BulkListingItem(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    quantity: float = Field(gt=0, le=100000)
+    unit: str = Field(min_length=1, max_length=40)
+    category: str = Field(min_length=1, max_length=40)
+    description: Optional[str] = Field(default=None, max_length=2000)
+    expiry_date: Optional[str] = Field(default=None, max_length=40)
+    location: Optional[str] = Field(default=None, max_length=200)
+    dietary_tags: Optional[List[str]] = None
+    allergens: Optional[List[str]] = None
+    image_url: Optional[str] = Field(default=None, max_length=2000)
+    # Preview community picker — MUST be accepted or every photo/CSV listing
+    # silently inherits the donor profile community (often Do Good Warehouse).
+    community_id: Optional[Union[int, str]] = Field(default=None)
+    community_name: Optional[str] = Field(default=None, max_length=200)
+
+
+class BulkListingsRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=128)
+    listings: List[BulkListingItem] = Field(min_length=1, max_length=_MAX_BULK_LISTINGS)
+
+
+class EnrichListingsRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=128)
+    rows: List[BulkListingItem] = Field(min_length=1, max_length=_MAX_BULK_LISTINGS)
+    language: Optional[str] = Field(default="en", max_length=8)
+
+
+def _normalize_listing_row(
+    item: BulkListingItem,
+    user_id: str,
+    donor: dict | None = None,
+    status: str = "approved",
+) -> dict:
+    """Map a validated BulkListingItem into a Supabase food_listings row."""
+    from datetime import date, timedelta
+
+    from backend.ai_engine import apply_donor_defaults_to_listing
+
+    category = (item.category or "").strip().lower()
+    if category not in _VALID_FOOD_CATEGORIES:
+        category = _DEFAULT_FOOD_CATEGORY
+    row: dict = {
+        "user_id": user_id,
+        "title": item.title.strip()[:200],
+        "quantity": float(item.quantity),
+        "unit": item.unit.strip()[:40],
+        "category": category,
+        "listing_type": "donation",
+        "status": status if status in {"approved", "pending"} else "approved",
+    }
+    if item.description:
+        row["description"] = item.description.strip()[:2000]
+
+    # Find Food hides expiry_date < today — never persist a past expiry from
+    # stale CSV templates / AI gap-fill, or most of a bulk import vanishes.
+    _CATEGORY_EXPIRY_DAYS = {
+        "produce": 5,
+        "bakery": 3,
+        "dairy": 7,
+        "meat": 3,
+        "prepared": 2,
+        "pantry": 180,
+        "other": 14,
+    }
+    today = date.today()
+    expiry_raw = (item.expiry_date or "").strip()[:40]
+    expiry_ok = False
+    if expiry_raw:
+        try:
+            parsed = date.fromisoformat(expiry_raw[:10])
+            if parsed >= today:
+                row["expiry_date"] = parsed.isoformat()
+                expiry_ok = True
+        except ValueError:
+            expiry_ok = False
+    if not expiry_ok:
+        days = _CATEGORY_EXPIRY_DAYS.get(category, 14)
+        row["expiry_date"] = (today + timedelta(days=days)).isoformat()
+
+    if item.location:
+        row["location"] = item.location.strip()[:200]
+    if item.dietary_tags:
+        row["dietary_tags"] = [
+            str(t).strip()[:40] for t in item.dietary_tags if str(t).strip()
+        ][:20]
+    if item.allergens:
+        row["allergens"] = [
+            str(t).strip()[:40] for t in item.allergens if str(t).strip()
+        ][:20]
+    if item.image_url:
+        row["image_url"] = item.image_url.strip()[:2000]
+
+    # Picker/community from the chat preview wins over the donor profile default.
+    # Previously BulkListingItem dropped community_id, so every photo/CSV listing
+    # silently inherited users.community_id (often Do Good Warehouse = 1).
+    cid = item.community_id
+    pending_name = None
+    if cid is not None and str(cid).strip() not in ("", "null", "None"):
+        cid_s = str(cid).strip()
+        if cid_s.isdigit():
+            try:
+                row["community_id"] = int(cid_s)
+            except (TypeError, ValueError):
+                pass
+        else:
+            # Non-numeric community_id is treated as a school name.
+            pending_name = cid_s[:200]
+    if not row.get("community_id") and item.community_name and str(item.community_name).strip():
+        pending_name = str(item.community_name).strip()[:200]
+    if pending_name:
+        row["_community_name_pending"] = pending_name
+
+    # When a community_name still needs resolving, do not stamp the donor's
+    # community_id yet — that would block name resolution and leak warehouse
+    # food to every school.
+    if donor and row.get("_community_name_pending") and not row.get("community_id"):
+        donor_sans_community = {k: v for k, v in donor.items() if k != "community_id"}
+        return apply_donor_defaults_to_listing(row, donor_sans_community)
+    return apply_donor_defaults_to_listing(row, donor)
+
+
+def _address_worth_geocoding(addr: str) -> bool:
+    """Skip vague template addresses that Mapbox pins in the wrong country."""
+    s = (addr or "").strip()
+    if len(s) < 12:
+        return False
+    # Need at least one digit (street number) to be worth a dedicated geocode.
+    if not any(ch.isdigit() for ch in s):
+        return False
+    # Bare "123 Main St" style stubs geocode unpredictably — require a comma
+    # (city/state) or a recognizable region token.
+    lower = s.lower()
+    if "," in s:
+        return True
+    return any(
+        tok in lower
+        for tok in (
+            " ca", "california", "alameda", "oakland", "berkeley",
+            "san francisco", "usa", "united states",
+        )
+    )
+
+
+def _row_for_enrich_prompt(item: BulkListingItem) -> dict:
+    """Compact dict for the model — drops empty fields so it knows what to fill."""
+    out: dict = {
+        "title": item.title,
+        "quantity": item.quantity,
+        "unit": item.unit,
+        "category": item.category,
+    }
+    if item.description:
+        out["description"] = item.description
+    if item.expiry_date:
+        out["expiry_date"] = item.expiry_date
+    if item.location:
+        out["location"] = item.location
+    if item.dietary_tags:
+        out["dietary_tags"] = list(item.dietary_tags)
+    if item.allergens:
+        out["allergens"] = list(item.allergens)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -435,6 +652,371 @@ async def ai_health() -> dict:
         "openai_configured": bool(OPENAI_API_KEY),
         "chat_model": CHAT_MODEL,
         "circuit_state": _circuit.state.value,
+    }
+
+
+@router.post("/enrich-listings")
+async def ai_enrich_listings(
+    body: EnrichListingsRequest,
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    """
+    Fill missing optional fields on parsed listing rows before bulk insert.
+    Never overwrites user-provided values. Falls back to originals if AI is down.
+    """
+    import json as _json
+
+    from backend.ai.ai_engine import (
+        FOLLOWUP_MODEL,
+        OPENAI_API_KEY,
+        OPENAI_BASE_URL,
+        _get_http_client,
+    )
+
+    _enforce_rate_limit(request)
+    uid = _parse_user_id(body.user_id)
+    await _require_owner(credentials, uid)
+
+    originals = [item.model_dump() for item in body.rows]
+    fallback = {
+        "rows": originals,
+        "summary": "AI gap-fill unavailable — rows returned unchanged.",
+        "filled": [],
+    }
+    if not OPENAI_API_KEY:
+        return fallback
+
+    compact = [_row_for_enrich_prompt(item) for item in body.rows]
+    language = (body.language or "en").lower()[:2]
+    user_msg = (
+        f"Language for summary: {language}.\n"
+        f"Rows to review (JSON array):\n{_json.dumps(compact, ensure_ascii=False)}"
+    )
+    client = _get_http_client(45)
+    payload = {
+        "model": FOLLOWUP_MODEL,
+        "messages": [
+            {"role": "system", "content": _ENRICH_LISTINGS_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 2200,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    try:
+        resp = await client.post(
+            f"{OPENAI_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("enrich-listings OpenAI call failed: %s", exc)
+        return fallback
+
+    content_str = (data.get("choices") or [{}])[0].get("message", {}).get("content") or "{}"
+    try:
+        parsed = _json.loads(content_str)
+        ai_rows = parsed.get("rows") or []
+        summary = str(parsed.get("summary") or "").strip()[:400]
+        if not isinstance(ai_rows, list):
+            ai_rows = []
+    except Exception:
+        ai_rows = []
+        summary = ""
+
+    merged: List[dict] = []
+    filled_log: List[dict] = []
+    for idx, original in enumerate(originals):
+        ai_row = (
+            ai_rows[idx]
+            if idx < len(ai_rows) and isinstance(ai_rows[idx], dict)
+            else {}
+        )
+        out = dict(original)
+        added_fields: List[str] = []
+
+        for f in ("description", "expiry_date", "location"):
+            if not out.get(f) and ai_row.get(f):
+                val = str(ai_row[f]).strip()
+                if val:
+                    cap = 2000 if f == "description" else (40 if f == "expiry_date" else 200)
+                    out[f] = val[:cap]
+                    added_fields.append(f)
+
+        for f in ("dietary_tags", "allergens"):
+            existing = out.get(f) or []
+            if not existing or len(existing) == 0:
+                ai_val = ai_row.get(f) or []
+                if isinstance(ai_val, list) and ai_val:
+                    clean = [
+                        str(t).strip().lower()[:40] for t in ai_val if str(t).strip()
+                    ][:10]
+                    if clean:
+                        out[f] = clean
+                        added_fields.append(f)
+
+        cur_cat = (out.get("category") or "").strip().lower()
+        ai_cat = (ai_row.get("category") or "").strip().lower()
+        if (
+            ai_cat in _VALID_FOOD_CATEGORIES
+            and cur_cat in ("", "other")
+            and ai_cat != cur_cat
+        ):
+            out["category"] = ai_cat
+            added_fields.append("category")
+
+        merged.append(out)
+        if added_fields:
+            filled_log.append({"index": idx, "fields": added_fields})
+
+    if not summary:
+        n_rows = len(filled_log)
+        if language == "es":
+            summary = (
+                f"Rellené {n_rows} fila(s) con datos faltantes."
+                if n_rows
+                else "No encontré huecos que rellenar."
+            )
+        else:
+            summary = (
+                f"Filled gaps on {n_rows} row(s)."
+                if n_rows
+                else "No gaps to fill — your rows look complete."
+            )
+
+    return {"rows": merged, "summary": summary, "filled": filled_log}
+
+
+@router.post("/bulk-listings")
+async def ai_bulk_listings(
+    body: BulkListingsRequest,
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    """
+    Create one or more food_listings rows from a vetted JSON payload
+    (chat UI photo + CSV upload confirm flow).
+
+    Returns: { created, failed, ids, errors }
+    """
+    from backend.ai_engine import fetch_donor_listing_defaults, supabase_post
+    from backend.tools import _forward_geocode, _resolve_create_listing_status
+
+    _enforce_rate_limit(request)
+    uid = _parse_user_id(body.user_id)
+    await _require_owner(credentials, uid)
+
+    donor = await fetch_donor_listing_defaults(uid)
+    listing_status = await _resolve_create_listing_status()
+    geocode_cache: dict[str, tuple | None] = {}
+    created_ids: List[str] = []
+    created_statuses: List[str] = []
+    errors: List[dict] = []
+
+    for idx, item in enumerate(body.listings):
+        try:
+            addr = str(item.location or "").strip()
+            pre_coords = None
+            # Only geocode solid pickup addresses. Vague stubs like
+            # "123 Main St" get wrong-country pins and hide nearby listings.
+            if addr and _address_worth_geocoding(addr):
+                if addr not in geocode_cache:
+                    geocode_cache[addr] = await _forward_geocode(addr)
+                pre_coords = geocode_cache[addr]
+            row = _normalize_listing_row(item, uid, donor=donor, status=listing_status)
+            pending_name = row.pop("_community_name_pending", None)
+            if pending_name and not row.get("community_id"):
+                try:
+                    from backend.tools import _resolve_community
+                    cid, _cname = await _resolve_community(pending_name, None)
+                    if cid:
+                        row["community_id"] = int(cid)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("bulk community_name resolve failed: %s", exc)
+            # After name resolve, fill donor community only if still unset.
+            if row.get("community_id") is None and donor and donor.get("community_id") is not None:
+                try:
+                    row["community_id"] = int(donor["community_id"])
+                except (TypeError, ValueError):
+                    row["community_id"] = donor["community_id"]
+            if pre_coords:
+                row["latitude"], row["longitude"] = pre_coords
+            elif addr and _address_worth_geocoding(addr):
+                # Own solid address but geocode failed — don't keep donor home pin.
+                row.pop("latitude", None)
+                row.pop("longitude", None)
+            elif addr and not _address_worth_geocoding(addr):
+                # Drop the stub address so donor profile location/coords apply.
+                from backend.ai_engine import apply_donor_defaults_to_listing
+                row.pop("location", None)
+                row.pop("full_address", None)
+                row.pop("latitude", None)
+                row.pop("longitude", None)
+                row = apply_donor_defaults_to_listing(row, donor)
+            result = await supabase_post("food_listings", row)
+            if isinstance(result, list) and result:
+                rid = result[0].get("id")
+                if rid:
+                    created_ids.append(str(rid))
+                    created_statuses.append(str(result[0].get("status") or listing_status))
+                    continue
+            errors.append({"index": idx, "error": "no row returned"})
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"index": idx, "error": str(exc)[:200]})
+
+    if created_ids:
+        try:
+            from backend.ai.conversation_flow import set_last_bulk_posted_ids
+            set_last_bulk_posted_ids(uid, created_ids)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {
+        "created": len(created_ids),
+        "failed": len(errors),
+        "ids": created_ids,
+        "statuses": created_statuses,
+        "awaiting_approval": listing_status == "pending",
+        "errors": errors,
+    }
+
+
+@router.post("/vision-listing")
+async def ai_vision_listing(
+    request: Request,
+    user_id: str = Form(..., min_length=1, max_length=128),
+    image: UploadFile = File(..., description="Photo of the food item (jpg/png/webp)"),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    """
+    Send a photo to vision and return a draft food_listings row for preview.
+    Returns: { draft, confidence, raw }
+    """
+    import base64 as _b64
+    import json as _json
+
+    from backend.ai.ai_engine import (
+        FOLLOWUP_MODEL,
+        OPENAI_API_KEY,
+        OPENAI_BASE_URL,
+        _get_http_client,
+    )
+
+    _enforce_rate_limit(request)
+    uid = _parse_user_id(user_id)
+    await _require_owner(credentials, uid)
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured")
+
+    raw = await image.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty image upload")
+    if len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image too large (max 8 MB)")
+
+    content_type = (image.content_type or "image/jpeg").split(";")[0].strip().lower()
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File is not an image")
+
+    b64 = _b64.b64encode(raw).decode("ascii")
+    data_url = f"data:{content_type};base64,{b64}"
+
+    client = _get_http_client(45)
+    payload = {
+        "model": FOLLOWUP_MODEL,
+        "messages": [
+            {"role": "system", "content": _VISION_LISTING_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Extract the listing JSON for this photo."},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            },
+        ],
+        "temperature": 0.2,
+        "max_tokens": 500,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    try:
+        resp = await client.post(
+            f"{OPENAI_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+        )
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("vision-listing OpenAI call failed")
+        raise HTTPException(status_code=502, detail=f"Vision call failed: {exc}") from exc
+
+    data = resp.json()
+    content_str = (data.get("choices") or [{}])[0].get("message", {}).get("content") or "{}"
+    try:
+        parsed = _json.loads(content_str)
+        if not isinstance(parsed, dict):
+            parsed = {}
+    except Exception:
+        parsed = {}
+
+    confidence = parsed.get("confidence")
+    try:
+        confidence_val = float(confidence) if confidence is not None else 0.0
+    except (TypeError, ValueError):
+        confidence_val = 0.0
+
+    category = str(parsed.get("category") or "").strip().lower()
+    if category not in _VALID_FOOD_CATEGORIES:
+        category = _DEFAULT_FOOD_CATEGORY
+
+    quantity_raw = parsed.get("quantity")
+    try:
+        quantity_val = float(quantity_raw) if quantity_raw is not None else 1.0
+        if quantity_val <= 0:
+            quantity_val = 1.0
+    except (TypeError, ValueError):
+        quantity_val = 1.0
+
+    def _str_list(v):
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()][:10]
+        return []
+
+    draft = {
+        "title": str(parsed.get("title") or "").strip()[:200],
+        "description": str(parsed.get("description") or "").strip()[:2000],
+        "category": category,
+        "quantity": quantity_val,
+        "unit": str(parsed.get("unit") or "items").strip()[:40] or "items",
+        "dietary_tags": _str_list(parsed.get("dietary_tags")),
+        "allergens": _str_list(parsed.get("allergens")),
+    }
+    # Prefill pickup + community from the donor profile so the preview
+    # selector is not empty / forced onto Do Good Warehouse only.
+    try:
+        from backend.ai_engine import fetch_donor_listing_defaults
+        donor = await fetch_donor_listing_defaults(uid)
+        if donor.get("address") and not draft.get("location"):
+            draft["location"] = str(donor["address"])[:200]
+        if donor.get("community_id") is not None:
+            draft["community_id"] = str(donor["community_id"])
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("vision-listing donor defaults skipped: %s", exc)
+
+    return {
+        "draft": draft,
+        "confidence": confidence_val,
+        "raw": content_str[:2000],
     }
 
 
@@ -668,8 +1250,8 @@ _WHISPER_NOISE_PHRASES: set[str] = {
     # YouTube / video artifacts
     "thanks for watching", "thank you for watching", "subscribe",
     "music", "applause", "gracias por ver",
-    # Polite short filler
-    "thank you", "thanks", "bye", "bye bye", "goodbye",
+    # Polite short filler (multi-word only — single "thanks" can be real)
+    "thank you", "bye bye", "goodbye",
     "silence",
     # Whisper-specific artifact tokens observed in the wild
     "gwynple",
@@ -677,15 +1259,23 @@ _WHISPER_NOISE_PHRASES: set[str] = {
 
 
 # Single filler words. When the ENTIRE utterance is only these tokens (in
-# any combination) it's almost certainly noise, not intent. Includes short
-# polite words that Whisper strings together on silent audio ("thank you
-# very much please" → all-filler → filtered).
+# any combination) it's almost certainly noise, not intent. Do NOT put
+# confirmations (yes/ok/sure) here — donors use them constantly in chat.
 _WHISPER_FILLER_WORDS: set[str] = {
     "um", "uh", "hmm", "mmm", "ah", "oh", "eh", "er",
-    "yeah", "yea", "yep", "nope",
-    "ok", "okay",
     # Polite filler run — Whisper's classic silent-audio hallucination.
     "thank", "thanks", "you", "very", "much", "please", "bye",
+}
+
+
+# Short but legitimate voice intents. Whisper + our old <3-char rule used
+# to reject "hi" / "yes" / "ok", which made hands-free confirmations fail.
+_VOICE_OK_SHORT: set[str] = {
+    "hi", "hey", "hello", "yo",
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay",
+    "no", "nope", "nah",
+    "help", "food", "share", "claim", "find", "post", "map",
+    "hola", "si", "sí", "claro", "vale", "ayuda", "comida",
 }
 
 
@@ -694,36 +1284,78 @@ def _is_whisper_noise(text: str) -> bool:
 
     Strategy:
       1. Reject empty / whitespace-only inputs.
-      2. Reject tiny transcripts (< 3 chars after stripping punctuation).
-      3. Reject exact matches against known noise phrases.
-      4. Reject utterances made ENTIRELY of filler words.
-      5. Reject transcripts where the same short token repeats (whisper
-         degrades to "thank thank thank" on silence).
-      6. Reject text where > 50% of characters are non-ASCII (Whisper
-         mis-transcribes silence into random CJK/Cyrillic runs).
+      2. Allow known short intents (yes / hi / help / …).
+      3. Reject tiny transcripts (< 2 chars after stripping punctuation).
+      4. Reject exact matches against known noise phrases.
+      5. Reject utterances made ENTIRELY of filler words (3+ tokens).
+      6. Reject transcripts where the same short token repeats.
+      7. Reject text where > 50% of characters are non-ASCII.
     """
     if not text:
         return True
     stripped = re.sub(r"[^\w\s]", " ", text.strip().lower())
     stripped = re.sub(r"\s+", " ", stripped).strip()
-    if len(stripped) < 3:
+    if not stripped:
+        return True
+    if stripped in _VOICE_OK_SHORT:
+        return False
+    if len(stripped) < 2:
         return True
     if stripped in _WHISPER_NOISE_PHRASES:
         return True
     tokens = stripped.split()
-    if tokens and all(t in _WHISPER_FILLER_WORDS for t in tokens):
+    # Require several filler-only tokens — "um" alone is noise, but
+    # "yes please" / "ok thanks" must reach the chat turn.
+    if len(tokens) >= 3 and all(t in _WHISPER_FILLER_WORDS for t in tokens):
         return True
-    # 5. Repeated-token noise: "thank thank thank" / "yeah yeah yeah".
+    if len(tokens) == 1 and tokens[0] in _WHISPER_FILLER_WORDS:
+        return True
+    # 6. Repeated-token noise: "thank thank thank" / "yeah yeah yeah".
     if len(tokens) >= 3 and len(set(tokens)) == 1:
         return True
-    # 6. High non-ASCII ratio (silence hallucinated as CJK/Cyrillic).
-    # Ignore ASCII whitespace when computing ratio.
+    # 7. High non-ASCII ratio (silence hallucinated as CJK/Cyrillic).
     letters = [ch for ch in text if not ch.isspace()]
     if letters:
         non_ascii = sum(1 for ch in letters if ord(ch) > 127)
         if non_ascii / len(letters) > 0.5:
             return True
     return False
+
+
+_ALLOWED_AUDIO_TYPES = {
+    "audio/webm", "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp4",
+    "audio/ogg", "audio/x-m4a", "audio/mp3", "audio/aac", "audio/flac",
+    # Chrome sometimes labels Opus-in-WebM microphone captures as video/webm
+    "video/webm",
+}
+
+
+def _audio_filename_for_whisper(upload_name: str | None, content_type: str | None) -> str:
+    """Pick a Whisper-friendly filename whose extension matches the bytes."""
+    base_type = (content_type or "").split(";")[0].strip().lower()
+    ext_by_type = {
+        "audio/webm": ".webm",
+        "video/webm": ".webm",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/mp4": ".mp4",
+        "audio/m4a": ".m4a",
+        "audio/x-m4a": ".m4a",
+        "audio/ogg": ".ogg",
+        "audio/aac": ".aac",
+        "audio/flac": ".flac",
+    }
+    preferred = ext_by_type.get(base_type)
+    name = (upload_name or "").strip() or "audio.webm"
+    lower = name.lower()
+    if preferred and not lower.endswith(preferred):
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        return f"{stem}{preferred}"
+    if "." not in name:
+        return f"{name}{preferred or '.webm'}"
+    return name
 
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "uploads", "ai")
@@ -816,12 +1448,8 @@ async def ai_voice(
     _require_uuid(uid)
     await _require_owner(credentials, uid)
 
-    allowed = {
-        "audio/webm", "audio/wav", "audio/mpeg", "audio/mp4",
-        "audio/ogg", "audio/x-m4a", "audio/mp3",
-    }
     base_type = (audio.content_type or "").split(";")[0].strip().lower()
-    if base_type and base_type not in allowed:
+    if base_type and base_type not in _ALLOWED_AUDIO_TYPES:
         raise HTTPException(400, f"Unsupported audio type: {audio.content_type}")
 
     audio_bytes = await audio.read()
@@ -831,13 +1459,15 @@ async def ai_voice(
         raise HTTPException(400, "Empty audio file")
 
     lang = resolve_lang(request)
+    whisper_name = _audio_filename_for_whisper(audio.filename, audio.content_type)
     try:
         transcript = await conversation_engine.transcribe_audio(
             audio_bytes=audio_bytes,
-            filename=audio.filename or "audio.webm",
+            filename=whisper_name,
+            content_type=base_type or None,
         )
         if _is_whisper_noise(transcript):
-            raise HTTPException(400, "Could not understand the audio. Try again or switch to text.")
+            raise AIInvalidInput(lang)
 
         result = await conversation_engine.chat(
             user_id=uid,
@@ -920,12 +1550,8 @@ async def ai_transcribe(
     _enforce_rate_limit(request)
     await _require_authenticated(credentials)
 
-    allowed_audio = {
-        "audio/webm", "audio/wav", "audio/mpeg", "audio/mp4",
-        "audio/ogg", "audio/x-m4a", "audio/mp3",
-    }
     base_type = (audio.content_type or "").split(";")[0].strip().lower()
-    if base_type and base_type not in allowed_audio:
+    if base_type and base_type not in _ALLOWED_AUDIO_TYPES:
         raise HTTPException(400, f"Unsupported audio type: {audio.content_type}")
 
     audio_bytes = await audio.read()
@@ -935,10 +1561,12 @@ async def ai_transcribe(
         raise HTTPException(400, "Empty audio file")
 
     lang = resolve_lang(request)
+    whisper_name = _audio_filename_for_whisper(audio.filename, audio.content_type)
     try:
         transcript = await conversation_engine.transcribe_audio(
             audio_bytes=audio_bytes,
-            filename=audio.filename or "audio.webm",
+            filename=whisper_name,
+            content_type=base_type or None,
         )
         transcript = (transcript or "").strip()
         if _is_whisper_noise(transcript):
@@ -1064,6 +1692,13 @@ async def ai_confirm(
         await conversation_engine.store_message(
             uid, "assistant", cancelled_text, metadata={"lang": lang}
         )
+        suggestions = await conversation_engine._build_suggestion_chips(
+            cancelled_text,
+            lang,
+            user_message="Cancel",
+            user_id=str(uid),
+            actions=[],
+        )
         return {
             "text": cancelled_text,
             "audio_url": None,
@@ -1072,7 +1707,7 @@ async def ai_confirm(
             "conversation_id": None,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "actions": [{"tool": pending.get("tool"), "ok": False, "summary": "Cancelled by user"}],
-            "suggestions": [],
+            "suggestions": suggestions,
             "requires_confirmation": False,
             "pending_action": None,
         }

@@ -658,7 +658,7 @@ class TestToolFormat:
             "search_food_near_user",
             "get_user_profile",
             "get_pickup_schedule",
-            "create_reminder",
+            "create_ai_reminder",
             "get_user_dashboard",
         }
         assert expected.issubset(names)
@@ -962,12 +962,10 @@ class TestToolFormat:
             "cancel_claim",
             "confirm_claim",
             "post_food_listing",
-            "create_food_listing",
             "post_food_request",
             "update_user_profile",
-            "create_reminder",
+            "create_ai_reminder",
             "attach_photos_to_listing",
-            "send_notification",
             "search_food_near_user",
             "get_user_dashboard",
             "get_user_profile",

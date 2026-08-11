@@ -10,12 +10,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Database connection settings
-DB_HOST = os.getenv('DB_HOST', 'database-1.c9um4qfazhpa.us-east-2.rds.amazonaws.com')
-DB_PORT = int(os.getenv('DB_PORT', 3306))
-DB_USER = os.getenv('DB_USER', 'admin')
-DB_PASSWORD = os.getenv('DB_PASSWORD', 'foodmaps2024')
+# Database connection settings — never hardcode credentials.
+# Fail closed if required env vars are missing.
+DB_HOST = os.getenv('DB_HOST')
+DB_PORT = int(os.getenv('DB_PORT', '3306'))
+DB_USER = os.getenv('DB_USER')
+DB_PASSWORD = os.getenv('DB_PASSWORD')
 DB_NAME = os.getenv('DB_NAME', 'foodmaps')
+
+if not all((DB_HOST, DB_USER, DB_PASSWORD)):
+    raise SystemExit(
+        "Set DB_HOST, DB_USER, and DB_PASSWORD in the environment "
+        "(or DATABASE_URL for other scripts). Hardcoded defaults were removed."
+    )
 
 def run_migration():
     print("🛡️ Starting Safety and Trust Features Migration...")

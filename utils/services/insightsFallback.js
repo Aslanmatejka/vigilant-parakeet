@@ -197,7 +197,6 @@ export async function computeLocalInsights(userId, roleHint = null) {
     const pendingClaims = claims.filter((c) => c.status === 'pending').length
     const approvedClaims = claims.filter((c) => c.status === 'approved').length
     const activeListings = listings.filter((l) => l.status === 'approved' || l.status === 'active').length
-    const pendingListings = listings.filter((l) => l.status === 'pending').length
 
     // Flag listings expiring within ~36 h so donors see "expiring soon"
     // alerts for items expiring TOMORROW (not just today). Using end-of-day
@@ -236,7 +235,7 @@ export async function computeLocalInsights(userId, roleHint = null) {
         activityInsights.push({
             id: 'admin_overview',
             title: 'Review the platform overview',
-            message: 'Check pending approvals, recent reports, and community health from the admin dashboard.',
+            message: 'Review reports, verifications, broadcasts, and community health from the admin dashboard.',
             priority: 'medium',
             icon: 'gauge-high',
             source: 'activity',
@@ -263,17 +262,6 @@ export async function computeLocalInsights(userId, roleHint = null) {
                 icon: 'utensils',
                 source: 'activity',
                 action: { label: 'Share food', href: '/share' },
-            })
-        }
-        if (pendingListings > 0) {
-            activityInsights.push({
-                id: 'donor_pending',
-                title: `${pendingListings} listing${pendingListings === 1 ? '' : 's'} awaiting approval`,
-                message: 'Admins are reviewing — you\'ll be notified once they go live.',
-                priority: 'low',
-                icon: 'hourglass-half',
-                source: 'activity',
-                action: { label: 'View status', href: '/listings' },
             })
         }
     } else {

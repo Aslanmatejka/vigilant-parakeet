@@ -16,14 +16,16 @@ const ProtectedRoute = ({ children }) => {
   const { useLocation, Navigate } = require('react-router-dom');
   const currentLocation = useLocation();
 
-  if (isAuthenticated) return children;
-
   if (loading || !initialized) {
     return <div>Loading...</div>;
   }
 
-  const redirectPath = currentLocation.pathname + currentLocation.search;
-  return <Navigate to={`/login?redirect=${encodeURIComponent(redirectPath)}`} replace />;
+  if (!isAuthenticated) {
+    const redirectPath = currentLocation.pathname + currentLocation.search;
+    return <Navigate to={`/login?redirect=${encodeURIComponent(redirectPath)}`} replace />;
+  }
+
+  return children;
 };
 
 beforeEach(() => {
@@ -57,7 +59,7 @@ const renderRoute = (authState, initialPath = '/protected') => {
 
 describe('ProtectedRoute', () => {
   test('renders children when user is authenticated', () => {
-    renderRoute({ isAuthenticated: true });
+    renderRoute({ isAuthenticated: true, loading: false, initialized: true });
     expect(screen.getByTestId('secret')).toHaveTextContent('Protected Content');
   });
 
@@ -74,14 +76,14 @@ describe('ProtectedRoute', () => {
     expect(screen.queryByTestId('login-page')).not.toBeInTheDocument();
   });
 
-  test('shows loading spinner when loading is false but not initialized', () => {
-    renderRoute({ isAuthenticated: false, loading: false, initialized: false });
+  test('shows loading until initialized even if localStorage says authenticated', () => {
+    renderRoute({ isAuthenticated: true, loading: false, initialized: false });
     expect(screen.getByText('Loading...')).toBeInTheDocument();
+    expect(screen.queryByTestId('secret')).not.toBeInTheDocument();
   });
 
-  test('prioritizes isAuthenticated over loading state', () => {
-    // Even if still loading, isAuthenticated from localStorage lets through
-    renderRoute({ isAuthenticated: true, loading: true, initialized: false });
+  test('renders children once initialized and authenticated', () => {
+    renderRoute({ isAuthenticated: true, loading: false, initialized: true });
     expect(screen.getByTestId('secret')).toHaveTextContent('Protected Content');
   });
 });

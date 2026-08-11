@@ -1,99 +1,80 @@
-# Production Readiness Checklist
+# Production readiness checklist
 
-Audit date: 2026-07-09  
-Repo: `vigilant-parakeet` (React/Vite frontend + FastAPI backend + Supabase)
+Generated from a full-repo audit (2026-07-14). Work items are ordered by severity. Items marked **DONE** were fixed in this pass.
 
-## Status legend
+## Gates (must be green before deploy)
 
-- [x] Pass
-- [ ] Fail / needs work
-- [~] Partial / deferred (documented, not blocking local green gates)
+| # | Gate | Command / check | Status |
+|---|------|-----------------|--------|
+| G1 | Hermetic backend tests | `pytest` (via `pytest.ini`) → 720 passed, 23 skipped | **DONE** |
+| G2 | Frontend lint | `npm run lint` | **DONE** |
+| G3 | Frontend unit tests | `npm test` | **DONE** |
+| G4 | Frontend production build | `npm run build` | **DONE** |
+| G5 | No critical/high open security findings | see S* below | **DONE** |
+| G6 | Backend deploy (Railway) | CI/CD on `master` → Railway `dogoods-backend` (or `scripts/deploy-railway.ps1`) | **DONE** |
+| G7 | Frontend deploy (Netlify) | CI/CD on `master` → Netlify prod https://dogoods.store | **DONE** |
+| G8 | GitHub Actions secrets | `NETLIFY_AUTH_TOKEN`, `NETLIFY_SITE_ID`, `RAILWAY_TOKEN` (repo Secrets) | **SETUP** |
 
----
+## CI/CD (GitHub Actions)
 
-## 1. Build & compile
+Workflow: `.github/workflows/ci-cd.yml`
 
-| Check | Status | Notes |
-|-------|--------|-------|
-| Frontend `npm run build` | [x] | Vite production build succeeds |
-| No TypeScript project | [x] | JS/JSX only — N/A |
-| Backend importable | [~] | App loads; FastAPI `@app.on_event` deprecation warnings remain |
+1. **CI** on push/PR to `master` / `main` / `develop`: frontend lint+test+build, backend pytest.
+2. **CD** on push to **`master` only** (after CI green): Netlify production + Railway production.
 
-## 2. Tests
+### One-time GitHub setup
 
-| Check | Status | Notes |
-|-------|--------|-------|
-| Frontend Jest (`npm test`) | [x] | **53/53 passed** |
-| Backend AI suite (`backend/ai/tests`) | [x] | **515 passed** |
-| Backend unit subset (`suggestion_chips`, `user_guidance`, `listing_expiry`) | [x] | **44 passed** |
-| Live/integration backend tests | [~] | `test_voice_live`, `test_granny_chat`, `test_claim_flow`, `test_share_flow`, and some heavy `test_ai_engine` imports hang / need live services — excluded from gate |
+Repo → **Settings → Secrets and variables → Actions → New repository secret**:
 
-## 3. Lint / static analysis
+| Secret | Where to get it |
+|--------|-----------------|
+| `NETLIFY_AUTH_TOKEN` | [Netlify personal access tokens](https://app.netlify.com/user/applications#personal-access-tokens) |
+| `NETLIFY_SITE_ID` | Netlify → Site → Site configuration → Site details → Site ID (`d5f37690-0335-437a-89b9-34a90c3107ed` for dogoods) |
+| `RAILWAY_TOKEN` | Railway → Project → Settings → Tokens (project token) |
 
-| Check | Status | Notes |
-|-------|--------|-------|
-| `npm run lint` | [x] | **0 errors** (130 warnings: unused vars / exhaustive-deps) |
-| Hooks correctness | [x] | Fixed conditional hooks in `FoodDietaryTags`, `AdminSidebar`, `useLocation` |
-| Real bugs found via lint | [x] | Fixed `onTrade` undefined, `tempMessage` TDZ, emoji regex `/u` flag |
+Optional **Variables** (defaults already baked into the workflow): `RAILWAY_PROJECT_ID`, `RAILWAY_SERVICE_NAME`, `RAILWAY_ENVIRONMENT`.
 
-## 4. Dependency security
+Create a GitHub **Environment** named `production` (Actions will prompt) if it does not exist.
 
-| Check | Status | Notes |
-|-------|--------|-------|
-| Critical/high runtime CVEs | [x] | Cleared `shell-quote`, `rollup`, `tar`, `ws`, `yaml`, `postcss` issues via updates |
-| Remaining `npm audit` | [~] | Vite/esbuild **dev-server only** advisory; fix requires Vite 8 major bump — deferred |
-| Python deps | [~] | Loose `>=` pins remain; no failing install in this pass |
+After secrets are set: **push to `master`** → Actions runs tests → auto-deploys. Manual CLI deploy remains a fallback.
 
-## 5. Secrets & debug leftovers
+## Security
 
-| Check | Status | Notes |
-|-------|--------|-------|
-| `.env` / `.env.local` gitignored | [x] | |
-| No hardcoded private secrets in source | [x] | Mapbox `pk.` in `netlify.toml` is public client token |
-| Remove agent debug ingest / file logs | [x] | Frontend localhost ingest removed; backend debug writers no-op’d |
-| Debug log files ignored | [x] | `debug-*.log` added to `.gitignore` |
+| # | Finding | Severity | Status |
+|---|---------|----------|--------|
+| S1 | Hardcoded RDS password defaults in `backend/scripts/*.py` | Critical | **DONE** (env-only) |
+| S2 | `/api/user/update-trust-score` self-service mutation | High | **DONE** (admin-only) |
+| S3 | `/api/listings/create` auth optional + client `donor_id` | High | **DONE** (JWT required; `sub` wins) |
+| S4 | `AI_REQUIRE_AUTH=""` treated as disabled | High | **DONE** (blank/unset → require auth) |
+| S5 | OpenAPI `/docs` enabled in production | Medium | **DONE** (`ENABLE_API_DOCS` gate) |
+| S6 | Live credentials in committed `netlify.toml` / test scripts | Critical* | **DONE*** (anon/`pk.` only; preference for Netlify UI) |
+| S7 | Stale Jekyll GH Pages workflow | High | **DONE** (deleted) |
+| S8 | CI deploy stubs / `main` vs `master` / artifact clash | High | **DONE** (rewrote `ci-cd.yml`) |
 
-## 6. Supabase security advisors
+\*Supabase anon + Mapbox `pk.` are browser-side by design; kept for build continuity. Prefer dashboard overrides for rotation.
 
-| Check | Status | Notes |
-|-------|--------|-------|
-| Anon EXECUTE on admin DEFINER RPCs | [x] | Revoked `is_admin`, `expire_unclaimed_receipts` from anon/authenticated |
-| Permissive users INSERT policy | [x] | Restricted to `service_role` |
-| Trigger `search_path` | [x] | Set on `update_user_preferences_updated_at` |
-| Impact aggregators for authenticated | [~] | Intentionally left for signed-in users (read-only summaries) |
-| Leaked password protection | [~] | **Dashboard action:** enable in Auth → Password security ([docs](https://supabase.com/docs/guides/auth/password-security#password-strength-and-leaked-password-protection)) |
-| Postgres version patches | [~] | **Dashboard action:** upgrade project ([docs](https://supabase.com/docs/guides/platform/upgrading)) |
+## Backend / tests / deps
 
-## 7. CI/CD alignment
+| # | Finding | Severity | Status |
+|---|---------|----------|--------|
+| B1 | Live/e2e tests fail offline → poison default suite | High | **DONE** (`pytest.ini` ignores) |
+| B2 | No DB driver pin in `requirements.txt` | High | **DONE** (`psycopg2-binary`, `pymysql`) |
+| B3 | Pytest not in CI | Medium | **DONE** |
+| B4 | Loose `>=` pins (reproducibility) | Medium | tracked |
+| B5 | Standing-instructions + voice/CSV changes uncommitted | Info | ship via Railway upload |
 
-| Check | Status | Notes |
-|-------|--------|-------|
-| Workflow branch names | [x] | CI now listens to `main`, `master`, and `develop` |
-| Deploy jobs real | [~] | Staging/prod steps still stubs |
+## Frontend
 
-## 8. Runtime / ops (deferred)
+| # | Finding | Severity | Status |
+|---|---------|----------|--------|
+| F1 | Lint/test/build currently pass | — | **DONE** |
+| F2 | No TypeScript / typecheck | Medium | tracked (no TS migration this pass) |
+| F3 | Bundle size ~1.28 MB | Low | tracked |
+| F4 | Thin Netlify security headers | Medium | **DONE** |
 
-| Check | Status | Notes |
-|-------|--------|-------|
-| Bundle size | [~] | Main JS ~1.27 MB — consider route-level code splitting |
-| FastAPI lifespan migration | [~] | Replace deprecated `on_event` handlers |
-| Live voice / claim flow e2e | [~] | Keep as optional CI job with secrets |
+## Explicitly out of scope this pass
 
----
-
-## Gate results (this pass)
-
-```
-npm run build     ✅
-npm test          ✅ 53 passed
-npm run lint      ✅ 0 errors
-backend/ai/tests  ✅ 515 passed
-npm audit high    ⚠️  vite/esbuild only (dev server)
-```
-
-## Manual follow-ups (cannot fully automate here)
-
-1. Enable **Leaked Password Protection** in Supabase Auth.
-2. Upgrade Supabase Postgres to latest patched version.
-3. Schedule Vite 8 upgrade when ready for the breaking change.
-4. Wire real deploy steps in `.github/workflows/ci-cd.yml`.
+- Full TypeScript migration
+- Dependency lockfile rewrite for entire LangChain stack
+- Rotating production DB passwords in AWS (ops; scripts scrubbed of defaults)
+- Secret history rewrite (`git filter-repo`) without explicit request

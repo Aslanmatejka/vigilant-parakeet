@@ -32,12 +32,15 @@ const NAV_TARGET_ROUTES = {
   list: '/find',
   create: '/share',
   'bulk-create': '/share',
+  request: '/request',
+  'request-food': '/request',
+  'community-requests': '/community-requests',
   dashboard: '/dashboard',
   dispatch: '/admin/distribution',
   admin: '/admin',
   driver: '/admin',
   schedule: '/donations',
-  partners: '/featured',
+  partners: '/sponsors',
   'food-rescue': '/find',
   'meal-planning': '/recipes',
   'ai-matching': '/find',
@@ -75,11 +78,12 @@ function normalizeNavigateDirective(directive) {
   }
 
   if (act === 'close') {
-    if (target === 'chat') return { ...directive, action: 'close_assistant' }
+    if (target === 'chat' || !target) return { ...directive, action: 'close_assistant' }
     if (target && MODAL_TARGET_ROUTES[target]) {
       return { ...directive, action: 'close_modal', target }
     }
-    return { ...directive, action: 'navigate', path: '/find' }
+    // Unknown close target — close chat only; do not yank to /find.
+    return { ...directive, action: 'close_assistant' }
   }
 
   if (act === 'toggle' && target) {
@@ -239,6 +243,16 @@ export function UIControlProvider({ children, navigate }) {
     let count = 0
     for (const entry of toolResults) {
       if (!entry?.tool) continue
+      // Directions tools flip to Find Food map so the route is visible.
+      if (
+        entry.tool === 'show_route_to_listing'
+        && entry.ok !== false
+        && !entry.error
+        && (entry.action === 'open_map' || entry.view === 'map' || entry.result?.action === 'open_map' || entry.result?.view === 'map')
+      ) {
+        if (executeUIAction({ ok: true, action: 'open_map' })) count += 1
+        continue
+      }
       if (entry.tool !== 'ui_action' && entry.tool !== 'navigate_ui') continue
       const directive = buildUIDirective(entry)
       const executed = directive && executeUIAction(directive)

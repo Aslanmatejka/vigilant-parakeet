@@ -11,16 +11,32 @@ class ReceiptService {
      */
     async expireOldReceipts() {
         try {
-            console.log('[ReceiptService] Checking for expired receipts...');
-
             // Call the Supabase function to expire receipts.
             // The function RETURNS TABLE(expired_count INT), so `data` is an
             // array of rows like [{ expired_count: N }].
             const { data, error } = await supabase.rpc('expire_unclaimed_receipts');
 
             if (error) {
-                console.error('[ReceiptService] Error expiring receipts:', error);
-                throw error;
+                // Best-effort housekeeping from the client — 403/42501 means
+                // EXECUTE isn't granted (or session isn't authed yet). Don't
+                // spam the console; scheduled/service_role jobs still expire.
+                const code = String(error.code || '');
+                const status = Number(error.status || error.statusCode || 0);
+                const permissionDenied =
+                    status === 403
+                    || code === '42501'
+                    || /permission denied|not authorized|403/i.test(
+                        String(error.message || '')
+                    );
+                if (!permissionDenied) {
+                    console.error('[ReceiptService] Error expiring receipts:', error);
+                }
+                return {
+                    success: false,
+                    expiredCount: 0,
+                    error: error.message,
+                    permissionDenied,
+                };
             }
 
             let expiredCount = 0;
@@ -29,7 +45,6 @@ class ReceiptService {
             } else if (typeof data === 'number') {
                 expiredCount = data;
             }
-            console.log(`[ReceiptService] Expired ${expiredCount} receipts and returned items to inventory`);
 
             return {
                 success: true,
@@ -37,11 +52,16 @@ class ReceiptService {
                 message: `Successfully expired ${expiredCount} receipt(s)`
             };
         } catch (error) {
-            console.error('[ReceiptService] Exception in expireOldReceipts:', error);
+            const msg = error?.message || String(error);
+            const permissionDenied = /permission denied|not authorized|403/i.test(msg);
+            if (!permissionDenied) {
+                console.error('[ReceiptService] Exception in expireOldReceipts:', error);
+            }
             return {
                 success: false,
                 expiredCount: 0,
-                error: error.message
+                error: msg,
+                permissionDenied,
             };
         }
     }
@@ -180,16 +200,16 @@ class ReceiptService {
 
             const foodIds = oldClaims.map(c => c.food_id);
 
-            // Check which items are still available
+            // Check which items are still available to reclaim
             const { data: availableItems, error: checkError } = await supabase
                 .from('food_listings')
                 .select('id')
                 .in('id', foodIds)
-                .eq('status', 'available');
+                .in('status', ['approved', 'active']);
 
             if (checkError) throw checkError;
 
-            const availableIds = availableItems.map(item => item.id);
+            const availableIds = (availableItems || []).map(item => item.id);
 
             if (availableIds.length === 0) {
                 return {

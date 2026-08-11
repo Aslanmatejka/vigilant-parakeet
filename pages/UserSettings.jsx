@@ -43,6 +43,7 @@ function UserSettings() {
         default_reminder_hours: 24
     });
     const [successMessage, setSuccessMessage] = React.useState('');
+    const [communityLabel, setCommunityLabel] = React.useState(null);
 
     React.useEffect(() => {
         const loadUserData = async () => {
@@ -81,6 +82,19 @@ function UserSettings() {
                     latitude: profile?.latitude ?? null,
                     longitude: profile?.longitude ?? null,
                 });
+
+                // Resolve community name for the read-only affiliation label.
+                const communityId = profile?.community_id ?? authUser.community_id ?? null;
+                if (communityId != null && communityId !== '') {
+                    const { data: community } = await supabase
+                        .from('communities')
+                        .select('id, name')
+                        .eq('id', communityId)
+                        .maybeSingle();
+                    setCommunityLabel(community?.name || `Community #${communityId}`);
+                } else {
+                    setCommunityLabel(null);
+                }
             }
         };
         loadUserData();
@@ -387,6 +401,30 @@ function UserSettings() {
                                 onChange={(e) => handleInputChange('name', e.target.value)}
                                 aria-label="Display name"
                             />
+                        </div>
+                        <div className="mt-6">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                Community / School
+                            </label>
+                            <div
+                                className="w-full rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-gray-800"
+                                role="status"
+                                aria-label="Community associated with your account"
+                            >
+                                {communityLabel ? (
+                                    <span className="inline-flex items-center gap-2">
+                                        <i className="fas fa-school text-[#2CABE3]" aria-hidden="true" />
+                                        {communityLabel}
+                                    </span>
+                                ) : (
+                                    <span className="text-gray-500">
+                                        No community linked to this account
+                                    </span>
+                                )}
+                            </div>
+                            <p className="mt-1 text-xs text-gray-500">
+                                Set by your signup approval code and cannot be changed here.
+                            </p>
                         </div>
                         <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div>

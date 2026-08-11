@@ -27,6 +27,110 @@ def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN") or os.getenv("VITE_MAPBOX_TOKEN", "")
 MAPBOX_DIRECTIONS_URL = "https://api.mapbox.com/directions/v5/mapbox"
 
+
+async def _require_listing_approval() -> bool:
+    """True when community posts must wait for admin approval before Find Food.
+
+    Reads ``platform_settings.require_listing_approval``. Defaults to True when
+    the row is missing or unreadable so moderation fails closed.
+    """
+    from backend.ai_engine import supabase_get
+
+    try:
+        rows = await supabase_get(
+            "platform_settings",
+            {
+                "key": "eq.require_listing_approval",
+                "select": "value",
+                "limit": "1",
+            },
+        )
+        if not rows:
+            return True
+        value = rows[0].get("value")
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes", "on"}
+        if value is None:
+            return True
+        return bool(value)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("require_listing_approval lookup failed: %s", exc)
+        return True
+
+
+async def _require_request_approval() -> bool:
+    """True when food requests must wait for admin approval before Community Requests.
+
+    Reads ``platform_settings.require_request_approval``. Defaults to True when
+    missing so moderation fails closed.
+    """
+    from backend.ai_engine import supabase_get
+
+    try:
+        rows = await supabase_get(
+            "platform_settings",
+            {
+                "key": "eq.require_request_approval",
+                "select": "value",
+                "limit": "1",
+            },
+        )
+        if not rows:
+            return True
+        value = rows[0].get("value")
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes", "on"}
+        if value is None:
+            return True
+        return bool(value)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("require_request_approval lookup failed: %s", exc)
+        return True
+
+
+async def _require_claim_approval() -> bool:
+    """True when recipient claims must wait for admin approval before pickup."""
+    from backend.ai_engine import supabase_get
+
+    try:
+        rows = await supabase_get(
+            "platform_settings",
+            {
+                "key": "eq.require_claim_approval",
+                "select": "value",
+                "limit": "1",
+            },
+        )
+        if not rows:
+            return True
+        value = rows[0].get("value")
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes", "on"}
+        if value is None:
+            return True
+        return bool(value)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("require_claim_approval lookup failed: %s", exc)
+        return True
+
+
+async def _resolve_create_listing_status(listing_type: str = "donation") -> str:
+    """Status for donor/Nouri creates: pending when the matching approval flag is on."""
+    if str(listing_type or "donation").lower() == "request":
+        return "pending" if await _require_request_approval() else "approved"
+    return "pending" if await _require_listing_approval() else "approved"
+
+
+async def _resolve_create_claim_status() -> str:
+    """Status for new claims: pending when claim approval is required."""
+    return "pending" if await _require_claim_approval() else "approved"
+
 # Max age (hours) applied ONLY when a listing has no expiry_date and no pickup_by.
 # These are intentionally generous — the listing's active/approved status is the
 # primary signal of availability. Only cooked/prepared/perishable-meat listings
@@ -119,6 +223,14 @@ def _normalize_expiry_date(*candidates: Optional[str]) -> Optional[str]:
         dt = _parse_dt(s)
         if dt:
             return dt.date().isoformat()
+        # Spoken forms: "24th July", "July 24 this year"
+        try:
+            from backend.ai.conversation_flow import _extract_expiry_from_text
+            spoken = _extract_expiry_from_text(s)
+            if spoken:
+                return spoken
+        except Exception:
+            pass
     return None
 
 
@@ -195,6 +307,10 @@ def _listing_is_fresh_enough(listing: dict, now: Optional[datetime] = None) -> b
 # ---------------------------------------------------------------------------
 # OpenAI function-calling tool definitions
 # ---------------------------------------------------------------------------
+# Production Nouri loads schemas from backend.ai.tools.TOOL_DEFINITIONS
+# (see backend.ai.ai_engine and backend.ai_engine.ConversationEngine).
+# Keep this list for agent/planner helpers that still import implementations
+# from this module — prefer editing backend/ai/tools.py for chat tool schemas.
 
 TOOL_DEFINITIONS = [
     {
@@ -202,16 +318,18 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "search_food_near_user",
             "description": (
-                "Search for available food listings near a user's location. "
-                "Returns food items that are currently available for pickup "
-                "within the specified radius. "
-                "Each result includes `image_url` (the listing's real photo) and "
-                "`community_name` (the community the listing belongs to, if any). "
-                "The chat UI renders the photo and community badge from these "
-                "fields automatically \u2014 do NOT repeat image URLs in your reply, "
-                "do NOT embed markdown image links like ![alt](url), and never "
-                "invent or substitute a photo URL. If `image_url` is missing, "
-                "do not mention a photo."
+                "Search for available food listings for a user. Returns every "
+                "available listing in their own school/community only — no "
+                "radius cutoff, and never other schools (warehouse only if "
+                "they belong to it). NEVER includes the "
+                "caller's own donations — those belong in get_user_listings / "
+                "My Listings. Each result includes `image_url` (the listing's "
+                "real photo) and `community_name` (the community the listing "
+                "belongs to, if any). The chat UI renders the photo and "
+                "community badge from these fields automatically \u2014 do NOT "
+                "repeat image URLs in your reply, do NOT embed markdown image "
+                "links like ![alt](url), and never invent or substitute a photo "
+                "URL. If `image_url` is missing, do not mention a photo."
             ),
             "parameters": {
                 "type": "object",
@@ -219,11 +337,6 @@ TOOL_DEFINITIONS = [
                     "user_id": {
                         "type": "string",
                         "description": "The UUID of the user to search near",
-                    },
-                    "radius_km": {
-                        "type": "number",
-                        "description": "Search radius in kilometers (default 10)",
-                        "default": 10,
                     },
                     "food_type": {
                         "type": "string",
@@ -321,6 +434,13 @@ TOOL_DEFINITIONS = [
                     "category": {
                         "type": "string",
                         "description": "Optional category filter for new listings.",
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": (
+                            "Authenticated user UUID. Own donations are excluded "
+                            "so Find Food never shows the caller's listings."
+                        ),
                     },
                 },
             },
@@ -885,6 +1005,7 @@ TOOL_DEFINITIONS = [
                         "description": (
                             "For 'navigate': route path. Common routes: "
                             "'/' (home), '/find' (browse food), '/share' (share food), "
+                            "'/request' (request food), '/community-requests' (open needs), "
                             "'/dashboard', '/profile', '/donate', "
                             "'/notifications', '/recipes', '/donations' (distribution schedules), "
                             "'/near-me', '/how-it-works', '/contact', '/blog', "
@@ -944,7 +1065,10 @@ TOOL_DEFINITIONS = [
                 "Create a new food donation listing for the authenticated user. "
                 "Use this when the user wants to share / post / donate / list food. "
                 "Confirm key fields (title, quantity, unit, category) with the user "
-                "before calling. Only call once the user clearly says yes."
+                "before calling. Only call once the user clearly says yes. "
+                "When the result has status=pending or awaiting_approval=true, tell "
+                "the donor it is awaiting admin approval — do NOT say it is live "
+                "on Find Food yet."
             ),
             "parameters": {
                 "type": "object",
@@ -1030,23 +1154,25 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "post_food_request",
             "description": (
-                "ACTION: create a FoodRequest for the current recipient user "
-                "(they are asking the community for food help). Use when the "
-                "user needs food and search_food_near_user returned nothing "
-                "close enough. Set category to one of produce/prepared/"
-                "packaged/bakery/water/fruit/leftovers or omit for 'any'."
+                "ACTION: create a community food request for the current user "
+                "(recipient asks for food not on Find Food). Stores as "
+                "food_listings with listing_type=request so donors see it on "
+                "Community Requests. Category: produce/prepared/packaged/bakery/"
+                "water/fruit/leftovers or omit. Prefer a short title of what "
+                "they need when known."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "user_id": {"type": "string"},
+                    "title": {"type": "string", "description": "What food they need"},
                     "category": {"type": "string"},
                     "household_size": {"type": "integer", "default": 1},
                     "address": {"type": "string"},
                     "notes": {"type": "string"},
                     "latest_by": {
                         "type": "string",
-                        "description": "ISO 8601 datetime",
+                        "description": "ISO 8601 date or datetime needed-by",
                     },
                     "special_needs": {
                         "type": "array",
@@ -1085,7 +1211,12 @@ TOOL_DEFINITIONS = [
                     },
                     "quantity": {
                         "type": "integer",
-                        "description": "How many units to claim (default 1, must be <= listing's available quantity).",
+                        "description": (
+                            "How many units to claim (must be <= available). "
+                            "Pass the amount the user asked for — portions above 2 "
+                            "are allowed. Use the listing's full available quantity "
+                            "when they say 'all' / 'everything'."
+                        ),
                     },
                     "pickup_date": {
                         "type": "string",
@@ -1170,6 +1301,13 @@ TOOL_DEFINITIONS = [
                     "community_name": {"type": "string", "description": "Community/school the donation is shared with — required after donor confirms."},
                     "community_id": {"type": "string", "description": "Optional community UUID if already known."},
                     "community_confirmed": {"type": "boolean", "description": "Must be true after the donor confirms the community."},
+                    "fulfilling_request_id": {
+                        "type": "string",
+                        "description": (
+                            "When sharing to fulfill an open food request, pass that "
+                            "request id — locks community to the request's community."
+                        ),
+                    },
                     "latitude": {"type": "number"},
                     "longitude": {"type": "number"},
                     "dietary_tags": {"type": "array", "items": {"type": "string"}},
@@ -1347,10 +1485,11 @@ TOOL_DEFINITIONS = [
             "description": (
                 "Permanently delete one or more of the authenticated user's own food listings "
                 "from the database. Use when the user says 'delete', 'remove permanently', "
-                "'delete duplicates', or 'delete all duplicates'. "
-                "For duplicate cleanup set delete_duplicates=true (keeps one best copy per "
-                "title — prefer photo, else newest). For many specific rows pass listing_ids. "
-                "Irreversible — confirm with the user before calling."
+                "'delete duplicates', 'delete the bulk listings', or 'delete them all'. "
+                "For full/bulk wipe set delete_all=true (last CSV batch if known, else all "
+                "active). For duplicate cleanup set delete_duplicates=true (keeps one best "
+                "copy per title). For many specific rows pass listing_ids (UUIDs or list "
+                "numbers). Irreversible — confirm with the user before calling."
             ),
             "parameters": {
                 "type": "object",
@@ -1360,13 +1499,18 @@ TOOL_DEFINITIONS = [
                     "listing_ids": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Multiple listing UUIDs to delete in one confirmed action.",
+                        "description": "Multiple listing UUIDs or get_user_listings list numbers.",
                     },
                     "delete_duplicates": {
                         "type": "boolean",
                         "description": "When true, delete extra copies of duplicate titles (keep one per title).",
                     },
+                    "delete_all": {
+                        "type": "boolean",
+                        "description": "Delete last bulk/CSV batch or all active listings.",
+                    },
                     "title": {"type": "string", "description": "Optional title filter for duplicate cleanup or single lookup."},
+
                     "confirmed": {"type": "boolean", "description": "Must be true — set only after the user has explicitly confirmed the deletion."},
                 },
                 "required": ["user_id", "confirmed"],
@@ -1393,8 +1537,11 @@ TOOL_DEFINITIONS = [
                     "user_id": {"type": "string", "description": "UUID of the authenticated user."},
                     "status": {
                         "type": "string",
-                        "enum": ["active", "approved", "expired", "claimed", "all"],
-                        "description": "Filter by status. Default: active+approved.",
+                        "enum": ["active", "approved", "pending", "expired", "claimed", "all"],
+                        "description": (
+                            "Filter by status. Default: active+approved+pending "
+                            "(includes listings awaiting admin approval)."
+                        ),
                     },
                 },
                 "required": ["user_id"],
@@ -1542,6 +1689,13 @@ TOOL_DEFINITIONS = [
                         "type": "string",
                         "description": "UUID of the community (from get_active_communities).",
                     },
+                    "user_id": {
+                        "type": "string",
+                        "description": (
+                            "Authenticated user UUID. Used to enforce school/community "
+                            "scope — callers only see their own community."
+                        ),
+                    },
                     "category": {
                         "type": "string",
                         "description": (
@@ -1556,7 +1710,7 @@ TOOL_DEFINITIONS = [
                         "default": 10,
                     },
                 },
-                "required": ["community_id"],
+                "required": ["community_id", "user_id"],
             },
         },
     },
@@ -1791,13 +1945,15 @@ async def _get_recent_listings(
     hours: int = 72,
     limit: int = 10,
     category: Optional[str] = None,
+    user_id: Optional[str] = None,
+    **_ignored,
 ) -> dict:
     """Return newly posted, still-available food listings."""
     from backend.ai_engine import supabase_get
 
     logger.info(
-        "get_recent_listings: hours=%s limit=%s category=%s",
-        hours, limit, category,
+        "get_recent_listings: hours=%s limit=%s category=%s user=%s",
+        hours, limit, category, user_id,
     )
 
     safe_hours = max(1, min(int(hours), 24 * 14))
@@ -1808,7 +1964,7 @@ async def _get_recent_listings(
     params: dict = {
         "select": (
             "id,title,description,category,quantity,unit,"
-            "latitude,longitude,full_address,location,donor_name,"
+            "latitude,longitude,full_address,location,donor_name,user_id,"
             "image_url,"
             "community_id,communities(id,name),"
             "expiry_date,pickup_by,status,dietary_tags,allergens,created_at"
@@ -1822,10 +1978,18 @@ async def _get_recent_listings(
         "or": f"(expiry_date.is.null,expiry_date.gte.{today_str})",
         "created_at": f"gte.{cutoff_iso}",
         "order": "created_at.desc",
-        "limit": str(safe_limit),
+        "limit": str(max(safe_limit * 3, safe_limit)),
     }
     if category:
         params["category"] = f"eq.{category}"
+    if user_id:
+        params["user_id"] = f"neq.{user_id}"
+
+    viewer_community_id, viewer_is_admin = await _fetch_viewer_community_scope(user_id)
+    _apply_community_scope_to_params(params, viewer_is_admin, viewer_community_id)
+    allowed_community_ids = _allowed_community_id_strings(
+        viewer_is_admin, viewer_community_id
+    )
 
     try:
         rows = await supabase_get("food_listings", params)
@@ -1836,6 +2000,10 @@ async def _get_recent_listings(
     now = datetime.now(timezone.utc)
     listings = []
     for row in rows:
+        if user_id and str(row.get("user_id") or "") == str(user_id):
+            continue
+        if not _listing_in_community_scope(row, allowed_community_ids):
+            continue
         if not _listing_is_fresh_enough(row, now=now):
             continue
         created_at = row.get("created_at")
@@ -1863,12 +2031,15 @@ async def _get_recent_listings(
             # donor_name excluded — see search_food_near_user for rationale.
             "created_at": created_at,
             "hours_ago": hours_ago,
+            "community_id": row.get("community_id"),
             "community_name": (
                 (row.get("communities") or {}).get("name")
                 or row.get("community_name")
                 or None
             ),
         })
+        if len(listings) >= safe_limit:
+            break
 
     if not listings:
         window_label = f"in the last {safe_hours} hour{'s' if safe_hours != 1 else ''}"
@@ -2010,17 +2181,31 @@ async def _get_community_listings(
     community_id: str,
     limit: int = 10,
     category: Optional[str] = None,
+    user_id: Optional[str] = None,
     **_ignored,
 ) -> dict:
     """Return active donations posted by a specific community."""
     from backend.ai_engine import supabase_get
 
     logger.info(
-        "get_community_listings: community=%s category=%s limit=%s",
-        community_id, category, limit,
+        "get_community_listings: community=%s category=%s limit=%s user=%s",
+        community_id, category, limit, user_id,
     )
     if not community_id or not isinstance(community_id, str):
         return {"success": False, "error": "missing community_id"}
+
+    viewer_community_id, viewer_is_admin = await _fetch_viewer_community_scope(user_id)
+    allowed = _allowed_community_id_strings(viewer_is_admin, viewer_community_id)
+    if allowed is not None and str(community_id) not in allowed:
+        return {
+            "success": True,
+            "listings": [],
+            "total": 0,
+            "summary": (
+                "That community's food isn't available in your school scope. "
+                "I can only show food from your own community."
+            ),
+        }
 
     safe_limit = max(1, min(int(limit or 10), 25))
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -2093,7 +2278,7 @@ async def _get_community_listings(
 # Allowed UI navigation routes (mirrors the React Router config). Keeping this
 # server-side prevents the model from sending the user to bogus paths.
 _UI_ALLOWED_PATHS = {
-    "/", "/find", "/share", "/dashboard", "/profile",
+    "/", "/find", "/share", "/request", "/community-requests", "/dashboard", "/profile",
     "/donate", "/notifications", "/recipes", "/donations",
     "/near-me", "/how-it-works", "/contact", "/blog", "/news", "/faqs",
     "/login", "/signup", "/sponsors", "/featured",
@@ -2363,11 +2548,181 @@ def duplicate_listing_ids_to_remove(
     }
 
 
+def split_title_query_hints(title_query: Optional[str]) -> list[str]:
+    """Split 'pawpaw and carrots' / 'milk, bread' into distinct title hints."""
+    if not title_query or not str(title_query).strip():
+        return []
+    raw = str(title_query).strip().lower()
+    parts = re.split(r"\s*(?:,|&|/|\band\b|\bor\b)\s*", raw)
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in parts:
+        hint = re.sub(r"[^a-z0-9'\s-]+", "", p).strip()
+        if not hint or hint in seen:
+            continue
+        seen.add(hint)
+        out.append(hint)
+    return out
+
+
+def _listing_matches_title_hint(row: dict, hint: str) -> bool:
+    """True when listing title matches a food hint (substring / token / fuzzy)."""
+    import difflib
+
+    hint = (hint or "").strip().lower()
+    if not hint:
+        return False
+    title_l = str(row.get("title") or "").strip().lower()
+    if not title_l:
+        return False
+    if hint in title_l:
+        return True
+    # stem-ish: carrot ↔ carrots
+    if hint.endswith("s") and hint[:-1] in title_l:
+        return True
+    if (not hint.endswith("s")) and (hint + "s") in title_l:
+        return True
+    tokens = re.findall(r"[a-z']+", title_l)
+    if hint in tokens:
+        return True
+    if any(hint.rstrip("s") == tok.rstrip("s") for tok in tokens if tok):
+        return True
+    if difflib.SequenceMatcher(None, hint, title_l).ratio() >= 0.72:
+        return True
+    return any(
+        difflib.SequenceMatcher(None, hint, tok).ratio() >= 0.72
+        for tok in tokens
+    )
+
+
+def _apply_title_query_filter(
+    results: list[dict],
+    title_query: Optional[str],
+) -> tuple[list[dict], list[str], list[str]]:
+    """OR-filter listings by one or more food hints.
+
+    Returns (filtered_or_original, matched_hints, unmatched_hints).
+    When no listing matches any hint, returns the original list so a bad
+    filter doesn't empty a search that still has nearby food.
+    """
+    hints = split_title_query_hints(title_query)
+    if not hints or not results:
+        return results, [], []
+
+    matched_hints: list[str] = []
+    unmatched_hints: list[str] = []
+    kept: list[dict] = []
+    seen_ids: set[str] = set()
+    for hint in hints:
+        hit_any = False
+        for row in results:
+            if _listing_matches_title_hint(row, hint):
+                hit_any = True
+                lid = str(row.get("id") or "")
+                if lid and lid not in seen_ids:
+                    seen_ids.add(lid)
+                    kept.append(row)
+                elif not lid:
+                    kept.append(row)
+        if hit_any:
+            matched_hints.append(hint)
+        else:
+            unmatched_hints.append(hint)
+
+    if kept:
+        # Preserve original distance order.
+        order = {str(r.get("id") or id(r)): i for i, r in enumerate(results)}
+        kept.sort(key=lambda r: order.get(str(r.get("id") or id(r)), 9999))
+        return kept, matched_hints, unmatched_hints
+    # Title hints were provided but none matched — do not fall back to the
+    # unfiltered nearby set (that made "no pawpaw" look like random bread cards).
+    return [], [], hints
+
+
+WAREHOUSE_COMMUNITY_ID = 1
+
+
+def _community_scope_supabase_filter(
+    viewer_is_admin: bool,
+    viewer_community_id,
+) -> Optional[str]:
+    """PostgREST community_id filter for browse tools. None = admin (unrestricted)."""
+    if viewer_is_admin:
+        return None
+    if viewer_community_id is not None and str(viewer_community_id).strip() != "":
+        try:
+            own_id = int(viewer_community_id)
+        except (TypeError, ValueError):
+            own_id = viewer_community_id
+        return f"eq.{own_id}"
+    # No community affiliation → match nothing (no community has id -1).
+    return "eq.-1"
+
+
+def _allowed_community_id_strings(viewer_is_admin: bool, viewer_community_id) -> Optional[set]:
+    """Allowed community IDs for a viewer. None = admin (unrestricted)."""
+    if viewer_is_admin:
+        return None
+    if viewer_community_id is not None and str(viewer_community_id).strip() != "":
+        return {str(viewer_community_id)}
+    return set()
+
+
+def _listing_in_community_scope(listing: dict, allowed_ids: Optional[set]) -> bool:
+    """True when listing.community_id is in the viewer's allowed set."""
+    if allowed_ids is None:
+        return True
+    cid = listing.get("community_id")
+    if cid is None or str(cid).strip() == "":
+        return False
+    return str(cid) in allowed_ids
+
+
+def _is_admin_flag(value) -> bool:
+    """Parse users.is_admin safely (bool / string / int)."""
+    if value is True or value is False:
+        return bool(value)
+    if isinstance(value, (int, float)):
+        return int(value) == 1
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "on"}
+    return False
+
+
+async def _fetch_viewer_community_scope(user_id: Optional[str]) -> tuple:
+    """Return (viewer_community_id, viewer_is_admin)."""
+    if not user_id:
+        return None, False
+    from backend.ai_engine import supabase_get
+
+    try:
+        rows = await supabase_get("users", {
+            "id": f"eq.{user_id}",
+            "select": "community_id,is_admin",
+            "limit": "1",
+        })
+        if rows:
+            return rows[0].get("community_id"), _is_admin_flag(rows[0].get("is_admin"))
+    except Exception as exc:
+        logger.error("viewer community scope lookup failed: %s", exc)
+    return None, False
+
+
+def _apply_community_scope_to_params(
+    params: dict,
+    viewer_is_admin: bool,
+    viewer_community_id,
+) -> None:
+    """Mutate Supabase query params with community scope when not admin."""
+    scope = _community_scope_supabase_filter(viewer_is_admin, viewer_community_id)
+    if scope is not None:
+        params["community_id"] = scope
+
+
 async def _search_food_near_user(
     user_id: str,
-    radius_km: float = 10,
     food_type: Optional[str] = None,
-    max_results: int = 20,
+    max_results: int = 25,
     dietary_tags: Optional[list] = None,
     exclude_allergens: Optional[list] = None,
     expiry_within_days: Optional[int] = None,
@@ -2375,14 +2730,11 @@ async def _search_food_near_user(
     title_query: Optional[str] = None,
     **_ignored,
 ) -> dict:
-    """Search available food listings near the user's location.
+    """Search available food listings for the user.
 
-    1. Fetch the user's location from the users table
-    2. Query food_listings with status in [approved, active], not expired
-    3. Filter by Haversine distance and optional food_type
-    4. Apply post-fetch filters for dietary_tags, exclude_allergens,
-       expiry_within_days, and min_quantity
-    5. Format natural-language-friendly results
+    Community-scoped recipients see only their own community. Distance is
+    computed for ranking/display only — there is no radius cutoff.
+    Legacy ``radius_km`` in ``_ignored`` is intentionally discarded.
     """
     from backend.ai_engine import supabase_get
 
@@ -2406,9 +2758,9 @@ async def _search_food_near_user(
     bad_allergens = {_norm_tag(t) for t in (exclude_allergens or []) if t}
 
     logger.info(
-        "search_food_near_user: user=%s radius=%skm type=%s diet=%s "
+        "search_food_near_user: user=%s type=%s diet=%s "
         "exclude_allergens=%s expiry_within=%s min_qty=%s",
-        user_id, radius_km, food_type, want_diet, bad_allergens,
+        user_id, food_type, want_diet, bad_allergens,
         expiry_within_days, min_quantity,
     )
     # #region agent log
@@ -2417,7 +2769,6 @@ async def _search_food_near_user(
         "search_food_near_user called",
         {
             "user_id_prefix": str(user_id)[:8] if user_id else None,
-            "radius_km": radius_km,
             "food_type": food_type,
             "want_diet": sorted(want_diet),
             "bad_allergens": sorted(bad_allergens),
@@ -2426,18 +2777,25 @@ async def _search_food_near_user(
     )
     # #endregion
 
-    # --- 1. Get user location ---
+    # --- 1. Get user location + community scope ---
     # Prefer the geocoded latitude/longitude columns populated when the
     # user saves their profile address. Fall back to the legacy `location`
     # JSON column for older rows that pre-date geocoding.
     user_lat, user_lng = None, None
+    viewer_community_id = None
+    viewer_is_admin = False
     try:
         user_rows = await supabase_get("users", {
             "id": f"eq.{user_id}",
-            "select": "id,name,organization,location,latitude,longitude,address,created_at",
+            "select": (
+                "id,name,organization,location,latitude,longitude,address,"
+                "created_at,community_id,is_admin"
+            ),
         })
         if user_rows:
             profile = user_rows[0]
+            viewer_community_id = profile.get("community_id")
+            viewer_is_admin = _is_admin_flag(profile.get("is_admin"))
             # 1a) New canonical columns (numeric — PostgREST may return strings)
             raw_lat = profile.get("latitude")
             raw_lng = profile.get("longitude")
@@ -2519,6 +2877,17 @@ async def _search_food_near_user(
     if min_quantity is not None and min_quantity > 0:
         params["quantity"] = f"gte.{min_quantity}"
 
+    # Never surface the caller's own donations in Find-Food results — seeing
+    # them makes people try to claim their own food and confuses the chat.
+    if user_id:
+        params["user_id"] = f"neq.{user_id}"
+
+    # School-code users only see food for their own community.
+    _apply_community_scope_to_params(params, viewer_is_admin, viewer_community_id)
+    allowed_community_ids = _allowed_community_id_strings(
+        viewer_is_admin, viewer_community_id
+    )
+
     # Do NOT apply a PostgREST bounding-box filter: listings without
     # latitude/longitude would be excluded entirely even though they are
     # visible on Find Food. Distance is applied post-fetch instead.
@@ -2538,6 +2907,7 @@ async def _search_food_near_user(
             "bbox_applied": "and" in params,
             "status_filter": params.get("status"),
             "listing_type_filter": params.get("listing_type"),
+            "excluded_own_user": bool(user_id),
             "sample": [
                 {
                     "id": l.get("id"),
@@ -2553,21 +2923,27 @@ async def _search_food_near_user(
     )
     # #endregion
 
-    # --- 3. Filter by distance ---
+    # --- 3. Score / decorate results (no distance cutoff) ---
     now = datetime.now(timezone.utc)
     raw_count = len(listings)
     results = []
     skip_fresh = skip_own = skip_distance = skip_diet = skip_allergen = skip_parse = 0
-    own_included = 0
     listings_no_coords = 0
     for listing in listings:
         try:
             if not _listing_is_fresh_enough(listing, now=now):
                 skip_fresh += 1
                 continue
-            is_own = str(listing.get("user_id") or "") == str(user_id)
-            if is_own:
-                own_included += 1
+            # Defense in depth: never surface another school's food even if
+            # the PostgREST community filter was skipped or bypassed.
+            if not _listing_in_community_scope(listing, allowed_community_ids):
+                skip_own += 1
+                continue
+            # Defense in depth: also drop own rows if neq filter was skipped
+            # (e.g. missing user_id or PostgREST quirk).
+            if user_id and str(listing.get("user_id") or "") == str(user_id):
+                skip_own += 1
+                continue
             lat = listing.get("latitude")
             lng = listing.get("longitude")
             if lat is None or lng is None:
@@ -2581,10 +2957,8 @@ async def _search_food_near_user(
             else:
                 dist = None
 
-            # Include listing if within radius, or if no location data available
-            if dist is not None and dist > radius_km:
-                skip_distance += 1
-                continue
+            # No radius cutoff — community scope (or admin unrestricted) is the
+            # only geographic gate. Distance is for sorting/display only.
 
             # Dietary / allergen filters (post-fetch so we can normalise tags).
             # Listing tag columns may be a list, comma-separated string, or null.
@@ -2641,8 +3015,9 @@ async def _search_food_near_user(
                 "distance_km": round(dist, 1) if dist is not None else None,
                 "latitude": lat,
                 "longitude": lng,
+                "community_id": listing.get("community_id"),
                 "community_name": _community_name_from_listing(listing),
-                "is_own_listing": is_own,
+                "is_own_listing": False,
             }
             results.append(result)
         except Exception as exc:
@@ -2660,32 +3035,20 @@ async def _search_food_near_user(
             # #endregion
             continue
 
+    matched_title_hints: list[str] = []
+    unmatched_title_hints: list[str] = []
     if title_query:
-        hint = title_query.strip().lower()
-
-        def _title_matches(row: dict) -> bool:
-            title_l = str(row.get("title") or "").strip().lower()
-            if not title_l:
-                return False
-            if hint in title_l:
-                return True
-            tokens = re.findall(r"[a-z']+", title_l)
-            if hint in tokens:
-                return True
-            if difflib.SequenceMatcher(None, hint, title_l).ratio() >= 0.72:
-                return True
-            return any(
-                difflib.SequenceMatcher(None, hint, tok).ratio() >= 0.72
-                for tok in tokens
-            )
-
-        title_filtered = [r for r in results if _title_matches(r)]
-        if title_filtered:
-            results = title_filtered
+        results, matched_title_hints, unmatched_title_hints = _apply_title_query_filter(
+            results, title_query,
+        )
 
     # Sort by distance (nearest first), nulls last
     results.sort(key=lambda r: r["distance_km"] if r["distance_km"] is not None else 9999)
-    results = results[:max_results]
+    try:
+        cap = max(1, min(int(max_results or 25), 25))
+    except (TypeError, ValueError):
+        cap = 25
+    results = results[:cap]
     for i, r in enumerate(results, 1):
         r["display_index"] = i
     duplicate_groups = _annotate_duplicate_listings(results)
@@ -2698,7 +3061,6 @@ async def _search_food_near_user(
             "final_count": len(results),
             "skip_fresh": skip_fresh,
             "skip_own": skip_own,
-            "own_included": own_included,
             "skip_distance": skip_distance,
             "skip_diet": skip_diet,
             "skip_allergen": skip_allergen,
@@ -2719,7 +3081,6 @@ async def _search_food_near_user(
         summary_parts = []
         for i, r in enumerate(results, 1):
             dist_str = f"{r['distance_km']} km away" if r["distance_km"] is not None else "distance unknown"
-            own_note = " (your donation — you can't claim your own)" if r.get("is_own_listing") else ""
             dup_note = ""
             if r.get("same_title_count", 1) > 1:
                 dup_note = (
@@ -2728,18 +3089,21 @@ async def _search_food_near_user(
                 )
             summary_parts.append(
                 f"{i}. **{r['title']}** ({r['category'] or 'food'}) — "
-                f"{r['quantity']} {r['unit'] or 'items'}, {dist_str}{own_note}{dup_note}. "
+                f"{r['quantity']} {r['unit'] or 'items'}, {dist_str}{dup_note}. "
                 f"Pickup: {r['address'] or 'contact donor'}."
             )
-        own_count = sum(1 for r in results if r.get("is_own_listing"))
         lead = f"Found {len(results)} food item(s) near you"
-        if own_count and own_count == len(results):
-            lead = (
-                f"Found {len(results)} listing(s) near your address — "
-                "these are your own donations (others can claim them; you cannot claim your own)"
-            )
-        elif own_count:
-            lead = f"Found {len(results)} food item(s) near you ({own_count} are your donations)"
+        match_note = ""
+        if matched_title_hints or unmatched_title_hints:
+            parts = []
+            if matched_title_hints:
+                parts.append("matched: " + ", ".join(matched_title_hints))
+            if unmatched_title_hints:
+                parts.append(
+                    "NOT found nearby for: " + ", ".join(unmatched_title_hints)
+                )
+            match_note = " (" + "; ".join(parts) + ")"
+        lead = lead + match_note
         dup_group_lines = []
         for key, rows in duplicate_groups.items():
             label = rows[0].get("title") or key
@@ -2754,14 +3118,29 @@ async def _search_food_near_user(
                 "\n\nSame food type, separate postings:\n"
                 + "\n".join(dup_group_lines)
             )
+        missing_rule = ""
+        if unmatched_title_hints:
+            missing_rule = (
+                "\nIMPORTANT: Say clearly that these requested foods were NOT "
+                f"found nearby: {', '.join(unmatched_title_hints)}. Do NOT claim "
+                "they are available. For MATCHED foods, include quantity and "
+                "pickup address from the cards."
+            )
+        elif matched_title_hints and len(matched_title_hints) >= 2:
+            missing_rule = (
+                "\nIMPORTANT: The user asked for multiple foods and several matched. "
+                "Acknowledge EACH matched food with quantity and pickup address — "
+                "do not pretend only one was found."
+            )
         summary = (
             f"{lead}:\n"
             + "\n".join(summary_parts)
             + dup_block
+            + missing_rule
             + "\n\nTell the user food cards appear in chat — keep your reply to "
-            "1–2 warm sentences plus 'Which number works for you?' Do NOT paste "
-            "this full list into the user message. Each number maps to listing_id "
-            "when calling claim_listing."
+            "1–2 warm sentences that name the matched foods (qty + address) plus "
+            "'Which number works for you?' Do NOT paste this full list into the "
+            "user message. Each number maps to listing_id when calling claim_listing."
         )
     else:
         active_filters = []
@@ -2776,17 +3155,24 @@ async def _search_food_near_user(
         if min_quantity:
             active_filters.append(f"qty>={min_quantity}")
         hint = f" (filters: {'; '.join(active_filters)})" if active_filters else ""
-        if raw_count > 0 and own_included == raw_count:
+        if skip_own and raw_count == 0:
+            # neq filter removed them all from the fetch — rare edge case.
             summary = (
-                f"There are {raw_count} active listing(s) near your address, but "
-                "they are all your own donations — you cannot claim your own food. "
-                "Others can claim them; sign in as a recipient or browse Find Food "
-                "to see food shared by other donors."
+                "No food from other donors is available near your address right now. "
+                "Your own donations are managed under My Listings / Share Food — "
+                "they are not shown here because you can't claim your own food. "
+                "Try a wider search or check back later!"
+            )
+        elif skip_own and not results:
+            summary = (
+                f"No claimable food from other donors right now{hint}. "
+                "Your own donations are hidden from Find Food. "
+                "Check back later!"
             )
         else:
             summary = (
-                f"No available food listings found within {radius_km} km of your "
-                f"saved address{hint}. Try a wider search or check back later!"
+                f"No available food listings found for your community"
+                f"{hint}. Check back later!"
             )
 
     return {
@@ -2810,7 +3196,6 @@ async def _search_food_near_user(
             "Each listing is a separate posting. Identical titles are the same food "
             "TYPE but NOT one combined pool — never add quantities across listings."
         ),
-        "radius_km": radius_km,
         "user_location_available": user_lat is not None,
         "filters_applied": {
             "food_type": food_type,
@@ -2818,7 +3203,12 @@ async def _search_food_near_user(
             "exclude_allergens": sorted(bad_allergens) if bad_allergens else [],
             "expiry_within_days": expiry_within_days,
             "min_quantity": min_quantity,
+            "title_query": title_query,
+            "title_matched": matched_title_hints,
+            "title_unmatched": unmatched_title_hints,
         },
+        "requested_foods_matched": matched_title_hints,
+        "requested_foods_missing": unmatched_title_hints,
         "summary": summary,
     }
 
@@ -4204,6 +4594,41 @@ async def _resolve_community(community_name: Optional[str], community_id: Option
     return None, None
 
 
+async def _community_from_food_request(
+    request_id: str,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Return (community_id, community_name, title) for a food request listing."""
+    from backend.ai_engine import supabase_get
+
+    rid = str(request_id or "").strip()
+    if not rid:
+        return None, None, None
+    try:
+        rows = await supabase_get("food_listings", {
+            "id": f"eq.{rid}",
+            "listing_type": "eq.request",
+            "select": "id,title,community_id,communities(id,name)",
+            "limit": "1",
+        })
+    except Exception as exc:
+        logger.warning("food request community lookup failed: %s", exc)
+        return None, None, None
+    if not rows:
+        return None, None, None
+    row = rows[0]
+    cid = row.get("community_id")
+    title = row.get("title")
+    community = row.get("communities")
+    if isinstance(community, list):
+        community = community[0] if community else None
+    cname = (community or {}).get("name") if isinstance(community, dict) else None
+    if cid and not cname:
+        _, cname = await _resolve_community(None, str(cid))
+    if not cid:
+        return None, None, title
+    return str(cid), cname, title
+
+
 def _best_community_name_match(query: str, rows: list) -> Optional[dict]:
     """Return the best-matching community row for a free-text query."""
     import difflib
@@ -4252,6 +4677,7 @@ async def _find_recent_duplicate_listing(
     quantity: Optional[float] = None,
     address: Optional[str] = None,
     window_minutes: int = 45,
+    listing_type: str = "donation",
 ) -> Optional[dict]:
     """Return a recent matching listing by the same donor (duplicate-post guard)."""
     from backend.ai_engine import supabase_get, _is_placeholder_address
@@ -4260,17 +4686,23 @@ async def _find_recent_duplicate_listing(
     if not title_key or not user_id:
         return None
 
+    lt = str(listing_type or "donation").strip().lower()
+    if lt not in ("donation", "request"):
+        lt = "donation"
+
     cutoff = (
         datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
     ).isoformat()
     try:
         rows = await supabase_get("food_listings", {
             "user_id": f"eq.{user_id}",
-            "status": "in.(approved,pending)",
+            "listing_type": f"eq.{lt}",
+            "status": "in.(approved,active,pending)",
             "created_at": f"gte.{cutoff}",
             "select": (
                 "id,title,quantity,unit,image_url,location,full_address,"
-                "latitude,longitude,community_id,expiry_date,created_at"
+                "latitude,longitude,community_id,expiry_date,created_at,status,"
+                "listing_type"
             ),
             "order": "created_at.desc",
             "limit": "25",
@@ -4321,6 +4753,7 @@ async def _create_food_listing(
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
     image_url: Optional[str] = None,
+    fulfilling_request_id: Optional[str] = None,
     **_ignored,
 ) -> dict:
     """Insert a single food donation listing for the authenticated user."""
@@ -4352,6 +4785,23 @@ async def _create_food_listing(
         cat = "other"
 
     donor = await fetch_donor_listing_defaults(str(user_id))
+
+    # Fulfilling an open food request → use that request's community directly.
+    if fulfilling_request_id:
+        req_cid, req_cname, req_title = await _community_from_food_request(
+            str(fulfilling_request_id)
+        )
+        if not req_cid:
+            return {
+                "success": False,
+                "error": "request_not_found",
+                "message": "Could not find that food request to fulfill.",
+            }
+        community_id = req_cid
+        community_name = req_cname or community_name
+        community_confirmed = True
+        if not description and req_title:
+            description = f"Shared in response to a community request for: {req_title}"
 
     if not community_confirmed:
         suggested_id, suggested_name = (None, None)
@@ -4389,6 +4839,7 @@ async def _create_food_listing(
             "suggested_community_id": suggested_id,
         }
 
+    listing_status = await _resolve_create_listing_status()
     row: dict = {
         "user_id": str(user_id),
         "title": title_s[:200],
@@ -4396,7 +4847,7 @@ async def _create_food_listing(
         "unit": unit_s,
         "category": cat,
         "listing_type": "donation",
-        "status": "approved",
+        "status": listing_status,
     }
     if description:
         row["description"] = str(description).strip()[:2000]
@@ -4468,18 +4919,28 @@ async def _create_food_listing(
                 "longitude": dup.get("longitude"),
                 "community_id": dup.get("community_id"),
                 "expiry_date": dup.get("expiry_date"),
+                "status": dup.get("status"),
+                "awaiting_approval": str(dup.get("status") or "").lower() == "pending",
                 "on_map": dup.get("latitude") is not None and dup.get("longitude") is not None,
                 "duplicate_of_recent": True,
                 "photo_merged": True,
                 "summary": (
-                    f"That listing is already live — added the photo to '{title_s}' "
-                    f"(id {dup_id[:8]}…). No duplicate was created."
+                    (
+                        f"That listing is already awaiting approval — added the photo to "
+                        f"'{title_s}' (id {dup_id[:8]}…). No duplicate was created."
+                    )
+                    if str(dup.get("status") or "").lower() == "pending"
+                    else (
+                        f"That listing is already live — added the photo to '{title_s}' "
+                        f"(id {dup_id[:8]}…). No duplicate was created."
+                    )
                 ),
             }
         logger.info(
             "create_food_listing: dedup hit user=%s title=%r -> existing id=%s",
             user_id, title_s, dup_id,
         )
+        dup_pending = str(dup.get("status") or "").lower() == "pending"
         return {
             "success": True,
             "listing_id": dup_id,
@@ -4492,11 +4953,17 @@ async def _create_food_listing(
             "longitude": dup.get("longitude"),
             "community_id": dup.get("community_id"),
             "expiry_date": dup.get("expiry_date"),
+            "status": dup.get("status"),
             "on_map": dup.get("latitude") is not None and dup.get("longitude") is not None,
             "duplicate_of_recent": True,
             "summary": (
-                f"That listing is already up — '{title_s}' (id {dup_id[:8]}…). "
-                "Skipped creating a duplicate."
+                f"That listing is already awaiting approval — '{title_s}' "
+                f"(id {dup_id[:8]}…). Skipped creating a duplicate."
+                if dup_pending
+                else (
+                    f"That listing is already up — '{title_s}' (id {dup_id[:8]}…). "
+                    "Skipped creating a duplicate."
+                )
             ),
         }
 
@@ -4547,6 +5014,7 @@ async def _create_food_listing(
         return {"success": False, "error": "No row returned from database"}
 
     on_map = row.get("latitude") is not None and row.get("longitude") is not None
+    is_pending = str(row.get("status") or "").lower() == "pending"
     summary_bits = [
         f"Posted '{row['title']}' ({row['quantity']} {row['unit']}, {row['category']})"
     ]
@@ -4554,7 +5022,17 @@ async def _create_food_listing(
         summary_bits.append(f"at {row.get('full_address') or row.get('location')}")
     if resolved_community_name:
         summary_bits.append(f"in {resolved_community_name}")
-    summary_bits.append("— live on the map." if on_map else "— note: no map coordinates yet, recipients can still see it in the feed.")
+    if is_pending:
+        summary_bits.append(
+            "— awaiting admin approval before it appears on Find Food. "
+            "Please wait for admin approval."
+        )
+    elif on_map:
+        summary_bits.append("— live on the map.")
+    else:
+        summary_bits.append(
+            "— note: no map coordinates yet, recipients can still see it in the feed."
+        )
 
     return {
         "success": True,
@@ -4569,10 +5047,207 @@ async def _create_food_listing(
         "community_id": row.get("community_id"),
         "community_name": resolved_community_name,
         "expiry_date": row.get("expiry_date"),
-        "on_map": on_map,
+        "status": row.get("status"),
+        "awaiting_approval": is_pending,
+        "on_map": on_map and not is_pending,
         "image_url": row.get("image_url"),
         "has_photo": bool(row.get("image_url")),
         "summary": " ".join(summary_bits),
+    }
+
+
+async def _create_food_request(
+    user_id: str,
+    title: Optional[str] = None,
+    category: Optional[str] = None,
+    quantity: float = 1,
+    unit: str = "items",
+    description: Optional[str] = None,
+    needed_by: Optional[str] = None,
+    location: Optional[str] = None,
+    dietary_tags: Optional[list] = None,
+    community_name: Optional[str] = None,
+    community_id: Optional[str] = None,
+    **_ignored,
+) -> dict:
+    """Insert a community food request (food_listings.listing_type = request)."""
+    from backend.ai_engine import (
+        supabase_get,
+        supabase_post,
+        fetch_donor_listing_defaults,
+        apply_donor_defaults_to_listing,
+        _is_placeholder_address,
+    )
+
+    if not user_id:
+        return {"success": False, "error": "missing user_id"}
+
+    cat = str(category or "other").strip().lower()
+    # Map AI-style categories used by post_food_request
+    _ai_map = {
+        "produce": "produce",
+        "prepared": "prepared",
+        "packaged": "pantry",
+        "bakery": "bakery",
+        "water": "beverages",
+        "fruit": "produce",
+        "leftovers": "prepared",
+        "any": "other",
+    }
+    if cat not in _LISTING_CATEGORIES:
+        cat = _ai_map.get(cat, "other")
+    if cat not in _LISTING_CATEGORIES:
+        cat = "other"
+
+    title_s = (title or "").strip()
+    if not title_s:
+        pretty = cat if cat != "other" else "food"
+        title_s = f"Looking for {pretty}"
+
+    try:
+        qty = float(quantity)
+        if qty <= 0:
+            qty = 1.0
+    except (TypeError, ValueError):
+        qty = 1.0
+    unit_s = (unit or "items").strip()[:40] or "items"
+
+    profile = await fetch_donor_listing_defaults(str(user_id))
+    resolved_community_id, resolved_community_name = await _resolve_community(
+        community_name, community_id or profile.get("community_id")
+    )
+    if not resolved_community_id:
+        return {
+            "success": False,
+            "error": "community_required",
+            "message": (
+                "Set a school/community on your profile, or tell Nouri which "
+                "community this request is for."
+            ),
+        }
+
+    listing_status = await _resolve_create_listing_status("request")
+    row: dict = {
+        "user_id": str(user_id),
+        "title": title_s[:200],
+        "quantity": qty,
+        "unit": unit_s,
+        "category": cat,
+        "listing_type": "request",
+        "status": listing_status,
+        "community_id": resolved_community_id,
+        # Requests are text-only needs — never attach photos.
+        "image_url": None,
+    }
+    if description:
+        row["description"] = str(description).strip()[:2000]
+    else:
+        row["description"] = f"Looking for {title_s}"
+
+    resolved_needed = _normalize_expiry_date(needed_by, None, None)
+    if resolved_needed:
+        row["expiry_date"] = resolved_needed
+        row["pickup_by"] = f"{resolved_needed}T23:59:00"
+
+    if location and not _is_placeholder_address(location):
+        loc_s = str(location).strip()[:200]
+        row["location"] = loc_s
+        row["full_address"] = loc_s
+    if isinstance(dietary_tags, list):
+        row["dietary_tags"] = [str(t).strip()[:40] for t in dietary_tags if str(t).strip()][:20]
+
+    dup = await _find_recent_duplicate_listing(
+        str(user_id),
+        title_s,
+        quantity=qty,
+        address=row.get("full_address") or row.get("location"),
+        listing_type="request",
+    )
+    if dup:
+        dup_id = str(dup.get("id"))
+        return {
+            "success": True,
+            "listing_id": dup_id,
+            "request_id": dup_id,
+            "listing_type": "request",
+            "title": dup.get("title") or title_s,
+            "status": dup.get("status"),
+            "awaiting_approval": str(dup.get("status") or "").lower() == "pending",
+            "community_id": dup.get("community_id"),
+            "duplicate_of_recent": True,
+            "summary": (
+                f"That food request is already posted — '{title_s}' "
+                f"(id {dup_id[:8]}…). Skipped creating a duplicate."
+            ),
+        }
+
+    row = apply_donor_defaults_to_listing(row, profile)
+    row["community_id"] = resolved_community_id
+    row["listing_type"] = "request"
+
+    if (row.get("latitude") is None or row.get("longitude") is None) and (
+        row.get("full_address") or row.get("location")
+    ):
+        coords = await _forward_geocode(row.get("full_address") or row.get("location"))
+        if coords:
+            row["latitude"], row["longitude"] = coords
+
+    # Prefer requester contact fields from profile when available
+    try:
+        users = await supabase_get("users", {
+            "id": f"eq.{user_id}",
+            "select": "name,email,phone",
+            "limit": "1",
+        })
+        u = (users or [{}])[0]
+        if u.get("name"):
+            row["donor_name"] = str(u["name"])[:120]
+        if u.get("email"):
+            row["donor_email"] = str(u["email"])[:200]
+        if u.get("phone"):
+            row["donor_phone"] = str(u["phone"])[:40]
+    except Exception:
+        pass
+
+    try:
+        result = await supabase_post("food_listings", row)
+    except Exception as exc:
+        logger.error("create_food_request insert failed: %s", exc)
+        return {"success": False, "error": f"Insert failed: {exc}"}
+
+    listing_id = None
+    if isinstance(result, list) and result:
+        listing_id = result[0].get("id")
+    if not listing_id:
+        return {"success": False, "error": "No row returned from database"}
+
+    is_pending = str(row.get("status") or "").lower() == "pending"
+    summary = (
+        f"Posted food request '{row['title']}' "
+        f"({row['quantity']} {row['unit']}, {row['category']})"
+    )
+    if resolved_community_name:
+        summary += f" in {resolved_community_name}"
+    if is_pending:
+        summary += " — awaiting admin approval before it appears on Community Requests."
+    else:
+        summary += " — live on Community Requests for donors in your community."
+
+    return {
+        "success": True,
+        "listing_id": str(listing_id),
+        "request_id": str(listing_id),
+        "listing_type": "request",
+        "title": row["title"],
+        "quantity": row["quantity"],
+        "unit": row["unit"],
+        "category": row["category"],
+        "community_id": row.get("community_id"),
+        "community_name": resolved_community_name,
+        "expiry_date": row.get("expiry_date"),
+        "status": row.get("status"),
+        "awaiting_approval": is_pending,
+        "summary": summary,
     }
 
 
@@ -4588,6 +5263,12 @@ _CLAIM_ALL_KEYWORDS = frozenset({
     "all", "everything", "every", "max", "maximum", "whole", "entire",
     "todo", "todos", "toda", "todas", "completo", "completa", "entero",
 })
+
+# Soft abuse ceiling for absurd explicit integers (e.g. "claim 999999").
+# "all" / None still claim the full available amount. Available qty is always
+# the hard ceiling via _normalize_claim_quantity. The old hard max of 2 made
+# claiming a portion (3 of 10) feel impossible.
+_MAX_CLAIM_PER_LISTING = 50
 
 
 def _normalize_claim_quantity(
@@ -4631,7 +5312,9 @@ def _normalize_claim_quantity(
     s = str(raw_quantity).strip().lower()
     if not s:
         return (1, False)
-    if s in _CLAIM_ALL_KEYWORDS:
+    if s in _CLAIM_ALL_KEYWORDS or s in {
+        "all of them", "all of it", "the whole thing", "whole thing",
+    }:
         return (available_qty, False)
     # Pull the first integer out of "5", "5 loaves", "qty: 3", etc.
     m = re.search(r"-?\d+", s)
@@ -4667,6 +5350,13 @@ async def _claim_food_listing(
         return {"success": False, "error": "missing user_id"}
     if not listing_id or not isinstance(listing_id, str):
         return {"success": False, "error": "missing listing_id"}
+    listing_id = listing_id.strip()
+    if (
+        not re.fullmatch(r"[\w-]+", listing_id)
+        or len(listing_id) > 64
+        or any(ch in listing_id for ch in ",().")
+    ):
+        return {"success": False, "error": "invalid listing_id"}
 
     # --- 1. Fetch the listing to verify it exists and is claimable ---
     try:
@@ -4697,7 +5387,49 @@ async def _claim_food_listing(
         }
 
     if str(listing.get("user_id") or "") == str(user_id):
-        return {"success": False, "error": "You cannot claim your own listing."}
+        return {
+            "success": False,
+            "error": "own_listing",
+            "message": (
+                "That's your own donation — it isn't shown in Find Food and "
+                "can't be claimed. Open My Listings / Ask Nouri to update or "
+                "delete it instead."
+            ),
+        }
+
+    # School-code users may only claim food from their own community.
+    try:
+        claimer_rows = await supabase_get("users", {
+            "id": f"eq.{user_id}",
+            "select": "id,community_id,is_admin",
+            "limit": "1",
+        })
+        claimer = (claimer_rows or [{}])[0]
+        allowed = _allowed_community_id_strings(
+            bool(claimer.get("is_admin")),
+            claimer.get("community_id"),
+        )
+        if allowed is not None:
+            listing_cid = listing.get("community_id")
+            if listing_cid is None or str(listing_cid) not in allowed:
+                return {
+                    "success": False,
+                    "error": "wrong_community",
+                    "message": (
+                        "That listing belongs to a different community/school. "
+                        "I can only help you claim food from your community."
+                    ),
+                }
+    except Exception as exc:
+        logger.error("claim_food_listing: community scope check failed: %s", exc)
+        return {
+            "success": False,
+            "error": "wrong_community",
+            "message": (
+                "I couldn't verify this listing belongs to your community. "
+                "Please search again and pick a listing from Find Food."
+            ),
+        }
 
     status = str(listing.get("status") or "").lower()
     if status in {"claimed", "completed", "expired", "cancelled", "declined"}:
@@ -4711,7 +5443,7 @@ async def _claim_food_listing(
     if status not in {"", "active", "approved", "available"}:
         return {
             "success": False,
-            "error": f"Listing is not available to claim yet (status: {status}).",
+            "error": f"Listing is not claimable right now (status: {status}).",
         }
 
     # Guard: reject claims on listings whose expiry_date or pickup_by has
@@ -4766,9 +5498,32 @@ async def _claim_food_listing(
     # --- 2. Normalize claim quantity (food_claims.quantity is INTEGER NOT NULL) ---
     # Tolerate "all" / "everything" / "5 loaves" instead of silently defaulting
     # to 1 when the model passes a non-numeric value. See _normalize_claim_quantity.
+    # Available quantity is the only hard ceiling. Soft abuse ceiling below
+    # only applies to huge explicit integers — never to "all" / None.
+    available_int = int(available_qty) if available_qty >= 1 else 1
     requested_qty, quantity_clamped = _normalize_claim_quantity(
-        quantity, int(available_qty) if available_qty >= 1 else 1
+        quantity, available_int
     )
+    _qty_s = str(quantity).strip().lower() if isinstance(quantity, str) else ""
+    _is_all_or_default = quantity is None or _qty_s in _CLAIM_ALL_KEYWORDS or _qty_s in {
+        "all of them", "all of it", "the whole thing", "whole thing",
+    }
+    if (
+        not _is_all_or_default
+        and requested_qty > _MAX_CLAIM_PER_LISTING
+        and available_int > _MAX_CLAIM_PER_LISTING
+    ):
+        return {
+            "success": False,
+            "error": (
+                f"That's a large claim ({requested_qty} of {available_int}). "
+                f"Please claim up to {_MAX_CLAIM_PER_LISTING} at a time, "
+                "or say 'all' if you truly need the full stock."
+            ),
+            "needs_quantity_confirm": True,
+            "available_quantity": available_int,
+            "max_per_claim": _MAX_CLAIM_PER_LISTING,
+        }
 
     # --- 2b. Prevent duplicate claims on the same listing ---
     try:
@@ -4792,6 +5547,7 @@ async def _claim_food_listing(
             summary = (
                 f"You already claimed {qty} {unit} of '{title}'."
                 + (f" Pickup at {pickup_loc}." if pickup_loc else "")
+                + " Please wait for admin approval before pickup."
             )
             return {
                 "success": True,
@@ -4838,14 +5594,28 @@ async def _claim_food_listing(
     # The old _next_friday_5pm_utc() helper was wrong: it used Friday 5 PM
     # (pre-migration deadline) and hardcoded PST -8h (incorrect during PDT,
     # Apr–Oct, when the offset should be -7h).
+    #
+    # Match ClaimFoodForm: reuse a pending receipt only for the SAME
+    # pickup_location (community name preferred, else address).
     receipt_id = None
     pickup_deadline_db: Optional[str] = None
-    pickup_loc = listing.get("full_address") or _extract_location_text(listing.get("location")) or None
+    food_address = listing.get("full_address") or _extract_location_text(listing.get("location")) or None
+    community_blob = listing.get("communities")
+    if isinstance(community_blob, list):
+        community_blob = community_blob[0] if community_blob else None
+    community_name = None
+    if isinstance(community_blob, dict):
+        community_name = str(community_blob.get("name") or "").strip() or None
+    pickup_location_name = community_name or food_address or "Community Location"
+    pickup_loc = food_address  # address shown in claim summary
+    pickup_address = community_blob.get("location") if isinstance(community_blob, dict) else None
+    pickup_address = str(pickup_address or food_address or "Address not available")[:500]
     try:
         existing_receipts = await supabase_get("receipts", {
             "user_id": f"eq.{user_id}",
             "status": "eq.pending",
-            "select": "id,pickup_by",
+            "pickup_location": f"eq.{pickup_location_name}",
+            "select": "id,pickup_by,pickup_location",
             "order": "created_at.desc",
             "limit": "1",
         })
@@ -4856,11 +5626,10 @@ async def _claim_food_listing(
             receipt_row: dict = {
                 "user_id": str(user_id),
                 "status": "pending",
+                "pickup_location": str(pickup_location_name)[:255],
+                "pickup_address": pickup_address,
                 # pickup_by omitted — DB trigger sets Friday 11:59 PM Pacific
             }
-            if pickup_loc:
-                receipt_row["pickup_location"] = str(pickup_loc)[:255]
-                receipt_row["pickup_address"] = str(pickup_loc)[:500]
             receipt_result = await supabase_post("receipts", receipt_row)
             if isinstance(receipt_result, list) and receipt_result:
                 receipt_id = receipt_result[0].get("id")
@@ -4868,11 +5637,12 @@ async def _claim_food_listing(
     except Exception as exc:
         logger.warning("claim_food_listing: receipt create/lookup failed (non-fatal): %s", exc)
 
+    claim_status = await _resolve_create_claim_status()
     claim_row: dict = {
         "food_id": listing_id,
         "claimer_id": str(user_id),
         "requester_name": requester_name,
-        "status": "approved",
+        "status": claim_status,
         "quantity": requested_qty,
         "pickup_date": str(pickup_date).strip()[:40] if pickup_date else None,
     }
@@ -4907,7 +5677,12 @@ async def _claim_food_listing(
     # read it in step 1. If two users simultaneously reach this point, only
     # one PATCH will match; the other gets an empty result → claim rollback.
     remaining = available_qty - requested_qty
-    patch_body = {"status": "claimed"} if remaining <= 0 else {"quantity": remaining}
+    # Always write quantity on full claim. Status-only patches left the old
+    # stock on the row, so cancel_claim (current + claim_qty) doubled inventory.
+    if remaining <= 0:
+        patch_body = {"status": "claimed", "quantity": 0}
+    else:
+        patch_body = {"quantity": remaining}
     try:
         patched_rows = await supabase_patch(
             "food_listings",
@@ -4933,7 +5708,21 @@ async def _claim_food_listing(
                 ),
             }
     except Exception as exc:
-        logger.warning("claim_food_listing: listing patch failed (non-fatal): %s", exc)
+        logger.error("claim_food_listing: listing patch failed — rolling back claim: %s", exc)
+        try:
+            await supabase_delete("food_claims", {"id": f"eq.{claim_id}"})
+        except Exception as del_exc:
+            logger.error(
+                "claim_food_listing: rollback delete failed for claim %s: %s",
+                claim_id, del_exc,
+            )
+        return {
+            "success": False,
+            "error": (
+                "Could not update the listing after creating your claim. "
+                "Please search again and try once more."
+            ),
+        }
 
     title = str(listing.get("title") or "the listing")
     unit = str(listing.get("unit") or "")
@@ -4942,6 +5731,9 @@ async def _claim_food_listing(
     summary = " ".join(p for p in summary_parts if p).strip() + "."
     if pickup_loc:
         summary += f" Pickup at {pickup_loc}."
+    awaiting_approval = str(claim_status).lower() == "pending"
+    if awaiting_approval:
+        summary += " Please wait for admin approval before pickup."
     # When we had to clamp the request down to what was actually available,
     # tell the model explicitly. Without this hint GPT often echoes the
     # number the user asked for ("I claimed 5 loaves") instead of the
@@ -4959,6 +5751,8 @@ async def _claim_food_listing(
         "quantity": requested_qty,
         "quantity_clamped": quantity_clamped,
         "unit": unit,
+        "status": claim_status,
+        "awaiting_approval": awaiting_approval,
         "remaining_on_listing": max(remaining, 0),
         "pickup_location": pickup_loc,
         "pickup_deadline": pickup_deadline_db,
@@ -5047,20 +5841,19 @@ async def _cancel_claim(
 
     status = str(claim.get("status") or "").lower()
     if status in {"completed", "expired", "declined"}:
-        # The claim_id from conversation history is stale. Try to find a live
-        # active claim — first on the same food item, then any of this user's
-        # active claims — rather than surfacing a confusing error to the user.
+        # Stale claim_id from history — only retry the same food item.
+        # Never fall back to an unrelated active claim (wrong release).
         stale_food_id = claim.get("food_id")
+        if not stale_food_id:
+            return {"success": False, "error": f"Claim is already {status}, nothing to cancel."}
         try:
             fresh = await _find_user_claim(user_id, None, stale_food_id)
-            if fresh and str(fresh.get("status") or "").lower() not in {"completed", "expired", "declined"}:
+            if fresh and str(fresh.get("status") or "").lower() not in {
+                "completed", "expired", "declined",
+            }:
                 claim = fresh
             else:
-                fresh = await _find_user_claim(user_id, None, None)
-                if fresh:
-                    claim = fresh
-                else:
-                    return {"success": False, "error": f"Claim is already {status}, nothing to cancel."}
+                return {"success": False, "error": f"Claim is already {status}, nothing to cancel."}
         except Exception as exc:
             logger.warning("cancel_claim: fallback lookup failed: %s", exc)
             return {"success": False, "error": f"Claim is already {status}, nothing to cancel."}
@@ -5095,11 +5888,18 @@ async def _cancel_claim(
                     current_qty = float(listing.get("quantity") or 0)
                 except (TypeError, ValueError):
                     current_qty = 0
-                restored_qty = current_qty + claim_qty
                 listing_status = str(listing.get("status") or "").lower()
-                patch = {"quantity": restored_qty}
+                # Fully claimed (correct qty=0, or legacy status-only where
+                # qty still equals claim_qty): restore to exactly claim_qty.
+                # Partial claim: listing stayed live with leftover stock.
                 if listing_status in {"claimed", "completed"}:
-                    patch["status"] = "active"
+                    if current_qty <= 0 or abs(current_qty - float(claim_qty)) < 1e-6:
+                        restored_qty = float(claim_qty)
+                    else:
+                        restored_qty = current_qty + claim_qty
+                    patch = {"quantity": restored_qty, "status": "approved"}
+                else:
+                    patch = {"quantity": current_qty + claim_qty}
                 await supabase_patch("food_listings", {"id": f"eq.{food_id}"}, patch)
         except Exception as exc:
             logger.warning("cancel_claim: listing restore failed (non-fatal): %s", exc)
@@ -5192,19 +5992,24 @@ async def _delete_listing(
     title: Optional[str] = None,
     listing_ids: Optional[list] = None,
     delete_duplicates: bool = False,
+    delete_all: bool = False,
     confirmed: bool = False,
     **_ignored,
 ) -> dict:
     from backend.ai_engine import supabase_get, supabase_delete
     from backend.ai.conversation_flow import (
+        clear_last_bulk_posted_ids,
+        get_last_bulk_posted_ids,
         get_last_donor_listings,
         resolve_donor_listing_id,
         set_last_donor_listings,
     )
 
     logger.info(
-        "delete_listing: user=%s listing=%s title=%s confirmed=%s bulk=%s dup=%s",
-        user_id, listing_id, title, confirmed, bool(listing_ids), delete_duplicates,
+        "delete_listing: user=%s listing=%s title=%s confirmed=%s bulk=%s "
+        "dup=%s all=%s",
+        user_id, listing_id, title, confirmed, bool(listing_ids),
+        delete_duplicates, delete_all,
     )
     if not user_id:
         return {"success": False, "error": "missing user_id"}
@@ -5216,18 +6021,49 @@ async def _delete_listing(
         }
 
     if not get_last_donor_listings(user_id):
-        fetched = await _get_user_listings(user_id, status="active")
+        fetched = await _get_user_listings(user_id, status="active", limit=100)
         if fetched.get("listings"):
             set_last_donor_listings(str(user_id), fetched["listings"])
 
-    # ---- Bulk delete: explicit ids or duplicate cleanup -------------------
+    # ---- Bulk delete: explicit ids, delete_all, or duplicate cleanup -----
     bulk_ids: list[str] = []
     if listing_ids:
-        bulk_ids = [str(x).strip() for x in listing_ids if str(x).strip()]
+        raw_bulk = [str(x).strip() for x in listing_ids if str(x).strip()]
+        # Always resolve display indices / truncated ids → UUIDs. Raw integers
+        # like "146" hit PostgREST as id=eq.146 and fail UUID parse.
+        for raw in raw_bulk:
+            resolved, _err = resolve_donor_listing_id(raw, str(user_id))
+            if resolved:
+                bulk_ids.append(resolved)
+            elif re.match(r"^[0-9a-f-]{36}$", raw, re.I):
+                bulk_ids.append(raw)
+            else:
+                logger.warning(
+                    "delete_listing: skipping unresolvable listing_id=%r", raw,
+                )
+        # De-dupe while preserving order
+        seen: set[str] = set()
+        bulk_ids = [x for x in bulk_ids if not (x in seen or seen.add(x))]
+    elif delete_all:
+        preferred = get_last_bulk_posted_ids(str(user_id))
+        if preferred:
+            bulk_ids = list(preferred)
+        else:
+            donor_rows = get_last_donor_listings(user_id)
+            if not donor_rows:
+                fetched = await _get_user_listings(user_id, status="active", limit=100)
+                donor_rows = fetched.get("listings") or []
+            bulk_ids = [str(r["id"]) for r in donor_rows if r.get("id")]
+        if not bulk_ids:
+            return {
+                "success": False,
+                "error": "no_listings",
+                "message": "No active listings found to delete.",
+            }
     elif delete_duplicates:
         donor_rows = get_last_donor_listings(user_id)
         if not donor_rows:
-            fetched = await _get_user_listings(user_id, status="active")
+            fetched = await _get_user_listings(user_id, status="active", limit=100)
             donor_rows = fetched.get("listings") or []
         remove_ids, dup_meta = duplicate_listing_ids_to_remove(
             donor_rows, title=title,
@@ -5249,12 +6085,20 @@ async def _delete_listing(
         failed: list[dict] = []
         titles_seen: set[str] = set()
         for lid in bulk_ids:
-            check = await supabase_get("food_listings", {
-                "id": f"eq.{lid}",
-                "user_id": f"eq.{user_id}",
-                "select": "id,title",
-                "limit": "1",
-            })
+            if not re.match(r"^[0-9a-f-]{36}$", str(lid), re.I):
+                failed.append({"listing_id": lid, "error": "invalid_uuid"})
+                continue
+            try:
+                check = await supabase_get("food_listings", {
+                    "id": f"eq.{lid}",
+                    "user_id": f"eq.{user_id}",
+                    "select": "id,title",
+                    "limit": "1",
+                })
+            except Exception as exc:
+                logger.error("delete_listing bulk: lookup failed for %s: %s", lid, exc)
+                failed.append({"listing_id": lid, "error": str(exc)[:160]})
+                continue
             if not check:
                 failed.append({"listing_id": lid, "error": "not_found"})
                 continue
@@ -5266,7 +6110,7 @@ async def _delete_listing(
                 })
             except Exception as exc:
                 logger.error("delete_listing bulk: delete failed for %s: %s", lid, exc)
-                failed.append({"listing_id": lid, "error": str(exc)})
+                failed.append({"listing_id": lid, "error": str(exc)[:160]})
                 continue
             if count == 0:
                 failed.append({"listing_id": lid, "error": "already_deleted"})
@@ -5284,17 +6128,20 @@ async def _delete_listing(
             }
 
         # Refresh donor cache after bulk delete
-        refreshed = await _get_user_listings(user_id, status="active")
-        if refreshed.get("listings"):
+        refreshed = await _get_user_listings(user_id, status="active", limit=100)
+        if refreshed.get("listings") is not None:
             set_last_donor_listings(str(user_id), refreshed["listings"])
+        clear_last_bulk_posted_ids(str(user_id))
 
         title_sample = ", ".join(sorted(titles_seen)[:3])
-        if delete_duplicates and not listing_ids:
+        if delete_duplicates and not listing_ids and not delete_all:
             summary = (
                 f"Removed {len(deleted)} duplicate listing(s)"
                 + (f" (kept one copy of each title)" if len(titles_seen) > 1 else f" for '{title_sample}'")
                 + "."
             )
+        elif delete_all:
+            summary = f"Permanently deleted {len(deleted)} listing(s)."
         else:
             summary = f"Permanently deleted {len(deleted)} listing(s)."
 
@@ -5309,6 +6156,7 @@ async def _delete_listing(
             "titles": sorted(titles_seen),
             "summary": summary,
             "delete_duplicates": bool(delete_duplicates),
+            "delete_all": bool(delete_all),
         }
 
     # ---- Single listing delete -------------------------------------------
@@ -5527,13 +6375,19 @@ async def _deactivate_listing(
 async def _get_user_listings(
     user_id: str,
     status: str = "active",
+    limit: int = 20,
     **_ignored,
 ) -> dict:
     from backend.ai_engine import supabase_get
 
-    logger.info("get_user_listings: user=%s status=%s", user_id, status)
+    logger.info("get_user_listings: user=%s status=%s limit=%s", user_id, status, limit)
     if not user_id:
         return {"success": False, "error": "missing user_id"}
+
+    try:
+        lim = max(1, min(int(limit or 20), 100))
+    except (TypeError, ValueError):
+        lim = 20
 
     params: dict = {
         "user_id": f"eq.{user_id}",
@@ -5543,12 +6397,15 @@ async def _get_user_listings(
             "community_id,communities(id,name)"
         ),
         "order": "created_at.desc",
-        "limit": "20",
+        "limit": str(lim),
     }
     if status == "all":
         pass  # no status filter
     elif status in {"active", "approved"}:
+        # Donor "my listings" includes pending (awaiting admin approval).
         params["status"] = "in.(active,approved,pending)"
+    elif status == "pending":
+        params["status"] = "eq.pending"
     else:
         params["status"] = f"eq.{status}"
 
@@ -5617,12 +6474,24 @@ async def _get_user_listings(
         ],
         "listings": listings,
         "summary": (
-            f"You have {len(listings)} {status if status != 'active' else 'active'} "
-            f"listing(s) with {total_claims} active claim(s) across them."
+            f"You have {len(listings)} "
+            f"{'listing' if status == 'active' else status + ' listing'}(s) "
+            f"with {total_claims} active claim(s) across them."
+            + (
+                f" {sum(1 for row in listings if str(row.get('status') or '').lower() == 'pending')}"
+                " awaiting admin approval."
+                if any(str(row.get("status") or "").lower() == "pending" for row in listings)
+                else ""
+            )
             + dup_lines
             + (
                 "\n" + "\n".join(
                     f"{row['display_index']}. {row['title']}"
+                    + (
+                        " [awaiting approval]"
+                        if str(row.get("status") or "").lower() == "pending"
+                        else ""
+                    )
                     + (f" ({row['same_title_count']} with same title)" if row.get("same_title_count", 1) > 1 else "")
                     for row in listings[:10]
                 )
@@ -6000,9 +6869,8 @@ def _normalize_bulk_row(raw: dict, user_id: str) -> Optional[dict]:
         "unit": unit[:40],
         "category": category,
         "listing_type": "donation",
-        # Use "approved" (not "active") to match _create_food_listing so all
-        # AI-posted listings appear with the same status. Both show in the
-        # find-food feed but "approved" is semantically correct for new AI posts.
+        # Status filled by caller via _resolve_create_listing_status so bulk
+        # posts respect the admin require_listing_approval toggle.
         "status": "approved",
     }
     if raw.get("description"):
@@ -6028,6 +6896,25 @@ def _normalize_bulk_row(raw: dict, user_id: str) -> Optional[dict]:
             row["image_url"] = norm
         elif image_url.strip().startswith(("http://", "https://")):
             row["image_url"] = image_url.strip()[:2000]
+    # Per-row community from CSV / listings array (id or free-text name).
+    raw_cid = raw.get("community_id") or raw.get("school_id")
+    raw_cname = (
+        raw.get("community_name") or raw.get("community")
+        or raw.get("school") or raw.get("school_name")
+    )
+    if raw_cid is not None and str(raw_cid).strip() not in ("", "null", "None"):
+        cid_s = str(raw_cid).strip()
+        if cid_s.isdigit():
+            try:
+                row["community_id"] = int(cid_s)
+            except (TypeError, ValueError):
+                pass
+        elif not (raw_cname and str(raw_cname).strip()):
+            row["_community_name"] = cid_s[:200]
+        else:
+            row["_community_name"] = str(raw_cname).strip()[:200]
+    if raw_cname and str(raw_cname).strip():
+        row["_community_name"] = str(raw_cname).strip()[:200]
     return row
 
 
@@ -6067,8 +6954,9 @@ async def _bulk_import_listings(
             "error": "community_not_confirmed",
             "message": (
                 "Confirm which community/school this batch is for before importing. "
-                "Then call bulk_import_listings with community_name and "
-                "community_confirmed=true."
+                "CSV rows may also include their own community / school column; "
+                "those override the batch default. Then call bulk_import_listings "
+                "with community_name and community_confirmed=true."
             ),
             "suggested_community_name": suggested_name,
             "suggested_community_id": suggested_id,
@@ -6084,7 +6972,8 @@ async def _bulk_import_listings(
             "message": (
                 "Could not resolve the community for this batch. Ask the donor to "
                 "pick one, confirm it, then retry with community_name and "
-                "community_confirmed=true."
+                "community_confirmed=true. Or put a community/school column on "
+                "each CSV row."
             ),
         }
 
@@ -6114,6 +7003,7 @@ async def _bulk_import_listings(
 
     # ---- Pre-flight: normalize + classify gaps before inserting anything ----
     # (1-based row numbers so the AI can talk to the donor in human terms.)
+    listing_status = await _resolve_create_listing_status()
     normalized: list[Optional[dict]] = []
     missing_title_rows: list[int] = []
     missing_address_rows: list[int] = []
@@ -6122,6 +7012,8 @@ async def _bulk_import_listings(
     for idx, raw in enumerate(rows_in):
         human_row = idx + 1
         norm = _normalize_bulk_row(raw, user_id)
+        if norm is not None:
+            norm["status"] = listing_status
         normalized.append(norm)
         if not norm:
             missing_title_rows.append(human_row)
@@ -6163,8 +7055,9 @@ async def _bulk_import_listings(
     # ---- Insert: apply address, donor defaults, and coordinates per row ----
     created_ids: list[str] = []
     errors: list[dict] = []
-    # Cache geocode lookups so a batch sharing one address hits Mapbox once.
+    # Cache geocode + community-name lookups so a batch hits Mapbox / DB once.
     geocode_cache: dict[str, Optional[tuple]] = {}
+    community_name_cache: dict[str, Optional[str]] = {}
     for idx, norm in enumerate(normalized):
         if not norm:  # unreachable after pre-flight, but keep mypy/readers happy
             continue
@@ -6183,8 +7076,27 @@ async def _bulk_import_listings(
             if coords:
                 norm["latitude"], norm["longitude"] = coords
         # Donor defaults fill name/phone + coords ONLY where missing.
+        # Resolve per-row community BEFORE donor defaults so warehouse
+        # profile community cannot overwrite a CSV school assignment.
+        pending_cname = norm.pop("_community_name", None)
+        if norm.get("community_id") is None and pending_cname:
+            key = str(pending_cname).strip().lower()
+            if key not in community_name_cache:
+                cid, _cname = await _resolve_community(pending_cname, None)
+                community_name_cache[key] = cid
+            resolved_row_cid = community_name_cache[key]
+            if resolved_row_cid is not None:
+                try:
+                    norm["community_id"] = int(resolved_row_cid)
+                except (TypeError, ValueError):
+                    norm["community_id"] = resolved_row_cid
         norm = apply_donor_defaults_to_listing(norm, donor)
-        norm["community_id"] = resolved_community_id
+        # Batch community is only the fallback when the row has none.
+        if norm.get("community_id") is None:
+            try:
+                norm["community_id"] = int(resolved_community_id)
+            except (TypeError, ValueError):
+                norm["community_id"] = resolved_community_id
         try:
             result = await supabase_post("food_listings", norm)
             if isinstance(result, list) and result:
@@ -6195,6 +7107,12 @@ async def _bulk_import_listings(
             errors.append({"index": idx + 1, "error": str(exc)})
 
     posted = len(created_ids)
+    if created_ids:
+        try:
+            from backend.ai.conversation_flow import set_last_bulk_posted_ids
+            set_last_bulk_posted_ids(str(user_id), created_ids)
+        except Exception:  # noqa: BLE001
+            pass
     return {
         "success": posted > 0,
         "posted": posted,
@@ -6205,6 +7123,8 @@ async def _bulk_import_listings(
         "ids": created_ids,
         "errors": errors,
         "results": errors,
+        "community_id": resolved_community_id,
+        "community_name": resolved_community_name,
         "summary": f"Imported {posted} of {len(rows_in)} listings."
                    + (f" {len(errors)} failed." if errors else ""),
     }
@@ -6301,13 +7221,18 @@ async def _attach_photos_to_listing(
         listings = await supabase_get("food_listings", {
             "id": f"eq.{listing_id}",
             "user_id": f"eq.{user_id}",
-            "select": "id,title",
+            "select": "id,title,listing_type",
             "limit": "1",
         })
     except Exception as exc:
         return {"success": False, "error": f"Could not look up listing: {exc}"}
     if not listings:
         return {"success": False, "error": "Listing not found or not owned by you."}
+    if str(listings[0].get("listing_type") or "").lower() == "request":
+        return {
+            "success": False,
+            "error": "Food requests are text-only and cannot have photos.",
+        }
 
     try:
         await supabase_patch(

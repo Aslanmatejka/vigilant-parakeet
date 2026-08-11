@@ -84,10 +84,18 @@ def _chat_result(text="Hello!", lang="en", transcript=None):
 # ===================================================================
 
 class TestWhisperNoiseFilter:
-    def test_short_text_is_noise(self):
-        assert _is_whisper_noise("hi") is True
+    def test_empty_is_noise(self):
         assert _is_whisper_noise("") is True
         assert _is_whisper_noise("  ") is True
+        assert _is_whisper_noise("a") is True
+
+    def test_short_intents_are_kept(self):
+        # Hands-free confirmations and greetings must reach chat.
+        assert _is_whisper_noise("hi") is False
+        assert _is_whisper_noise("yes") is False
+        assert _is_whisper_noise("ok") is False
+        assert _is_whisper_noise("help") is False
+        assert _is_whisper_noise("food") is False
 
     def test_exact_noise_phrases(self):
         assert _is_whisper_noise("Thank you.") is True
@@ -97,7 +105,9 @@ class TestWhisperNoiseFilter:
         assert _is_whisper_noise("Bye bye") is True
 
     def test_all_noise_words(self):
-        assert _is_whisper_noise("um uh oh yeah") is True
+        assert _is_whisper_noise("um") is True
+        assert _is_whisper_noise("um uh oh") is True
+        assert _is_whisper_noise("yes please") is False  # confirmation + polite
         assert _is_whisper_noise("thank you very much please") is True
 
     def test_repeated_phrase(self):
@@ -149,7 +159,7 @@ class TestVoiceEndpoint:
 
     @patch("backend.ai.routes.conversation_engine")
     def test_voice_filters_noise(self, mock_engine, client):
-        """Whisper noise should be rejected with 400."""
+        """Whisper noise should be rejected with structured invalid_input."""
         mock_engine.transcribe_audio = AsyncMock(return_value="Thank you")
 
         resp = client.post(
@@ -158,7 +168,12 @@ class TestVoiceEndpoint:
             data={"user_id": TEST_USER_ID},
         )
         assert resp.status_code == 400
-        assert "could not understand" in resp.json()["detail"].lower()
+        body = resp.json()
+        # Flattened AIError body from secure_http_exception_handler
+        assert body.get("error_code") == "invalid_input" or (
+            isinstance(body.get("detail"), dict)
+            and body["detail"].get("error_code") == "invalid_input"
+        )
 
     def test_voice_invalid_uuid(self, client):
         """Non-UUID user_id should be rejected."""

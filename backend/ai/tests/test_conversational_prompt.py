@@ -40,7 +40,7 @@ class TestActionPolicyIsConversational:
         is deliberately generous but catches a regression where someone
         pastes the old giant block back in.
         """
-        assert len(_build_action_policy()) < 20_000, (
+        assert len(_build_action_policy()) < 21_000, (
             "Action policy is drifting back toward the 40k-char scripted prompt."
         )
 

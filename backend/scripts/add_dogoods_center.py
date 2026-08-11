@@ -9,8 +9,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from backend.models import DistributionCenter
 
-# Database connection
-DATABASE_URL = os.getenv('DATABASE_URL', 'mysql+pymysql://admin:foodmaps2024@database-1.c9um4qfazhpa.us-east-2.rds.amazonaws.com:3306/foodmaps')
+# Database connection — require DATABASE_URL (no password defaults).
+DATABASE_URL = os.getenv('DATABASE_URL')
+if not DATABASE_URL:
+    raise SystemExit("Set DATABASE_URL in the environment before running this script.")
 
 engine = create_engine(DATABASE_URL)
 Session = sessionmaker(bind=engine)

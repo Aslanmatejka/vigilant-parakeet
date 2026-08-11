@@ -1,7 +1,6 @@
 import React from 'react';
 import AdminLayout from './AdminLayout';
 import Button from '../../components/common/Button';
-import Card from '../../components/common/Card';
 import dataService from '../../utils/dataService';
 import supabase from '../../utils/supabaseClient';
 
@@ -22,7 +21,7 @@ function FoodDistributionManagement() {
         total: 0,
         available: 0,
         claimed: 0,
-        pending: 0
+        pending: 0,
     });
 
     React.useEffect(() => {
@@ -79,7 +78,12 @@ function FoodDistributionManagement() {
     const fetchListings = async () => {
         try {
             setLoading(true);
-            const data = await dataService.getFoodListings({ status: ['pending', 'approved', 'active', 'completed', 'expired', 'declined', 'cancelled'] });
+            const data = await dataService.getFoodListings({
+                status: ['pending', 'approved', 'active', 'claimed', 'completed', 'expired', 'declined', 'cancelled'],
+                listing_type: 'donation',
+                includeExpired: true,
+                skipCommunityScope: true,
+            });
 
             setListings(data);
 
@@ -99,13 +103,17 @@ function FoodDistributionManagement() {
         }
     };
 
-    const handleStatusChange = async (listingId, newStatus) => {
+    const handleReview = async (listingId, approved) => {
         try {
-            await dataService.updateFoodListingStatus(listingId, newStatus);
+            await dataService.updateFoodListingStatus(
+                listingId,
+                approved ? 'approved' : 'declined'
+            );
+            await dataService.sendListingReviewNotification(listingId, approved);
             await fetchListings();
         } catch (error) {
-            console.error('Error updating status:', error);
-            alert('Failed to update status');
+            console.error('Error reviewing listing:', error);
+            alert(error.message || 'Failed to update listing');
         }
     };
 
@@ -169,24 +177,24 @@ function FoodDistributionManagement() {
 
                     <div className="bg-white rounded-lg shadow p-6">
                         <div className="flex items-center">
-                            <div className="flex-shrink-0 bg-[#2CABE3]/20 rounded-full p-3">
-                                <i className="fas fa-check-circle text-[#2CABE3] text-xl"></i>
+                            <div className="flex-shrink-0 bg-yellow-100 rounded-full p-3">
+                                <i className="fas fa-clock text-yellow-700 text-xl"></i>
                             </div>
                             <div className="ml-4">
-                                <p className="text-sm font-medium text-gray-500">Available</p>
-                                <p className="text-2xl font-bold text-gray-900">{stats.available}</p>
+                                <p className="text-sm font-medium text-gray-500">Pending</p>
+                                <p className="text-2xl font-bold text-gray-900">{stats.pending}</p>
                             </div>
                         </div>
                     </div>
 
                     <div className="bg-white rounded-lg shadow p-6">
                         <div className="flex items-center">
-                            <div className="flex-shrink-0 bg-yellow-100 rounded-full p-3">
-                                <i className="fas fa-clock text-yellow-600 text-xl"></i>
+                            <div className="flex-shrink-0 bg-[#2CABE3]/20 rounded-full p-3">
+                                <i className="fas fa-check-circle text-[#2CABE3] text-xl"></i>
                             </div>
                             <div className="ml-4">
-                                <p className="text-sm font-medium text-gray-500">Pending</p>
-                                <p className="text-2xl font-bold text-gray-900">{stats.pending}</p>
+                                <p className="text-sm font-medium text-gray-500">Available</p>
+                                <p className="text-2xl font-bold text-gray-900">{stats.available}</p>
                             </div>
                         </div>
                     </div>
@@ -296,14 +304,14 @@ function FoodDistributionManagement() {
                                                         <Button
                                                             variant="primary"
                                                             size="sm"
-                                                            onClick={() => handleStatusChange(listing.id, 'approved')}
+                                                            onClick={() => handleReview(listing.id, true)}
                                                         >
                                                             Approve
                                                         </Button>
                                                         <Button
-                                                            variant="danger"
+                                                            variant="secondary"
                                                             size="sm"
-                                                            onClick={() => handleStatusChange(listing.id, 'declined')}
+                                                            onClick={() => handleReview(listing.id, false)}
                                                         >
                                                             Decline
                                                         </Button>

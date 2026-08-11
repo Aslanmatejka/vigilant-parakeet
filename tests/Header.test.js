@@ -20,6 +20,17 @@ jest.mock('../utils/TutorialContext', () => ({
   useTutorial: () => ({ startTutorial: mockStartTutorial }),
 }));
 
+jest.mock('../utils/hooks/useCommunityRole.js', () => ({
+  useCommunityRole: jest.fn(() => ''),
+}));
+
+jest.mock('../utils/dataService', () => ({
+  __esModule: true,
+  default: {
+    countLiveListings: jest.fn(() => Promise.resolve(0)),
+  },
+}));
+
 jest.mock('../components/common/Avatar', () => {
   return function MockAvatar({ alt }) {
     return <div data-testid="avatar">{alt}</div>;
@@ -34,9 +45,11 @@ jest.mock('../components/common/Button', () => {
 
 import Header from '../components/common/Header';
 import { useAuthContext } from '../utils/AuthContext';
+import { useCommunityRole } from '../utils/hooks/useCommunityRole.js';
 
 beforeEach(() => {
   jest.clearAllMocks();
+  useCommunityRole.mockReturnValue('');
 });
 
 const renderHeader = (authState = {}) => {
@@ -142,5 +155,31 @@ describe('Header component', () => {
     fireEvent.click(menuButton);
     // Mobile menu contains the Menu heading
     expect(screen.getByText('Menu')).toBeInTheDocument();
+  });
+
+  test('recipient nav shows Find/Request Food but not Community Requests or Share Food', () => {
+    useCommunityRole.mockReturnValue('recipient');
+    renderHeader({
+      isAuthenticated: true,
+      user: { name: 'Recipient User', community_role: 'recipient' },
+    });
+
+    expect(screen.getAllByText('Find Food').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Request Food').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Community Requests')).not.toBeInTheDocument();
+    expect(screen.queryByText('Share Food')).not.toBeInTheDocument();
+  });
+
+  test('donor nav shows Share Food and Community Requests but not Find/Request Food', () => {
+    useCommunityRole.mockReturnValue('donor');
+    renderHeader({
+      isAuthenticated: true,
+      user: { name: 'Donor User', community_role: 'donor' },
+    });
+
+    expect(screen.getAllByText('Share Food').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Community Requests').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Find Food')).not.toBeInTheDocument();
+    expect(screen.queryByText('Request Food')).not.toBeInTheDocument();
   });
 });

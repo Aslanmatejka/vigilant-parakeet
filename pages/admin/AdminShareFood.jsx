@@ -297,7 +297,7 @@ function AdminShareFood() {
                 donor_state: geo.donor_state,
                 donor_type: 'organization',
                 listing_type: 'donation',
-                status: 'active',
+                status: 'approved',
                 image_url: GENERIC_FOOD_IMAGE,
                 user_id: user?.id || null,
                 created_at: new Date(date + 'T12:00:00').toISOString(),
@@ -792,7 +792,7 @@ function AdminShareFood() {
                     <ul className="text-sm text-blue-800 space-y-1">
                         <li>• <strong>Bulk Food Entry:</strong> Quickly add food donations to any community</li>
                         <li>• Fill in the colored row at the top to add a new entry, then click the + button</li>
-                        <li>• All entries use a generic food image and are set to Active status automatically</li>
+                        <li>• All entries use a generic food image and go live automatically</li>
                         <li>• <strong>Pickup By:</strong> Set the deadline for when food must be picked up</li>
                         <li>• <strong>Expiry Date:</strong> Set when the food expires</li>
                         <li>• <strong>Pickup Address:</strong> Where the food can be collected from</li>

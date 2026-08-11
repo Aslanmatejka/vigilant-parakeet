@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import AdminSidebar, { ADMIN_MENU_FLAT } from './AdminSidebar';
 import AIHealthBanner from '../../components/common/AIHealthBanner';
 import { useAuthContext } from '../../utils/AuthContext';
+import dataService from '../../utils/dataService';
 
 const COLLAPSE_STORAGE_KEY = 'dogoods.admin.sidebarCollapsed';
 
@@ -15,10 +16,9 @@ const COLLAPSE_STORAGE_KEY = 'dogoods.admin.sidebarCollapsed';
  *  • Collapsible icon-rail mode that persists across sessions via localStorage
  *  • Real breadcrumb (Admin / <Section>) instead of an awkward single word
  *  • Lightweight admin "command-search" that filters and jumps to any page
- *  • Notification bell carries a live count of pending approvals via the badge prop
  *  • Skip-to-content link + ESC-to-close for keyboard users
  */
-function AdminLayout({ children, active, pendingApprovals = 0 }) {
+function AdminLayout({ children, active }) {
     const navigate = useNavigate();
     const { user, signOut } = useAuthContext();
 
@@ -72,12 +72,36 @@ function AdminLayout({ children, active, pendingApprovals = 0 }) {
     // Reset highlighted result when the list changes.
     React.useEffect(() => { setActiveResultIdx(0); }, [searchQuery, showSearch]);
 
-    // Sidebar badges — only "approvals" wired today; structure is extensible.
-    const sidebarBadges = React.useMemo(() => {
-        const badges = {};
-        if (pendingApprovals > 0) badges.dashboard = pendingApprovals;
-        return badges;
-    }, [pendingApprovals]);
+    // Sidebar badges — pending listing approvals count.
+    const [sidebarBadges, setSidebarBadges] = React.useState({});
+
+    React.useEffect(() => {
+        let cancelled = false;
+        const loadBadge = async () => {
+            try {
+                const [listingCount, requestCount, claimCount] = await Promise.all([
+                    dataService.countPendingListings(),
+                    dataService.countPendingRequests(),
+                    dataService.countPendingClaims(),
+                ]);
+                if (!cancelled) {
+                    const badges = {};
+                    if (listingCount > 0) badges['listing-approvals'] = listingCount;
+                    if (requestCount > 0) badges['request-approvals'] = requestCount;
+                    if (claimCount > 0) badges['claim-approvals'] = claimCount;
+                    setSidebarBadges(badges);
+                }
+            } catch (_) {
+                if (!cancelled) setSidebarBadges({});
+            }
+        };
+        loadBadge();
+        const timer = setInterval(loadBadge, 60_000);
+        return () => {
+            cancelled = true;
+            clearInterval(timer);
+        };
+    }, []);
 
     // ───── Keyboard shortcuts: Ctrl/Cmd+K opens search, Ctrl/Cmd+\ toggles sidebar
     React.useEffect(() => {
@@ -263,23 +287,15 @@ function AdminLayout({ children, active, pendingApprovals = 0 }) {
                                     <i className="fas fa-magnifying-glass" aria-hidden="true" />
                                 </button>
 
-                                {/* Notifications with badge */}
+                                {/* Notifications */}
                                 <button
                                     type="button"
                                     className="relative inline-flex items-center justify-center h-9 w-9 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition"
-                                    aria-label={pendingApprovals > 0 ? `${pendingApprovals} pending approvals` : 'Notifications'}
-                                    title={pendingApprovals > 0 ? `${pendingApprovals} pending approvals` : 'No new notifications'}
+                                    aria-label="Notifications"
+                                    title="Notifications"
                                     onClick={() => active !== 'dashboard' && handleNavigation('/admin')}
                                 >
                                     <i className="fas fa-bell" aria-hidden="true" />
-                                    {pendingApprovals > 0 && (
-                                        <>
-                                            <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white animate-pulse" aria-hidden="true" />
-                                            <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold flex items-center justify-center">
-                                                {pendingApprovals > 99 ? '99+' : pendingApprovals}
-                                            </span>
-                                        </>
-                                    )}
                                 </button>
 
                                 <div className="hidden sm:block h-6 w-px bg-slate-200 mx-1" aria-hidden="true" />
@@ -467,7 +483,6 @@ function AdminLayout({ children, active, pendingApprovals = 0 }) {
 AdminLayout.propTypes = {
     children: PropTypes.node.isRequired,
     active: PropTypes.string.isRequired,
-    pendingApprovals: PropTypes.number,
 };
 
 export default AdminLayout;

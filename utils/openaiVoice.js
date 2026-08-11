@@ -13,7 +13,20 @@ import { throwAiHttpError } from './services/aiRequest.js'
  */
 export async function transcribeAudio(audioBlob, _language = 'en') {
   const formData = new FormData()
-  formData.append('audio', audioBlob, 'audio.webm')
+  const mime = (audioBlob?.type || 'audio/webm').split(';')[0].trim() || 'audio/webm'
+  const extByMime = {
+    'audio/webm': 'webm',
+    'video/webm': 'webm',
+    'audio/mp4': 'mp4',
+    'audio/m4a': 'm4a',
+    'audio/x-m4a': 'm4a',
+    'audio/mpeg': 'mp3',
+    'audio/mp3': 'mp3',
+    'audio/ogg': 'ogg',
+    'audio/wav': 'wav',
+  }
+  const ext = extByMime[mime] || 'webm'
+  formData.append('audio', audioBlob, `audio.${ext}`)
 
   const response = await resilientFetch(
     '/api/ai/transcribe',

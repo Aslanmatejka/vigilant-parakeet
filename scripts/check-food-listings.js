@@ -37,7 +37,7 @@ async function checkListings() {
         console.log('1. Sign up/login to the app');
         console.log('2. Go to Share Food page');
         console.log('3. Fill in the form with location data');
-        console.log('4. The listing will appear on the map once approved');
+        console.log('4. The listing goes live immediately and appears on Find Food / the map');
     }
     
     // Check listings with coordinates

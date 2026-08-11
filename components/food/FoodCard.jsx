@@ -10,6 +10,7 @@ import VerificationStatus from "./VerificationStatus";
 import FoodDietaryTags from "./FoodDietaryTags";
 import CommunityPinIcon from "../common/CommunityPinIcon";
 import { AIThinkingInline } from "../common/AIThinking.jsx";
+import { useCommunityRole } from "../../utils/hooks/useCommunityRole.js";
 
 const formatDistance = (dist) => {
     if (!dist) return '';
@@ -61,6 +62,8 @@ function FoodCard({
     communityName = null,
 }) {
     const { getRecipeSuggestions, isLoading: aiLoading } = useAI();
+    const communityRole = useCommunityRole();
+    const canFulfillRequests = communityRole === 'donor' || communityRole === 'organizer';
     const [showAITips, setShowAITips] = React.useState(false);
     const [aiSuggestions, setAISuggestions] = React.useState(null);
 
@@ -86,9 +89,10 @@ function FoodCard({
         listing_type,
         type: legacyType,
     } = food;
-    // DB column is listing_type (always 'donation' now - requests were removed).
+    // DB column is listing_type (donation | request). Requests are not claimable.
     // Fall back to legacy type field for any old in-memory objects.
-    const type = listing_type || legacyType || 'donation';
+    const type = String(listing_type || legacyType || 'donation').toLowerCase();
+    const isRequest = type === 'request';
 
     const donor = {
         name: donor_name || (users?.[0] || users)?.organization || (users?.[0] || users)?.name || 'Anonymous',
@@ -171,7 +175,7 @@ function FoodCard({
     return (
         <Card
             className={`food-card ${className}`}
-            image={image_url}
+            image={isRequest ? undefined : image_url}
             title={title}
             subtitle={
                 <div className="space-y-1.5 sm:space-y-2.5 text-xs sm:text-sm">
@@ -267,7 +271,21 @@ function FoodCard({
                             >
                                 Claim
                             </Button>
-                        ) : (
+                        ) : isRequest && canFulfillRequests ? (
+                            <Button
+                                variant="secondary"
+                                size="sm"
+                                className="flex-1 sm:flex-none text-xs sm:text-sm px-2 sm:px-3"
+                                onClick={() => {
+                                    if (typeof window !== 'undefined') {
+                                        window.location.assign('/community-requests');
+                                    }
+                                }}
+                                aria-label={`View request ${title}`}
+                            >
+                                View request
+                            </Button>
+                        ) : isRequest ? null : (
                             <Button
                                 variant="secondary"
                                 size="sm"

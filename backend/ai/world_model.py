@@ -157,10 +157,12 @@ FOOD_KIND: dict[str, str] = {
         "arroz", "frijoles", "frijol", "lentejas", "harina", "azúcar",
         "azucar", "avena", "sal",
     )},
-    # Canned / jarred (heuristic: modifiers 'canned' + these nouns) --------
+    # Canned / jarred — ONLY naturally canned foods. Produce like tomatoes
+    # belong in produce_* and promote to canned only with an explicit modifier
+    # ("canned tomatoes", "cans of tomatoes"). Hard-mapping tomatoes→canned
+    # made Nouri ask "how many cans?" for fresh baskets.
     **{k: "canned" for k in (
         "tuna", "sardines", "sardine", "anchovies", "salmon",
-        "corn", "peas", "spinach", "tomatoes",
         # Spanish
         "atún", "atun", "sardinas",
     )},
@@ -172,18 +174,20 @@ FOOD_KIND: dict[str, str] = {
         "mango", "mangoes", "mangos", "watermelon", "melon", "melons",
         "pineapple", "pineapples", "cucumber", "cucumbers",
         "pepper", "peppers", "zucchini",
+        "tomato", "tomatoes",
         # Spanish
         "manzana", "manzanas", "naranja", "naranjas", "plátano",
         "plátanos", "platano", "platanos", "pera", "peras", "durazno",
         "duraznos", "limón", "limones", "aguacate", "aguacates",
         "sandía", "sandia", "piña", "pina", "pepino", "pepinos",
+        "tomate", "tomates",
     )},
     # Produce — bulk / weight-based ---------------------------------------
     **{k: "produce_bulk" for k in (
         "potato", "potatoes", "onion", "onions", "carrot", "carrots",
         "kale", "lettuce", "spinach", "cabbage", "broccoli",
         "cauliflower", "beets", "turnips", "yams", "sweet potato",
-        "sweet potatoes",
+        "sweet potatoes", "corn", "peas",
         # Spanish
         "papa", "papas", "patata", "patatas", "cebolla", "cebollas",
         "zanahoria", "zanahorias", "col", "coles", "acelga",
@@ -268,9 +272,18 @@ _TOKEN_RE = re.compile(r"[a-zA-ZÀ-ÿ']+")
 
 # Words that flip a countable/bulk noun into its canned form
 # ("canned beans" → canned, not bulk_dry).
+# Do NOT use bare substring "can" — it false-matches "I can share…".
+_CANNED_MODIFIER_RE = re.compile(
+    r"\b(?:canned|cans|jarred|jars|enlatad[oa]s?)\b"
+    r"|\bcan(?:s)?\s+of\b"
+    r"|\ben\s+lata\b",
+    re.IGNORECASE,
+)
+
 _CANNED_MODIFIERS: frozenset[str] = frozenset({
-    "canned", "can", "cans", "jarred", "jar", "jars",
+    "canned", "cans", "jarred", "jars",
     "en lata", "enlatado", "enlatada", "enlatados", "enlatadas",
+    "can of", "cans of",
 })
 
 # Modifiers that lock a food into a specific unit — we honour these
@@ -326,8 +339,9 @@ def detect_food_kind(text: str) -> Optional[dict]:
 def _entry(food: str, kind: str, lowered_message: str) -> dict:
     """Assemble the ontology entry for a detected food, honouring modifiers."""
     if kind in {"bulk_dry", "produce_bulk", "produce_count"}:
-        # 'canned beans' / 'canned corn' should flip to canned, not bulk.
-        if any(m in lowered_message for m in _CANNED_MODIFIERS):
+        # 'canned beans' / 'cans of tomatoes' should flip to canned.
+        # Substring 'can' alone must NOT match ("I can share tomatoes").
+        if _CANNED_MODIFIER_RE.search(lowered_message or ""):
             kind = "canned"
     hint = KIND_HINTS.get(kind, KIND_HINTS["bulk_dry"])
     return {

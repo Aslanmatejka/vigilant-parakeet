@@ -54,8 +54,60 @@ class TestParseShareItems:
     def test_ignores_photo_only(self):
         assert _parse_share_items_from_text("image: https://cdn.example.com/a.jpg") == []
 
+    def test_carrot_and_tomatoes_both_parsed(self):
+        items = _parse_share_items_from_text("i want to share carrot and tomatoes")
+        titles = {i["title"].lower() for i in items}
+        assert "carrot" in titles or "carrots" in titles
+        assert "tomato" in titles or "tomatoes" in titles
 
-class TestShareDraftQueue:
+    def test_basket_of_carrots(self):
+        items = _parse_share_items_from_text(
+            "1 basket of carrots and 1 basket of tomatoes"
+        )
+        titles = {i["title"].lower() for i in items}
+        assert any("carrot" in t for t in titles)
+        assert any("tomato" in t for t in titles)
+
+
+class TestShareDraftDoesNotBleedPriorFood:
+    def test_fresh_share_clears_stale_bananas(self):
+        set_share_drafts("u-test", [
+            {"id": "d1", "title": "bananas", "qty": 5, "unit": "items",
+             "expiry": "2026-07-20", "photo_url": None, "photo_declined": False},
+        ])
+        drafts = sync_share_drafts(
+            "u-test",
+            "i want to share carrot and tomatoes",
+            history=[
+                {"role": "assistant", "message": "Posted! Your bananas are live."},
+            ],
+        )
+        titles = {str(d.get("title") or "").lower() for d in drafts}
+        assert "bananas" not in titles
+        assert any("carrot" in t for t in titles)
+        assert any("tomato" in t for t in titles)
+
+    def test_user_restrict_keeps_only_named_foods(self):
+        set_share_drafts("u-test", [
+            {"id": "d1", "title": "bananas", "qty": 5, "unit": "items",
+             "expiry": None, "photo_url": None, "photo_declined": False},
+            {"id": "d2", "title": "carrots", "qty": 1, "unit": "basket",
+             "expiry": "2026-07-25", "photo_url": None, "photo_declined": False},
+            {"id": "d3", "title": "tomatoes", "qty": 1, "unit": "basket",
+             "expiry": "2026-07-25", "photo_url": None, "photo_declined": False},
+        ])
+        drafts = sync_share_drafts(
+            "u-test",
+            "we are listing tomatoes and carrots please",
+            history=[
+                {"role": "user", "message": "i want to share carrot and tomatoes"},
+                {"role": "assistant", "message": "How many bananas?"},
+            ],
+        )
+        titles = {str(d.get("title") or "").lower() for d in drafts}
+        assert "bananas" not in titles
+        assert any("carrot" in t for t in titles)
+        assert any("tomato" in t for t in titles)
     def test_upsert_creates_two_drafts(self):
         drafts = upsert_share_drafts_from_message(
             "u-test", "share 3 bread and 5 apples",

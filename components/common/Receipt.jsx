@@ -157,7 +157,7 @@ export default function Receipt({ receipt, items, onUpdate }) {
                 const needed = Number(item.quantity) || 1;
                 if (!listing) {
                     unavailable.push(`${item.food_name || 'Item'} (no longer listed)`);
-                } else if (listing.status !== 'active') {
+                } else if (listing.status !== 'active' && listing.status !== 'approved') {
                     unavailable.push(`${item.food_name || listing.title || 'Item'} (already claimed)`);
                 } else if ((Number(listing.quantity) || 0) < needed) {
                     unavailable.push(

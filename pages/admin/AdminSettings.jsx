@@ -6,6 +6,7 @@ import { reportError } from '../../utils/helpers';
 import { toast } from 'react-toastify';
 import { useAuth } from '../../utils/hooks/useSupabase';
 import supabase from '../../utils/supabaseClient';
+import dataService from '../../utils/dataService';
 
 const AUTOMATION_EVENTS = ['new_listing', 'draft_listing_reminder', 'admin_broadcast'];
 
@@ -59,10 +60,11 @@ function AdminSettings() {
                 weeklyReport: true
             },
             listings: {
-                requireApproval: false,
                 maxImagesPerListing: 5,
                 maxActiveDaysDefault: 7,
-                allowedCategories: 'produce,dairy,bakery,pantry,meat,prepared'
+                allowedCategories: 'produce,dairy,bakery,pantry,meat,prepared',
+                requireApproval: true,
+                requireRequestApproval: true,
             },
             users: {
                 requireEmailVerification: true,
@@ -194,8 +196,18 @@ function AdminSettings() {
 
         const loadSettings = async () => {
             try {
-                // TODO: Fetch from Supabase settings table when available
-                // For now, keep defaults already set in state
+                const [requireApproval, requireRequestApproval] = await Promise.all([
+                    dataService.getRequireListingApproval(),
+                    dataService.getRequireRequestApproval(),
+                ]);
+                setSettings((prev) => ({
+                    ...prev,
+                    listings: {
+                        ...prev.listings,
+                        requireApproval: !!requireApproval,
+                        requireRequestApproval: !!requireRequestApproval,
+                    },
+                }));
                 setMaintenanceMode(false);
             } catch (error) {
                 console.error('Load settings error:', error);
@@ -262,8 +274,18 @@ function AdminSettings() {
             setError(null);
             
             try {
-                // For now, just show success since we don't have a settings table
-                // In a real app, you would save to Supabase settings table
+                if (section === 'listings') {
+                    await Promise.all([
+                        dataService.setPlatformSetting(
+                            'require_listing_approval',
+                            !!settings.listings.requireApproval
+                        ),
+                        dataService.setPlatformSetting(
+                            'require_request_approval',
+                            !!settings.listings.requireRequestApproval
+                        ),
+                    ]);
+                }
                 toast.success(`${section.charAt(0).toUpperCase() + section.slice(1)} settings saved successfully`);
             } catch (err) {
                 console.error('Save settings error:', err);
@@ -660,23 +682,12 @@ function AdminSettings() {
                         {/* Listing Settings */}
                         <Card>
                             <div className="p-6">
-                                <h2 className="text-lg font-semibold mb-6">Listing Settings</h2>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    <div className="flex items-start">
-                                        <div className="flex items-center h-5">
-                                            <input
-                                                id="requireApproval"
-                                                type="checkbox"
-                                                className="h-4 w-4 text-[#2CABE3] focus:ring-[#2CABE3] border-gray-300 rounded"
-                                                checked={settings.listings.requireApproval}
-                                                onChange={() => handleCheckboxChange('listings', 'requireApproval')}
-                                            />
-                                        </div>
-                                        <div className="ml-3 text-sm">
-                                            <label htmlFor="requireApproval" className="font-medium text-gray-700">Require Approval</label>
-                                            <p className="text-gray-500">Require admin approval before listings go live</p>
-                                        </div>
-                                    </div>
+                        <h2 className="text-lg font-semibold mb-2">Listing Settings</h2>
+                        <p className="text-sm text-amber-700 bg-amber-50 border border-amber-100 rounded-md px-3 py-2 mb-6">
+                            Only the approval toggles below are saved to the live database.
+                            Other fields are preview-only and do not change production behavior.
+                        </p>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                     <div>
                                         <label className="block text-sm font-medium text-gray-700 mb-1">
                                             Max Images Per Listing
@@ -713,6 +724,44 @@ function AdminSettings() {
                                             value={settings.listings.allowedCategories}
                                             onChange={(e) => handleInputChange('listings', 'allowedCategories', e.target.value)}
                                         />
+                                    </div>
+                                    <div className="flex items-start md:col-span-2">
+                                        <div className="flex items-center h-5">
+                                            <input
+                                                id="requireListingApproval"
+                                                type="checkbox"
+                                                className="h-4 w-4 text-[#2CABE3] focus:ring-[#2CABE3] border-gray-300 rounded"
+                                                checked={!!settings.listings.requireApproval}
+                                                onChange={(e) => handleInputChange('listings', 'requireApproval', e.target.checked)}
+                                            />
+                                        </div>
+                                        <div className="ml-3 text-sm">
+                                            <label htmlFor="requireListingApproval" className="font-medium text-gray-700">
+                                                Require approval for donation listings
+                                            </label>
+                                            <p className="text-gray-500">
+                                                When on, donor posts and Nouri donation submissions start as pending until approved on Listing Approvals. Admin Share Food always goes live.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-start md:col-span-2">
+                                        <div className="flex items-center h-5">
+                                            <input
+                                                id="requireRequestApproval"
+                                                type="checkbox"
+                                                className="h-4 w-4 text-[#2CABE3] focus:ring-[#2CABE3] border-gray-300 rounded"
+                                                checked={!!settings.listings.requireRequestApproval}
+                                                onChange={(e) => handleInputChange('listings', 'requireRequestApproval', e.target.checked)}
+                                            />
+                                        </div>
+                                        <div className="ml-3 text-sm">
+                                            <label htmlFor="requireRequestApproval" className="font-medium text-gray-700">
+                                                Require approval for food requests
+                                            </label>
+                                            <p className="text-gray-500">
+                                                When on, Request Food and Nouri request posts start as pending until approved on Request Approvals.
+                                            </p>
+                                        </div>
                                     </div>
                                 </div>
                                 <div className="mt-6 flex justify-end">

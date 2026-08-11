@@ -9,26 +9,67 @@ class DataService {
     try {
       // First get the current session to ensure we're authenticated
       const { data: { session } } = await supabase.auth.getSession();
-      
+
       if (!session) {
         throw new Error('User is not authenticated. Please log in.');
       }
-      
+
       const { data, error } = await supabase
         .from('food_claims')
         .select(`
           *,
           food_listings(
-            title, 
-            description, 
+            id,
+            title,
+            description,
             image_url,
             quantity,
             unit,
-            category
+            category,
+            listing_type,
+            status,
+            expiry_date,
+            pickup_by,
+            preparation_date,
+            location,
+            full_address,
+            donor_name,
+            donor_email,
+            donor_phone,
+            donor_city,
+            donor_state,
+            donor_zip,
+            donor_occupation,
+            donor_type,
+            community_id,
+            dietary_tags,
+            allergens,
+            allergen_info,
+            ingredients,
+            storage_requirements,
+            packaging_type,
+            current_condition,
+            is_perishable,
+            requires_refrigeration,
+            requires_freezing,
+            storage_temperature_min,
+            storage_temperature_max,
+            current_storage_temp,
+            safe_handling_instructions,
+            reheating_instructions,
+            safety_notes,
+            passed_safety_check,
+            safety_check_date,
+            urgency_level,
+            weight_per_package,
+            weight_unit,
+            created_at,
+            communities:community_id(id, name)
           )
         `)
-        .eq('status', status);
-      
+        .eq('status', status)
+        .order('created_at', { ascending: false });
+
       if (error) throw error;
       return data;
     } catch (error) {
@@ -140,7 +181,7 @@ class DataService {
       
       const neighborsHelped = claims.length;
       const activeListings = sharedFood.filter(item => item.status === 'approved' || item.status === 'active').length;
-      const pendingListings = sharedFood.filter(item => item.status === 'pending').length;
+      const expiredListings = sharedFood.filter(item => item.status === 'expired').length;
       const donorsCount = new Set(sharedFood.map(item => item.user_id).filter(Boolean)).size;
       
       // Calculate people impact
@@ -174,7 +215,7 @@ class DataService {
         livesImpacted,
         sharingCount: sharedFood.length,
         activeListings,
-        pendingListings,
+        expiredListings,
         categoryDistribution,
         lastUpdated: new Date().toISOString()
       };
@@ -192,11 +233,12 @@ class DataService {
     try {
       console.log(`Fetching impact data for user ${userId}...`);
 
-      // Get user's food listings
+      // Get user's donation listings only (requests are needs, not impact donations)
       const { data: userListings, error: listingsError } = await supabase
         .from('food_listings')
         .select('id, quantity, unit, category, status, created_at')
-        .eq('user_id', userId);
+        .eq('user_id', userId)
+        .eq('listing_type', 'donation');
 
       if (listingsError) throw listingsError;
 
@@ -233,7 +275,7 @@ class DataService {
       // Calculate metrics
       const totalListings = userListings.length;
       const activeListings = userListings.filter(l => l.status === 'approved' || l.status === 'active').length;
-      const pendingListings = userListings.filter(l => l.status === 'pending').length;
+      const expiredListings = userListings.filter(l => l.status === 'expired').length;
       const claimedListings = claims.length;
 
       const totalFoodShared = userListings.reduce((sum, l) => sum + (l.quantity || 0), 0);
@@ -252,7 +294,7 @@ class DataService {
       const result = {
         totalListings,
         activeListings,
-        pendingListings,
+        expiredListings,
         claimedListings,
         totalFoodShared,
         foodClaimed,
@@ -273,97 +315,23 @@ class DataService {
     }
   }
 
-  // Admin: Approve or decline a food claim
-  async reviewFoodClaim(claimId, approve) {
-    try {
-      const status = approve ? 'approved' : 'declined';
-      const { data, error } = await supabase
-        .from('food_claims')
-        .update({ status })
-        .eq('id', claimId)
-        .select()
-        .single();
-      if (error) throw error;
-
-      // Email notification stub
-      if (approve) {
-        // TODO: Integrate with email service
-        console.log(`Confirmation email sent to claimer and sharer for claim ${claimId}`);
-      } else {
-        // TODO: Integrate with email service
-        console.log(`Polite rejection email sent to claimer for claim ${claimId}`);
-      }
-      return data;
-    } catch (error) {
-      console.error('Review food claim error:', error);
-      reportError(error);
-      throw error;
-    }
-  }
-  // Send notification to claimer when claim is approved or declined
-  async sendClaimReviewNotification(claimId, approved) {
-    try {
-      // Get the claim to find claimer info and food title.
-      // Use maybeSingle() so a missing claim returns null instead of throwing.
-      const { data: claim, error: claimError } = await supabase
-        .from('food_claims')
-        .select('requester_name, requester_email, food_id')
-        .eq('id', claimId)
-        .maybeSingle();
-      if (claimError) throw claimError;
-      if (!claim) {
-        console.warn('sendClaimReviewNotification: claim not found, skipping', claimId);
-        return false;
-      }
-
-      // Get food title
-      let foodTitle = '';
-      if (claim.food_id) {
-        const { data: food, error: foodError } = await supabase
-          .from('food_listings')
-          .select('title')
-          .eq('id', claim.food_id)
-          .maybeSingle();
-        if (!foodError && food) foodTitle = food.title;
-      }
-
-      // Compose notification
-      const notif = {
-        title: approved ? 'Food Claim Approved' : 'Food Claim Declined',
-        message: approved
-          ? `Your claim for "${foodTitle}" has been approved! Please check your email for pickup details.`
-          : `Your claim for "${foodTitle}" was not approved. Please review the guidelines and try again.`,
-        type: approved ? 'claim_approved' : 'claim_declined',
-        read: false,
-        data: { claimId, foodTitle },
-        // For claims, we don't have user_id, so we use email for notification (or extend schema)
-      };
-
-      // Insert notification (if you have user_id, add it)
-      const { error: notifError } = await supabase.from('notifications').insert(notif);
-      if (notifError) {
-        console.error('Failed to insert notification:', notifError);
-        reportError(notifError);
-      }
-
-      // Send email (stub, implement with email service if needed)
-      if (approved) {
-        // TODO: Integrate with email service to send confirmation email to claim.requester_email
-        console.log(`Confirmation email sent to ${claim.requester_email}`);
-      } else {
-        // TODO: Integrate with email service to send polite rejection to claim.requester_email
-        console.log(`Rejection email sent to ${claim.requester_email}`);
-      }
-      return true;
-    } catch (error) {
-      console.error('Send claim review notification error:', error);
-      reportError(error);
-      return false;
-    }
-  }
   // Create a food claim request
   async createFoodClaim(claimData) {
     try {
+      const foodId = claimData?.food_id;
+      if (foodId) {
+        const { data: listing, error: listingError } = await supabase
+          .from('food_listings')
+          .select('id, listing_type, status')
+          .eq('id', foodId)
+          .maybeSingle();
+        if (listingError) throw listingError;
+        if (!listing) throw new Error('Listing not found');
+        if (String(listing.listing_type || '').toLowerCase() === 'request') {
+          throw new Error("That's a food request, not a donation — it can't be claimed.");
+        }
+      }
+
       const { data, error } = await supabase
         .from('food_claims')
         .insert(claimData)
@@ -378,67 +346,479 @@ class DataService {
     }
   }
 
-  // Update food claim status (approve/decline)
-  async updateFoodClaimStatus(claimId, status) {
+  /** Read a platform_settings JSON value (defaults when missing). */
+  async getPlatformSetting(key, fallback = null) {
     try {
-      const { error } = await supabase
-        .from('food_claims')
-        .update({ status })
-        .eq('id', claimId);
+      const { data, error } = await supabase
+        .from('platform_settings')
+        .select('value')
+        .eq('key', key)
+        .maybeSingle();
       if (error) throw error;
-      return true;
+      if (data == null || data.value === undefined) return fallback;
+      return data.value;
     } catch (error) {
-      console.error('Update food claim status error:', error);
-      reportError(error);
-      throw error;
+      console.warn('getPlatformSetting failed:', key, error);
+      return fallback;
     }
   }
-  // Update food listing status (approve/decline)
+
+  async setPlatformSetting(key, value) {
+    const { data: { session } } = await supabase.auth.getSession();
+    const { error } = await supabase
+      .from('platform_settings')
+      .upsert({
+        key,
+        value,
+        updated_at: new Date().toISOString(),
+        updated_by: session?.user?.id || null,
+      });
+    if (error) throw error;
+    return true;
+  }
+
+  async getRequireListingApproval() {
+    const value = await this.getPlatformSetting('require_listing_approval', true);
+    return value === true || value === 'true';
+  }
+
+  async getRequireRequestApproval() {
+    const value = await this.getPlatformSetting('require_request_approval', true);
+    return value === true || value === 'true';
+  }
+
+  async getRequireClaimApproval() {
+    const value = await this.getPlatformSetting('require_claim_approval', true);
+    return value === true || value === 'true';
+  }
+
+  /**
+   * Initial listing status for community posts.
+   * Admin-trusted posts (skipApproval) always go live as approved.
+   * Food requests use require_request_approval; donations use require_listing_approval.
+   */
+  async resolveCreateListingStatus({ skipApproval = false, listing_type = 'donation' } = {}) {
+    if (skipApproval) return 'approved';
+    const isRequest = String(listing_type || '').toLowerCase() === 'request';
+    const required = isRequest
+      ? await this.getRequireRequestApproval()
+      : await this.getRequireListingApproval();
+    return required ? 'pending' : 'approved';
+  }
+
+  async resolveCreateClaimStatus() {
+    const required = await this.getRequireClaimApproval();
+    return required ? 'pending' : 'approved';
+  }
+
   async updateFoodListingStatus(listingId, status) {
-    try {
-      const { error } = await supabase
-        .from('food_listings')
-        .update({ status })
-        .eq('id', listingId);
-      if (error) throw error;
-      return true;
-    } catch (error) {
-      console.error('Update food listing status error:', error);
-      reportError(error);
-      throw error;
-    }
+    const { data, error } = await supabase
+      .from('food_listings')
+      .update({ status })
+      .eq('id', listingId)
+      .select('id, title, user_id, status')
+      .maybeSingle();
+    if (error) throw error;
+    return data;
   }
 
-  // Send notification to user if declined
-  async sendDeclineNotification(listingId) {
-    try {
-      // Get the listing to find the user_id
-      const { data: listing, error: listingError } = await supabase
-        .from('food_listings')
-        .select('user_id, title')
-        .eq('id', listingId)
-        .single();
-      if (listingError || !listing) throw listingError || new Error('Listing not found');
+  async updateFoodClaimStatus(claimId, status) {
+    const { data, error } = await supabase
+      .from('food_claims')
+      .update({ status })
+      .eq('id', claimId)
+      .select(`
+        id,
+        status,
+        quantity,
+        claimer_id,
+        food_id,
+        food_listings(id, title, quantity, status, unit)
+      `)
+      .maybeSingle();
+    if (error) throw error;
+    return data;
+  }
 
-      // Insert notification for the user
-      const { error: notifError } = await supabase
-        .from('notifications')
-        .insert({
-          user_id: listing.user_id,
-          title: 'Food Submission Declined',
-          message: `Your food listing "${listing.title}" was not approved by the admin. Please review the guidelines and try again.`,
-          type: 'submission_declined',
-          read: false,
-          data: { listingId },
-        });
-      if (notifError) throw notifError;
+  /**
+   * Update claim fields from admin approval queue.
+   * If quantity changes while pending, adjust listing inventory by the delta.
+   */
+  async updateFoodClaim(claimId, updates) {
+    const { data: existing, error: fetchError } = await supabase
+      .from('food_claims')
+      .select(`
+        id,
+        status,
+        quantity,
+        food_id,
+        food_listings(id, quantity, status, unit)
+      `)
+      .eq('id', claimId)
+      .maybeSingle();
+    if (fetchError) throw fetchError;
+    if (!existing) throw new Error('Claim not found');
+
+    const allowed = [
+      'quantity',
+      'requester_name',
+      'requester_email',
+      'requester_phone',
+      'school',
+      'school_district',
+      'school_contact',
+      'school_contact_email',
+      'school_contact_phone',
+      'members_count',
+      'people',
+      'students',
+      'school_staff',
+      'dietary_restrictions',
+      'pickup_date',
+      'pickup_time',
+      'pickup_place',
+      'pickup_contact',
+      'dropoff_place',
+      'dropoff_time',
+      'dropoff_contact',
+      'category',
+    ];
+    const patch = {};
+    for (const key of allowed) {
+      if (Object.prototype.hasOwnProperty.call(updates, key)) {
+        patch[key] = updates[key];
+      }
+    }
+    if (!Object.keys(patch).length) {
+      throw new Error('No claim fields to update');
+    }
+
+    const oldQty = Number(existing.quantity) || 0;
+    const nextQty = Object.prototype.hasOwnProperty.call(patch, 'quantity')
+      ? Number(patch.quantity)
+      : oldQty;
+    if (!Number.isFinite(nextQty) || nextQty < 1) {
+      throw new Error('Claim quantity must be at least 1');
+    }
+    patch.quantity = Math.round(nextQty);
+
+    const qtyDelta = patch.quantity - oldQty;
+    const listing = existing.food_listings;
+    const listingId = listing?.id || existing.food_id;
+
+    if (qtyDelta !== 0 && listingId && String(existing.status || '').toLowerCase() === 'pending') {
+      const currentListingQty = Number(listing?.quantity) || 0;
+      // Increasing the claim draws more from remaining listing qty.
+      if (qtyDelta > 0 && currentListingQty < qtyDelta) {
+        throw new Error(
+          `Only ${currentListingQty} portion${currentListingQty === 1 ? '' : 's'} left on the listing`
+        );
+      }
+      let restoredQty = currentListingQty - qtyDelta;
+      if (restoredQty < 0) restoredQty = 0;
+      const listingStatus = String(listing?.status || '').toLowerCase();
+      const listingPatch = { quantity: restoredQty };
+      if (restoredQty <= 0 && listingStatus !== 'claimed') {
+        listingPatch.status = 'claimed';
+      } else if (restoredQty > 0 && listingStatus === 'claimed') {
+        listingPatch.status = 'approved';
+      }
+      const { error: listingError } = await supabase
+        .from('food_listings')
+        .update(listingPatch)
+        .eq('id', listingId);
+      if (listingError) throw listingError;
+    }
+
+    const { data, error } = await supabase
+      .from('food_claims')
+      .update(patch)
+      .eq('id', claimId)
+      .select(`
+        *,
+        food_listings(
+          id,
+          title,
+          description,
+          image_url,
+          quantity,
+          unit,
+          category,
+          listing_type,
+          status,
+          expiry_date,
+          pickup_by,
+          preparation_date,
+          location,
+          full_address,
+          donor_name,
+          donor_email,
+          donor_phone,
+          donor_city,
+          donor_state,
+          donor_zip,
+          donor_occupation,
+          donor_type,
+          community_id,
+          dietary_tags,
+          allergens,
+          allergen_info,
+          ingredients,
+          storage_requirements,
+          packaging_type,
+          current_condition,
+          is_perishable,
+          requires_refrigeration,
+          requires_freezing,
+          storage_temperature_min,
+          storage_temperature_max,
+          current_storage_temp,
+          safe_handling_instructions,
+          reheating_instructions,
+          safety_notes,
+          passed_safety_check,
+          safety_check_date,
+          urgency_level,
+          weight_per_package,
+          weight_unit,
+          created_at,
+          updated_at,
+          communities:community_id(id, name)
+        )
+      `)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error('Claim update failed');
+    return data;
+  }
+
+  /**
+   * Approve or decline a pending claim.
+   * Decline restores reserved inventory to the listing.
+   */
+  async reviewFoodClaim(claimId, approved) {
+    const { data: claim, error: fetchError } = await supabase
+      .from('food_claims')
+      .select(`
+        id,
+        status,
+        quantity,
+        claimer_id,
+        food_id,
+        food_listings(id, title, quantity, status, unit)
+      `)
+      .eq('id', claimId)
+      .maybeSingle();
+    if (fetchError) throw fetchError;
+    if (!claim) throw new Error('Claim not found');
+    if (String(claim.status || '').toLowerCase() !== 'pending') {
+      throw new Error(`Claim is already ${claim.status}`);
+    }
+
+    const nextStatus = approved ? 'approved' : 'declined';
+    const { data: updated, error: updateError } = await supabase
+      .from('food_claims')
+      .update({ status: nextStatus })
+      .eq('id', claimId)
+      .eq('status', 'pending')
+      .select('id, status, quantity, claimer_id, food_id')
+      .maybeSingle();
+    if (updateError) throw updateError;
+    if (!updated) throw new Error('Claim was already reviewed by someone else');
+
+    if (!approved && claim.food_id) {
+      const listing = claim.food_listings;
+      const listingId = listing?.id || claim.food_id;
+      const claimQty = Number(claim.quantity) || 1;
+      const currentQty = Number(listing?.quantity) || 0;
+      const listingStatus = String(listing?.status || '').toLowerCase();
+      let restoredQty = currentQty + claimQty;
+      // Fully claimed rows may still show stale qty equal to the claim amount.
+      if (listingStatus === 'claimed' && currentQty <= 0) {
+        restoredQty = claimQty;
+      } else if (listingStatus === 'claimed' && currentQty === claimQty) {
+        restoredQty = claimQty;
+      }
+      const { error: restoreError } = await supabase
+        .from('food_listings')
+        .update({
+          quantity: restoredQty,
+          status: 'approved',
+        })
+        .eq('id', listingId);
+      if (restoreError) {
+        console.error('Failed to restore listing after claim decline:', restoreError);
+        throw new Error('Claim declined but inventory restore failed — check Food Distribution');
+      }
+    }
+
+    return updated;
+  }
+
+  async sendClaimReviewNotification(claimId, approved) {
+    try {
+      const { data: claim, error } = await supabase
+        .from('food_claims')
+        .select(`
+          id,
+          claimer_id,
+          quantity,
+          food_listings(title, unit)
+        `)
+        .eq('id', claimId)
+        .maybeSingle();
+      if (error || !claim?.claimer_id) return false;
+      const title = claim.food_listings?.title || 'your food claim';
+      const qty = claim.quantity || 1;
+      const unit = claim.food_listings?.unit || '';
+      const qtyLabel = `${qty}${unit ? ` ${unit}` : ''}`.trim();
+      const { error: notifError } = await supabase.from('notifications').insert({
+        user_id: claim.claimer_id,
+        title: approved ? 'Claim approved' : 'Claim not approved',
+        message: approved
+          ? `Good news — your claim for ${qtyLabel} of "${title}" was approved. You can pick it up from Receipts & Activity.`
+          : `Your claim for ${qtyLabel} of "${title}" was not approved. The food is back on Find Food.`,
+        type: approved ? 'claim_approved' : 'claim_declined',
+        read: false,
+        data: { claimId, status: approved ? 'approved' : 'declined' },
+      });
+      if (notifError) {
+        console.warn('sendClaimReviewNotification insert failed:', notifError);
+        return false;
+      }
       return true;
-    } catch (error) {
-      console.error('Send decline notification error:', error);
-      reportError(error);
+    } catch (err) {
+      console.warn('sendClaimReviewNotification failed:', err);
       return false;
     }
   }
+
+  async sendListingReviewNotification(listingId, approved) {
+    try {
+      const { data: listing, error } = await supabase
+        .from('food_listings')
+        .select('id, title, user_id, listing_type, community_id')
+        .eq('id', listingId)
+        .maybeSingle();
+      if (error || !listing?.user_id) return false;
+      const title = listing.title || 'your listing';
+      const isRequest = String(listing.listing_type || '').toLowerCase() === 'request';
+
+      // Requester + donor "listed" notices for approved food requests are owned
+      // by the DB trigger notify_requester_food_request_listed (form, Nouri,
+      // admin approve). Skip duplicates here; still notify on decline and for
+      // donation approvals.
+      const skipRequestLiveNotifs = approved && isRequest;
+      if (!skipRequestLiveNotifs) {
+        const { error: notifError } = await supabase.from('notifications').insert({
+          user_id: listing.user_id,
+          title: approved
+            ? (isRequest ? 'Food request approved' : 'Listing approved')
+            : (isRequest ? 'Food request not approved' : 'Listing not approved'),
+          message: approved
+            ? (isRequest
+              ? `Good news — "${title}" is live on Community Requests so donors can share matching food.`
+              : `Good news — "${title}" is live on Find Food and neighbors can claim it.`)
+            : `"${title}" was not approved. Please review the guidelines and try again.`,
+          type: approved
+            ? (isRequest ? 'food_request_approved' : 'listing_approved')
+            : 'submission_declined',
+          read: false,
+          data: {
+            listingId,
+            status: approved ? 'approved' : 'declined',
+            listing_type: listing.listing_type || 'donation',
+          },
+        });
+        if (notifError) {
+          console.warn('sendListingReviewNotification insert failed:', notifError);
+          return false;
+        }
+      }
+
+      return true;
+    } catch (err) {
+      console.warn('sendListingReviewNotification failed:', err);
+      return false;
+    }
+  }
+
+  async countPendingListings() {
+    const { count, error } = await supabase
+      .from('food_listings')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'pending')
+      .eq('listing_type', 'donation');
+    if (error) throw error;
+    return count || 0;
+  }
+
+  async countPendingRequests() {
+    const { count, error } = await supabase
+      .from('food_listings')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'pending')
+      .eq('listing_type', 'request');
+    if (error) throw error;
+    return count || 0;
+  }
+
+  async countPendingClaims() {
+    const { count, error } = await supabase
+      .from('food_claims')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'pending');
+    if (error) throw error;
+    return count || 0;
+  }
+
+  /**
+   * Count live food_listings for nav badges (Find Food / Community Requests).
+   * Matches browse filters: approved|active, not expired, optional community scope.
+   */
+  async countLiveListings({
+    listing_type = 'donation',
+    community_ids = null,
+    exclude_user_id = null,
+  } = {}) {
+    try {
+      if (Array.isArray(community_ids) && community_ids.length === 0) {
+        return 0;
+      }
+
+      const _d = new Date();
+      const todayStr = [
+        _d.getFullYear(),
+        String(_d.getMonth() + 1).padStart(2, '0'),
+        String(_d.getDate()).padStart(2, '0'),
+      ].join('-');
+
+      let q = supabase
+        .from('food_listings')
+        .select('id', { count: 'exact', head: true })
+        .eq('listing_type', listing_type)
+        .in('status', ['approved', 'active'])
+        .or(`expiry_date.is.null,expiry_date.gte.${todayStr}`);
+
+      if (Array.isArray(community_ids)) {
+        q = q.in('community_id', community_ids);
+      } else if (community_ids != null && community_ids !== '') {
+        q = q.eq('community_id', community_ids);
+      }
+
+      if (exclude_user_id) {
+        q = q.neq('user_id', exclude_user_id);
+      }
+
+      const { count, error } = await q;
+      if (error) throw error;
+      return count || 0;
+    } catch (error) {
+      console.warn('countLiveListings failed:', error);
+      return 0;
+    }
+  }
+
   constructor() {
     this.subscriptions = new Map()
   }
@@ -475,6 +855,7 @@ class DataService {
           donor_zip,
           donor_occupation,
           donor_type,
+          user_id,
           community_id,
           latitude,
           longitude,
@@ -543,6 +924,25 @@ class DataService {
         if (filters.listing_type) q = q.eq('listing_type', filters.listing_type);
         if (filters.location) q = q.ilike('location', `%${filters.location}%`);
         if (filters.user_id) q = q.eq('user_id', filters.user_id);
+        // Find Food / public browse: hide the viewer's own donations so they
+        // don't try to claim food they posted. My Listings uses user_id instead.
+        if (filters.exclude_user_id && !filters.user_id) {
+          q = q.neq('user_id', filters.exclude_user_id);
+        }
+        // Community scope for Find Food / Near Me / map. Own-listing queries
+        // (user_id set) and admin/explicit bypasses skip this.
+        if (!filters.user_id && !filters.skipCommunityScope) {
+          if (Array.isArray(filters.community_ids)) {
+            if (filters.community_ids.length === 0) {
+              // Impossible match → empty result set without throwing.
+              q = q.eq('id', '00000000-0000-0000-0000-000000000000');
+            } else {
+              q = q.in('community_id', filters.community_ids);
+            }
+          } else if (filters.community_id != null && filters.community_id !== '') {
+            q = q.eq('community_id', filters.community_id);
+          }
+        }
 
         // Safety filter: exclude already-expired listings unless caller is viewing own listings.
         // Items with null expiry_date are kept (no expiration set).
@@ -569,9 +969,13 @@ class DataService {
       const withDonor = (listing) => {
         const community = listing.communities;
         const communityRecord = Array.isArray(community) ? community[0] : community;
+        const isRequest = String(listing.listing_type || '').toLowerCase() === 'request';
         return {
           ...listing,
-          image_url: listing.image_url || assignFoodImage(listing),
+          // Food requests are text-only — never show or invent a photo.
+          image_url: isRequest
+            ? null
+            : (listing.image_url || assignFoodImage(listing)),
           donor: listing.users,
           community_name: communityRecord?.name || listing.community_name || null,
         };
@@ -633,9 +1037,11 @@ class DataService {
         if (!userId) throw new Error('User must be authenticated to create a food listing');
       }
 
-      // Handle image upload if File object is provided
-      let imageUrl = listingData.image_url || null;
-      if (listingData.image instanceof File) {
+      // Handle image upload if File object is provided (donations only —
+      // food requests never include photos).
+      const isRequest = String(listingData.listing_type || '').toLowerCase() === 'request';
+      let imageUrl = isRequest ? null : (listingData.image_url || null);
+      if (!isRequest && listingData.image instanceof File) {
         try {
           const uploadResult = await this.uploadFile(listingData.image, 'food-images');
           if (uploadResult?.url) {
@@ -672,6 +1078,13 @@ class DataService {
         if (expiry < today) throw new Error('Expiry date cannot be in the past');
       }
 
+      // Status is always resolved server-side logic — never trust caller-supplied
+      // status (prevents bypassing admin approval via direct REST insert).
+      const status = await this.resolveCreateListingStatus({
+        skipApproval: !!listingData.skipApproval,
+        listing_type: listingData.listing_type || 'donation',
+      });
+
       // Build clean listing object with only valid food_listings columns
       const listing = {
         title: listingData.title,
@@ -681,7 +1094,7 @@ class DataService {
         category: listingData.category,
         expiry_date: listingData.expiry_date || null,
         pickup_by: listingData.pickup_by || null,
-        status: listingData.status || 'pending',
+        status,
         user_id: userId,
         image_url: imageUrl,
         donor_name: listingData.donor_name || null,
@@ -700,6 +1113,9 @@ class DataService {
         allergens: listingData.allergens || [],
         ingredients: listingData.ingredients || null,
       };
+      if (isRequest) {
+        listing.image_url = null;
+      }
 
       const fullAddress = listingData.full_address?.trim?.() || listingData.full_address || null;
       if (fullAddress) {
@@ -778,8 +1194,27 @@ class DataService {
     try {
       const toUpdate = { ...updates };
 
-      // Handle image upload if File object provided
-      if (toUpdate.image instanceof File) {
+      // Food requests never carry photos — strip any image fields.
+      let isRequestUpdate = String(toUpdate.listing_type || '').toLowerCase() === 'request';
+      if (!isRequestUpdate && id) {
+        try {
+          const { data: existing } = await supabase
+            .from('food_listings')
+            .select('listing_type')
+            .eq('id', id)
+            .maybeSingle();
+          isRequestUpdate = String(existing?.listing_type || '').toLowerCase() === 'request';
+        } catch (_) {
+          /* best-effort; proceed without blocking the update */
+        }
+      }
+      if (isRequestUpdate) {
+        toUpdate.image_url = null;
+        delete toUpdate.image;
+      }
+
+      // Handle image upload if File object provided (donations only)
+      if (!isRequestUpdate && toUpdate.image instanceof File) {
         try {
           const uploadResult = await this.uploadFile(toUpdate.image, 'food-images');
           if (uploadResult?.url) {
@@ -814,6 +1249,21 @@ class DataService {
       delete toUpdate.donor;
       delete toUpdate.users;
 
+      // Never trust client-supplied privileged columns on update.
+      const privilegedKeys = [
+        'status',
+        'listing_type',
+        'user_id',
+        'id',
+        'created_at',
+        'updated_at',
+        'skipApproval',
+        'communities',
+      ];
+      for (const key of privilegedKeys) {
+        delete toUpdate[key];
+      }
+
       // Keep location (varchar) in sync with full_address on edit.
       // Without this the location column retains the old address string.
       if (toUpdate.full_address && typeof toUpdate.full_address === 'string') {
@@ -822,7 +1272,11 @@ class DataService {
 
       // Auto-geocode if address changed but coordinates are missing
       // This ensures updated addresses get proper map markers
-      if ((toUpdate.full_address || toUpdate.location) && (!toUpdate.latitude || !toUpdate.longitude)) {
+      const hasExplicitCoords =
+        toUpdate.latitude != null && toUpdate.longitude != null
+        && Number.isFinite(Number(toUpdate.latitude))
+        && Number.isFinite(Number(toUpdate.longitude));
+      if ((toUpdate.full_address || toUpdate.location) && !hasExplicitCoords) {
         const addressToGeocode = toUpdate.full_address || toUpdate.location;
         if (addressToGeocode && typeof addressToGeocode === 'string') {
           try {
@@ -1317,6 +1771,21 @@ class DataService {
       // Caller can override by passing listing_type explicitly.
       query = query.eq('listing_type', filters.listing_type || 'donation')
 
+      if (!filters.user_id && !filters.skipCommunityScope) {
+        if (Array.isArray(filters.community_ids)) {
+          if (filters.community_ids.length === 0) {
+            query = query.eq('id', '00000000-0000-0000-0000-000000000000');
+          } else {
+            query = query.in('community_id', filters.community_ids);
+          }
+        } else if (filters.community_id != null && filters.community_id !== '') {
+          query = query.eq('community_id', filters.community_id);
+        }
+      }
+      if (filters.exclude_user_id && !filters.user_id) {
+        query = query.neq('user_id', filters.exclude_user_id);
+      }
+
       const { data, error } = await query.order('created_at', { ascending: false })
 
       if (error) throw error
@@ -1328,11 +1797,16 @@ class DataService {
         return String(row.expiry_date).slice(0, 10) >= todayStr
       })
 
-      return activeRows.map(listing => ({
-        ...listing,
-        image_url: listing.image_url || assignFoodImage(listing),
-        donor: listing.users
-      }))
+      return activeRows.map(listing => {
+        const isRequest = String(listing.listing_type || '').toLowerCase() === 'request';
+        return {
+          ...listing,
+          image_url: isRequest
+            ? null
+            : (listing.image_url || assignFoodImage(listing)),
+          donor: listing.users
+        };
+      })
     } catch (error) {
       console.error('Search food listings error:', error)
       reportError(error)
@@ -1387,17 +1861,23 @@ class DataService {
       const [
         { count: totalUsers },
         { count: totalListings },
-        { count: totalDonations }
+        { count: totalDonations },
+        { count: pendingApprovals },
+        { count: pendingRequests },
       ] = await Promise.all([
         supabase.from('users').select('*', { count: 'exact', head: true }),
         supabase.from('food_listings').select('*', { count: 'exact', head: true }),
-        supabase.from('food_listings').select('*', { count: 'exact', head: true }).eq('listing_type', 'donation')
+        supabase.from('food_listings').select('*', { count: 'exact', head: true }).eq('listing_type', 'donation'),
+        supabase.from('food_listings').select('*', { count: 'exact', head: true }).eq('status', 'pending').eq('listing_type', 'donation'),
+        supabase.from('food_listings').select('*', { count: 'exact', head: true }).eq('status', 'pending').eq('listing_type', 'request'),
       ])
 
       return {
         totalUsers,
         totalListings,
         totalDonations,
+        pendingApprovals: pendingApprovals || 0,
+        pendingRequests: pendingRequests || 0,
         lastUpdated: new Date().toISOString()
       }
     } catch (error) {

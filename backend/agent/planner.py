@@ -63,7 +63,6 @@ def _plan_search(entities: Dict[str, Any], user_context: Dict[str, Any]) -> List
     search_args = {
         "user_id": user_context.get("user_id"),
         "food_type": entities.get("food_type"),
-        "radius_km": entities.get("radius", 10),
         "dietary_tags": user_context.get("dietary_restrictions", []),
         "exclude_allergens": user_context.get("allergies", []),
     }

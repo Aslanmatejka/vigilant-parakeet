@@ -2,14 +2,12 @@
   command = "npm run build"
   publish = "dist"
 
+# Public client build vars (anon key + Mapbox pk — not server secrets).
+# Prefer Netlify UI overrides for rotation; these keep CI/preview builds green.
 [build.environment]
   VITE_SUPABASE_URL = "https://ifzbpqyuhnxbhdcnmvfs.supabase.co"
   VITE_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlmemJwcXl1aG54YmhkY25tdmZzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYwNTI5NTgsImV4cCI6MjA3MTYyODk1OH0.ivjNXt8z704sVv6Jt2Z3tVkkelUzeb8Ih4SaCQFHerk"
   VITE_MAPBOX_TOKEN = "pk.eyJ1Ijoic2lnbndpc2UiLCJhIjoiY21rc2tjNjQ3MGFjajNkcHJ1cTNsbWV6dyJ9.xbJQFP3HCM2jmG87wvwC1Q"
-
-# SECURITY: Never commit secrets to git!
-# Keep secret values in the Netlify dashboard. Public build-time vars can live here.
-# Required variables not set here should still exist in the dashboard:
 
 # Proxy AI API to Railway backend
 [[redirects]]
@@ -33,3 +31,6 @@
   for = "/*"
   [headers.values]
     X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    X-Frame-Options = "DENY"
+    Permissions-Policy = "geolocation=(), microphone=(self), camera=()"

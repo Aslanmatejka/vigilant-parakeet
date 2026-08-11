@@ -52,11 +52,38 @@ def test_polish_does_not_inject_claim_boilerplate():
 def test_enrich_search_action_forwards_listings():
     result = {
         "listings": [
-            {"id": "x", "title": "Bread", "quantity": 3, "display_index": 1, "secret": "nope"},
+            {
+                "id": "x",
+                "title": "Bread",
+                "quantity": 3,
+                "display_index": 1,
+                "community_id": 8,
+                "community_name": "School A",
+                "secret": "nope",
+            },
+            {"id": "y", "title": "Apples", "quantity": 2, "display_index": 2, "community_id": 1},
+            {"id": "z", "title": "Rice", "quantity": 1, "display_index": 3, "community_id": 8},
+            {"id": "a", "title": "Beans", "quantity": 4, "display_index": 4, "community_id": 8},
+            {"id": "b", "title": "Milk", "quantity": 1, "display_index": 5, "community_id": 8},
+            {"id": "c", "title": "Eggs", "quantity": 12, "display_index": 6, "community_id": 8},
         ],
-        "total": 1,
+        "total": 6,
     }
     entry = enrich_tool_action("search_food_near_user", result, {"tool": "search_food_near_user", "ok": True})
-    assert len(entry["listings"]) == 1
+    assert len(entry["listings"]) == 6
     assert entry["listings"][0]["title"] == "Bread"
+    assert entry["listings"][0]["community_id"] == 8
     assert "secret" not in entry["listings"][0]
+
+
+def test_enrich_keeps_more_than_five_search_cards():
+    result = {
+        "listings": [
+            {"id": str(i), "title": f"Item {i}", "display_index": i, "community_id": 3}
+            for i in range(1, 12)
+        ],
+        "total": 11,
+    }
+    entry = enrich_tool_action("search_food_near_user", result, {"tool": "search_food_near_user", "ok": True})
+    assert len(entry["listings"]) == 11
+    assert entry["total"] == 11

@@ -16,17 +16,15 @@ logger = logging.getLogger(__name__)
 async def search_food_near_user(
     user_id: str,
     food_type: Optional[str] = None,
-    radius_km: int = 10,
     dietary_tags: Optional[List[str]] = None,
     exclude_allergens: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    Search for available food near the user.
+    Search for available food in the user's community (no radius cutoff).
     
     Args:
         user_id: User's UUID
         food_type: Optional food category filter (vegetables, bakery, prepared_meals, etc.)
-        radius_km: Search radius in kilometers (default 10)
         dietary_tags: Optional dietary requirements (vegan, gluten_free, halal, kosher)
         exclude_allergens: Optional allergens to exclude (nuts, dairy, soy, eggs)
     
@@ -41,7 +39,6 @@ async def search_food_near_user(
         result = await original_search(
             user_id=user_id,
             food_type=food_type,
-            radius_km=radius_km,
             dietary_tags=dietary_tags or [],
             exclude_allergens=exclude_allergens or [],
         )
