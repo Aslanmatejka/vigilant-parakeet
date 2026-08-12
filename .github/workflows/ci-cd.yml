@@ -120,6 +120,9 @@ jobs:
             echo "Add secrets under GitHub → Settings → Secrets and variables → Actions"
             exit 1
           fi
+      # Needed so the Netlify CLI picks up netlify.toml (headers, redirects)
+      # from repo root during --no-build deploys.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: frontend-dist
