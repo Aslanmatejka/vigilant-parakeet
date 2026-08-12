@@ -27,6 +27,19 @@
   [headers.values]
     Cache-Control = "public, max-age=0, must-revalidate"
 
+# Vite output is content-hashed (e.g. main-DakZg5AA.js) — safe to cache forever.
+# Prevents re-downloading the main bundle on every page load.
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# Keep the SPA entry always fresh so users pick up new asset hashes immediately.
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
 [[headers]]
   for = "/*"
   [headers.values]
