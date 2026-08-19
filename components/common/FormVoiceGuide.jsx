@@ -1,25 +1,18 @@
 /**
- * FormVoiceGuide
- *
- * Floating guided-assistant banner shown on forms.
- * Speaks the current step instruction aloud and shows progress dots.
- *
- * Props:
- *   guide  — return value of useFormVoiceGuide()
- *   className — optional extra Tailwind classes on the wrapper
+ * FormVoiceGuide — floating AI assistant banner on forms.
+ * Shows the welcome message and mute / replay / dismiss controls.
  */
 import React from 'react'
 import PropTypes from 'prop-types'
 
 export default function FormVoiceGuide({ guide, className = '' }) {
   const {
-    currentStep,
-    isComplete,
+    welcomeMessage,
     isMuted,
     isSpeaking,
     isDismissed,
     toggleMute,
-    speak,
+    speakWelcome,
     dismiss,
   } = guide
 
@@ -27,12 +20,11 @@ export default function FormVoiceGuide({ guide, className = '' }) {
 
   return (
     <div
-      className={`relative flex items-start gap-3 rounded-xl border border-[#2CABE3]/40 bg-[#2CABE3]/8 px-4 py-3 shadow-sm ${className}`}
+      className={`relative flex items-start gap-3 rounded-xl border border-[#2CABE3]/40 bg-[#2CABE3]/10 px-4 py-3 shadow-sm ${className}`}
       role="status"
       aria-live="polite"
       aria-atomic="true"
     >
-      {/* Avatar / speaking indicator */}
       <div className="flex-shrink-0 mt-0.5">
         <div
           className={`w-9 h-9 rounded-full flex items-center justify-center transition-all duration-300 ${
@@ -42,7 +34,6 @@ export default function FormVoiceGuide({ guide, className = '' }) {
           }`}
         >
           {isSpeaking ? (
-            /* Animated equalizer bars */
             <span className="flex items-end gap-0.5 h-4">
               {[1, 2, 3].map((i) => (
                 <span
@@ -58,57 +49,27 @@ export default function FormVoiceGuide({ guide, className = '' }) {
         </div>
       </div>
 
-      {/* Text content */}
       <div className="flex-1 min-w-0">
-        {isComplete ? (
-          <p className="text-sm font-semibold text-emerald-700">
-            <i className="fas fa-check-circle mr-1.5" aria-hidden="true" />
-            All fields filled — review your details and hit Submit!
-          </p>
-        ) : (
-          <>
-            {/* Step label */}
-            <p className="text-xs font-semibold text-[#2CABE3] mb-0.5 uppercase tracking-wide">
-              Step {(currentStep?.index ?? 0) + 1} of {currentStep?.total ?? 1}
-            </p>
-            {/* Instruction */}
-            <p className="text-sm text-gray-800 leading-snug">{currentStep?.instruction}</p>
-
-            {/* Progress dots */}
-            <div className="flex gap-1 mt-2" aria-hidden="true">
-              {Array.from({ length: currentStep?.total ?? 1 }).map((_, i) => (
-                <span
-                  key={i}
-                  className={`h-1.5 rounded-full transition-all duration-300 ${
-                    i < (currentStep?.index ?? 0)
-                      ? 'w-3 bg-emerald-400'
-                      : i === (currentStep?.index ?? 0)
-                      ? 'w-5 bg-[#2CABE3]'
-                      : 'w-1.5 bg-gray-300'
-                  }`}
-                />
-              ))}
-            </div>
-          </>
-        )}
+        <p className="text-xs font-semibold text-[#2CABE3] mb-0.5 uppercase tracking-wide">
+          AI guide
+        </p>
+        <p className="text-sm text-gray-800 leading-snug">{welcomeMessage}</p>
+        <p className="text-xs text-gray-500 mt-1.5">
+          Click or tap any field for step-by-step help.
+        </p>
       </div>
 
-      {/* Controls */}
       <div className="flex items-center gap-1 flex-shrink-0">
-        {/* Re-speak button */}
-        {!isComplete && (
-          <button
-            type="button"
-            onClick={() => speak()}
-            title="Repeat instruction"
-            aria-label="Repeat voice instruction"
-            className="w-7 h-7 rounded-full flex items-center justify-center text-[#2CABE3] hover:bg-[#2CABE3]/15 transition-colors"
-          >
-            <i className="fas fa-redo text-xs" aria-hidden="true" />
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={speakWelcome}
+          title="Replay welcome"
+          aria-label="Replay welcome message"
+          className="w-7 h-7 rounded-full flex items-center justify-center text-[#2CABE3] hover:bg-[#2CABE3]/15 transition-colors"
+        >
+          <i className="fas fa-redo text-xs" aria-hidden="true" />
+        </button>
 
-        {/* Mute toggle */}
         <button
           type="button"
           onClick={toggleMute}
@@ -123,7 +84,6 @@ export default function FormVoiceGuide({ guide, className = '' }) {
           <i className={`fas ${isMuted ? 'fa-volume-xmark' : 'fa-volume-high'} text-xs`} aria-hidden="true" />
         </button>
 
-        {/* Dismiss */}
         <button
           type="button"
           onClick={dismiss}
@@ -140,13 +100,12 @@ export default function FormVoiceGuide({ guide, className = '' }) {
 
 FormVoiceGuide.propTypes = {
   guide: PropTypes.shape({
-    currentStep: PropTypes.object,
-    isComplete: PropTypes.bool,
+    welcomeMessage: PropTypes.string,
     isMuted: PropTypes.bool,
     isSpeaking: PropTypes.bool,
     isDismissed: PropTypes.bool,
     toggleMute: PropTypes.func,
-    speak: PropTypes.func,
+    speakWelcome: PropTypes.func,
     dismiss: PropTypes.func,
   }).isRequired,
   className: PropTypes.string,
