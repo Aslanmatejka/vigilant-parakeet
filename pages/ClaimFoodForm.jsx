@@ -12,7 +12,7 @@ import {
     browseCommunityIdsForUser,
     listingVisibleToCommunityScope,
 } from '../utils/communityScope';
-import useFormVoiceGuide, { CLAIM_FOOD_WELCOME, CLAIM_FOOD_HINTS } from '../hooks/useFormVoiceGuide';
+import useFormVoiceGuide, { CLAIM_FOOD_WELCOME, CLAIM_FOOD_HINTS, FORM_NAMES } from '../hooks/useFormVoiceGuide';
 import FormVoiceGuide from '../components/common/FormVoiceGuide';
 
 // Calculate next Friday from today (food returns to inventory at 11:59PM Friday)
@@ -57,6 +57,7 @@ export default function ClaimFoodForm() {
     const maxAllowed = Math.min(MAX_CLAIM, availableQty);
     const [claimQty, setClaimQty] = React.useState(1);
     const guide = useFormVoiceGuide({
+        formName: FORM_NAMES.claim,
         welcomeMessage: CLAIM_FOOD_WELCOME,
         hints: CLAIM_FOOD_HINTS,
     });

@@ -6,7 +6,7 @@ import { useAuthContext } from '../../utils/AuthContext';
 import supabase from '../../utils/supabaseClient';
 import { API_CONFIG } from '../../utils/config';
 import dataService from '../../utils/dataService';
-import useFormVoiceGuide, { SHARE_FOOD_WELCOME, SHARE_FOOD_HINTS } from '../../hooks/useFormVoiceGuide';
+import useFormVoiceGuide, { SHARE_FOOD_WELCOME, SHARE_FOOD_HINTS, FORM_NAMES } from '../../hooks/useFormVoiceGuide';
 import FormVoiceGuide from '../common/FormVoiceGuide';
 
 function FoodForm({
@@ -183,6 +183,7 @@ function FoodForm({
     const [errors, setErrors] = useState({});
     const [imagePreview, setImagePreview] = useState(null);
     const guide = useFormVoiceGuide({
+        formName: FORM_NAMES.share,
         welcomeMessage: SHARE_FOOD_WELCOME,
         hints: SHARE_FOOD_HINTS,
     });

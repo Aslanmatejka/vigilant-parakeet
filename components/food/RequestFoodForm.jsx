@@ -5,7 +5,7 @@ import Button from '../common/Button';
 import { useAuthContext } from '../../utils/AuthContext';
 import dataService from '../../utils/dataService';
 import supabase from '../../utils/supabaseClient';
-import useFormVoiceGuide, { REQUEST_FOOD_WELCOME, REQUEST_FOOD_HINTS } from '../../hooks/useFormVoiceGuide';
+import useFormVoiceGuide, { REQUEST_FOOD_WELCOME, REQUEST_FOOD_HINTS, FORM_NAMES } from '../../hooks/useFormVoiceGuide';
 import FormVoiceGuide from '../common/FormVoiceGuide';
 
 const CATEGORIES = [
@@ -55,7 +55,11 @@ function RequestFoodForm({ onSubmit, loading = false }) {
     requester_phone: '',
     full_address: '',
   });
-  const guide = useFormVoiceGuide({ welcomeMessage: REQUEST_FOOD_WELCOME, hints: REQUEST_FOOD_HINTS });
+  const guide = useFormVoiceGuide({
+    formName: FORM_NAMES.request,
+    welcomeMessage: REQUEST_FOOD_WELCOME,
+    hints: REQUEST_FOOD_HINTS,
+  });
   const { speakField } = guide;
 
   useEffect(() => {

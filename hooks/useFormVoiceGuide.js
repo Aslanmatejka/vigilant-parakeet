@@ -4,31 +4,96 @@
  * AI voice assistant for forms:
  * - Speaks a welcome message when the form opens
  * - Speaks field-specific hints when the user focuses a field
- *
- * Audio uses the backend AI TTS endpoint (OpenAI voice).
- * Only one utterance plays at a time — newer speech cancels in-flight requests.
+ * - Inline chat so users can ask Nouri questions while filling the form
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { textToSpeech, playAudioBlob } from '../utils/openaiVoice'
+import aiChatService from '../utils/services/aiChatService'
+import { useAuthContext } from '../utils/AuthContext'
 
 const DEFAULT_WELCOME =
   "Welcome! I'll guide you step by step. Click or tap any field whenever you need help."
 
 const FIELD_DEBOUNCE_MS = 350
 
+export const FORM_NAMES = {
+  share: 'Share Food',
+  request: 'Request Food',
+  claim: 'Claim Food',
+}
+
+const DONOR_FIELDS = new Set([
+  'donor_name', 'donor_type', 'donor_zip', 'donor_city', 'donor_state',
+  'school_district', 'donor_email', 'donor_phone', 'full_address', 'donor_occupation',
+])
+
+const REQUEST_CONTACT_FIELDS = new Set([
+  'requester_name', 'requester_email', 'requester_phone', 'full_address',
+])
+
+function sectionHint(formName, fieldName) {
+  if (!fieldName) return ''
+  if (formName === FORM_NAMES.share) {
+    if (DONOR_FIELDS.has(fieldName)) {
+      return 'That field is in the DONOR INFORMATION section (top of the form).'
+    }
+    return 'That field is in the FOOD LISTING section (below donor information).'
+  }
+  if (formName === FORM_NAMES.request) {
+    if (REQUEST_CONTACT_FIELDS.has(fieldName)) {
+      return 'That field is in the contact information section.'
+    }
+    return 'That field is in the food request details section.'
+  }
+  if (formName === FORM_NAMES.claim) {
+    return 'That field is on the claim confirmation form.'
+  }
+  return ''
+}
+
+function buildFormChatPayload(userText, { formName, activeHint }) {
+  const fieldLine = activeHint?.label
+    ? `They are focused on the "${activeHint.label}" field.`
+    : 'No field is currently focused.'
+
+  const sectionLine = sectionHint(formName, activeHint?.fieldName)
+
+  const separationRule = formName === FORM_NAMES.share
+    ? 'Keep donor information separate from food listing details — never mix the two.\n'
+    : ''
+
+  return `[FORM ASSISTANT — ${formName}]
+The user is actively filling out this form in the browser. ${fieldLine} ${sectionLine}
+Help them complete THIS form only. ${separationRule}Do NOT call navigate_ui or send them to other pages unless they explicitly ask to leave.
+Answer briefly (2–4 sentences) unless they need more detail.
+
+User question: ${userText.trim()}`
+}
+
 export default function useFormVoiceGuide({
   hints = {},
   welcomeMessage = DEFAULT_WELCOME,
+  formName = 'Form',
   lang = 'en',
 }) {
+  const { user, isAuthenticated } = useAuthContext()
   const [isMuted, setIsMuted] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [isDismissed, setIsDismissed] = useState(false)
   const [activeHint, setActiveHint] = useState(null)
+  const [chatMessages, setChatMessages] = useState([])
+  const [isChatLoading, setIsChatLoading] = useState(false)
+  const [chatError, setChatError] = useState(null)
+
   const stopRef = useRef(null)
   const welcomedRef = useRef(false)
   const speakIdRef = useRef(0)
   const fieldTimerRef = useRef(null)
+  const chatSeqRef = useRef(0)
+  const chatBusyRef = useRef(false)
+  const activeHintRef = useRef(null)
+
+  useEffect(() => { activeHintRef.current = activeHint }, [activeHint])
 
   const cancelSpeech = useCallback(() => {
     speakIdRef.current += 1
@@ -41,8 +106,8 @@ export default function useFormVoiceGuide({
     setIsSpeaking(false)
   }, [])
 
-  const speakText = useCallback(async (text, { onStart } = {}) => {
-    if (!text) return
+  const speakText = useCallback(async (text, { force = false } = {}) => {
+    if (!text || (isMuted && !force)) return
 
     cancelSpeech()
     const id = speakIdRef.current
@@ -53,7 +118,7 @@ export default function useFormVoiceGuide({
 
       const { stop } = playAudioBlob(
         blob,
-        () => { setIsSpeaking(true); onStart?.() },
+        () => setIsSpeaking(true),
         () => { setIsSpeaking(false); stopRef.current = null },
       )
       stopRef.current = stop
@@ -64,14 +129,13 @@ export default function useFormVoiceGuide({
       const utt = new SpeechSynthesisUtterance(text)
       utt.lang = lang === 'es' ? 'es-ES' : 'en-US'
       utt.rate = 0.95
-      utt.onstart = () => { setIsSpeaking(true); onStart?.() }
+      utt.onstart = () => setIsSpeaking(true)
       utt.onend = () => setIsSpeaking(false)
       utt.onerror = () => setIsSpeaking(false)
       synth.speak(utt)
     }
-  }, [lang, cancelSpeech])
+  }, [lang, cancelSpeech, isMuted])
 
-  // Welcome once on open
   useEffect(() => {
     if (welcomedRef.current || isDismissed || isMuted) return
     welcomedRef.current = true
@@ -97,7 +161,7 @@ export default function useFormVoiceGuide({
   }, [isMuted, isDismissed, welcomeMessage, speakText])
 
   const speakField = useCallback((fieldName) => {
-    if (isMuted || isDismissed) return
+    if (isMuted || isDismissed || chatBusyRef.current || isChatLoading) return
     const entry = hints[fieldName]
     if (!entry) return
 
@@ -109,11 +173,74 @@ export default function useFormVoiceGuide({
 
     fieldTimerRef.current = setTimeout(() => {
       fieldTimerRef.current = null
+      if (chatBusyRef.current) return
       cancelSpeech()
       setActiveHint({ fieldName, label, text })
       speakText(text)
     }, FIELD_DEBOUNCE_MS)
-  }, [isMuted, isDismissed, speakText, hints, cancelSpeech])
+  }, [isMuted, isDismissed, isChatLoading, speakText, hints, cancelSpeech])
+
+  const askQuestion = useCallback(async (rawText) => {
+    const text = String(rawText || '').trim()
+    if (!text || isChatLoading) return
+
+    if (!isAuthenticated || !user?.id) {
+      setChatError('Sign in to ask Nouri questions while filling out the form.')
+      return
+    }
+
+    setChatError(null)
+    chatBusyRef.current = true
+    if (fieldTimerRef.current) clearTimeout(fieldTimerRef.current)
+    cancelSpeech()
+
+    const userMsg = {
+      id: `form-user-${Date.now()}`,
+      role: 'user',
+      message: text,
+    }
+    setChatMessages((prev) => [...prev, userMsg])
+    setIsChatLoading(true)
+
+    const seq = ++chatSeqRef.current
+
+    try {
+      const payload = buildFormChatPayload(text, {
+        formName,
+        activeHint: activeHintRef.current,
+      })
+      const result = await aiChatService.sendMessage(payload, { userId: user.id })
+
+      if (seq !== chatSeqRef.current) return
+
+      if (result.error) {
+        setChatError(result.error.message || 'Could not reach Nouri. Try again.')
+        return
+      }
+
+      const reply = String(result.response || '').trim()
+      if (!reply) {
+        setChatError('No response from Nouri. Try again.')
+        return
+      }
+
+      setChatMessages((prev) => [...prev, {
+        id: `form-ai-${Date.now()}`,
+        role: 'assistant',
+        message: reply,
+      }])
+      setActiveHint(null)
+      speakText(reply)
+    } catch {
+      if (seq !== chatSeqRef.current) return
+      setChatError('Could not reach Nouri. Check your connection and try again.')
+    } finally {
+      if (seq === chatSeqRef.current) {
+        setIsChatLoading(false)
+        chatBusyRef.current = false
+      }
+    }
+  }, [isChatLoading, isAuthenticated, user?.id, formName, cancelSpeech, speakText])
 
   const toggleMute = useCallback(() => {
     setIsMuted((m) => {
@@ -127,20 +254,29 @@ export default function useFormVoiceGuide({
 
   const dismiss = useCallback(() => {
     if (fieldTimerRef.current) clearTimeout(fieldTimerRef.current)
+    chatSeqRef.current += 1
+    chatBusyRef.current = false
+    setIsChatLoading(false)
     cancelSpeech()
     setIsDismissed(true)
   }, [cancelSpeech])
 
   return {
     welcomeMessage,
+    formName,
     activeHint,
     isMuted,
     isSpeaking,
     isDismissed,
+    isChatLoading,
+    chatMessages,
+    chatError,
+    canChat: isAuthenticated && !!user?.id,
     toggleMute,
     speakWelcome,
     dismiss,
     speakField,
+    askQuestion,
   }
 }
 
@@ -149,16 +285,16 @@ export default function useFormVoiceGuide({
 // ---------------------------------------------------------------------------
 
 export const SHARE_FOOD_WELCOME =
-  "Welcome! This form has two sections: donor information at the top, and food listing details below. Click or tap any field whenever you need help."
+  "Welcome! This form has two sections: donor information at the top, and food listing details below. Click any field for help, or ask me a question anytime."
 
 export const REQUEST_FOOD_WELCOME =
-  "Welcome! I'll guide you step by step through your food request. Click or tap any field whenever you need help."
+  "Welcome! I'll guide you through your food request. Click any field for help, or ask me a question anytime."
 
 export const CLAIM_FOOD_WELCOME =
-  "Welcome! I'll guide you step by step through confirming your claim. Click or tap any field whenever you need help."
+  "Welcome! I'll guide you through confirming your claim. Click any field for help, or ask me a question anytime."
 
 // ---------------------------------------------------------------------------
-// Per-field focus hints — section prefix keeps donor vs listing separate
+// Per-field focus hints
 // ---------------------------------------------------------------------------
 
 export const SHARE_FOOD_HINTS = {
