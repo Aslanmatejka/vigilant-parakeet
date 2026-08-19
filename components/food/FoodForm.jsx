@@ -601,6 +601,7 @@ function FoodForm({
                                 });
                             }
                         }}
+                        onFocus={() => speakField('school_district')}
                         error={errors.school_district}
                         disabled={
                             loadingCommunities
@@ -722,7 +723,8 @@ function FoodForm({
                     
                 </div>
             </div>
-            {/* ...existing code... */}
+            <div className="mb-8 p-6 bg-emerald-50 rounded-xl border border-emerald-200">
+                <h2 className="text-xl font-bold text-emerald-800 mb-4">Food Listing Details</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               
                 <Input
@@ -873,7 +875,7 @@ function FoodForm({
                             { value: 'halal', label: 'Halal', icon: '☪️' },
                             { value: 'kosher', label: 'Kosher', icon: '✡️' },
                             { value: 'organic', label: 'Organic', icon: '♻️' }
-                        ].map(tag => (
+                        ].map((tag, idx) => (
                             <label key={tag.value} className="flex items-center space-x-2 cursor-pointer">
                                 <input
                                     type="checkbox"
@@ -881,6 +883,7 @@ function FoodForm({
                                     value={tag.value}
                                     checked={formData.dietary_tags.includes(tag.value)}
                                     onChange={handleChange}
+                                    onFocus={idx === 0 ? () => speakField('dietary_tags') : undefined}
                                     className="w-4 h-4 text-primary-600 border-gray-300 rounded focus:ring-primary-500"
                                 />
                                 <span className="text-sm text-gray-700">
@@ -907,7 +910,7 @@ function FoodForm({
                             { value: 'peanuts', label: 'Peanuts' },
                             { value: 'wheat', label: 'Wheat' },
                             { value: 'soy', label: 'Soy' }
-                        ].map(allergen => (
+                        ].map((allergen, idx) => (
                             <label key={allergen.value} className="flex items-center space-x-2 cursor-pointer">
                                 <input
                                     type="checkbox"
@@ -915,6 +918,7 @@ function FoodForm({
                                     value={allergen.value}
                                     checked={formData.allergens.includes(allergen.value)}
                                     onChange={handleChange}
+                                    onFocus={idx === 0 ? () => speakField('allergens') : undefined}
                                     className="w-4 h-4 text-orange-600 border-gray-300 rounded focus:ring-orange-500"
                                 />
                                 <span className="text-sm text-gray-700">{allergen.label}</span>
@@ -976,6 +980,7 @@ function FoodForm({
                 </div>
 
                 {/* Listing Type field removed */}
+            </div>
             </div>
 
             <div className="flex justify-end space-x-4">
