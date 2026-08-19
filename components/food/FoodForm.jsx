@@ -6,7 +6,7 @@ import { useAuthContext } from '../../utils/AuthContext';
 import supabase from '../../utils/supabaseClient';
 import { API_CONFIG } from '../../utils/config';
 import dataService from '../../utils/dataService';
-import useFormVoiceGuide, { SHARE_FOOD_STEPS } from '../../hooks/useFormVoiceGuide';
+import useFormVoiceGuide, { SHARE_FOOD_STEPS, SHARE_FOOD_HINTS } from '../../hooks/useFormVoiceGuide';
 import FormVoiceGuide from '../common/FormVoiceGuide';
 
 function FoodForm({
@@ -185,7 +185,9 @@ function FoodForm({
     const guide = useFormVoiceGuide({
         steps: SHARE_FOOD_STEPS,
         formData: { ...formData, image_url: initialData?.image_url },
+        hints: SHARE_FOOD_HINTS,
     });
+    const { speakField } = guide;
     const [submitError, setSubmitError] = useState(null);
     const [geocodeTimeout, setGeocodeTimeout] = useState(null);
     // Ref holds the active debounce timer so the cleanup always cancels the
@@ -486,6 +488,7 @@ function FoodForm({
                         name="donor_name"
                         value={formData.donor_name}
                         onChange={handleChange}
+                        onFocus={() => speakField('donor_name')}
                         error={errors.donor_name}
                         required
                         maxLength={100}
@@ -496,6 +499,7 @@ function FoodForm({
                         name="donor_zip"
                         value={formData.donor_zip}
                         onChange={handleChange}
+                        onFocus={() => speakField('donor_zip')}
                         error={errors.donor_zip}
                         required
                         maxLength={10}
@@ -506,6 +510,7 @@ function FoodForm({
                         name="donor_city"
                         value={formData.donor_city}
                         onChange={handleChange}
+                        onFocus={() => speakField('donor_city')}
                         error={errors.donor_city}
                         required
                         maxLength={50}
@@ -517,6 +522,7 @@ function FoodForm({
                         type="select"
                         value={formData.donor_state}
                         onChange={handleChange}
+                        onFocus={() => speakField('donor_state')}
                         error={errors.donor_state}
                         required
                         helperText="Select your state."
@@ -634,6 +640,7 @@ function FoodForm({
                         type="email"
                         value={formData.donor_email}
                         onChange={handleChange}
+                        onFocus={() => speakField('donor_email')}
                         error={errors.donor_email}
                         maxLength={100}
                         helperText="Enter your email address."
@@ -644,6 +651,7 @@ function FoodForm({
                         type="tel"
                         value={formData.donor_phone}
                         onChange={handleChange}
+                        onFocus={() => speakField('donor_phone')}
                         error={errors.donor_phone}
                         maxLength={20}
                         helperText="Enter your phone number."
@@ -656,6 +664,7 @@ function FoodForm({
                             name="full_address"
                             value={formData.full_address}
                             onChange={handleChange}
+                            onFocus={() => speakField('full_address')}
                             onBlur={handleAddressBlur}
                             error={errors.full_address}
                             placeholder="e.g., 123 Main St, San Francisco, CA 94102"
@@ -690,6 +699,7 @@ function FoodForm({
                         name="donor_occupation"
                         value={formData.donor_occupation}
                         onChange={handleChange}
+                        onFocus={() => speakField('donor_occupation')}
                         error={errors.donor_occupation}
                         maxLength={100}
                         helperText="Optional — your occupation or role in the organization."
@@ -700,6 +710,7 @@ function FoodForm({
                     type="select"
                     value={formData.donor_type}
                     onChange={handleChange}
+                    onFocus={() => speakField('donor_type')}
                     error={errors.donor_type}
                     required
                     options={[
@@ -720,6 +731,7 @@ function FoodForm({
                     name="title"
                     value={formData.title}
                     onChange={handleChange}
+                    onFocus={() => speakField('title')}
                     error={errors.title}
                     required
                     maxLength={100}
@@ -733,6 +745,7 @@ function FoodForm({
                     type="select"
                     value={formData.category}
                     onChange={handleChange}
+                    onFocus={() => speakField('category')}
                     error={errors.category}
                     required
                     options={[
@@ -760,6 +773,7 @@ function FoodForm({
                         type="textarea"
                         value={formData.description}
                         onChange={handleChange}
+                        onFocus={() => speakField('description')}
                         error={errors.description}
                         required
                         maxLength={500}
@@ -780,6 +794,7 @@ function FoodForm({
                                 name="quantity"
                                 value={formData.quantity}
                                 onChange={handleChange}
+                                onFocus={() => speakField('quantity')}
                                 min="0"
                                 step="0.01"
                                 required
@@ -795,6 +810,7 @@ function FoodForm({
                                 name="unit"
                                 value={formData.unit}
                                 onChange={handleChange}
+                                onFocus={() => speakField('unit')}
                                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
                             >
                                 <option value="lb">Pounds (lb)</option>
@@ -821,6 +837,7 @@ function FoodForm({
                         type="date"
                         value={formData.expiry_date}
                         onChange={handleChange}
+                        onFocus={() => speakField('expiry_date')}
                         error={errors.expiry_date}
                         min={(() => { const _d = new Date(); return [_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-'); })()}
                         aria-describedby="expiry_date-error"
@@ -834,6 +851,7 @@ function FoodForm({
                     type="datetime-local"
                     value={formData.pickup_by}
                     onChange={handleChange}
+                    onFocus={() => speakField('pickup_by')}
                     error={errors.pickup_by}
                     min={(() => { const _d = new Date(); return `${[_d.getFullYear(), String(_d.getMonth()+1).padStart(2,'0'), String(_d.getDate()).padStart(2,'0')].join('-')}T${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`; })()}
                     aria-describedby="pickup_by-error"
@@ -914,6 +932,7 @@ function FoodForm({
                         type="textarea"
                         value={formData.ingredients}
                         onChange={handleChange}
+                        onFocus={() => speakField('ingredients')}
                         error={errors.ingredients}
                         maxLength={500}
                         placeholder="List main ingredients if applicable (e.g., flour, sugar, eggs, butter)"
@@ -930,6 +949,7 @@ function FoodForm({
                         name="image"
                         type="file"
                         onChange={handleImageChange}
+                        onFocus={() => speakField('image')}
                         accept="image/jpeg,image/png,image/gif"
                         error={errors.image}
                         required

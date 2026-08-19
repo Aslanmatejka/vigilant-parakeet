@@ -48,6 +48,8 @@ const Input = ({ label, value, onChange, disabled, className, type = "text", ...
                         {...commonProps}
                         value={value}
                         onChange={onChange}
+                        onFocus={props.onFocus}
+                        onBlur={props.onBlur}
                         placeholder={props.placeholder}
                         rows={props.rows}
                     />
@@ -61,6 +63,8 @@ const Input = ({ label, value, onChange, disabled, className, type = "text", ...
                         {...commonProps}
                         value={value}
                         onChange={onChange}
+                        onFocus={props.onFocus}
+                        onBlur={props.onBlur}
                     >
                         {props.options.map((option, index) => (
                             <option 
@@ -79,6 +83,8 @@ const Input = ({ label, value, onChange, disabled, className, type = "text", ...
                         {...commonProps}
                         type={type}
                         onChange={onChange}
+                        onFocus={props.onFocus}
+                        onBlur={props.onBlur}
                         accept={props.accept}
                         className={`${inputStyles} file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-primary-50 file:text-primary-700 hover:file:bg-primary-100`}
                         multiple={props.accept?.includes('multiple')}
@@ -91,6 +97,8 @@ const Input = ({ label, value, onChange, disabled, className, type = "text", ...
                         type={type}
                         value={value}
                         onChange={onChange}
+                        onFocus={props.onFocus}
+                        onBlur={props.onBlur}
                         placeholder={props.placeholder}
                         min={props.min}
                         max={props.max}
@@ -175,6 +183,8 @@ Input.propTypes = {
     rows: PropTypes.number,
     name: PropTypes.string,
     autoComplete: PropTypes.string,
+    onFocus: PropTypes.func,
+    onBlur: PropTypes.func,
     'aria-describedby': PropTypes.string
 };
 

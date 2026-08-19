@@ -8,7 +8,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { textToSpeech, playAudioBlob } from '../utils/openaiVoice'
 
-export default function useFormVoiceGuide({ steps = [], formData = {}, lang = 'en' }) {
+export default function useFormVoiceGuide({ steps = [], formData = {}, lang = 'en', hints = {} }) {
   const [isMuted, setIsMuted] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [isDismissed, setIsDismissed] = useState(false)
@@ -90,6 +90,13 @@ export default function useFormVoiceGuide({ steps = [], formData = {}, lang = 'e
     setIsDismissed(true)
   }, [])
 
+  // speakField — called on field focus; speaks the field-specific hint
+  const speakField = useCallback((fieldName) => {
+    if (isMuted || isDismissed) return
+    const hint = hints[fieldName]
+    if (hint) speakText(hint)
+  }, [isMuted, isDismissed, speakText, hints])
+
   return {
     currentStep,
     isComplete,
@@ -99,7 +106,55 @@ export default function useFormVoiceGuide({ steps = [], formData = {}, lang = 'e
     toggleMute,
     speak,
     dismiss,
+    speakField,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Per-field focus hints — spoken when the user clicks/tabs into a field
+// ---------------------------------------------------------------------------
+
+export const SHARE_FOOD_HINTS = {
+  donor_name:       'Enter your full name, or the name of your organization if you\'re donating on behalf of one.',
+  donor_type:       'Choose Individual or Family if you\'re donating personally, or Organization if you represent a business or group.',
+  donor_zip:        'Enter the ZIP code for your pickup location.',
+  donor_city:       'Enter the city where the food can be picked up.',
+  donor_state:      'Select the state where pickup will happen.',
+  school_district:  'Choose the community or school this donation belongs to.',
+  donor_email:      'Enter your email address so recipients can contact you if needed.',
+  donor_phone:      'Optional — add a phone number if you\'d like to be reachable by phone.',
+  full_address:     'Enter the complete street address for pickup. We\'ll pin it on the map automatically.',
+  donor_occupation: 'Optional — your occupation or role, for example Teacher or Chef.',
+  title:            'Give the food a short, clear name. For example: Apples, Rice, or Homemade Bread.',
+  category:         'Pick the category that best fits the food — such as Fresh Produce, Dairy, or Bakery.',
+  description:      'Describe the food in a few sentences — its condition, source, and any details recipients should know.',
+  quantity:         'Enter how much food you have, then choose a unit like pounds, kilograms, or count.',
+  unit:             'Choose the unit for the quantity — pounds, kilograms, ounces, or servings.',
+  expiry_date:      'Enter the expiration or best-before date so recipients know how fresh the food is.',
+  pickup_by:        'Optional — set a specific date and time by which the food must be picked up.',
+  dietary_tags:     'Check any labels that apply to this food, such as Vegetarian, Vegan, or Gluten-Free.',
+  allergens:        'Check all allergens present so recipients with dietary restrictions can stay safe.',
+  ingredients:      'Optional — list the main ingredients, especially if this is a prepared or packaged food.',
+  image:            'Upload a real photo of the food. Clear, well-lit photos help recipients decide faster.',
+}
+
+export const REQUEST_FOOD_HINTS = {
+  title:           'Describe the food you need — for example Rice, Baby Formula, or Fresh Vegetables.',
+  category:        'Select the category that best matches the food you\'re looking for.',
+  quantity:        'Enter how much you need and choose a unit like items, pounds, or bags.',
+  unit:            'Choose the unit for your quantity.',
+  needed_by:       'Optional — if you need the food by a specific date, enter it here.',
+  school_district: 'Choose your school or community so the right donors can see your request.',
+  description:     'Optional — add details like household size, why you need it, or preferred pickup area.',
+  dietary_notes:   'Optional — list any dietary needs, such as gluten-free or nut allergy.',
+  requester_name:  'Enter your name so donors know who the request is from.',
+  requester_email: 'Enter your email address so donors or admins can reach you.',
+  requester_phone: 'Optional — add a phone number if you prefer to be contacted by phone.',
+  full_address:    'Optional — enter your neighborhood or address to help donors near you.',
+}
+
+export const CLAIM_FOOD_HINTS = {
+  claimQty: 'Use the plus and minus buttons to choose how many portions you\'d like to claim, then press Confirm Claim.',
 }
 
 // ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ import {
     browseCommunityIdsForUser,
     listingVisibleToCommunityScope,
 } from '../utils/communityScope';
-import useFormVoiceGuide, { CLAIM_FOOD_STEPS } from '../hooks/useFormVoiceGuide';
+import useFormVoiceGuide, { CLAIM_FOOD_STEPS, CLAIM_FOOD_HINTS } from '../hooks/useFormVoiceGuide';
 import FormVoiceGuide from '../components/common/FormVoiceGuide';
 
 // Calculate next Friday from today (food returns to inventory at 11:59PM Friday)
@@ -59,7 +59,9 @@ export default function ClaimFoodForm() {
     const guide = useFormVoiceGuide({
         steps: CLAIM_FOOD_STEPS,
         formData: { claimQty, hasConfirmed: claiming },
+        hints: CLAIM_FOOD_HINTS,
     });
+    const { speakField } = guide;
 
     React.useEffect(() => {
         const fetchCommunity = async () => {
@@ -435,6 +437,7 @@ export default function ClaimFoodForm() {
                                     <button
                                         type="button"
                                         onClick={() => setClaimQty(q => Math.max(1, q - 1))}
+                                        onFocus={() => speakField('claimQty')}
                                         className="w-8 h-8 rounded-full border-2 border-[#2CABE3] text-[#2CABE3] font-bold text-lg flex items-center justify-center hover:bg-[#2CABE3] hover:text-white transition-colors disabled:opacity-40"
                                         disabled={claimQty <= 1}
                                     >−</button>
@@ -442,6 +445,7 @@ export default function ClaimFoodForm() {
                                     <button
                                         type="button"
                                         onClick={() => setClaimQty(q => Math.min(maxAllowed, q + 1))}
+                                        onFocus={() => speakField('claimQty')}
                                         className="w-8 h-8 rounded-full border-2 border-[#2CABE3] text-[#2CABE3] font-bold text-lg flex items-center justify-center hover:bg-[#2CABE3] hover:text-white transition-colors disabled:opacity-40"
                                         disabled={claimQty >= maxAllowed}
                                     >+</button>

@@ -5,7 +5,7 @@ import Button from '../common/Button';
 import { useAuthContext } from '../../utils/AuthContext';
 import dataService from '../../utils/dataService';
 import supabase from '../../utils/supabaseClient';
-import useFormVoiceGuide, { REQUEST_FOOD_STEPS } from '../../hooks/useFormVoiceGuide';
+import useFormVoiceGuide, { REQUEST_FOOD_STEPS, REQUEST_FOOD_HINTS } from '../../hooks/useFormVoiceGuide';
 import FormVoiceGuide from '../common/FormVoiceGuide';
 
 const CATEGORIES = [
@@ -41,7 +41,8 @@ function RequestFoodForm({ onSubmit, loading = false }) {
   const [loadingCommunities, setLoadingCommunities] = useState(true);
   const [requireApproval, setRequireApproval] = useState(true);
   const [errors, setErrors] = useState({});
-  const guide = useFormVoiceGuide({ steps: REQUEST_FOOD_STEPS, formData });
+  const guide = useFormVoiceGuide({ steps: REQUEST_FOOD_STEPS, formData, hints: REQUEST_FOOD_HINTS });
+  const { speakField } = guide;
   const [formData, setFormData] = useState({
     title: '',
     category: '',
@@ -195,6 +196,7 @@ function RequestFoodForm({ onSubmit, loading = false }) {
             name="title"
             value={formData.title}
             onChange={handleChange}
+            onFocus={() => speakField('title')}
             error={errors.title}
             required
             placeholder="e.g. Rice, fresh vegetables, baby formula"
@@ -207,6 +209,7 @@ function RequestFoodForm({ onSubmit, loading = false }) {
           type="select"
           value={formData.category}
           onChange={handleChange}
+          onFocus={() => speakField('category')}
           error={errors.category}
           required
           options={CATEGORIES}
@@ -221,6 +224,7 @@ function RequestFoodForm({ onSubmit, loading = false }) {
             step="any"
             value={formData.quantity}
             onChange={handleChange}
+            onFocus={() => speakField('quantity')}
             error={errors.quantity}
             required
           />
@@ -230,6 +234,7 @@ function RequestFoodForm({ onSubmit, loading = false }) {
             type="select"
             value={formData.unit}
             onChange={handleChange}
+            onFocus={() => speakField('unit')}
             options={UNITS}
           />
         </div>
@@ -240,6 +245,7 @@ function RequestFoodForm({ onSubmit, loading = false }) {
           type="date"
           value={formData.needed_by}
           onChange={handleChange}
+          onFocus={() => speakField('needed_by')}
           helperText="When do you need this by?"
         />
 
@@ -249,6 +255,7 @@ function RequestFoodForm({ onSubmit, loading = false }) {
           type="select"
           value={formData.school_district}
           onChange={handleChange}
+          onFocus={() => speakField('school_district')}
           error={errors.school_district}
           required
           disabled={loadingCommunities || communityLocked}
@@ -265,6 +272,7 @@ function RequestFoodForm({ onSubmit, loading = false }) {
             type="textarea"
             value={formData.description}
             onChange={handleChange}
+            onFocus={() => speakField('description')}
             placeholder="Household size, preferred pickup area, why you need it…"
           />
         </div>
@@ -275,6 +283,7 @@ function RequestFoodForm({ onSubmit, loading = false }) {
             name="dietary_notes"
             value={formData.dietary_notes}
             onChange={handleChange}
+            onFocus={() => speakField('dietary_notes')}
             placeholder="e.g. gluten-free, vegetarian, nut allergy"
             helperText="Separate multiple needs with commas"
           />
@@ -285,6 +294,7 @@ function RequestFoodForm({ onSubmit, loading = false }) {
           name="requester_name"
           value={formData.requester_name}
           onChange={handleChange}
+          onFocus={() => speakField('requester_name')}
           error={errors.requester_name}
           required
         />
@@ -294,6 +304,7 @@ function RequestFoodForm({ onSubmit, loading = false }) {
           type="email"
           value={formData.requester_email}
           onChange={handleChange}
+          onFocus={() => speakField('requester_email')}
           error={errors.requester_email}
           required
         />
@@ -302,12 +313,14 @@ function RequestFoodForm({ onSubmit, loading = false }) {
           name="requester_phone"
           value={formData.requester_phone}
           onChange={handleChange}
+          onFocus={() => speakField('requester_phone')}
         />
         <Input
           label="Preferred pickup area (optional)"
           name="full_address"
           value={formData.full_address}
           onChange={handleChange}
+          onFocus={() => speakField('full_address')}
           placeholder="Neighborhood or address"
         />
       </div>
