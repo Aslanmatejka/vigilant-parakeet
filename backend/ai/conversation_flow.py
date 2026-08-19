@@ -514,6 +514,320 @@ def _assistance_action_label(goal: AssistanceGoal, lang: str = "en") -> str:
     return "find food"
 
 
+# ---------------------------------------------------------------------------
+# Guided-mode step trackers
+# These examine the conversation history and return a precise, single-step
+# instruction for the current turn — so the AI never has to guess where it
+# is in a multi-step intake flow.
+# ---------------------------------------------------------------------------
+
+_QTY_RE = re.compile(
+    r"\b(\d+(?:\.\d+)?)\s*(kg|g|gram|lb|pound|piece|unit|item|bag|box|litre|liter|"
+    r"dozen|pack|bunch|serving|portion|loaf|loaves|slice|bottle|can|jar|tray)\b",
+    re.IGNORECASE,
+)
+
+_LOCATION_HINTS = frozenset({
+    "street", "ave", "avenue", "road", "drive", "lane", "blvd", "boulevard",
+    "way", "place", "plaza", "court", "close", "park", "community", "school",
+    "neighborhood", "area", "district", "zona", "comunidad", "barrio",
+    "vecindario", "calle", "avenida", "colonia",
+})
+
+_DATE_SIGNALS = re.compile(
+    r"\b(today|tonight|tomorrow|this week|next week|monday|tuesday|wednesday|"
+    r"thursday|friday|saturday|sunday|january|february|march|april|may|june|"
+    r"july|august|september|october|november|december|hoy|ma[ñn]ana|lunes|martes|"
+    r"mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|esta semana|pr[oó]xima semana|"
+    r"\d{1,2}[/-]\d{1,2}|\d{4}-\d{2}-\d{2})\b",
+    re.IGNORECASE,
+)
+
+_NEED_WORDS = frozenset({
+    "need", "want", "looking for", "searching for", "require", "requesting",
+    "necesito", "quiero", "busco", "solicito",
+})
+
+
+def _blob_user_turns(history: list | None, message: str, limit: int = 12) -> str:
+    """Concatenate recent USER messages + current message into one searchable blob."""
+    parts = []
+    for m in (history or [])[-limit:]:
+        if m.get("role") == "user":
+            parts.append(m.get("message") or "")
+    parts.append(message or "")
+    return " ".join(parts).lower()
+
+
+def _guided_share_step(message: str, history: list | None, lang: str = "en") -> str:
+    """Return the precise per-turn instruction for guided SHARE flow.
+
+    Reads what the user has already provided and tells the AI exactly
+    which single field to ask about next — no multi-step script.
+    """
+    # Reuse the existing state machine that tracks posting progress.
+    # These imports are deferred because the trackers live further down the file
+    # and because _FOOD_WORDS / _parse_share_items_from_text are also below.
+    user_blob = _blob_user_turns(history, message)
+
+    # --- has food name? ---
+    # _FOOD_WORDS is defined later in the file but is fully available at
+    # call-time (Python functions close over globals at call, not def time).
+    has_food = any(w in _FOOD_WORDS for w in re.findall(r"[a-z']+", user_blob))
+    if not has_food:
+        # Fallback: any noun after share/donate/giving verbs
+        has_food = bool(re.search(
+            r"\b(?:share|sharing|donate|donating|have|giving away)\s+\w+", user_blob
+        ))
+
+    # --- has quantity? ---
+    has_qty = bool(_QTY_RE.search(user_blob)) or bool(
+        re.search(r"\b\d+\b", user_blob)  # any number at all
+    )
+
+    # --- has expiry? ---
+    has_expiry = bool(_DATE_SIGNALS.search(user_blob)) or bool(
+        re.search(r"\b(fresh|no expiry|never expire|long shelf|no date|sin fecha)\b", user_blob)
+    )
+
+    # --- has location/community? ---
+    has_location = (
+        any(w in user_blob for w in _LOCATION_HINTS)
+        or bool(re.search(r"\b\d{3,}\s+\w", user_blob))  # "123 Main…"
+    )
+
+    # Determine next step
+    if not has_food:
+        if lang == "es":
+            return (
+                "GUIADO — PASO 1 de 4 (COMPARTIR):\n"
+                "Pide solo esto: '¿Qué alimento quieres compartir? Dime el nombre y la categoría "
+                "(por ejemplo: manzanas, lácteos, pan).'\n"
+                "UNA pregunta. No pidas cantidad ni fecha todavía."
+            )
+        return (
+            "GUIDED — STEP 1 of 4 (SHARE):\n"
+            "Ask only this: 'What food are you sharing? Give me the name and category "
+            "(e.g. apples, dairy, bread).'\n"
+            "ONE question. Don't ask for quantity or expiry yet."
+        )
+
+    if not has_qty:
+        if lang == "es":
+            return (
+                "GUIADO — PASO 2 de 4 (COMPARTIR):\n"
+                "Ya tienes el alimento. Pide solo esto: '¿Cuánto tienes y en qué unidad? "
+                "(por ejemplo: 3 kg, 12 piezas, 2 docenas).'\n"
+                "UNA pregunta. No preguntes por fecha ni lugar todavía."
+            )
+        return (
+            "GUIDED — STEP 2 of 4 (SHARE):\n"
+            "You have the food name. Ask only this: 'How much do you have and in what unit? "
+            "(e.g. 3 kg, 12 pieces, 2 dozen).'\n"
+            "ONE question. Don't ask for expiry or location yet."
+        )
+
+    if not has_expiry:
+        if lang == "es":
+            return (
+                "GUIADO — PASO 3 de 4 (COMPARTIR):\n"
+                "Ya tienes alimento y cantidad. Pide solo esto: '¿Cuál es la fecha de vencimiento "
+                "o caducidad aproximada? (puedes decir 'esta semana', 'el viernes', etc.)'\n"
+                "UNA pregunta. No preguntes por el lugar todavía."
+            )
+        return (
+            "GUIDED — STEP 3 of 4 (SHARE):\n"
+            "You have food and quantity. Ask only this: 'What's the expiry or best-before date? "
+            "(You can say 'this Friday', 'next week', etc.)'\n"
+            "ONE question. Don't ask for location yet."
+        )
+
+    if not has_location:
+        if lang == "es":
+            return (
+                "GUIADO — PASO 4 de 4 (COMPARTIR):\n"
+                "Ya tienes alimento, cantidad y fecha. Pide solo esto: '¿Dónde pueden recogerlo? "
+                "Dime la dirección o el nombre de la comunidad.'\n"
+                "UNA pregunta."
+            )
+        return (
+            "GUIDED — STEP 4 of 4 (SHARE):\n"
+            "You have food, quantity, and expiry. Ask only this: 'Where can people pick it up? "
+            "Give me the address or community name.'\n"
+            "ONE question."
+        )
+
+    # All fields collected — offer to post or open page
+    if lang == "es":
+        return (
+            "GUIADO — RESUMEN (COMPARTIR):\n"
+            "Tienes todos los datos. Haz un resumen corto en 2–3 líneas y pregunta UNA vez: "
+            "'¿Publico esto por ti aquí en el chat, o prefieres abrir la página de Compartir Comida y enviarlo tú?'\n"
+            "NO llames post_food_listing todavía — espera su respuesta."
+        )
+    return (
+        "GUIDED — SUMMARY (SHARE):\n"
+        "You have all the details. Give a 2–3 line summary and ask ONCE: "
+        "'Want me to post this for you here in chat, or would you prefer to open the "
+        "Share Food page and submit it yourself?'\n"
+        "Do NOT call post_food_listing yet — wait for their answer."
+    )
+
+
+def _guided_request_step(message: str, history: list | None, lang: str = "en") -> str:
+    """Return the precise per-turn instruction for guided REQUEST flow."""
+    user_blob = _blob_user_turns(history, message)
+
+    # --- has what food? ---
+    has_what = (
+        any(w in user_blob for w in _NEED_WORDS)
+        and bool(re.search(r"\b[a-z]{3,}\b", user_blob.replace("need", "").replace("want", "")))
+    ) or bool(re.search(r"\b(food|rice|bread|eggs|milk|meat|vegetables|fruit|beans)\b", user_blob))
+
+    # --- has quantity? ---
+    has_qty = bool(_QTY_RE.search(user_blob)) or bool(re.search(r"\b\d+\b", user_blob))
+
+    # --- has community/area? ---
+    has_community = any(w in user_blob for w in _LOCATION_HINTS)
+
+    # --- has needed-by date? ---
+    has_date = bool(_DATE_SIGNALS.search(user_blob)) or bool(
+        re.search(r"\b(urgent|asap|as soon as possible|urgente|inmediatamente)\b", user_blob)
+    )
+
+    if not has_what:
+        if lang == "es":
+            return (
+                "GUIADO — PASO 1 de 4 (SOLICITUD):\n"
+                "Pide solo esto: '¿Qué alimento necesitas? Dime el tipo o los tipos de comida.'\n"
+                "UNA pregunta."
+            )
+        return (
+            "GUIDED — STEP 1 of 4 (REQUEST):\n"
+            "Ask only this: 'What food do you need? Tell me the type or types of food.'\n"
+            "ONE question."
+        )
+
+    if not has_qty:
+        if lang == "es":
+            return (
+                "GUIADO — PASO 2 de 4 (SOLICITUD):\n"
+                "Ya sabes qué necesita. Pide solo esto: '¿Cuánto necesitas aproximadamente? "
+                "(por ejemplo: 2 kg, para 4 personas, una semana de suministro)'\n"
+                "UNA pregunta."
+            )
+        return (
+            "GUIDED — STEP 2 of 4 (REQUEST):\n"
+            "You know what they need. Ask only this: 'How much do you need roughly? "
+            "(e.g. 2 kg, enough for 4 people, one week's supply)'\n"
+            "ONE question."
+        )
+
+    if not has_community:
+        if lang == "es":
+            return (
+                "GUIADO — PASO 3 de 4 (SOLICITUD):\n"
+                "Ya tienes qué y cuánto. Pide solo esto: '¿En qué comunidad o zona estás?'\n"
+                "UNA pregunta."
+            )
+        return (
+            "GUIDED — STEP 3 of 4 (REQUEST):\n"
+            "You have what and how much. Ask only this: 'Which community or area are you in?'\n"
+            "ONE question."
+        )
+
+    if not has_date:
+        if lang == "es":
+            return (
+                "GUIADO — PASO 4 de 4 (SOLICITUD):\n"
+                "Ya tienes qué, cuánto y comunidad. Pide solo esto: '¿Para cuándo lo necesitas? "
+                "(esta semana, el viernes, urgente, etc.)'\n"
+                "UNA pregunta."
+            )
+        return (
+            "GUIDED — STEP 4 of 4 (REQUEST):\n"
+            "You have what, how much, and community. Ask only this: 'When do you need it by? "
+            "(this week, Friday, urgent, etc.)'\n"
+            "ONE question."
+        )
+
+    if lang == "es":
+        return (
+            "GUIADO — RESUMEN (SOLICITUD):\n"
+            "Tienes todos los datos. Haz un resumen corto y pregunta UNA vez: "
+            "'¿Publico esta solicitud por ti, o prefieres abrir la página de Solicitar Comida?'\n"
+            "NO llames post_food_request todavía — espera su respuesta."
+        )
+    return (
+        "GUIDED — SUMMARY (REQUEST):\n"
+        "You have all the details. Give a short summary and ask ONCE: "
+        "'Want me to post this request for you, or would you prefer to open the Request Food page?'\n"
+        "Do NOT call post_food_request yet — wait for their answer."
+    )
+
+
+def _guided_find_step(message: str, history: list | None, lang: str = "en") -> str:
+    """Return the precise per-turn instruction for guided FIND/CLAIM flow."""
+    user_blob = _blob_user_turns(history, message)
+
+    # Did the user already say what food they want?
+    has_what = bool(re.search(r"\b[a-z]{3,}\b", user_blob.replace("find", "")
+                              .replace("food", "").replace("looking", "").strip()))
+
+    # Has a dietary/allergy question been asked in assistant history?
+    dietary_asked = any(
+        any(k in (m.get("message") or "").lower() for k in (
+            "allerg", "dietary", "restriction", "vegetarian", "vegan", "halal",
+            "kosher", "gluten", "alergia", "dieta", "restricción",
+        ))
+        for m in (history or [])[-6:]
+        if m.get("role") == "assistant"
+    )
+
+    if not has_what:
+        if lang == "es":
+            return (
+                "GUIADO — PASO 1 (BUSCAR):\n"
+                "Pide solo esto: '¿Qué tipo de alimento estás buscando?'\n"
+                "UNA pregunta. No busques todavía."
+            )
+        return (
+            "GUIDED — STEP 1 (FIND):\n"
+            "Ask only this: 'What kind of food are you looking for?'\n"
+            "ONE question. Don't search yet."
+        )
+
+    if not dietary_asked:
+        if lang == "es":
+            return (
+                "GUIADO — PASO 2 (BUSCAR):\n"
+                "Ya sabes qué busca. Pide solo esto: '¿Tienes alguna alergia o restricción dietética "
+                "que deba filtrar?' (Si no, responde 'ninguna' y buscaré de inmediato.)\n"
+                "UNA pregunta."
+            )
+        return (
+            "GUIDED — STEP 2 (FIND):\n"
+            "You know what they want. Ask only this: 'Any allergies or dietary restrictions "
+            "I should filter by? (If none, just say so and I'll search right away.)'\n"
+            "ONE question."
+        )
+
+    # Ready to search
+    if lang == "es":
+        return (
+            "GUIADO — BUSCAR AHORA:\n"
+            "Tienes lo que necesitas. Llama search_food_near_user ESTE turno con los datos del usuario. "
+            "Muestra los resultados de forma amigable y ayúdalos a elegir y reclamar. "
+            "No abras ninguna página a menos que lo pidan."
+        )
+    return (
+        "GUIDED — SEARCH NOW:\n"
+        "You have what you need. Call search_food_near_user THIS turn with the user's info. "
+        "Show results in a friendly way and help them pick and claim. "
+        "Do NOT open any page unless they ask."
+    )
+
+
 def build_assistance_mode_reminder(
     message: str,
     history: list | None = None,
@@ -552,79 +866,13 @@ def build_assistance_mode_reminder(
         )
 
     if mode == "guided" and goal:
-        if lang == "es":
-            if goal == "share":
-                return (
-                    "MODO GUIADO — COMPARTIR (paso a paso en el chat):\n"
-                    "Guía al usuario campo por campo EN EL CHAT — UNA pregunta por turno:\n"
-                    "  Paso 1: '¿Qué alimento quieres compartir? (nombre y categoría)'\n"
-                    "  Paso 2: '¿Cuánto tienes y en qué unidad? (ej. 3 kg, 12 unidades)'\n"
-                    "  Paso 3: '¿Cuál es la fecha de vencimiento aproximada?'\n"
-                    "  Paso 4: '¿Dónde pueden recogerlo? (dirección o comunidad)'\n"
-                    "  Paso 5: Résumelo y pregunta: '¿Publico yo esto por ti, o prefieres abrir la página y enviarlo tú?'\n"
-                    "NO llames navigate_ui ni abras ninguna página a menos que el usuario lo pida "
-                    "explícitamente ('abre la página', 'muéstrame el formulario', 'llévame allí'). "
-                    "NO llames post_food_listing hasta que el usuario confirme o pida que lo hagas tú."
-                )
-            if goal == "request":
-                return (
-                    "MODO GUIADO — SOLICITAR (paso a paso en el chat):\n"
-                    "Guía al usuario campo por campo EN EL CHAT — UNA pregunta por turno:\n"
-                    "  Paso 1: '¿Qué alimento necesitas?'\n"
-                    "  Paso 2: '¿Cuánto necesitas aproximadamente?'\n"
-                    "  Paso 3: '¿En qué comunidad o zona estás?'\n"
-                    "  Paso 4: '¿Para cuándo lo necesitas?'\n"
-                    "  Paso 5: Résumelo y pregunta: '¿Publico yo la solicitud, o prefieres abrirla tú en la página?'\n"
-                    "NO llames navigate_ui ni abras ninguna página a menos que el usuario lo pida "
-                    "explícitamente. NO llames post_food_request hasta que el usuario confirme."
-                )
-            return (
-                "MODO GUIADO — BUSCAR (paso a paso en el chat):\n"
-                "Guía al usuario paso a paso EN EL CHAT — UNA pregunta por turno:\n"
-                "  Paso 1: '¿Qué tipo de alimento estás buscando?' (si no lo dijo)\n"
-                "  Paso 2: '¿Tienes alguna restricción dietética o alergia?'\n"
-                "  Paso 3: Llama search_food_near_user con lo que tienes y muestra resultados.\n"
-                "  Paso 4: Ayúdalos a elegir y reclamar conversacionalmente.\n"
-                "NO llames navigate_ui ni abras ninguna página a menos que el usuario lo pida "
-                "explícitamente ('abre la página', 'muéstrame el mapa'). "
-                "Busca y reclama tú en el chat."
-            )
+        # Use the step-tracker to tell the AI exactly which question to ask
+        # this turn, based on what has already been collected in the history.
         if goal == "share":
-            return (
-                "GUIDED MODE — SHARE FOOD (step-by-step in chat):\n"
-                "Walk the user through each field ONE question per turn, entirely in chat:\n"
-                "  Step 1: 'What food are you sharing? (name and category)'\n"
-                "  Step 2: 'How much do you have and what unit? (e.g. 3 kg, 12 pieces)'\n"
-                "  Step 3: 'What's the approximate expiry or best-before date?'\n"
-                "  Step 4: 'Where can people pick it up? (address or community)'\n"
-                "  Step 5: Summarise everything and ask: 'Want me to post this for you, or would you prefer to open the page and submit it yourself?'\n"
-                "Do NOT call navigate_ui or open any page unless the user explicitly asks "
-                "('open the page', 'show me the form', 'take me there'). "
-                "Do NOT call post_food_listing until they confirm or ask you to take over."
-            )
+            return _guided_share_step(message, history, lang)
         if goal == "request":
-            return (
-                "GUIDED MODE — REQUEST FOOD (step-by-step in chat):\n"
-                "Walk the user through each field ONE question per turn, entirely in chat:\n"
-                "  Step 1: 'What food do you need?'\n"
-                "  Step 2: 'How much do you need roughly?'\n"
-                "  Step 3: 'Which community or area are you in?'\n"
-                "  Step 4: 'When do you need it by?'\n"
-                "  Step 5: Summarise and ask: 'Want me to post this request for you, or open the page to submit it yourself?'\n"
-                "No photo step — requests are text-only. "
-                "Do NOT call navigate_ui or open any page unless the user explicitly asks. "
-                "Do NOT call post_food_request until they confirm."
-            )
-        return (
-            "GUIDED MODE — FIND FOOD (step-by-step in chat):\n"
-            "Walk the user through finding food ONE step at a time, entirely in chat:\n"
-            "  Step 1: 'What kind of food are you looking for?' (if not already said)\n"
-            "  Step 2: 'Any dietary restrictions or allergies to filter by?'\n"
-            "  Step 3: Call search_food_near_user with what you have and show results.\n"
-            "  Step 4: Help them pick and claim conversationally.\n"
-            "Do NOT call navigate_ui or open any page unless the user explicitly asks "
-            "('open the page', 'show me the map'). Handle search and claim directly in chat."
-        )
+            return _guided_request_step(message, history, lang)
+        return _guided_find_step(message, history, lang)
 
     if mode == "hands_on" and goal:
         if lang == "es":
@@ -2820,19 +3068,7 @@ def _posting_checklist(message: str, history: list | None, lang: str) -> str:
         )
     mode = resolve_assistance_mode(message, history)
     if mode == "guided":
-        if lang == "es":
-            return (
-                "FLUJO ACTIVO — COMPARTIR (guiado, paso a paso en el chat):\n"
-                "Continúa guiando campo por campo EN EL CHAT — UNA pregunta por turno. "
-                "No abras ninguna página a menos que el usuario lo pida explícitamente. "
-                "Cuando tengas todos los datos, ofrece: '¿Lo publico yo, o prefieres abrirlo en la página?'"
-            )
-        return (
-            "ACTIVE FLOW — SHARE FOOD (guided, step-by-step in chat):\n"
-            "Continue collecting fields ONE question per turn in chat. "
-            "Do NOT open any page or call navigate_ui unless the user explicitly asks. "
-            "Once all fields are gathered, offer: 'Want me to post this, or open the page to submit yourself?'"
-        )
+        return _guided_share_step(message, history, lang)
     contextual = build_posting_step_reminder(message, history, lang=lang)
     if contextual:
         return contextual
@@ -3023,19 +3259,7 @@ def _finding_checklist(message: str, history: list | None, lang: str) -> str:
 
     mode = resolve_assistance_mode(message, history)
     if mode == "guided":
-        if lang == "es":
-            return (
-                "FLUJO ACTIVO — BUSCAR (guiado, paso a paso en el chat):\n"
-                "Continúa guiando paso a paso EN EL CHAT. Llama search_food_near_user "
-                "cuando tengas suficiente información y ayuda al usuario a elegir y reclamar. "
-                "No abras ninguna página a menos que el usuario lo pida explícitamente."
-            )
-        return (
-            "ACTIVE FLOW — FIND FOOD (guided, step-by-step in chat):\n"
-            "Continue guiding step by step in chat. Call search_food_near_user "
-            "once you have enough info and help them pick and claim. "
-            "Do NOT open any page or call navigate_ui unless the user explicitly asks."
-        )
+        return _guided_find_step(message, history, lang)
 
     blob_l = _history_blob(history, message, 8).lower()
     searched = any(k in blob_l for k in (
@@ -3094,19 +3318,7 @@ def _request_checklist(message: str, history: list | None, lang: str) -> str:
         )
     mode = resolve_assistance_mode(message, history)
     if mode == "guided":
-        if lang == "es":
-            return (
-                "FLUJO ACTIVO — SOLICITAR (guiado, paso a paso en el chat):\n"
-                "Continúa guiando campo por campo EN EL CHAT — UNA pregunta por turno. "
-                "No abras ninguna página a menos que el usuario lo pida explícitamente. "
-                "Cuando tengas todos los datos, ofrece: '¿Lo publico yo, o prefieres abrirlo en la página?'"
-            )
-        return (
-            "ACTIVE FLOW — REQUEST FOOD (guided, step-by-step in chat):\n"
-            "Continue collecting fields ONE question per turn in chat. "
-            "Do NOT open any page or call navigate_ui unless the user explicitly asks. "
-            "Once all fields are gathered, offer: 'Want me to post this, or open the page to submit yourself?'"
-        )
+        return _guided_request_step(message, history, lang)
     if lang == "es":
         return (
             "FLUJO ACTIVO — SOLICITUD EXPLÍCITA:\n"
