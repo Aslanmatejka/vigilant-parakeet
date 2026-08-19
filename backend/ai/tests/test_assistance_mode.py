@@ -41,11 +41,10 @@ def test_reminder_guided_request():
     ]
     rem = build_assistance_mode_reminder("Guide me step by step", history)
     assert rem is not None
-    # Step-tracker returns the exact next step, starting with "GUIDED —"
     assert "GUIDED" in rem
     assert "REQUEST" in rem or "request" in rem.lower()
-    # Guided mode walks through fields in chat — no page navigation until user asks
-    assert "Do NOT" in rem or "do NOT" in rem or "ONE question" in rem
+    assert "navigate_ui" in rem or "Request Food" in rem
+    assert "STEP 1" in rem or "PASO 1" in rem
 
 
 def test_reminder_hands_on_request():
@@ -112,10 +111,11 @@ def test_reminder_guided_share():
     ]
     rem = build_assistance_mode_reminder("Guide me step by step", history)
     assert rem is not None
-    # Step-tracker returns the exact next step, starting with "GUIDED —"
     assert "GUIDED" in rem
-    # Must be a single-step instruction, not a full script
-    assert "ONE question" in rem or "Step" in rem or "SUMMARY" in rem
+    assert "SHARE" in rem or "share" in rem.lower()
+    assert "navigate_ui" in rem
+    assert "Donor Information" in rem or "donor" in rem.lower()
+    assert "STEP 1" in rem
 
 
 def test_tool_block_while_waiting_for_choice():
@@ -152,7 +152,24 @@ def test_quick_replies_for_assistance_fork():
     assert "Guide me step by step" in out
 
 
-def test_concrete_share_qty_skips_fork():
+def test_guided_share_advances_on_done():
+    history = [
+        {"role": "user", "message": "I want to share food"},
+        {
+            "role": "assistant",
+            "message": "Want me to handle everything for you in chat, or guide me step by step?",
+        },
+        {"role": "user", "message": "Guide me step by step"},
+        {
+            "role": "assistant",
+            "message": "GUIDED — STEP 1 of 9 (SHARE FOOD — Open Share Food): ...",
+        },
+    ]
+    rem = build_assistance_mode_reminder("done", history)
+    assert rem is not None
+    assert "STEP 2" in rem
+    assert "Donor Type" in rem or "donor" in rem.lower()
+
     # Donor already named food + qty — go straight into posting.
     assert needs_assistance_mode_choice("I want to share 5 apples") is False
     # Still a share trigger without qty should ask.

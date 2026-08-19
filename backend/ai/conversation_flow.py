@@ -559,272 +559,449 @@ def _blob_user_turns(history: list | None, message: str, limit: int = 12) -> str
     return " ".join(parts).lower()
 
 
-def _guided_share_step(message: str, history: list | None, lang: str = "en") -> str:
-    """Return the precise per-turn instruction for guided SHARE flow.
+def _blob_user_turns(history: list | None, message: str, limit: int = 12) -> str:
+    """Concatenate recent USER messages + current message into one searchable blob."""
+    parts = []
+    for m in (history or [])[-limit:]:
+        if m.get("role") == "user":
+            parts.append(m.get("message") or "")
+    parts.append(message or "")
+    return " ".join(parts).lower()
 
-    Reads what the user has already provided and tells the AI exactly
-    which single field to ask about next — no multi-step script.
-    """
-    # Reuse the existing state machine that tracks posting progress.
-    # These imports are deferred because the trackers live further down the file
-    # and because _FOOD_WORDS / _parse_share_items_from_text are also below.
-    user_blob = _blob_user_turns(history, message)
 
-    # --- has food name? ---
-    # _FOOD_WORDS is defined later in the file but is fully available at
-    # call-time (Python functions close over globals at call, not def time).
-    has_food = any(w in _FOOD_WORDS for w in re.findall(r"[a-z']+", user_blob))
-    if not has_food:
-        # Fallback: any noun after share/donate/giving verbs
-        has_food = bool(re.search(
-            r"\b(?:share|sharing|donate|donating|have|giving away)\s+\w+", user_blob
-        ))
+_GUIDED_ADVANCE_EXACT: frozenset[str] = frozenset({
+    "done", "next", "ok", "okay", "ready", "finished", "got it", "continue",
+    "yes", "yep", "sure", "y", "listo", "siguiente", "continuar", "sí", "si",
+    "what's next", "whats next", "next step", "all set", "done with that",
+})
 
-    # --- has quantity? ---
-    has_qty = bool(_QTY_RE.search(user_blob)) or bool(
-        re.search(r"\b\d+\b", user_blob)  # any number at all
+_GUIDED_ADVANCE_SUBSTRINGS: tuple[str, ...] = (
+    "what's next", "whats next", "next step", "next field", "move on",
+    "done with", "finished that", "filled in", "filled out", "filled it",
+    "all set", "ready for next", "paso siguiente", "ya está", "ya esta",
+    "listo con", "hecho", "terminé", "termine",
+)
+
+
+def _guided_steps_delivered(history: list | None) -> int:
+    """How many GUIDED step instructions the assistant already sent."""
+    n = 0
+    for m in history or []:
+        if m.get("role") != "assistant":
+            continue
+        text = m.get("message") or ""
+        if re.search(r"GUIDED — STEP \d+", text) or re.search(r"GUIADO — PASO \d+", text):
+            n += 1
+    return n
+
+
+def _user_guided_advance(message: str) -> bool:
+    t = (message or "").strip().lower()
+    if t in _GUIDED_ADVANCE_EXACT:
+        return True
+    return any(p in t for p in _GUIDED_ADVANCE_SUBSTRINGS)
+
+
+def _guided_step_index(history: list | None, message: str, total: int) -> tuple[int, bool]:
+    """Return (step_index, is_repeat)."""
+    delivered = _guided_steps_delivered(history)
+    if delivered == 0:
+        return 0, False
+    if _user_guided_advance(message):
+        return min(delivered, total - 1), False
+    return max(0, delivered - 1), True
+
+
+def _guided_format_step(
+    *,
+    goal: str,
+    step_no: int,
+    total: int,
+    section: str,
+    body: str,
+    lang: str,
+    repeat: bool,
+) -> str:
+    repeat_note = (
+        "\nREPEAT — they may be stuck. Re-explain this SAME step more simply "
+        "with a concrete example. Do NOT skip ahead."
+        if repeat else
+        "\nGive ONLY this one step. Wait for them to say done / ok / what's next "
+        "before moving on. Do NOT dump future steps."
     )
-
-    # --- has expiry? ---
-    has_expiry = bool(_DATE_SIGNALS.search(user_blob)) or bool(
-        re.search(r"\b(fresh|no expiry|never expire|long shelf|no date|sin fecha)\b", user_blob)
-    )
-
-    # --- has location/community? ---
-    has_location = (
-        any(w in user_blob for w in _LOCATION_HINTS)
-        or bool(re.search(r"\b\d{3,}\s+\w", user_blob))  # "123 Main…"
-    )
-
-    # Determine next step
-    if not has_food:
-        if lang == "es":
-            return (
-                "GUIADO — PASO 1 de 4 (COMPARTIR):\n"
-                "Pide solo esto: '¿Qué alimento quieres compartir? Dime el nombre y la categoría "
-                "(por ejemplo: manzanas, lácteos, pan).'\n"
-                "UNA pregunta. No pidas cantidad ni fecha todavía."
-            )
-        return (
-            "GUIDED — STEP 1 of 4 (SHARE):\n"
-            "Ask only this: 'What food are you sharing? Give me the name and category "
-            "(e.g. apples, dairy, bread).'\n"
-            "ONE question. Don't ask for quantity or expiry yet."
-        )
-
-    if not has_qty:
-        if lang == "es":
-            return (
-                "GUIADO — PASO 2 de 4 (COMPARTIR):\n"
-                "Ya tienes el alimento. Pide solo esto: '¿Cuánto tienes y en qué unidad? "
-                "(por ejemplo: 3 kg, 12 piezas, 2 docenas).'\n"
-                "UNA pregunta. No preguntes por fecha ni lugar todavía."
-            )
-        return (
-            "GUIDED — STEP 2 of 4 (SHARE):\n"
-            "You have the food name. Ask only this: 'How much do you have and in what unit? "
-            "(e.g. 3 kg, 12 pieces, 2 dozen).'\n"
-            "ONE question. Don't ask for expiry or location yet."
-        )
-
-    if not has_expiry:
-        if lang == "es":
-            return (
-                "GUIADO — PASO 3 de 4 (COMPARTIR):\n"
-                "Ya tienes alimento y cantidad. Pide solo esto: '¿Cuál es la fecha de vencimiento "
-                "o caducidad aproximada? (puedes decir 'esta semana', 'el viernes', etc.)'\n"
-                "UNA pregunta. No preguntes por el lugar todavía."
-            )
-        return (
-            "GUIDED — STEP 3 of 4 (SHARE):\n"
-            "You have food and quantity. Ask only this: 'What's the expiry or best-before date? "
-            "(You can say 'this Friday', 'next week', etc.)'\n"
-            "ONE question. Don't ask for location yet."
-        )
-
-    if not has_location:
-        if lang == "es":
-            return (
-                "GUIADO — PASO 4 de 4 (COMPARTIR):\n"
-                "Ya tienes alimento, cantidad y fecha. Pide solo esto: '¿Dónde pueden recogerlo? "
-                "Dime la dirección o el nombre de la comunidad.'\n"
-                "UNA pregunta."
-            )
-        return (
-            "GUIDED — STEP 4 of 4 (SHARE):\n"
-            "You have food, quantity, and expiry. Ask only this: 'Where can people pick it up? "
-            "Give me the address or community name.'\n"
-            "ONE question."
-        )
-
-    # All fields collected — offer to post or open page
     if lang == "es":
+        header = f"GUIADO — PASO {step_no} de {total} ({goal})"
+        if section:
+            header += f" — {section}"
         return (
-            "GUIADO — RESUMEN (COMPARTIR):\n"
-            "Tienes todos los datos. Haz un resumen corto en 2–3 líneas y pregunta UNA vez: "
-            "'¿Publico esto por ti aquí en el chat, o prefieres abrir la página de Compartir Comida y enviarlo tú?'\n"
-            "NO llames post_food_listing todavía — espera su respuesta."
+            f"{header}:\n"
+            f"{body}\n"
+            "Responde en 3–6 frases cortas, claras y amables. "
+            "NO llames post_food_listing, post_food_request, claim_*, ni search_* "
+            "en modo guiado salvo que lo pidan explícitamente."
+            f"{repeat_note}"
         )
+    header = f"GUIDED — STEP {step_no} of {total} ({goal})"
+    if section:
+        header += f" — {section}"
     return (
-        "GUIDED — SUMMARY (SHARE):\n"
-        "You have all the details. Give a 2–3 line summary and ask ONCE: "
-        "'Want me to post this for you here in chat, or would you prefer to open the "
-        "Share Food page and submit it yourself?'\n"
-        "Do NOT call post_food_listing yet — wait for their answer."
+        f"{header}:\n"
+        f"{body}\n"
+        "Reply in 3–6 short, clear, friendly sentences the user can follow easily. "
+        "Do NOT call post_food_listing, post_food_request, claim_*, or search_* "
+        "in guided mode unless they explicitly ask you to."
+        f"{repeat_note}"
+    )
+
+
+# Detailed UI walkthrough steps — mirrors the real Share Food form layout.
+_SHARE_GUIDED_UI: tuple[dict, ...] = (
+    {
+        "section_en": "Open Share Food",
+        "section_es": "Abrir Compartir Comida",
+        "body_en": (
+            "THIS turn call navigate_ui action=open target=create once (opens Share Food).\n"
+            "Tell them:\n"
+            "• The form has TWO parts — do not mix them up: "
+            "(1) Donor Information = blue box at the TOP, "
+            "(2) Food Listing Details = green box BELOW.\n"
+            "• Start in Donor Information: click the **Name / Organization** field "
+            "and type their full name or organization name.\n"
+            "• When finished, say 'done' or 'what's next' and you'll guide the next field."
+        ),
+        "body_es": (
+            "ESTE turno llama navigate_ui action=open target=create una vez (abre Compartir Comida).\n"
+            "Explícales:\n"
+            "• El formulario tiene DOS partes — no las mezcles: "
+            "(1) Información del donante = caja azul ARRIBA, "
+            "(2) Detalles del alimento = caja verde ABAJO.\n"
+            "• Empieza en Información del donante: haz clic en **Nombre / Organización** "
+            "y escribe su nombre completo u organización.\n"
+            "• Cuando termine, que diga 'listo' o 'siguiente' y guías el siguiente campo."
+        ),
+    },
+    {
+        "section_en": "Donor Information",
+        "section_es": "Información del donante",
+        "body_en": (
+            "Still in the blue **Donor Information** box at the top.\n"
+            "• Find **Donor Type** (dropdown).\n"
+            "• Choose **Individual/Family** if donating personally, or **Organization** "
+            "if representing a business or group.\n"
+            "• Say 'done' when selected."
+        ),
+        "body_es": (
+            "Sigue en la caja azul **Información del donante** arriba.\n"
+            "• Busca **Tipo de donante** (menú).\n"
+            "• Elige **Individual/Familia** o **Organización** según corresponda.\n"
+            "• Di 'listo' cuando lo hayas seleccionado."
+        ),
+    },
+    {
+        "section_en": "Donor Information",
+        "section_es": "Información del donante",
+        "body_en": (
+            "Still in **Donor Information** (blue box).\n"
+            "• Fill **ZIP Code**, **City**, and **State** — these are the pickup area details.\n"
+            "• Use the state dropdown for State.\n"
+            "• Say 'done' when all three are filled."
+        ),
+        "body_es": (
+            "Sigue en **Información del donante** (caja azul).\n"
+            "• Completa **Código postal**, **Ciudad** y **Estado**.\n"
+            "• Usa el menú desplegable para el Estado.\n"
+            "• Di 'listo' cuando los tres estén llenos."
+        ),
+    },
+    {
+        "section_en": "Donor Information",
+        "section_es": "Información del donante",
+        "body_en": (
+            "Still in **Donor Information**.\n"
+            "• Open **Active Communities** and pick the school or community this donation belongs to.\n"
+            "• If it's locked to their signup community, leave it as shown.\n"
+            "• Say 'done' when set."
+        ),
+        "body_es": (
+            "Sigue en **Información del donante**.\n"
+            "• Abre **Comunidades activas** y elige la escuela o comunidad.\n"
+            "• Si está bloqueado a su comunidad de registro, déjalo como está.\n"
+            "• Di 'listo' cuando esté."
+        ),
+    },
+    {
+        "section_en": "Donor Information",
+        "section_es": "Información del donante",
+        "body_en": (
+            "Still in **Donor Information**.\n"
+            "• Enter **Email** and/or **Phone** — at least one is required.\n"
+            "• Then scroll to **Full Address (for map location)** and type the complete "
+            "street address where food will be picked up (e.g. 123 Main St, City, ST 12345).\n"
+            "• Wait for the green checkmark that the address was located on the map.\n"
+            "• Say 'done' when the address is verified."
+        ),
+        "body_es": (
+            "Sigue en **Información del donante**.\n"
+            "• Ingresa **Correo** y/o **Teléfono** — al menos uno es obligatorio.\n"
+            "• Luego completa **Dirección completa** para el mapa.\n"
+            "• Espera la marca verde de verificación.\n"
+            "• Di 'listo' cuando la dirección esté verificada."
+        ),
+    },
+    {
+        "section_en": "Food Listing Details",
+        "section_es": "Detalles del alimento",
+        "body_en": (
+            "Now scroll down to the green **Food Listing Details** section — "
+            "this is separate from donor info.\n"
+            "• Click **What are you donating?** and type a short food name (e.g. Fresh Apples).\n"
+            "• Open **Category** and pick the best match (Produce, Dairy, Bakery, etc.).\n"
+            "• Say 'done' when both are filled."
+        ),
+        "body_es": (
+            "Baja a la sección verde **Detalles del alimento** — separada del donante.\n"
+            "• En **¿Qué estás donando?** escribe un nombre corto (ej. Manzanas frescas).\n"
+            "• En **Categoría** elige la mejor opción.\n"
+            "• Di 'listo' cuando ambos estén llenos."
+        ),
+    },
+    {
+        "section_en": "Food Listing Details",
+        "section_es": "Detalles del alimento",
+        "body_en": (
+            "Still in **Food Listing Details** (green box).\n"
+            "• Fill **Description** — a few sentences about condition, source, and anything "
+            "recipients should know.\n"
+            "• Then enter **Quantity** (number) and choose a **Unit** (lb, kg, count, etc.).\n"
+            "• Say 'done' when complete."
+        ),
+        "body_es": (
+            "Sigue en **Detalles del alimento** (caja verde).\n"
+            "• Completa **Descripción**.\n"
+            "• Luego **Cantidad** y **Unidad**.\n"
+            "• Di 'listo' cuando termines."
+        ),
+    },
+    {
+        "section_en": "Food Listing Details",
+        "section_es": "Detalles del alimento",
+        "body_en": (
+            "Still in **Food Listing Details**.\n"
+            "• If category is NOT Fresh Produce, fill **Expiration Date**.\n"
+            "• Produce can skip expiry. **Pickup Deadline** is optional.\n"
+            "• Dietary tags and allergens are optional — check any that apply or skip.\n"
+            "• Say 'done' when ready for the photo step."
+        ),
+        "body_es": (
+            "Sigue en **Detalles del alimento**.\n"
+            "• Si NO es producto fresco, completa **Fecha de vencimiento**.\n"
+            "• Etiquetas dietéticas y alérgenos son opcionales.\n"
+            "• Di 'listo' para el paso de la foto."
+        ),
+    },
+    {
+        "section_en": "Food Listing Details",
+        "section_es": "Detalles del alimento",
+        "body_en": (
+            "Last required field in **Food Listing Details**.\n"
+            "• Click **Photo**, choose **Upload**, and select a real photo of the food "
+            "(no stock images).\n"
+            "• Review everything: donor info at top, food details below.\n"
+            "• Click **Submit Listing** at the bottom.\n"
+            "• Tell them you'll wait — ask them to say 'submitted' when done or if they hit an error."
+        ),
+        "body_es": (
+            "Último campo obligatorio en **Detalles del alimento**.\n"
+            "• Sube una **Foto** real del alimento.\n"
+            "• Revisa todo y pulsa **Enviar listado**.\n"
+            "• Pídeles que digan 'enviado' cuando terminen o si hay un error."
+        ),
+    },
+)
+
+_REQUEST_GUIDED_UI: tuple[dict, ...] = (
+    {
+        "section_en": "Open Request Food",
+        "section_es": "Abrir Solicitar Comida",
+        "body_en": (
+            "THIS turn call navigate_ui action=open target=request once.\n"
+            "Tell them:\n"
+            "• You're opening the **Request Food** form.\n"
+            "• First field: **What food do you need?** — type what they're looking for "
+            "(e.g. Rice, baby formula, fresh vegetables).\n"
+            "• Say 'done' or 'what's next' when filled."
+        ),
+        "body_es": (
+            "ESTE turno llama navigate_ui action=open target=request una vez.\n"
+            "• Abres el formulario **Solicitar Comida**.\n"
+            "• Primer campo: **¿Qué alimento necesitas?**\n"
+            "• Di 'listo' o 'siguiente' cuando lo hayas llenado."
+        ),
+    },
+    {
+        "section_en": "Request form",
+        "section_es": "Formulario de solicitud",
+        "body_en": (
+            "• Select **Category** from the dropdown.\n"
+            "• Enter **How much?** (quantity) and pick a **Unit** (items, lb, bags, etc.).\n"
+            "• Say 'done' when both are set."
+        ),
+        "body_es": (
+            "• Elige **Categoría**.\n"
+            "• Ingresa **¿Cuánto?** y la **Unidad**.\n"
+            "• Di 'listo' cuando esté."
+        ),
+    },
+    {
+        "section_en": "Request form",
+        "section_es": "Formulario de solicitud",
+        "body_en": (
+            "• **Needed by** is optional — add a date if they have a deadline.\n"
+            "• Choose **School / community** so donors in their area can see the request.\n"
+            "• Say 'done' when the community is selected."
+        ),
+        "body_es": (
+            "• **Necesito para** es opcional.\n"
+            "• Elige **Escuela / comunidad**.\n"
+            "• Di 'listo' cuando esté."
+        ),
+    },
+    {
+        "section_en": "Request form",
+        "section_es": "Formulario de solicitud",
+        "body_en": (
+            "• **Details** and **Dietary needs** are optional — add household size or "
+            "allergies if relevant.\n"
+            "• Fill **Your name** and **Email** (required).\n"
+            "• **Phone** and **Preferred pickup area** are optional.\n"
+            "• Say 'done' when contact info is complete."
+        ),
+        "body_es": (
+            "• **Detalles** y **Necesidades dietéticas** son opcionales.\n"
+            "• Completa **Tu nombre** y **Correo** (obligatorios).\n"
+            "• Di 'listo' cuando la info de contacto esté lista."
+        ),
+    },
+    {
+        "section_en": "Submit request",
+        "section_es": "Enviar solicitud",
+        "body_en": (
+            "• Review all fields.\n"
+            "• Click **Submit food request** at the bottom.\n"
+            "• Ask them to say 'submitted' when done or tell you if something blocked them."
+        ),
+        "body_es": (
+            "• Revisa todos los campos.\n"
+            "• Pulsa **Enviar solicitud de comida**.\n"
+            "• Pídeles que digan 'enviado' cuando terminen."
+        ),
+    },
+)
+
+_FIND_GUIDED_UI: tuple[dict, ...] = (
+    {
+        "section_en": "Open Find Food",
+        "section_es": "Abrir Buscar Comida",
+        "body_en": (
+            "THIS turn call navigate_ui action=open target=list once (opens Find Food).\n"
+            "Tell them:\n"
+            "• You're opening **Find Food** where available donations are listed.\n"
+            "• They can browse cards, use filters on the side, or tell you what they want "
+            "and you can search for them.\n"
+            "• Ask: 'What kind of food are you looking for today?'"
+        ),
+        "body_es": (
+            "ESTE turno llama navigate_ui action=open target=list una vez.\n"
+            "• Abres **Buscar Comida** con donaciones disponibles.\n"
+            "• Pueden explorar tarjetas o decirte qué buscan.\n"
+            "• Pregunta: '¿Qué tipo de comida buscas hoy?'"
+        ),
+    },
+    {
+        "section_en": "Find Food — search",
+        "section_es": "Buscar Comida — búsqueda",
+        "body_en": (
+            "• Ask if they have **allergies or dietary restrictions** to filter by "
+            "(vegetarian, nut-free, etc.). If none, they can say 'none'.\n"
+            "• Then call search_food_near_user THIS turn with their food type and any "
+            "dietary filters.\n"
+            "• Show results clearly with numbers and say: 'Pick a number, or tell me "
+            "which one you want.'"
+        ),
+        "body_es": (
+            "• Pregunta por **alergias o restricciones dietéticas**. Si no hay, 'ninguna'.\n"
+            "• Llama search_food_near_user ESTE turno.\n"
+            "• Muestra resultados numerados y pide que elijan uno."
+        ),
+    },
+    {
+        "section_en": "Claim food",
+        "section_es": "Reclamar comida",
+        "body_en": (
+            "• When they pick a listing (#1, #2, etc.), tell them:\n"
+            "  1) Click **Claim** on that food card on Find Food, OR say the number "
+            "and you can claim it for them in chat.\n"
+            "  2) On the claim page, use **+ / −** to choose how many portions.\n"
+            "  3) Read the pickup location and deadline carefully.\n"
+            "  4) Click **Confirm Claim**.\n"
+            "• Offer to claim in chat if they prefer not to use the page."
+        ),
+        "body_es": (
+            "• Cuando elijan un listado:\n"
+            "  1) Pulsa **Reclamar** en la tarjeta, o diles el número y reclamas en el chat.\n"
+            "  2) En la página de reclamo, usa **+ / −** para la cantidad.\n"
+            "  3) Lee ubicación y fecha límite.\n"
+            "  4) Pulsa **Confirmar reclamo**.\n"
+            "• Ofrece reclamar en el chat si prefieren."
+        ),
+    },
+)
+
+
+def _guided_from_steps(
+    steps: tuple[dict, ...],
+    *,
+    goal_label: str,
+    message: str,
+    history: list | None,
+    lang: str,
+) -> str:
+    idx, repeat = _guided_step_index(history, message, len(steps))
+    step = steps[idx]
+    section = step["section_es"] if lang == "es" else step["section_en"]
+    body = step["body_es"] if lang == "es" else step["body_en"]
+    return _guided_format_step(
+        goal=goal_label,
+        step_no=idx + 1,
+        total=len(steps),
+        section=section,
+        body=body,
+        lang=lang,
+        repeat=repeat,
+    )
+
+
+def _guided_share_step(message: str, history: list | None, lang: str = "en") -> str:
+    """Detailed UI walkthrough for Share Food — one clear step per turn."""
+    label = "COMPARTIR" if lang == "es" else "SHARE FOOD"
+    return _guided_from_steps(
+        _SHARE_GUIDED_UI, goal_label=label, message=message, history=history, lang=lang,
     )
 
 
 def _guided_request_step(message: str, history: list | None, lang: str = "en") -> str:
-    """Return the precise per-turn instruction for guided REQUEST flow."""
-    user_blob = _blob_user_turns(history, message)
-
-    # --- has what food? ---
-    has_what = (
-        any(w in user_blob for w in _NEED_WORDS)
-        and bool(re.search(r"\b[a-z]{3,}\b", user_blob.replace("need", "").replace("want", "")))
-    ) or bool(re.search(r"\b(food|rice|bread|eggs|milk|meat|vegetables|fruit|beans)\b", user_blob))
-
-    # --- has quantity? ---
-    has_qty = bool(_QTY_RE.search(user_blob)) or bool(re.search(r"\b\d+\b", user_blob))
-
-    # --- has community/area? ---
-    has_community = any(w in user_blob for w in _LOCATION_HINTS)
-
-    # --- has needed-by date? ---
-    has_date = bool(_DATE_SIGNALS.search(user_blob)) or bool(
-        re.search(r"\b(urgent|asap|as soon as possible|urgente|inmediatamente)\b", user_blob)
-    )
-
-    if not has_what:
-        if lang == "es":
-            return (
-                "GUIADO — PASO 1 de 4 (SOLICITUD):\n"
-                "Pide solo esto: '¿Qué alimento necesitas? Dime el tipo o los tipos de comida.'\n"
-                "UNA pregunta."
-            )
-        return (
-            "GUIDED — STEP 1 of 4 (REQUEST):\n"
-            "Ask only this: 'What food do you need? Tell me the type or types of food.'\n"
-            "ONE question."
-        )
-
-    if not has_qty:
-        if lang == "es":
-            return (
-                "GUIADO — PASO 2 de 4 (SOLICITUD):\n"
-                "Ya sabes qué necesita. Pide solo esto: '¿Cuánto necesitas aproximadamente? "
-                "(por ejemplo: 2 kg, para 4 personas, una semana de suministro)'\n"
-                "UNA pregunta."
-            )
-        return (
-            "GUIDED — STEP 2 of 4 (REQUEST):\n"
-            "You know what they need. Ask only this: 'How much do you need roughly? "
-            "(e.g. 2 kg, enough for 4 people, one week's supply)'\n"
-            "ONE question."
-        )
-
-    if not has_community:
-        if lang == "es":
-            return (
-                "GUIADO — PASO 3 de 4 (SOLICITUD):\n"
-                "Ya tienes qué y cuánto. Pide solo esto: '¿En qué comunidad o zona estás?'\n"
-                "UNA pregunta."
-            )
-        return (
-            "GUIDED — STEP 3 of 4 (REQUEST):\n"
-            "You have what and how much. Ask only this: 'Which community or area are you in?'\n"
-            "ONE question."
-        )
-
-    if not has_date:
-        if lang == "es":
-            return (
-                "GUIADO — PASO 4 de 4 (SOLICITUD):\n"
-                "Ya tienes qué, cuánto y comunidad. Pide solo esto: '¿Para cuándo lo necesitas? "
-                "(esta semana, el viernes, urgente, etc.)'\n"
-                "UNA pregunta."
-            )
-        return (
-            "GUIDED — STEP 4 of 4 (REQUEST):\n"
-            "You have what, how much, and community. Ask only this: 'When do you need it by? "
-            "(this week, Friday, urgent, etc.)'\n"
-            "ONE question."
-        )
-
-    if lang == "es":
-        return (
-            "GUIADO — RESUMEN (SOLICITUD):\n"
-            "Tienes todos los datos. Haz un resumen corto y pregunta UNA vez: "
-            "'¿Publico esta solicitud por ti, o prefieres abrir la página de Solicitar Comida?'\n"
-            "NO llames post_food_request todavía — espera su respuesta."
-        )
-    return (
-        "GUIDED — SUMMARY (REQUEST):\n"
-        "You have all the details. Give a short summary and ask ONCE: "
-        "'Want me to post this request for you, or would you prefer to open the Request Food page?'\n"
-        "Do NOT call post_food_request yet — wait for their answer."
+    """Detailed UI walkthrough for Request Food."""
+    label = "SOLICITUD" if lang == "es" else "REQUEST FOOD"
+    return _guided_from_steps(
+        _REQUEST_GUIDED_UI, goal_label=label, message=message, history=history, lang=lang,
     )
 
 
 def _guided_find_step(message: str, history: list | None, lang: str = "en") -> str:
-    """Return the precise per-turn instruction for guided FIND/CLAIM flow."""
-    user_blob = _blob_user_turns(history, message)
-
-    # Did the user already say what food they want?
-    has_what = bool(re.search(r"\b[a-z]{3,}\b", user_blob.replace("find", "")
-                              .replace("food", "").replace("looking", "").strip()))
-
-    # Has a dietary/allergy question been asked in assistant history?
-    dietary_asked = any(
-        any(k in (m.get("message") or "").lower() for k in (
-            "allerg", "dietary", "restriction", "vegetarian", "vegan", "halal",
-            "kosher", "gluten", "alergia", "dieta", "restricción",
-        ))
-        for m in (history or [])[-6:]
-        if m.get("role") == "assistant"
-    )
-
-    if not has_what:
-        if lang == "es":
-            return (
-                "GUIADO — PASO 1 (BUSCAR):\n"
-                "Pide solo esto: '¿Qué tipo de alimento estás buscando?'\n"
-                "UNA pregunta. No busques todavía."
-            )
-        return (
-            "GUIDED — STEP 1 (FIND):\n"
-            "Ask only this: 'What kind of food are you looking for?'\n"
-            "ONE question. Don't search yet."
-        )
-
-    if not dietary_asked:
-        if lang == "es":
-            return (
-                "GUIADO — PASO 2 (BUSCAR):\n"
-                "Ya sabes qué busca. Pide solo esto: '¿Tienes alguna alergia o restricción dietética "
-                "que deba filtrar?' (Si no, responde 'ninguna' y buscaré de inmediato.)\n"
-                "UNA pregunta."
-            )
-        return (
-            "GUIDED — STEP 2 (FIND):\n"
-            "You know what they want. Ask only this: 'Any allergies or dietary restrictions "
-            "I should filter by? (If none, just say so and I'll search right away.)'\n"
-            "ONE question."
-        )
-
-    # Ready to search
-    if lang == "es":
-        return (
-            "GUIADO — BUSCAR AHORA:\n"
-            "Tienes lo que necesitas. Llama search_food_near_user ESTE turno con los datos del usuario. "
-            "Muestra los resultados de forma amigable y ayúdalos a elegir y reclamar. "
-            "No abras ninguna página a menos que lo pidan."
-        )
-    return (
-        "GUIDED — SEARCH NOW:\n"
-        "You have what you need. Call search_food_near_user THIS turn with the user's info. "
-        "Show results in a friendly way and help them pick and claim. "
-        "Do NOT open any page unless they ask."
+    """Detailed UI walkthrough for Find / Claim food."""
+    label = "BUSCAR" if lang == "es" else "FIND FOOD"
+    return _guided_from_steps(
+        _FIND_GUIDED_UI, goal_label=label, message=message, history=history, lang=lang,
     )
 
 
@@ -839,7 +1016,10 @@ def build_assistance_mode_reminder(
 
     mode = resolve_assistance_mode(message, history)
     goal = detect_assistance_goal(message, history)
-    if goal is None and mode and _assistant_asked_assistance_mode(history):
+    if goal is None and mode and (
+        _assistant_asked_assistance_mode(history)
+        or _guided_steps_delivered(history) > 0
+    ):
         goal = _goal_from_recent_user_intent(history)
 
     if mode is None and needs_assistance_mode_choice(message, history):
@@ -866,8 +1046,7 @@ def build_assistance_mode_reminder(
         )
 
     if mode == "guided" and goal:
-        # Use the step-tracker to tell the AI exactly which question to ask
-        # this turn, based on what has already been collected in the history.
+        # Detailed UI walkthrough — one step per turn via step trackers below.
         if goal == "share":
             return _guided_share_step(message, history, lang)
         if goal == "request":
