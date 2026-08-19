@@ -38,20 +38,17 @@ function getBestVoice(lang = 'en') {
 }
 
 export default function useFormVoiceGuide({ steps = [], formData = {}, lang = 'en' }) {
-  const [stepIndex, setStepIndex] = useState(0)
   const [isMuted, setIsMuted] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [isDismissed, setIsDismissed] = useState(false)
   const utteranceRef = useRef(null)
   const spokenStepRef = useRef(-1)   // track which step index was last spoken
-  const voicesReady = useRef(false)
 
-  // Load voices (Chromium fires voiceschanged once async)
+  // Load voices (Chromium fires voiceschanged once async; getBestVoice reads dynamically)
   useEffect(() => {
     if (!synth) return
-    const onVoices = () => { voicesReady.current = true }
+    const onVoices = () => {}  // trigger a re-render so voices are available
     synth.addEventListener('voiceschanged', onVoices)
-    if (synth.getVoices().length > 0) voicesReady.current = true
     return () => synth.removeEventListener('voiceschanged', onVoices)
   }, [])
 
@@ -63,23 +60,7 @@ export default function useFormVoiceGuide({ steps = [], formData = {}, lang = 'e
     ? null
     : { ...steps[effectiveIndex], index: effectiveIndex, total: steps.length }
 
-  // Advance the tracked step and speak when it changes
-  useEffect(() => {
-    if (isDismissed || isMuted || !synth) return
-    if (isComplete) return
-    if (effectiveIndex === spokenStepRef.current) return
-
-    spokenStepRef.current = effectiveIndex
-    setStepIndex(effectiveIndex)
-
-    // Small delay so the user has a moment to absorb the previous response
-    const timer = setTimeout(() => {
-      speakText(steps[effectiveIndex]?.instruction || '')
-    }, 600)
-    return () => clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveIndex, isDismissed, isMuted, isComplete])
-
+  // speakText must be defined BEFORE the useEffect that calls it
   const speakText = useCallback((text) => {
     if (!synth || !text) return
     synth.cancel()
@@ -98,6 +79,22 @@ export default function useFormVoiceGuide({ steps = [], formData = {}, lang = 'e
     const msg = text || currentStep?.instruction || ''
     if (msg) speakText(msg)
   }, [currentStep, speakText])
+
+  // Advance the tracked step and speak when it changes
+  useEffect(() => {
+    if (isDismissed || isMuted || !synth) return
+    if (isComplete) return
+    if (effectiveIndex === spokenStepRef.current) return
+
+    spokenStepRef.current = effectiveIndex
+
+    // Small delay so the user has a moment to absorb the previous response
+    const timer = setTimeout(() => {
+      speakText(steps[effectiveIndex]?.instruction || '')
+    }, 600)
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveIndex, isDismissed, isMuted, isComplete, speakText])
 
   const toggleMute = useCallback(() => {
     setIsMuted((m) => {
