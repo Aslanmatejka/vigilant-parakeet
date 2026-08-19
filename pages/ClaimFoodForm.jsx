@@ -12,6 +12,8 @@ import {
     browseCommunityIdsForUser,
     listingVisibleToCommunityScope,
 } from '../utils/communityScope';
+import useFormVoiceGuide, { CLAIM_FOOD_STEPS } from '../hooks/useFormVoiceGuide';
+import FormVoiceGuide from '../components/common/FormVoiceGuide';
 
 // Calculate next Friday from today (food returns to inventory at 11:59PM Friday)
 const getNextFriday = () => {
@@ -54,6 +56,10 @@ export default function ClaimFoodForm() {
     const availableQty = food ? Math.max(1, parseInt(food.quantity) || 1) : 1;
     const maxAllowed = Math.min(MAX_CLAIM, availableQty);
     const [claimQty, setClaimQty] = React.useState(1);
+    const guide = useFormVoiceGuide({
+        steps: CLAIM_FOOD_STEPS,
+        formData: { claimQty, hasConfirmed: claiming },
+    });
 
     React.useEffect(() => {
         const fetchCommunity = async () => {
@@ -383,6 +389,8 @@ export default function ClaimFoodForm() {
                     Back to Find Food
                 </Button>
             </div>
+
+            <FormVoiceGuide guide={guide} className="mb-6" />
 
             {/* Food Details Section */}
             <div className="bg-white rounded-2xl shadow-lg p-6 mb-6 border border-gray-100">

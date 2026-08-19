@@ -5,6 +5,8 @@ import Button from '../common/Button';
 import { useAuthContext } from '../../utils/AuthContext';
 import dataService from '../../utils/dataService';
 import supabase from '../../utils/supabaseClient';
+import useFormVoiceGuide, { REQUEST_FOOD_STEPS } from '../../hooks/useFormVoiceGuide';
+import FormVoiceGuide from '../common/FormVoiceGuide';
 
 const CATEGORIES = [
   { value: '', label: 'Select category' },
@@ -39,6 +41,7 @@ function RequestFoodForm({ onSubmit, loading = false }) {
   const [loadingCommunities, setLoadingCommunities] = useState(true);
   const [requireApproval, setRequireApproval] = useState(true);
   const [errors, setErrors] = useState({});
+  const guide = useFormVoiceGuide({ steps: REQUEST_FOOD_STEPS, formData });
   const [formData, setFormData] = useState({
     title: '',
     category: '',
@@ -171,6 +174,7 @@ function RequestFoodForm({ onSubmit, loading = false }) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6" noValidate>
+      <FormVoiceGuide guide={guide} className="mb-2" />
       <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
         <p className="font-semibold">Can’t find what you need on Find Food?</p>
         <p className="mt-1 text-amber-900/90">

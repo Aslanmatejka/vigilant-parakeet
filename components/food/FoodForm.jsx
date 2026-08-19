@@ -6,6 +6,8 @@ import { useAuthContext } from '../../utils/AuthContext';
 import supabase from '../../utils/supabaseClient';
 import { API_CONFIG } from '../../utils/config';
 import dataService from '../../utils/dataService';
+import useFormVoiceGuide, { SHARE_FOOD_STEPS } from '../../hooks/useFormVoiceGuide';
+import FormVoiceGuide from '../common/FormVoiceGuide';
 
 function FoodForm({
     initialData = null,
@@ -180,6 +182,10 @@ function FoodForm({
 
     const [errors, setErrors] = useState({});
     const [imagePreview, setImagePreview] = useState(null);
+    const guide = useFormVoiceGuide({
+        steps: SHARE_FOOD_STEPS,
+        formData: { ...formData, image_url: initialData?.image_url },
+    });
     const [submitError, setSubmitError] = useState(null);
     const [geocodeTimeout, setGeocodeTimeout] = useState(null);
     // Ref holds the active debounce timer so the cleanup always cancels the
@@ -458,6 +464,7 @@ function FoodForm({
             noValidate
         >
             {sharingGuidelines}
+            <FormVoiceGuide guide={guide} className="mb-2" />
             {submitError && (
                 <div 
                     className="bg-red-50 border border-red-200 rounded-lg p-4" 
