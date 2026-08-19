@@ -555,56 +555,75 @@ def build_assistance_mode_reminder(
         if lang == "es":
             if goal == "share":
                 return (
-                    "MODO GUIADO — COMPARTIR:\n"
-                    "El usuario quiere hacerlo en la app. Llama navigate_ui "
-                    "action=open target=create ESTE turno. Luego explica 3–5 "
-                    "pasos cortos: título/categoría, cantidad, fecha de vencimiento, "
-                    "dirección/comunidad, enviar. UNA pregunta si hace falta. "
-                    "NO publiques tú con post_food_listing a menos que lo pida."
+                    "MODO GUIADO — COMPARTIR (paso a paso en el chat):\n"
+                    "Guía al usuario campo por campo EN EL CHAT — UNA pregunta por turno:\n"
+                    "  Paso 1: '¿Qué alimento quieres compartir? (nombre y categoría)'\n"
+                    "  Paso 2: '¿Cuánto tienes y en qué unidad? (ej. 3 kg, 12 unidades)'\n"
+                    "  Paso 3: '¿Cuál es la fecha de vencimiento aproximada?'\n"
+                    "  Paso 4: '¿Dónde pueden recogerlo? (dirección o comunidad)'\n"
+                    "  Paso 5: Résumelo y pregunta: '¿Publico yo esto por ti, o prefieres abrir la página y enviarlo tú?'\n"
+                    "NO llames navigate_ui ni abras ninguna página a menos que el usuario lo pida "
+                    "explícitamente ('abre la página', 'muéstrame el formulario', 'llévame allí'). "
+                    "NO llames post_food_listing hasta que el usuario confirme o pida que lo hagas tú."
                 )
             if goal == "request":
                 return (
-                    "MODO GUIADO — SOLICITAR:\n"
-                    "El usuario quiere hacerlo en la app. Llama navigate_ui "
-                    "action=open target=request ESTE turno. Luego explica 3–5 "
-                    "pasos cortos: qué necesita, cantidad, comunidad, fecha, "
-                    "enviar. Quédate como guía — NO llames post_food_request "
-                    "a menos que pida que lo hagas tú."
+                    "MODO GUIADO — SOLICITAR (paso a paso en el chat):\n"
+                    "Guía al usuario campo por campo EN EL CHAT — UNA pregunta por turno:\n"
+                    "  Paso 1: '¿Qué alimento necesitas?'\n"
+                    "  Paso 2: '¿Cuánto necesitas aproximadamente?'\n"
+                    "  Paso 3: '¿En qué comunidad o zona estás?'\n"
+                    "  Paso 4: '¿Para cuándo lo necesitas?'\n"
+                    "  Paso 5: Résumelo y pregunta: '¿Publico yo la solicitud, o prefieres abrirla tú en la página?'\n"
+                    "NO llames navigate_ui ni abras ninguna página a menos que el usuario lo pida "
+                    "explícitamente. NO llames post_food_request hasta que el usuario confirme."
                 )
             return (
-                "MODO GUIADO — BUSCAR:\n"
-                "El usuario quiere hacerlo en la app. Llama navigate_ui "
-                "action=open target=list ESTE turno. Luego explica 3–5 pasos "
-                "cortos: revisar listados, filtrar, tocar Reclamar, confirmar "
-                "cantidad, enviar. Quédate como guía — NO llames "
-                "search_food_near_user / claim_* a menos que pida que lo hagas tú."
+                "MODO GUIADO — BUSCAR (paso a paso en el chat):\n"
+                "Guía al usuario paso a paso EN EL CHAT — UNA pregunta por turno:\n"
+                "  Paso 1: '¿Qué tipo de alimento estás buscando?' (si no lo dijo)\n"
+                "  Paso 2: '¿Tienes alguna restricción dietética o alergia?'\n"
+                "  Paso 3: Llama search_food_near_user con lo que tienes y muestra resultados.\n"
+                "  Paso 4: Ayúdalos a elegir y reclamar conversacionalmente.\n"
+                "NO llames navigate_ui ni abras ninguna página a menos que el usuario lo pida "
+                "explícitamente ('abre la página', 'muéstrame el mapa'). "
+                "Busca y reclama tú en el chat."
             )
         if goal == "share":
             return (
-                "GUIDED MODE — SHARE FOOD:\n"
-                "User wants to do it on the pages. Call navigate_ui "
-                "action=open target=create THIS turn. Then explain 3–5 short "
-                "steps: title/category, quantity, expiry, address/community, "
-                "submit. One follow-up question only if needed. Do NOT post "
-                "via post_food_listing unless they ask you to take over."
+                "GUIDED MODE — SHARE FOOD (step-by-step in chat):\n"
+                "Walk the user through each field ONE question per turn, entirely in chat:\n"
+                "  Step 1: 'What food are you sharing? (name and category)'\n"
+                "  Step 2: 'How much do you have and what unit? (e.g. 3 kg, 12 pieces)'\n"
+                "  Step 3: 'What's the approximate expiry or best-before date?'\n"
+                "  Step 4: 'Where can people pick it up? (address or community)'\n"
+                "  Step 5: Summarise everything and ask: 'Want me to post this for you, or would you prefer to open the page and submit it yourself?'\n"
+                "Do NOT call navigate_ui or open any page unless the user explicitly asks "
+                "('open the page', 'show me the form', 'take me there'). "
+                "Do NOT call post_food_listing until they confirm or ask you to take over."
             )
         if goal == "request":
             return (
-                "GUIDED MODE — REQUEST FOOD:\n"
-                "User wants to do it on the pages. Call navigate_ui "
-                "action=open target=request THIS turn. Then explain 3–5 short "
-                "steps: what they need, quantity, community, needed-by date, "
-                "submit. No photo step — requests never include images. Stay "
-                "a coach — do NOT call post_food_request unless they ask you "
-                "to take over in chat."
+                "GUIDED MODE — REQUEST FOOD (step-by-step in chat):\n"
+                "Walk the user through each field ONE question per turn, entirely in chat:\n"
+                "  Step 1: 'What food do you need?'\n"
+                "  Step 2: 'How much do you need roughly?'\n"
+                "  Step 3: 'Which community or area are you in?'\n"
+                "  Step 4: 'When do you need it by?'\n"
+                "  Step 5: Summarise and ask: 'Want me to post this request for you, or open the page to submit it yourself?'\n"
+                "No photo step — requests are text-only. "
+                "Do NOT call navigate_ui or open any page unless the user explicitly asks. "
+                "Do NOT call post_food_request until they confirm."
             )
         return (
-            "GUIDED MODE — FIND FOOD:\n"
-            "User wants to do it on the pages. Call navigate_ui "
-            "action=open target=list THIS turn. Then explain 3–5 short steps: "
-            "browse listings, filter if needed, tap Claim, confirm quantity, "
-            "submit. Stay a coach — do NOT call search_food_near_user / claim_* "
-            "unless they ask you to take over in chat."
+            "GUIDED MODE — FIND FOOD (step-by-step in chat):\n"
+            "Walk the user through finding food ONE step at a time, entirely in chat:\n"
+            "  Step 1: 'What kind of food are you looking for?' (if not already said)\n"
+            "  Step 2: 'Any dietary restrictions or allergies to filter by?'\n"
+            "  Step 3: Call search_food_near_user with what you have and show results.\n"
+            "  Step 4: Help them pick and claim conversationally.\n"
+            "Do NOT call navigate_ui or open any page unless the user explicitly asks "
+            "('open the page', 'show me the map'). Handle search and claim directly in chat."
         )
 
     if mode == "hands_on" and goal:
@@ -2803,14 +2822,16 @@ def _posting_checklist(message: str, history: list | None, lang: str) -> str:
     if mode == "guided":
         if lang == "es":
             return (
-                "FLUJO ACTIVO — COMPARTIR (modo guiado):\n"
-                "Abre Share Food con navigate_ui (target=create) y explica los "
-                "pasos. No publiques en el chat a menos que lo pidan."
+                "FLUJO ACTIVO — COMPARTIR (guiado, paso a paso en el chat):\n"
+                "Continúa guiando campo por campo EN EL CHAT — UNA pregunta por turno. "
+                "No abras ninguna página a menos que el usuario lo pida explícitamente. "
+                "Cuando tengas todos los datos, ofrece: '¿Lo publico yo, o prefieres abrirlo en la página?'"
             )
         return (
-            "ACTIVE FLOW — SHARE FOOD (guided):\n"
-            "Open Share Food via navigate_ui (target=create) and coach the steps. "
-            "Do not post in chat unless they ask you to take over."
+            "ACTIVE FLOW — SHARE FOOD (guided, step-by-step in chat):\n"
+            "Continue collecting fields ONE question per turn in chat. "
+            "Do NOT open any page or call navigate_ui unless the user explicitly asks. "
+            "Once all fields are gathered, offer: 'Want me to post this, or open the page to submit yourself?'"
         )
     contextual = build_posting_step_reminder(message, history, lang=lang)
     if contextual:
@@ -3004,14 +3025,16 @@ def _finding_checklist(message: str, history: list | None, lang: str) -> str:
     if mode == "guided":
         if lang == "es":
             return (
-                "FLUJO ACTIVO — BUSCAR (modo guiado):\n"
-                "Abre Find Food con navigate_ui (target=list) y explica los "
-                "pasos. No busques ni reclames en el chat a menos que lo pidan."
+                "FLUJO ACTIVO — BUSCAR (guiado, paso a paso en el chat):\n"
+                "Continúa guiando paso a paso EN EL CHAT. Llama search_food_near_user "
+                "cuando tengas suficiente información y ayuda al usuario a elegir y reclamar. "
+                "No abras ninguna página a menos que el usuario lo pida explícitamente."
             )
         return (
-            "ACTIVE FLOW — FIND FOOD (guided):\n"
-            "Open Find Food via navigate_ui (target=list) and coach the steps. "
-            "Do not search/claim in chat unless they ask you to take over."
+            "ACTIVE FLOW — FIND FOOD (guided, step-by-step in chat):\n"
+            "Continue guiding step by step in chat. Call search_food_near_user "
+            "once you have enough info and help them pick and claim. "
+            "Do NOT open any page or call navigate_ui unless the user explicitly asks."
         )
 
     blob_l = _history_blob(history, message, 8).lower()
@@ -3073,14 +3096,16 @@ def _request_checklist(message: str, history: list | None, lang: str) -> str:
     if mode == "guided":
         if lang == "es":
             return (
-                "FLUJO ACTIVO — SOLICITAR (modo guiado):\n"
-                "Abre Request Food con navigate_ui (target=request) y explica los "
-                "pasos. No publiques en el chat a menos que lo pidan."
+                "FLUJO ACTIVO — SOLICITAR (guiado, paso a paso en el chat):\n"
+                "Continúa guiando campo por campo EN EL CHAT — UNA pregunta por turno. "
+                "No abras ninguna página a menos que el usuario lo pida explícitamente. "
+                "Cuando tengas todos los datos, ofrece: '¿Lo publico yo, o prefieres abrirlo en la página?'"
             )
         return (
-            "ACTIVE FLOW — REQUEST FOOD (guided):\n"
-            "Open Request Food via navigate_ui (target=request) and coach the steps. "
-            "Do not post in chat unless they ask you to take over."
+            "ACTIVE FLOW — REQUEST FOOD (guided, step-by-step in chat):\n"
+            "Continue collecting fields ONE question per turn in chat. "
+            "Do NOT open any page or call navigate_ui unless the user explicitly asks. "
+            "Once all fields are gathered, offer: 'Want me to post this, or open the page to submit yourself?'"
         )
     if lang == "es":
         return (

@@ -42,8 +42,9 @@ def test_reminder_guided_request():
     rem = build_assistance_mode_reminder("Guide me step by step", history)
     assert rem is not None
     assert "GUIDED MODE — REQUEST FOOD" in rem
-    assert "navigate_ui" in rem
-    assert "request" in rem
+    # Guided mode now collects fields in chat — navigate_ui is only mentioned as prohibited
+    assert "Do NOT" in rem or "do NOT" in rem
+    assert "request" in rem.lower()
 
 
 def test_reminder_hands_on_request():
@@ -111,8 +112,9 @@ def test_reminder_guided_share():
     rem = build_assistance_mode_reminder("Guide me step by step", history)
     assert rem is not None
     assert "GUIDED MODE" in rem
-    assert "navigate_ui" in rem
-    assert "create" in rem
+    # Guided mode now collects fields step-by-step in chat — navigate_ui is mentioned only as prohibited
+    assert "Do NOT" in rem or "do NOT" in rem
+    assert "Step" in rem
 
 
 def test_tool_block_while_waiting_for_choice():
