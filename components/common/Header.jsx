@@ -2,7 +2,7 @@ import React from "react";
 import Avatar from "./Avatar";
 import Button from "./Button";
 import { useAuthContext } from "../../utils/AuthContext";
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useTutorial } from '../../utils/TutorialContext';
 import { useCommunityRole } from '../../utils/hooks/useCommunityRole.js';
 import { browseCommunityIdsForUser } from '../../utils/communityScope';
@@ -209,8 +209,17 @@ function Header({ menuItems: menuItemsProp }) {
     }, []);
 
     const handleNavigation = (path) => {
+        setIsDropdownOpen(false);
+        setSupportDropdownOpen(false);
+        setIsMenuOpen(false);
         navigate(path);
         window.scrollTo(0, 0);
+    };
+
+    const closeMenus = () => {
+        setIsDropdownOpen(false);
+        setSupportDropdownOpen(false);
+        setIsMenuOpen(false);
     };
 
     const handleLogout = async () => {
@@ -274,12 +283,12 @@ function Header({ menuItems: menuItemsProp }) {
                     </div>
 
                     <div data-name="logo" className="flex items-center">
-                        <a href="/" className="flex items-center">
+                        <Link to="/" className="flex items-center" onClick={closeMenus}>
                             <div className="h-10 w-10 bg-[#2CABE3] rounded-full flex items-center justify-center text-white">
                                 <i className="fas fa-seedling text-xl"></i>
                             </div>
                             <span className="ml-2 text-xl font-semibold text-gray-900">DoGoods</span>
-                        </a>
+                        </Link>
                     </div>
 
                     <nav data-name="desktop-nav" className="hidden lg:flex flex-1 items-center justify-center gap-x-5 xl:gap-x-6 whitespace-nowrap text-sm xl:text-base">
@@ -291,11 +300,12 @@ function Header({ menuItems: menuItemsProp }) {
                                     ref={supportDropdownRef}
                                 >
                                     <button
+                                        type="button"
                                         onClick={() => setSupportDropdownOpen(!supportDropdownOpen)}
-                                        className="nav-link hover:text-[#2CABE3] transition-colors duration-150 flex items-center"
+                                        className="nav-link hover:text-[#2CABE3] transition-colors duration-75 flex items-center"
                                     >
                                         {item.label}
-                                        <i className={`fas fa-chevron-down text-xs ml-1 transform transition-transform ${supportDropdownOpen ? 'rotate-180' : ''}`}></i>
+                                        <i className={`fas fa-chevron-down text-xs ml-1 transition-transform duration-75 ${supportDropdownOpen ? 'rotate-180' : ''}`}></i>
                                     </button>
                                     {supportDropdownOpen && (
                                         <div className="absolute left-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 z-50">
@@ -304,7 +314,8 @@ function Header({ menuItems: menuItemsProp }) {
                                                     subItem.external ? (
                                                         <button
                                                             key={subIndex}
-                                                            className="w-full text-left block px-4 py-2 text-sm text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3]"
+                                                            type="button"
+                                                            className="nav-menu-item w-full text-left block px-4 py-2 text-sm text-gray-700 hover:text-[#2CABE3]"
                                                             role="menuitem"
                                                             onClick={() => {
                                                                 window.open(subItem.path, '_blank', 'noopener,noreferrer');
@@ -315,15 +326,15 @@ function Header({ menuItems: menuItemsProp }) {
                                                             <i className="fas fa-external-link-alt ml-2 text-xs"></i>
                                                         </button>
                                                     ) : (
-                                                        <a
+                                                        <Link
                                                             key={subIndex}
-                                                            href={subItem.path}
-                                                            className="block px-4 py-2 text-sm text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3]"
+                                                            to={subItem.path}
+                                                            className="nav-menu-item block px-4 py-2 text-sm text-gray-700 hover:text-[#2CABE3]"
                                                             role="menuitem"
-                                                            onClick={() => setSupportDropdownOpen(false)}
+                                                            onClick={closeMenus}
                                                         >
                                                             {subItem.label}
-                                                        </a>
+                                                        </Link>
                                                     )
                                                 ))}
                                             </div>
@@ -331,22 +342,24 @@ function Header({ menuItems: menuItemsProp }) {
                                     )}
                                 </div>
                             ) : (
-                                <a 
+                                <Link 
                                     key={index}
-                                    href={item.path}
-                                    className="nav-link hover:text-[#2CABE3] transition-colors duration-150"
+                                    to={item.path}
+                                    className="nav-link hover:text-[#2CABE3] transition-colors duration-75"
+                                    onClick={closeMenus}
                                 >
                                     {renderNavLabel(item)}
-                                </a>
+                                </Link>
                             )
                         ))}
                         {showReceiptsNavLink && (
-                            <a
-                                href="/receipts"
-                                className="nav-link hover:text-[#2CABE3] transition-colors duration-200"
+                            <Link
+                                to="/receipts"
+                                className="nav-link hover:text-[#2CABE3] transition-colors duration-75"
+                                onClick={closeMenus}
                             >
                                 Receipts & Activity
-                            </a>
+                            </Link>
                         )}
                     </nav>
 
@@ -354,7 +367,7 @@ function Header({ menuItems: menuItemsProp }) {
                         {/* Help / Tutorial button */}
                         <button
                             onClick={() => startTutorial()}
-                            className="w-8 h-8 rounded-full border-2 border-[#2CABE3] text-[#2CABE3] hover:bg-[#2CABE3] hover:text-white flex items-center justify-center transition-colors duration-150 text-sm font-bold"
+                            className="w-8 h-8 rounded-full border-2 border-[#2CABE3] text-[#2CABE3] hover:bg-[#2CABE3] hover:text-white flex items-center justify-center transition-colors duration-75 text-sm font-bold"
                             title="Take a guided tour"
                             aria-label="Start tutorial"
                         >
@@ -378,7 +391,7 @@ function Header({ menuItems: menuItemsProp }) {
                                         <span className="ml-2 text-gray-700 text-sm">
                                             {authUser?.name || 'User'}
                                         </span>
-                                        <i className={`fas fa-chevron-down text-xs ml-2 text-gray-400 transform transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`}></i>
+                                        <i className={`fas fa-chevron-down text-xs ml-2 text-gray-400 transition-transform duration-75 ${isDropdownOpen ? 'rotate-180' : ''}`}></i>
                                     </div>
                                 </button>
                                 
@@ -389,53 +402,49 @@ function Header({ menuItems: menuItemsProp }) {
                                     >
                                         <div className="py-1">
                                             {showReceiptsNavLink && (
-                                                <a
-                                                    href="/receipts"
-                                                    className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                                                <Link
+                                                    to="/receipts"
+                                                    className="nav-menu-item block px-4 py-2 text-sm text-gray-700"
                                                     role="menuitem"
+                                                    onClick={closeMenus}
                                                 >
                                                     Receipts & Activity
-                                                </a>
+                                                </Link>
                                             )}
                                             {!isAdminRoute && (
-                                                <a
-                                                    href="/profile"
-                                                    className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                                                <Link
+                                                    to="/profile"
+                                                    className="nav-menu-item block px-4 py-2 text-sm text-gray-700"
                                                     role="menuitem"
+                                                    onClick={closeMenus}
                                                 >
                                                     Your Profile
-                                                </a>
+                                                </Link>
                                             )}
-                                            {/* TEMPORARILY DISABLED
-                                            <a
-                                                href="/listings"
-                                                className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                                                role="menuitem"
-                                            >
-                                                My Listings
-                                            </a>
-                                            */}
                                             {(authUser?.is_admin === true || authUser?.role === 'admin') && (
-                                                <a
-                                                    href="/admin"
-                                                    className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                                                <Link
+                                                    to="/admin"
+                                                    className="nav-menu-item block px-4 py-2 text-sm text-gray-700"
                                                     role="menuitem"
+                                                    onClick={closeMenus}
                                                 >
                                                     Admin Panel
-                                                </a>
+                                                </Link>
                                             )}
-                                            <a
-                                                href="/settings"
-                                                className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                                            <Link
+                                                to="/settings"
+                                                className="nav-menu-item block px-4 py-2 text-sm text-gray-700"
                                                 role="menuitem"
+                                                onClick={closeMenus}
                                             >
                                                 Settings
-                                            </a>
+                                            </Link>
                                         </div>
                                         <div className="py-1">
                                             <button
+                                                type="button"
                                                 onClick={handleLogout}
-                                                className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                                                className="nav-menu-item block w-full text-left px-4 py-2 text-sm text-gray-700"
                                                 role="menuitem"
                                             >
                                                 Sign out
@@ -496,7 +505,8 @@ function Header({ menuItems: menuItemsProp }) {
                                                         <li key={subIndex}>
                                                             {subItem.external ? (
                                                                 <button
-                                                                    className="w-full text-left block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
+                                                                    type="button"
+                                                                    className="nav-menu-item w-full text-left block px-4 py-2 text-gray-700 rounded-lg"
                                                                     onClick={() => {
                                                                         window.open(subItem.path, '_blank', 'noopener,noreferrer');
                                                                         setIsMenuOpen(false);
@@ -506,13 +516,13 @@ function Header({ menuItems: menuItemsProp }) {
                                                                     <i className="fas fa-external-link-alt ml-2 text-xs"></i>
                                                                 </button>
                                                             ) : (
-                                                                <a
-                                                                    href={subItem.path}
-                                                                    className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
-                                                                    onClick={() => setIsMenuOpen(false)}
+                                                                <Link
+                                                                    to={subItem.path}
+                                                                    className="nav-menu-item block px-4 py-2 text-gray-700 rounded-lg"
+                                                                    onClick={closeMenus}
                                                                 >
                                                                     {subItem.label}
-                                                                </a>
+                                                                </Link>
                                                             )}
                                                         </li>
                                                     ))}
@@ -520,13 +530,13 @@ function Header({ menuItems: menuItemsProp }) {
                                             </li>
                                         ) : (
                                             <li key={index}>
-                                                <a
-                                                    href={item.path}
-                                                    className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
-                                                    onClick={() => setIsMenuOpen(false)}
+                                                <Link
+                                                    to={item.path}
+                                                    className="nav-menu-item block px-4 py-2 text-gray-700 rounded-lg"
+                                                    onClick={closeMenus}
                                                 >
                                                     {renderNavLabel(item)}
-                                                </a>
+                                                </Link>
                                             </li>
                                         )
                                     ))}
@@ -534,64 +544,54 @@ function Header({ menuItems: menuItemsProp }) {
                                         <>
                                             {showReceiptsNavLink && (
                                                 <li className="border-t border-gray-200 mt-2 pt-2">
-                                                    <a
-                                                        href="/receipts"
-                                                        className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
-                                                        onClick={() => setIsMenuOpen(false)}
+                                                    <Link
+                                                        to="/receipts"
+                                                        className="nav-menu-item block px-4 py-2 text-gray-700 rounded-lg"
+                                                        onClick={closeMenus}
                                                     >
                                                         Receipts & Activity
-                                                    </a>
+                                                    </Link>
                                                 </li>
                                             )}
                                             {!isAdminRoute && (
                                                 <li className={showReceiptsNavLink ? undefined : 'border-t border-gray-200 mt-2 pt-2'}>
-                                                    <a
-                                                        href="/profile"
-                                                        className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
-                                                        onClick={() => setIsMenuOpen(false)}
+                                                    <Link
+                                                        to="/profile"
+                                                        className="nav-menu-item block px-4 py-2 text-gray-700 rounded-lg"
+                                                        onClick={closeMenus}
                                                     >
                                                         Your Profile
-                                                    </a>
+                                                    </Link>
                                                 </li>
                                             )}
-                                            {/* TEMPORARILY DISABLED
-                                            <li>
-                                                <a
-                                                    href="/listings"
-                                                    className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
-                                                    onClick={() => setIsMenuOpen(false)}
-                                                >
-                                                    My Listings
-                                                </a>
-                                            </li>
-                                            */}
                                             {(authUser?.is_admin === true || authUser?.role === 'admin') && (
                                                 <li>
-                                                    <a
-                                                        href="/admin"
-                                                        className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
-                                                        onClick={() => setIsMenuOpen(false)}
+                                                    <Link
+                                                        to="/admin"
+                                                        className="nav-menu-item block px-4 py-2 text-gray-700 rounded-lg"
+                                                        onClick={closeMenus}
                                                     >
                                                         Admin Panel
-                                                    </a>
+                                                    </Link>
                                                 </li>
                                             )}
                                             <li>
-                                                <a
-                                                    href="/settings"
-                                                    className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
-                                                    onClick={() => setIsMenuOpen(false)}
+                                                <Link
+                                                    to="/settings"
+                                                    className="nav-menu-item block px-4 py-2 text-gray-700 rounded-lg"
+                                                    onClick={closeMenus}
                                                 >
                                                     Settings
-                                                </a>
+                                                </Link>
                                             </li>
                                             <li>
                                                 <button
+                                                    type="button"
                                                     onClick={() => {
                                                         setIsMenuOpen(false);
                                                         startTutorial();
                                                     }}
-                                                    className="w-full block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg text-left"
+                                                    className="nav-menu-item w-full block px-4 py-2 text-gray-700 rounded-lg text-left"
                                                 >
                                                     <i className="fas fa-question-circle mr-2"></i>
                                                     Take a Tour
@@ -599,11 +599,12 @@ function Header({ menuItems: menuItemsProp }) {
                                             </li>
                                             <li className="border-t border-gray-200 mt-2 pt-2">
                                                 <button
+                                                    type="button"
                                                     onClick={() => {
                                                         setIsMenuOpen(false);
                                                         handleLogout();
                                                     }}
-                                                    className="block w-full text-left px-4 py-2 text-red-600 hover:bg-red-50 rounded-lg"
+                                                    className="nav-menu-item block w-full text-left px-4 py-2 text-red-600 rounded-lg"
                                                 >
                                                     Sign out
                                                 </button>
@@ -614,33 +615,34 @@ function Header({ menuItems: menuItemsProp }) {
                                         <>
                                             <li className="border-t border-gray-200 mt-2 pt-2">
                                                 <button
+                                                    type="button"
                                                     onClick={() => {
                                                         setIsMenuOpen(false);
                                                         startTutorial();
                                                     }}
-                                                    className="w-full block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg text-left"
+                                                    className="nav-menu-item w-full block px-4 py-2 text-gray-700 rounded-lg text-left"
                                                 >
                                                     <i className="fas fa-question-circle mr-2"></i>
                                                     Take a Tour
                                                 </button>
                                             </li>
                                             <li>
-                                                <a
-                                                    href="/login"
-                                                    className="block px-4 py-2 text-gray-700 hover:bg-[#2CABE3]/10 hover:text-[#2CABE3] rounded-lg"
-                                                    onClick={() => setIsMenuOpen(false)}
+                                                <Link
+                                                    to="/login"
+                                                    className="nav-menu-item block px-4 py-2 text-gray-700 rounded-lg"
+                                                    onClick={closeMenus}
                                                 >
                                                     Sign In
-                                                </a>
+                                                </Link>
                                             </li>
                                             <li>
-                                                <a
-                                                    href="/signup"
-                                                    className="block px-4 py-2 bg-[#2CABE3] text-white hover:opacity-90 rounded-lg text-center"
-                                                    onClick={() => setIsMenuOpen(false)}
+                                                <Link
+                                                    to="/signup"
+                                                    className="block px-4 py-2 bg-[#2CABE3] text-white rounded-lg text-center"
+                                                    onClick={closeMenus}
                                                 >
                                                     Sign Up
-                                                </a>
+                                                </Link>
                                             </li>
                                         </>
                                     )}

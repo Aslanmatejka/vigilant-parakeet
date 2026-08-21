@@ -133,7 +133,7 @@ function AdminSidebar({ active, onNavigate, collapsed = false, onToggleCollapse,
                         <button
                             type="button"
                             onClick={onToggleCollapse}
-                            className="hidden lg:inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition"
+                            className="hidden lg:inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors duration-75"
                             aria-label="Collapse sidebar"
                             title="Collapse (⌘\\)"
                         >
@@ -188,7 +188,7 @@ function AdminSidebar({ active, onNavigate, collapsed = false, onToggleCollapse,
                                             key={item.id}
                                             onClick={() => onNavigate(item.path)}
                                             onKeyDown={(e) => handleKeyPress(e, item.path)}
-                                            className={`relative w-full flex items-center rounded-lg text-[13px] font-medium transition-all
+                                            className={`relative w-full flex items-center rounded-lg text-[13px] font-medium transition-colors duration-75
                                                 ${collapsed ? 'h-10 justify-center' : 'px-3 py-2'}
                                                 ${isActive
                                                     ? 'bg-[#2CABE3]/15 text-white shadow-inner ring-1 ring-[#2CABE3]/30'
@@ -254,7 +254,7 @@ function AdminSidebar({ active, onNavigate, collapsed = false, onToggleCollapse,
                     <button
                         onClick={() => onNavigate('/')}
                         onKeyDown={(e) => handleKeyPress(e, '/')}
-                        className={`w-full flex items-center text-[12px] font-medium text-slate-300 rounded-lg hover:bg-white/5 hover:text-white transition
+                        className={`w-full flex items-center text-[12px] font-medium text-slate-300 rounded-lg hover:bg-white/5 hover:text-white transition-colors duration-75
                             ${collapsed ? 'h-9 justify-center' : 'px-3 py-2'}`}
                         aria-label="Return to main site"
                         title={collapsed ? 'Back to site' : undefined}
@@ -265,7 +265,7 @@ function AdminSidebar({ active, onNavigate, collapsed = false, onToggleCollapse,
 
                     <button
                         onClick={handleSignOut}
-                        className={`w-full flex items-center text-[12px] font-medium text-slate-300 rounded-lg hover:bg-rose-500/10 hover:text-rose-300 transition
+                        className={`w-full flex items-center text-[12px] font-medium text-slate-300 rounded-lg hover:bg-rose-500/10 hover:text-rose-300 transition-colors duration-75
                             ${collapsed ? 'h-9 justify-center' : 'px-3 py-2'}`}
                         aria-label="Sign out"
                         title={collapsed ? 'Sign out' : undefined}

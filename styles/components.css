@@ -8,16 +8,25 @@
 .nav-link {
     color: #4a5568;
     padding: 0.5rem 1rem;
-    transition: color 0.2s ease;
+    transition: color 75ms ease-out;
 }
 
 .nav-link:hover {
-    color: #00c853;
+    color: #2CABE3;
 }
 
 .nav-link.active {
-    color: #00c853;
+    color: #2CABE3;
     font-weight: 600;
+}
+
+/* Header / admin menus — instant hover feedback */
+.nav-menu-item {
+    transition: none;
+}
+.nav-menu-item:hover,
+.nav-menu-item:focus-visible {
+    background-color: #f3f4f6;
 }
 
 /* Hero Banner Styles */

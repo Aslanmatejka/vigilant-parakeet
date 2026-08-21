@@ -179,7 +179,7 @@ function AdminLayout({ children, active }) {
                 />
             )}
             <div
-                className={`fixed inset-y-0 left-0 z-50 w-72 transition-transform duration-200 ease-out lg:hidden shadow-2xl ${
+                className={`fixed inset-y-0 left-0 z-50 w-72 transition-transform duration-150 ease-out lg:hidden shadow-2xl ${
                     isMobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'
                 }`}
             >
@@ -188,7 +188,7 @@ function AdminLayout({ children, active }) {
 
             {/* ───── Desktop persistent sidebar ───── */}
             <aside
-                className={`hidden lg:block fixed inset-y-0 left-0 z-30 transition-[width] duration-200 ease-out shadow-xl
+                className={`hidden lg:block fixed inset-y-0 left-0 z-30 transition-[width] duration-150 ease-out shadow-xl
                     ${isCollapsed ? 'w-16' : 'w-64'}`}
             >
                 <AdminSidebar
@@ -202,7 +202,7 @@ function AdminLayout({ children, active }) {
 
             {/* ───── Main column (offset by sidebar width on desktop) ───── */}
             <div
-                className={`flex flex-col min-h-screen transition-[padding] duration-200 ease-out
+                className={`flex flex-col min-h-screen transition-[padding] duration-150 ease-out
                     ${isCollapsed ? 'lg:pl-16' : 'lg:pl-64'}`}
             >
                 {/* ───── Top bar ───── */}
@@ -213,7 +213,7 @@ function AdminLayout({ children, active }) {
                             <div className="flex items-center min-w-0 gap-2">
                                 <button
                                     type="button"
-                                    className="lg:hidden inline-flex items-center justify-center h-9 w-9 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition"
+                                    className="lg:hidden inline-flex items-center justify-center h-9 w-9 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors duration-75"
                                     onClick={() => setIsMobileSidebarOpen(true)}
                                     aria-label="Open navigation"
                                 >
@@ -224,7 +224,7 @@ function AdminLayout({ children, active }) {
                                     <button
                                         type="button"
                                         onClick={toggleCollapse}
-                                        className="hidden lg:inline-flex items-center justify-center h-9 w-9 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition"
+                                        className="hidden lg:inline-flex items-center justify-center h-9 w-9 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors duration-75"
                                         aria-label="Expand sidebar"
                                         title="Expand sidebar (⌘\\)"
                                     >
@@ -236,7 +236,7 @@ function AdminLayout({ children, active }) {
                                 <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 min-w-0">
                                     <button
                                         onClick={() => handleNavigation('/admin')}
-                                        className="text-[13px] text-slate-500 hover:text-[#2CABE3] font-medium transition truncate"
+                                        className="text-[13px] text-slate-500 hover:text-[#2CABE3] font-medium transition-colors duration-75 truncate"
                                     >
                                         Admin
                                     </button>
@@ -268,7 +268,7 @@ function AdminLayout({ children, active }) {
                                         setShowSearch(true);
                                         setTimeout(() => searchInputRef.current?.focus(), 30);
                                     }}
-                                    className="hidden sm:inline-flex items-center gap-2 pl-3 pr-2 h-9 rounded-lg border border-slate-200 bg-slate-50 text-slate-500 hover:text-slate-900 hover:bg-white hover:border-slate-300 text-[12px] transition"
+                                    className="hidden sm:inline-flex items-center gap-2 pl-3 pr-2 h-9 rounded-lg border border-slate-200 bg-slate-50 text-slate-500 hover:text-slate-900 hover:bg-white hover:border-slate-300 text-[12px] transition-colors duration-75"
                                     aria-label="Open admin search"
                                 >
                                     <i className="fas fa-magnifying-glass text-[12px]" aria-hidden="true" />
@@ -281,7 +281,7 @@ function AdminLayout({ children, active }) {
                                         setShowSearch(true);
                                         setTimeout(() => searchInputRef.current?.focus(), 30);
                                     }}
-                                    className="sm:hidden inline-flex items-center justify-center h-9 w-9 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition"
+                                    className="sm:hidden inline-flex items-center justify-center h-9 w-9 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors duration-75"
                                     aria-label="Open admin search"
                                 >
                                     <i className="fas fa-magnifying-glass" aria-hidden="true" />
@@ -290,7 +290,7 @@ function AdminLayout({ children, active }) {
                                 {/* Notifications */}
                                 <button
                                     type="button"
-                                    className="relative inline-flex items-center justify-center h-9 w-9 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition"
+                                    className="relative inline-flex items-center justify-center h-9 w-9 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors duration-75"
                                     aria-label="Notifications"
                                     title="Notifications"
                                     onClick={() => active !== 'dashboard' && handleNavigation('/admin')}
@@ -306,7 +306,7 @@ function AdminLayout({ children, active }) {
                                     <button
                                         type="button"
                                         onClick={() => setShowUserMenu((v) => !v)}
-                                        className="flex items-center gap-2 pl-1 pr-2 py-1 h-9 rounded-lg hover:bg-slate-100 transition"
+                                        className="flex items-center gap-2 pl-1 pr-2 py-1 h-9 rounded-lg hover:bg-slate-100 transition-colors duration-75"
                                         aria-haspopup="menu"
                                         aria-expanded={showUserMenu}
                                         aria-label="Account menu"
@@ -322,7 +322,7 @@ function AdminLayout({ children, active }) {
                                         <div className="absolute right-0 top-full pt-2 z-50">
                                         <div
                                             role="menu"
-                                            className="w-64 rounded-xl bg-white shadow-xl border border-slate-200 py-2 animate-[admin-fade-in_120ms_ease-out]"
+                                            className="w-64 rounded-xl bg-white shadow-xl border border-slate-200 py-2"
                                         >
                                             <div className="px-4 py-2 border-b border-slate-100">
                                                 <p className="text-[13px] font-semibold text-slate-900 truncate">{adminName}</p>
@@ -331,7 +331,7 @@ function AdminLayout({ children, active }) {
                                             <button
                                                 role="menuitem"
                                                 onClick={() => handleNavigation('/admin/settings')}
-                                                className="w-full text-left px-4 py-2 text-[13px] text-slate-700 hover:bg-slate-50 flex items-center gap-2.5"
+                                                className="nav-menu-item w-full text-left px-4 py-2 text-[13px] text-slate-700 flex items-center gap-2.5"
                                             >
                                                 <i className="fas fa-gear text-slate-400 w-4" aria-hidden="true" />
                                                 Admin settings
@@ -339,7 +339,7 @@ function AdminLayout({ children, active }) {
                                             <button
                                                 role="menuitem"
                                                 onClick={() => handleNavigation('/profile')}
-                                                className="w-full text-left px-4 py-2 text-[13px] text-slate-700 hover:bg-slate-50 flex items-center gap-2.5"
+                                                className="nav-menu-item w-full text-left px-4 py-2 text-[13px] text-slate-700 flex items-center gap-2.5"
                                             >
                                                 <i className="fas fa-user text-slate-400 w-4" aria-hidden="true" />
                                                 My profile
@@ -347,7 +347,7 @@ function AdminLayout({ children, active }) {
                                             <button
                                                 role="menuitem"
                                                 onClick={() => handleNavigation('/')}
-                                                className="w-full text-left px-4 py-2 text-[13px] text-slate-700 hover:bg-slate-50 flex items-center gap-2.5"
+                                                className="nav-menu-item w-full text-left px-4 py-2 text-[13px] text-slate-700 flex items-center gap-2.5"
                                             >
                                                 <i className="fas fa-house text-slate-400 w-4" aria-hidden="true" />
                                                 Back to site
@@ -356,10 +356,11 @@ function AdminLayout({ children, active }) {
                                             <button
                                                 role="menuitem"
                                                 onClick={async () => {
+                                                    setShowUserMenu(false);
                                                     try { await signOut?.(); } catch (_) { /* noop */ }
                                                     handleNavigation('/');
                                                 }}
-                                                className="w-full text-left px-4 py-2 text-[13px] text-rose-600 hover:bg-rose-50 flex items-center gap-2.5"
+                                                className="nav-menu-item w-full text-left px-4 py-2 text-[13px] text-rose-600 flex items-center gap-2.5"
                                             >
                                                 <i className="fas fa-right-from-bracket text-rose-500 w-4" aria-hidden="true" />
                                                 Sign out

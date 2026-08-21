@@ -27,7 +27,8 @@ html {
 }
 
 /* Prefer compositor-friendly, short transitions on interactive controls.
-   Avoid transition: all (animates layout props and feels sluggish). */
+   Avoid transition: all (animates layout props and feels sluggish).
+   Do NOT put transitions on all anchors — menu hover must feel instant. */
 button,
 [role="button"],
 .btn,
@@ -35,13 +36,7 @@ input[type="submit"],
 input[type="button"],
 input[type="reset"] {
     transition-property: color, background-color, border-color, opacity, box-shadow, transform, filter;
-    transition-duration: 120ms;
-    transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
-}
-
-a {
-    transition-property: color, background-color, border-color, opacity;
-    transition-duration: 120ms;
+    transition-duration: 80ms;
     transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 
