@@ -7,7 +7,7 @@ import { NOURI_GOALS, getStepMeta } from './registry'
 
 /** @typedef {{ stepIndex: number, stepTotal: number, goalPhrase: string, section: string, goalKey: string|null, fieldName: string|null }} ParsedGuidedStep */
 
-const STEP_RE = /(?:GUIDED\s*[—–-]\s*STEP|GUIADO\s*[—–-]\s*PASO)\s*(\d+)\s*(?:of|de)\s*(\d+)\s*(?:\(([^)]+)\))?\s*(?:[—–-]\s*([^\n\[]+))?/i
+const STEP_RE = /(?:GUIDED\s*[—–-]\s*STEP|GUIADO\s*[—–-]\s*PASO)\s*(\d+)\s*(?:of|de)\s*(\d+)\s*(?:\(([^)]+)\))?\s*(?:[—–-]\s*([^\n[]+))?/i
 const FIELD_RE = /\[field:([a-z0-9_]+)\]/i
 
 /** Keyword → field for headerless guided coaching replies. */
@@ -73,7 +73,6 @@ export function parseGuidedStepHeader(message) {
 export function inferGuidedFieldFromText(message, fallbackGoalKey = null) {
   if (!message) return null
   const t = String(message)
-  const low = t.toLowerCase()
   const looksGuided = (
     /guided|guiado|baby step|paso de bebé|paso de bebe|say done|di listo|look at the top|mira arriba|tap |pulsa /i.test(t)
   )
