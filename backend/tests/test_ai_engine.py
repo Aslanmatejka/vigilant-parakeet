@@ -188,8 +188,9 @@ class TestQuickReplyChips:
         # Never suggest Made today/yesterday as expiry — those break posting.
         assert "Tomorrow" in chips
         assert "In 2 days" in chips
+        assert "Other date" in chips
         assert "Made today" not in chips
-        assert any("24" in c for c in chips)
+        assert "Good for 24 hours" not in chips
 
     def test_chip_language_helper_does_not_override_en_conv(self):
         reply = "Sure — ¿Quieres que lo publique ahora?"

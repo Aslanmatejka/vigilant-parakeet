@@ -1,6 +1,5 @@
 import React from 'react';
 import PropTypes from 'prop-types';
-import { reportError } from '../../utils/helpers';
 
 const VARIANTS = {
     primary: 'text-white hover:opacity-90 disabled:opacity-50',
@@ -39,7 +38,7 @@ function Button({
         size = 'md';
     }
 
-    const baseStyles = 'inline-flex items-center justify-center font-medium rounded-lg transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2';
+    const baseStyles = 'inline-flex items-center justify-center font-medium rounded-lg transition-[color,background-color,border-color,opacity,box-shadow,transform] duration-150 ease-out active:scale-[0.98] focus:outline-none focus:ring-2 focus:ring-offset-2';
     
     const focusRingColors = {
         primary: 'focus:ring-[#2CABE3]',

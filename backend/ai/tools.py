@@ -2926,7 +2926,7 @@ def _validate_listing_timestamps(
                     "expiration_date is in the past — listing would be expired. "
                     f"Today is {now.strftime('%Y-%m-%d %H:%M UTC')}. "
                     "Ask for a good-until date of today or later "
-                    "(e.g. Tomorrow, In 2 days, Good for 24 hours)."
+                    "(e.g. Tomorrow, In 2 days, Other date)."
                 )
             }
     return None
@@ -4376,7 +4376,7 @@ async def _post_food_listing_legacy_sqlalchemy(
                     "expiration_date is in the past — listing would be expired. "
                     f"Today is {now.strftime('%Y-%m-%d %H:%M UTC')}. "
                     "Use a good-until date of today or later "
-                    "(Tomorrow, In 2 days, Good for 24 hours)."
+                    "(Tomorrow, In 2 days, Other date)."
                 )
             }
 

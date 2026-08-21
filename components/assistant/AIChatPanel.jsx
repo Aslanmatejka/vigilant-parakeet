@@ -2579,12 +2579,12 @@ function AIChatPanel() {
     if (!isOpen) return
     const el = messagesContainerRef.current
     if (!el) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
       return
     }
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200
     if (nearBottom) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
     }
   }, [messages, isOpen, isLoading])
 
@@ -2624,7 +2624,7 @@ function AIChatPanel() {
   }, [isOpen, voiceMode])
 
   const jumpToLatest = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
   }, [])
 
   // Focus input when panel opens
@@ -4333,7 +4333,7 @@ function AIChatPanel() {
       <div className="flex-1 relative min-h-0 z-0">
         <div
           ref={messagesContainerRef}
-          className="absolute inset-0 overflow-y-auto px-4 py-3 nourish-scrollbar scroll-smooth"
+          className="absolute inset-0 overflow-y-auto px-4 py-3 nourish-scrollbar"
           role="log"
           aria-label="Chat messages"
           aria-live="polite"

@@ -28,7 +28,7 @@ function Sidebar({
                 className={`
                     fixed top-0 left-0 bottom-0
                     w-64 bg-white shadow-lg z-50
-                    transform transition-transform duration-300 ease-in-out
+                    transform transition-transform duration-200 ease-out
                     ${isOpen ? 'translate-x-0' : '-translate-x-full'}
                     lg:translate-x-0 lg:static
                 `}
@@ -54,7 +54,7 @@ function Sidebar({
                                     className="
                                         flex items-center px-4 py-2 rounded-lg
                                         text-gray-700 hover:bg-primary-50 hover:text-primary-600
-                                        transition-colors duration-200
+                                        transition-colors duration-150
                                     "
                                 >
                                     <i className={`fas ${item.icon} w-5`}></i>

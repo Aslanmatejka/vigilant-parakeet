@@ -111,13 +111,9 @@ export function guideFormField(fieldName, { guideText = '', scroll = true, _from
   el.classList.add('nouri-field-guided')
   lastGuidedField = fieldName
 
-  const reduceMotion =
-    document.documentElement.classList.contains('a11y-reduce-motion')
-    || window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
-
   if (scroll) {
     el.scrollIntoView({
-      behavior: reduceMotion ? 'auto' : 'smooth',
+      behavior: 'auto',
       block: 'center',
     })
   }

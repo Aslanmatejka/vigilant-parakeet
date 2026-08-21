@@ -90,7 +90,7 @@ body.has-nouri-guide-bar {
   border-radius: 0.5rem;
   position: relative;
   z-index: 2;
-  animation: nouri-guide-pulse 1.4s ease-in-out 2;
+  animation: nouri-guide-pulse 0.9s ease-in-out 2;
 }
 
 @keyframes nouri-guide-pulse {

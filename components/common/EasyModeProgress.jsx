@@ -33,7 +33,7 @@ export default function EasyModeProgress({ sectionIndex, sectionTotal, sectionTi
         aria-label={`Form progress ${pct} percent`}
       >
         <div
-          className="h-full bg-[#2CABE3] transition-all duration-300"
+          className="h-full bg-[#2CABE3] transition-[width] duration-150 ease-out"
           style={{ width: `${pct}%` }}
         />
       </div>

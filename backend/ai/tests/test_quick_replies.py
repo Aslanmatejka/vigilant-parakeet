@@ -210,9 +210,11 @@ def test_es_freshness_question():
     )
     assert out
     joined = " ".join(out).lower()
-    assert "mañana" in joined or "días" in joined or "24" in joined
+    assert "mañana" in joined or "días" in joined
+    assert "otra fecha" in joined
     assert "hecho hoy" not in joined
     assert "hecho ayer" not in joined
+    assert "bueno 24" not in joined
 
 
 def test_good_until_chips_not_made_today():
@@ -221,8 +223,30 @@ def test_good_until_chips_not_made_today():
     )
     assert "Tomorrow" in out
     assert "In 2 days" in out
+    assert "Other date" in out
+    assert "Good for 24 hours" not in out
     assert "Made today" not in out
     assert "Made yesterday" not in out
+
+
+def test_allergen_ask_not_expiry_chips():
+    """Allergen question must not keep showing best-by date chips."""
+    out = generate_quick_replies(
+        "Got it — best by tomorrow. Any allergens in the pizza, "
+        "like nuts, dairy, eggs, wheat, soy, or shellfish?",
+    )
+    assert "No allergens" in out
+    assert "Tomorrow" not in out
+    assert "In 2 days" not in out
+    assert "Other date" not in out
+
+
+def test_expiry_ack_does_not_reoffer_date_chips():
+    out = generate_quick_replies(
+        "Got it — best by tomorrow. I'll note that.",
+    )
+    assert "Tomorrow" not in out
+    assert "In 2 days" not in out
 
 
 def test_fresh_food_question_does_not_get_expiry_chips():

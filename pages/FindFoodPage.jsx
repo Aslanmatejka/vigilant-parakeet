@@ -414,7 +414,7 @@ function FindFoodPage({ initialCategory }) {
                 {/* Mobile: quick jump between map and listings */}
                 <nav
                     aria-label="Page sections"
-                    className="lg:hidden sticky top-14 sm:top-16 z-30 -mx-3 sm:-mx-4 px-3 sm:px-4 py-2 mb-4 bg-white/95 backdrop-blur-md border-y border-gray-100 shadow-sm"
+                    className="lg:hidden sticky top-14 sm:top-16 z-30 -mx-3 sm:-mx-4 px-3 sm:px-4 py-2 mb-4 bg-white border-y border-gray-100 shadow-sm"
                 >
                     <div className="flex gap-2">
                         <a

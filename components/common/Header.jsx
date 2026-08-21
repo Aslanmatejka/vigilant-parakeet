@@ -292,7 +292,7 @@ function Header({ menuItems: menuItemsProp }) {
                                 >
                                     <button
                                         onClick={() => setSupportDropdownOpen(!supportDropdownOpen)}
-                                        className="nav-link hover:text-[#2CABE3] transition-colors duration-200 flex items-center"
+                                        className="nav-link hover:text-[#2CABE3] transition-colors duration-150 flex items-center"
                                     >
                                         {item.label}
                                         <i className={`fas fa-chevron-down text-xs ml-1 transform transition-transform ${supportDropdownOpen ? 'rotate-180' : ''}`}></i>
@@ -334,7 +334,7 @@ function Header({ menuItems: menuItemsProp }) {
                                 <a 
                                     key={index}
                                     href={item.path}
-                                    className="nav-link hover:text-[#2CABE3] transition-colors duration-200"
+                                    className="nav-link hover:text-[#2CABE3] transition-colors duration-150"
                                 >
                                     {renderNavLabel(item)}
                                 </a>
@@ -354,7 +354,7 @@ function Header({ menuItems: menuItemsProp }) {
                         {/* Help / Tutorial button */}
                         <button
                             onClick={() => startTutorial()}
-                            className="w-8 h-8 rounded-full border-2 border-[#2CABE3] text-[#2CABE3] hover:bg-[#2CABE3] hover:text-white flex items-center justify-center transition-all duration-200 text-sm font-bold"
+                            className="w-8 h-8 rounded-full border-2 border-[#2CABE3] text-[#2CABE3] hover:bg-[#2CABE3] hover:text-white flex items-center justify-center transition-colors duration-150 text-sm font-bold"
                             title="Take a guided tour"
                             aria-label="Start tutorial"
                         >

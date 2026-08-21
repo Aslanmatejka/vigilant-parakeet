@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useRef, useCallback, useMemo } from 'react'
+import { scrollIntoView, scrollWindowTo } from './motion.js'
 
 /**
  * UIControlContext — lets the AI assistant drive the React UI.
@@ -228,13 +229,13 @@ export function UIControlProvider({ children, navigate }) {
 
       case 'scroll_to_top':
         try {
-          window.scrollTo({ top: 0, behavior: 'smooth' })
+          scrollWindowTo({ top: 0, smooth: true })
           return true
         } catch { return false }
 
       case 'scroll_to_bottom':
         try {
-          window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' })
+          scrollWindowTo({ top: document.documentElement.scrollHeight, smooth: true })
           return true
         } catch { return false }
 
@@ -243,7 +244,7 @@ export function UIControlProvider({ children, navigate }) {
         try {
           const el = document.querySelector(`[data-ai-id="${normalized.target_id}"]`)
           if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+            scrollIntoView(el, { smooth: true, block: 'center' })
             if (typeof el.focus === 'function') el.focus()
             return true
           }

@@ -559,7 +559,8 @@ def _build_action_policy() -> str:
         "\n"
         "Expiration: ask when the food is good until (best-by / use-by), NOT "
         "only when it was made. Prefer future dates: Tomorrow, In 2 days, "
-        "In 3 days, Good for 24 hours. If they say 'made today/yesterday', "
+        "In 3 days, or Other date (then ask for the exact day). If they say "
+        "'made today/yesterday', "
         "convert to a remaining good-until date (made today → tomorrow). "
         "Never pass expiration_date=today (midnight fails as already past). "
         "Map to an ISO date of TOMORROW or later. Never silently invent one.\n"
@@ -4181,6 +4182,81 @@ def _is_combined_food_qty_ask(t: str) -> bool:
     return food_ask and qty_ask
 
 
+def _is_allergen_ask(t: str) -> bool:
+    """True when the assistant is asking about allergens / dietary flags."""
+    t = (t or "").lower()
+    if any(k in t for k in (
+        "allerg", "alérgen", "alergen", "alergia", "alergias",
+        "dietary restriction", "restricciones diet", "restricción diet",
+    )):
+        return True
+    # Common hands-on phrasing lists major allergens without the word itself.
+    if any(k in t for k in ("shellfish", "frutos secos", "gluten", "lácteos", "lacteos")):
+        if any(k in t for k in (
+            "nuts", "dairy", "eggs", "wheat", "soy", "any ", "note",
+            "should i", "contain", "mention", "know about", "frutos", "huevos",
+        )):
+            return True
+    return False
+
+
+def _is_expiry_ask(t: str) -> bool:
+    """True when the assistant is asking for a good-until / best-by date.
+
+    Must not fire on allergen turns, or on acknowledgements that merely
+    repeat a date already chosen (\"Got it — best by tomorrow.\").
+    """
+    t = (t or "").lower()
+    if _is_allergen_ask(t):
+        return False
+    if any(k in t for k in (
+        "photo", "picture", "foto", "imagen", "community", "school",
+        "ready to post", "post it", "publish",
+    )) and not any(k in t for k in ("best by", "good until", "expir", "how long")):
+        return False
+
+    has_cue = any(k in t for k in (
+        "best by", "best-by", "good until", "good for", "use by", "use-by",
+        "when does it expire", "when will it expire", "how long is it good",
+        "how long will it keep", "how long will it stay", "stay fresh",
+        "expiration", "expiry date", "best before",
+        "caduc", "vence", "fecha de venc", "hasta cuándo es bueno",
+        "hasta cuando es bueno", "cuánto dura", "cuanto dura",
+    )) or (
+        any(k in t for k in ("expir", "vence", "caduc"))
+        and any(k in t for k in ("when", "date", "until", "cuándo", "cuando", "?"))
+    )
+    if not has_cue:
+        return False
+
+    asking = (
+        "?" in t or "¿" in t
+        or any(k in t for k in (
+            "when is", "when was", "how long", "what date", "tell me",
+            "best by or", "good until?", "or how long",
+        ))
+    )
+    if not asking:
+        return False
+
+    # Acknowledgement of a date already chosen — don't re-offer date chips
+    # unless clearly re-asking / offering to change it.
+    ack = any(k in t for k in (
+        "got it", "noted", "i'll use", "i will use", "set to", "set as",
+        "locked in", "confirmed", "sounds good", "using tomorrow",
+        "using that", "saved as", "listed as", "perfecto", "listo —",
+        "anotado", "queda",
+    ))
+    re_ask = any(k in t for k in (
+        "change", "different date", "or different", "update the", "wrong date",
+        "another date", "new date", "when is", "how long", "still good",
+        "want a different", "prefer a different",
+    ))
+    if ack and not re_ask:
+        return False
+    return True
+
+
 def generate_quick_replies(
     text: str,
     lang: str = "en",
@@ -4292,6 +4368,14 @@ def generate_quick_replies(
             add("Adjuntar foto", "Ya la subí")
         else:
             add("I'll add one", "I already uploaded it")
+        return out
+
+    # Allergen ask early — same turn often also mentions a chosen best-by date.
+    if _is_allergen_ask(t):
+        if es:
+            add("Sin alérgenos", "Solo gluten", "Lácteos", "Frutos secos")
+        else:
+            add("No allergens", "Just gluten", "Dairy", "Nuts")
         return out
 
     # Assistance fork — shared matcher (find/share/request).
@@ -4765,8 +4849,8 @@ def generate_quick_replies(
                 add("Within 5 mi", "Within 10 mi")
         return out
 
-    # Allergens
-    if "allerg" in t or "alérgen" in t or "alergia" in t:
+    # Allergens (also handled early before ? gate)
+    if _is_allergen_ask(t):
         if es:
             add("Sin alérgenos", "Solo gluten", "Lácteos", "Frutos secos")
         else:
@@ -4790,23 +4874,12 @@ def generate_quick_replies(
             add("Today 5–8pm", "Tomorrow morning", "Next 24h", "Whenever")
         return out
 
-    # Freshness / good-until (NOT bake date). Avoid bare "fresh" — it falsely
-    # matches food descriptions ("fresh apples") and wrong chips.
-    if any(k in t for k in (
-        "best by", "best-by", "good until", "good for", "use by", "use-by",
-        "when does it expire", "when will it expire", "how long is it good",
-        "how long will it keep", "how long will it stay", "stay fresh",
-        "expiration", "expiry date", "best before",
-        "caduc", "vence", "fecha de venc", "hasta cuándo es bueno",
-        "hasta cuando es bueno", "cuánto dura", "cuanto dura",
-    )) or (
-        any(k in t for k in ("expir", "vence", "caduc"))
-        and any(k in t for k in ("when", "date", "until", "cuándo", "cuando", "?"))
-    ):
+    # Freshness / good-until — only when actively asking, never on ack + allergen.
+    if _is_expiry_ask(t):
         if es:
-            add("Mañana", "En 2 días", "En 3 días", "Bueno 24h")
+            add("Mañana", "En 2 días", "En 3 días", "Otra fecha")
         else:
-            add("Tomorrow", "In 2 days", "In 3 days", "Good for 24 hours")
+            add("Tomorrow", "In 2 days", "In 3 days", "Other date")
         return out
 
     # Combined food + qty (hands-on "Do it for me") — before bare qty.

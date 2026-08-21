@@ -145,19 +145,19 @@ export default function UserReceipts() {
 
                 {/* Stats cards */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-                    <div className="bg-white/80 backdrop-blur-md rounded-xl p-4 shadow-sm border border-gray-100">
+                    <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
                         <p className="text-sm text-gray-500">Total</p>
                         <p className="text-2xl font-bold text-gray-900">{counts.all}</p>
                     </div>
-                    <div className="bg-white/80 backdrop-blur-md rounded-xl p-4 shadow-sm border border-green-100">
+                    <div className="bg-white rounded-xl p-4 shadow-sm border border-green-100">
                         <p className="text-sm text-green-600">Pending Pickup</p>
                         <p className="text-2xl font-bold text-green-700">{counts.pending}</p>
                     </div>
-                    <div className="bg-white/80 backdrop-blur-md rounded-xl p-4 shadow-sm border border-gray-100">
+                    <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
                         <p className="text-sm text-gray-500">Completed</p>
                         <p className="text-2xl font-bold text-gray-700">{counts.completed}</p>
                     </div>
-                    <div className="bg-white/80 backdrop-blur-md rounded-xl p-4 shadow-sm border border-orange-100">
+                    <div className="bg-white rounded-xl p-4 shadow-sm border border-orange-100">
                         <p className="text-sm text-orange-600">Expired</p>
                         <p className="text-2xl font-bold text-orange-700">{counts.expired}</p>
                     </div>
@@ -187,7 +187,7 @@ export default function UserReceipts() {
                         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-600"></div>
                     </div>
                 ) : filtered.length === 0 ? (
-                    <div className="text-center py-20 bg-white/60 backdrop-blur-sm rounded-2xl">
+                    <div className="text-center py-20 bg-white rounded-2xl">
                         <div className="text-6xl mb-4">🧾</div>
                         <h3 className="text-xl font-semibold text-gray-700 mb-2">
                             {activeTab === 'all' ? 'No receipts yet' : `No ${activeTab} receipts`}

@@ -173,13 +173,13 @@ function AdminLayout({ children, active }) {
             {/* ───── Mobile sidebar overlay ───── */}
             {isMobileSidebarOpen && (
                 <div
-                    className="fixed inset-0 z-40 bg-slate-900/60 backdrop-blur-sm transition-opacity lg:hidden"
+                    className="fixed inset-0 z-40 bg-slate-900/50 transition-opacity duration-150 lg:hidden"
                     onClick={() => setIsMobileSidebarOpen(false)}
                     aria-hidden="true"
                 />
             )}
             <div
-                className={`fixed inset-y-0 left-0 z-50 w-72 transition-transform duration-300 lg:hidden shadow-2xl ${
+                className={`fixed inset-y-0 left-0 z-50 w-72 transition-transform duration-200 ease-out lg:hidden shadow-2xl ${
                     isMobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'
                 }`}
             >
@@ -188,7 +188,7 @@ function AdminLayout({ children, active }) {
 
             {/* ───── Desktop persistent sidebar ───── */}
             <aside
-                className={`hidden lg:block fixed inset-y-0 left-0 z-30 transition-[width] duration-300 shadow-xl
+                className={`hidden lg:block fixed inset-y-0 left-0 z-30 transition-[width] duration-200 ease-out shadow-xl
                     ${isCollapsed ? 'w-16' : 'w-64'}`}
             >
                 <AdminSidebar
@@ -202,11 +202,11 @@ function AdminLayout({ children, active }) {
 
             {/* ───── Main column (offset by sidebar width on desktop) ───── */}
             <div
-                className={`flex flex-col min-h-screen transition-[padding] duration-300
+                className={`flex flex-col min-h-screen transition-[padding] duration-200 ease-out
                     ${isCollapsed ? 'lg:pl-16' : 'lg:pl-64'}`}
             >
                 {/* ───── Top bar ───── */}
-                <header className="sticky top-0 z-20 bg-white/85 backdrop-blur-md border-b border-slate-200/70 shadow-sm">
+                <header className="sticky top-0 z-20 bg-white border-b border-slate-200/70 shadow-sm">
                     <div className="px-4 sm:px-6 lg:px-8">
                         <div className="flex items-center justify-between h-16 gap-3">
                             {/* Left: mobile menu + desktop collapse + breadcrumb */}

@@ -37,7 +37,7 @@ function Card({
 
     const cardStyles = `
         bg-white rounded-lg shadow-sm overflow-hidden
-        ${hoverable ? 'transition-transform duration-200 hover:-translate-y-1 hover:shadow-md focus-within:translate-y-0 focus-within:shadow-md' : ''}
+        ${hoverable ? 'transition-[transform,box-shadow] duration-150 ease-out hover:-translate-y-0.5 hover:shadow-md focus-within:translate-y-0 focus-within:shadow-md' : ''}
         ${onClick ? 'cursor-pointer' : ''}
         ${className}
     `.trim().replace(/\s+/g, ' ');

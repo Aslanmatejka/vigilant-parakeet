@@ -61,7 +61,7 @@ function MainLayout({ children }) {
             </a>
             <Header/>
             <main id="main-content" tabIndex={-1} className="flex-grow container mx-auto px-2 sm:px-4 py-3 sm:py-8 outline-none">
-                <div className="rounded-xl sm:rounded-3xl shadow-lg sm:shadow-2xl bg-white/80 backdrop-blur-md border border-cyan-100 p-3.5 sm:p-6 md:p-10 transition-all duration-300">
+                <div className="rounded-xl sm:rounded-3xl shadow-lg sm:shadow-2xl bg-white/95 border border-cyan-100 p-3.5 sm:p-6 md:p-10">
                     {children}
                 </div>
             </main>

@@ -5422,9 +5422,9 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
         "caduc", "vence", "fecha de venc",
     )):
         if es:
-            add("Mañana", "En 2 días", "En 3 días", "Bueno 24h")
+            add("Mañana", "En 2 días", "En 3 días", "Otra fecha")
         else:
-            add("Tomorrow", "In 2 days", "In 3 days", "Good for 24 hours")
+            add("Tomorrow", "In 2 days", "In 3 days", "Other date")
         return out
 
     # Quantity prompt — require an explicit count cue. "how much"

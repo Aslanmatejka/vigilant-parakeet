@@ -14,7 +14,7 @@ function UserChatWidget() {
     const messagesEndRef = React.useRef(null);
 
     const scrollToBottom = () => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
     };
 
     React.useEffect(() => {

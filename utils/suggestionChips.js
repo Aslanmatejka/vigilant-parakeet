@@ -215,6 +215,8 @@ export function filterChipsAgainstResponse(responseText, chips) {
   const foodAsk = /(what food|what would you like to share|what are you sharing|what do you have|qué comida)/.test(text)
   const qtyAsk = /(how much|how many|cuántos|cuántas|cuánto)/.test(text)
   const combinedFoodQty = foodAsk && qtyAsk
+  const allergenAsk = /(allerg|alérgen|alergia|dietary restriction)/.test(text)
+  const expiryChipLabel = /^(tomorrow|in 2 days|in 3 days|other date|mañana|en 2 d[ií]as|en 3 d[ií]as|otra fecha|good for 24)/i
 
   // Never keep food-example chips under a mode / confirm ask.
   const foodExamples = new Set([
@@ -230,6 +232,7 @@ export function filterChipsAgainstResponse(responseText, chips) {
       if (drop.has(label)) return false
       if (handsOnStep && forkChip.test(label)) return false
       if (combinedFoodQty && /^(1|2|3|5|10)$/.test(label)) return false
+      if (allergenAsk && expiryChipLabel.test(label)) return false
       if (foodExamples.has(label) && /(chat|guide|step|form|page)/.test(text) && !combinedFoodQty) return false
       return true
     })
@@ -274,12 +277,24 @@ export function resolveInputChips(suggestions, language = 'en', role = null, { a
     /(how many|how much|cuántos|cuántas|cuánto)/.test(text)
     && !/(what food|what would you like to share|what are you sharing|best by|allerg|community|photo|ready to post|post this under|school)/.test(text)
   )
-  // Stale qty chips on a non-qty turn (common mid hands-on) → prefer infer.
-  if (filtered.length > 0 && !(onlyBareQty && !qtyOnlyAsk)) {
+  const expiryChip = /^(tomorrow|in 2 days|in 3 days|other date|mañana|en 2 d[ií]as|en 3 d[ií]as|otra fecha|good for 24)/i
+  const onlyExpiry = filtered.length > 0
+    && filtered.every((c) => expiryChip.test(chipLabel(c)))
+  const allergenAsk = /(allerg|alérgen|alergia|dietary restriction|shellfish|frutos secos)/.test(text)
+  const expiryAsk = (
+    /(best by|good until|good for|use by|expir|how long is it good|stay fresh|fecha de venc)/.test(text)
+    && /(\?|¿|when is|how long|what date)/.test(text)
+    && !allergenAsk
+    && !/(got it|noted|i'?ll use|listed as|confirmed).{0,40}(best by|good until|tomorrow)/.test(text)
+  )
+  // Stale qty/expiry chips on the wrong turn (common mid hands-on) → prefer infer.
+  const staleForTurn = (onlyBareQty && !qtyOnlyAsk) || (onlyExpiry && !expiryAsk)
+  if (filtered.length > 0 && !staleForTurn) {
     return filtered.slice(0, 40)
   }
 
-  // Safety net: infer chips from the reply text when the backend sent none.
+  // Safety net: infer chips from the reply text when the backend sent none
+  // or sent chips that conflict with the current question.
   if (responseText) {
     const inferred = inferChipsFromResponse(responseText, language)
     if (inferred.length > 0) return inferred.slice(0, 40)

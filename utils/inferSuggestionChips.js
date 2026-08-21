@@ -179,8 +179,14 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Use my saved address'), chip('Use a different address'), chip("I don't have one saved")]
   }
 
-  // Allergens
-  if (/allerg|alérgen|alergia/.test(t)) {
+  // Allergens — before food/qty/expiry so mixed "best by… any allergens?" wins.
+  if (
+    /allerg|alérgen|alergia|dietary restriction|restricciones diet/.test(t)
+    || (
+      /(nuts|dairy|eggs|wheat|soy|shellfish|gluten|frutos secos|lácteos)/.test(t)
+      && /(any |contain|should i|note|know about|dietary|allerg)/.test(t)
+    )
+  ) {
     return es
       ? [chip('Sin alérgenos'), chip('Solo gluten'), chip('Lácteos'), chip('Frutos secos')]
       : [chip('No allergens'), chip('Just gluten'), chip('Dairy'), chip('Nuts')]
@@ -237,12 +243,23 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Today 5–8pm'), chip('Tomorrow morning'), chip('Next 24h'), chip('Whenever')]
   }
 
-  // Good-until / expiry — never Made today/yesterday (those break posting).
-  if (/best by|best-by|good until|good for|use by|expir|vence|caduc|how long is it good|how long will it (keep|stay)|stay fresh|fecha de venc/.test(t)
-    && !/what food|donating|sharing|fresh apples|fresh bread/.test(t)) {
+  // Good-until / expiry — only when actively asking, never on allergen turns
+  // or acknowledgements that merely repeat a chosen date.
+  const allergenAsk = /allerg|alérgen|alergia|dietary restriction/.test(t)
+  const expiryCue = /best by|best-by|good until|good for|use by|expir|vence|caduc|how long is it good|how long will it (keep|stay)|stay fresh|fecha de venc/.test(t)
+  const expiryAsking = /(\?|¿|when is|when was|how long|what date|or how long)/.test(t)
+  const expiryAck = /got it|noted|i'?ll use|set to|set as|confirmed|listed as|using tomorrow|anotado/.test(t)
+  const expiryReAsk = /change|different date|another date|update the|wrong date|want a different/.test(t)
+  if (
+    expiryCue
+    && expiryAsking
+    && !allergenAsk
+    && !/what food|donating|sharing|fresh apples|fresh bread/.test(t)
+    && !(expiryAck && !expiryReAsk)
+  ) {
     return es
-      ? [chip('Mañana'), chip('En 2 días'), chip('En 3 días'), chip('Bueno 24h')]
-      : [chip('Tomorrow'), chip('In 2 days'), chip('In 3 days'), chip('Good for 24 hours')]
+      ? [chip('Mañana'), chip('En 2 días'), chip('En 3 días'), chip('Otra fecha')]
+      : [chip('Tomorrow'), chip('In 2 days'), chip('In 3 days'), chip('Other date')]
   }
 
   // Remind
