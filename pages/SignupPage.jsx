@@ -4,6 +4,9 @@ import { useAuthContext } from "../utils/AuthContext";
 import ErrorBoundary from "../components/common/ErrorBoundary";
 import Button from "../components/common/Button";
 import supabase from "../utils/supabaseClient";
+import useFormVoiceGuide from "../hooks/useFormVoiceGuide";
+import { SIGNUP_WELCOME, SIGNUP_HINTS } from "../hooks/formGuideHints";
+import EasyModeProgress, { EasyModeSectionGate, useEasyModeSections } from "../components/common/EasyModeProgress";
 
 function SignupPageContent() {
     const navigate = useNavigate();
@@ -21,6 +24,12 @@ function SignupPageContent() {
 
     const [errors, setErrors] = React.useState({});
     const [submitting, setSubmitting] = React.useState(false);
+    const { speakField, reportError } = useFormVoiceGuide({
+        formId: 'signup',
+        welcomeMessage: SIGNUP_WELCOME,
+        hints: SIGNUP_HINTS,
+    });
+    const easyNav = useEasyModeSections(3);
 
     React.useEffect(() => {
         // Scroll to top when page loads
@@ -83,6 +92,10 @@ function SignupPageContent() {
         }
 
         setErrors(newErrors);
+        const firstKey = Object.keys(newErrors)[0];
+        if (firstKey) {
+            reportError(firstKey, newErrors[firstKey]);
+        }
         return Object.keys(newErrors).length === 0;
     };
 
@@ -242,6 +255,12 @@ function SignupPageContent() {
                     )}
 
                     <form onSubmit={handleSubmit} className="space-y-6" noValidate>
+                        <EasyModeProgress
+                            sectionIndex={easyNav.activeSection}
+                            sectionTotal={easyNav.sectionCount}
+                            sectionTitle={['Your info', 'Approval & phone', 'Password & terms'][easyNav.activeSection]}
+                        />
+                        <EasyModeSectionGate easyMode={easyNav.easyMode} sectionIndex={0} activeSection={easyNav.activeSection}>
                         <div>
                             <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-1">
                                 Full Name <span className="text-red-500" aria-hidden="true">*</span>
@@ -252,6 +271,7 @@ function SignupPageContent() {
                                 type="text"
                                 value={formData.name}
                                 onChange={handleChange}
+                                onFocus={() => speakField('name')}
                                 className={`w-full px-4 py-2 rounded-lg border focus:outline-none focus:ring-2 focus:ring-primary-500 ${errors.name ? 'border-red-500' : 'border-gray-300'}`}
                                 placeholder="John Doe"
                                 aria-required="true"
@@ -273,6 +293,7 @@ function SignupPageContent() {
                                 type="email"
                                 value={formData.email}
                                 onChange={handleChange}
+                                onFocus={() => speakField('email')}
                                 className={`w-full px-4 py-2 rounded-lg border focus:outline-none focus:ring-2 focus:ring-primary-500 ${errors.email ? 'border-red-500' : 'border-gray-300'}`}
                                 placeholder="johndoe@example.com"
                                 aria-required="true"
@@ -283,7 +304,8 @@ function SignupPageContent() {
                                 <p id="email-error" className="mt-1 text-sm text-red-500" role="alert">{errors.email}</p>
                             )}
                         </div>
-
+                        </EasyModeSectionGate>
+                        <EasyModeSectionGate easyMode={easyNav.easyMode} sectionIndex={1} activeSection={easyNav.activeSection}>
                         <div>
                             <label htmlFor="approvalNumber" className="block text-sm font-medium text-gray-700 mb-1">
                                 Approval Number <span className="text-red-500" aria-hidden="true">*</span>
@@ -294,6 +316,7 @@ function SignupPageContent() {
                                 type="text"
                                 value={formData.approvalNumber}
                                 onChange={handleChange}
+                                onFocus={() => speakField('approvalNumber')}
                                 className={`w-full px-4 py-2 rounded-lg border focus:outline-none focus:ring-2 focus:ring-primary-500 ${errors.approvalNumber ? 'border-red-500' : 'border-gray-300'}`}
                                 placeholder="e.g. RBE123456"
                                 aria-required="true"
@@ -318,6 +341,7 @@ function SignupPageContent() {
                                 type="tel"
                                 value={formData.phone}
                                 onChange={handleChange}
+                                onFocus={() => speakField('phone')}
                                 className={`w-full px-4 py-2 rounded-lg border focus:outline-none focus:ring-2 focus:ring-[#2CABE3] ${errors.phone ? 'border-red-500' : 'border-gray-300'}`}
                                 placeholder="+1234567890 or (123) 456-7890"
                                 aria-required={formData.smsOptIn}
@@ -331,7 +355,8 @@ function SignupPageContent() {
                                 <p id="phone-error" className="mt-1 text-sm text-red-500" role="alert">{errors.phone}</p>
                             )}
                         </div>
-
+                        </EasyModeSectionGate>
+                        <EasyModeSectionGate easyMode={easyNav.easyMode} sectionIndex={2} activeSection={easyNav.activeSection}>
                         <div>
                             <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
                                 Password <span className="text-red-500" aria-hidden="true">*</span>
@@ -342,6 +367,7 @@ function SignupPageContent() {
                                 type="password"
                                 value={formData.password}
                                 onChange={handleChange}
+                                onFocus={() => speakField('password')}
                                 className={`w-full px-4 py-2 rounded-lg border focus:outline-none focus:ring-2 focus:ring-primary-500 ${errors.password ? 'border-red-500' : 'border-gray-300'}`}
                                 placeholder="At least 8 characters"
                                 aria-required="true"
@@ -363,6 +389,7 @@ function SignupPageContent() {
                                 type="password"
                                 value={formData.confirmPassword}
                                 onChange={handleChange}
+                                onFocus={() => speakField('confirmPassword')}
                                 className={`w-full px-4 py-2 rounded-lg border focus:outline-none focus:ring-2 focus:ring-primary-500 ${errors.confirmPassword ? 'border-red-500' : 'border-gray-300'}`}
                                 placeholder="Confirm your password"
                                 aria-required="true"
@@ -408,6 +435,7 @@ function SignupPageContent() {
                                     type="checkbox"
                                     checked={formData.agreeToTerms}
                                     onChange={handleChange}
+                                    onFocus={() => speakField('agreeToTerms')}
                                     className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
                                     aria-required="true"
                                     aria-invalid={!!errors.agreeToTerms}
@@ -430,6 +458,20 @@ function SignupPageContent() {
                                 )}
                             </div>
                         </div>
+                        </EasyModeSectionGate>
+
+                        {easyNav.easyMode && (
+                            <div className="flex gap-2 justify-between">
+                                <Button type="button" variant="secondary" className="easy-mode-nav-btn" disabled={!easyNav.canPrev} onClick={easyNav.goPrev}>
+                                    Back
+                                </Button>
+                                {easyNav.canNext && (
+                                    <Button type="button" variant="primary" className="easy-mode-nav-btn" onClick={easyNav.goNext}>
+                                        Next
+                                    </Button>
+                                )}
+                            </div>
+                        )}
 
                         <div>
                             <Button

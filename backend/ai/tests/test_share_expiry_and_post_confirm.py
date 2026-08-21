@@ -54,7 +54,59 @@ class TestSpokenExpiryParsing:
         assert date.fromisoformat(result).weekday() == 4
 
 
-class TestExpiryFromEarlierTurn:
+class TestSpokenExpiryShelfLife:
+    def test_made_today_maps_to_tomorrow(self):
+        from datetime import timedelta
+        assert _extract_expiry_from_text("Made today") == (
+            date.today() + timedelta(days=1)
+        ).isoformat()
+
+    def test_made_yesterday_maps_to_today(self):
+        assert _extract_expiry_from_text("Made yesterday") == date.today().isoformat()
+
+    def test_good_for_24_hours(self):
+        from datetime import timedelta
+        assert _extract_expiry_from_text("Good for 24 hours") == (
+            date.today() + timedelta(days=1)
+        ).isoformat()
+
+    def test_in_2_days(self):
+        from datetime import timedelta
+        assert _extract_expiry_from_text("In 2 days") == (
+            date.today() + timedelta(days=2)
+        ).isoformat()
+
+    def test_normalize_bumps_date_only_today_to_tomorrow(self):
+        from datetime import timedelta
+        from backend.ai.conversation_flow import normalize_expiration_date_for_post
+
+        today = date.today().isoformat()
+        assert normalize_expiration_date_for_post(today) == (
+            date.today() + timedelta(days=1)
+        ).isoformat()
+
+    def test_enrich_made_today_overrides_model_today(self):
+        from datetime import timedelta
+        history = [
+            {"role": "user", "message": "I want to share pizza"},
+            {"role": "assistant", "message": "When is it best by?"},
+            {"role": "user", "message": "Made today"},
+            {"role": "assistant", "message": "Ready to post?"},
+        ]
+        out = enrich_post_food_listing_args(
+            {
+                "title": "pizza",
+                "qty": 10,
+                "expiration_date": date.today().isoformat(),
+                "community_confirmed": True,
+            },
+            "Yes, post it",
+            history,
+        )
+        assert out["expiration_date"] == (
+            date.today() + timedelta(days=1)
+        ).isoformat()
+
     def test_upsert_applies_expiry_from_prior_user_message(self):
         from backend.ai.conversation_flow import upsert_share_drafts_from_message
 
@@ -82,7 +134,7 @@ class TestExpiryAskedButAlreadyProvided:
             {"role": "assistant", "message": "What's the best by date?"},
             {"role": "user", "message": "tomorrow"},
         ]
-        reminder = build_posting_step_reminder("skip photo", history, lang="en")
+        reminder = build_posting_step_reminder("tomorrow works", history, lang="en")
         assert reminder is not None
         assert "Do NOT ask again" in reminder or "already gave" in reminder.lower()
 
@@ -170,26 +222,83 @@ class TestPostConfirmDoesNotReaskPhotos:
         assert "call post_food_listing" in low or "post_food_listings" in low
         assert "waiting on either a photo" not in low
 
-    def test_already_shared_photos_counts_as_has_photo(self):
+    def test_verbal_already_shared_without_url_is_not_enough(self):
         history = self._history_ready() + [
             {
                 "role": "assistant",
-                "message": "Want to snap a quick photo, or should I post without photos?",
+                "message": "Want to snap a quick photo?",
+            },
+        ]
+        # Strip photo URLs from earlier turns by starting a new share-like
+        # history that asks for a photo without an upload.
+        history = [
+            {"role": "user", "message": "i want to share bread"},
+            {
+                "role": "assistant",
+                "message": "Should this go under Do Good Warehouse?",
+            },
+            {"role": "user", "message": "yes"},
+            {
+                "role": "assistant",
+                "message": "When does it expire?",
+            },
+            {"role": "user", "message": "tomorrow"},
+            {
+                "role": "assistant",
+                "message": "Please upload a photo of the bread.",
             },
         ]
         state = posting_flow_state("i already shared the photos with you", history)
-        assert state["has_photo"] is True
-        assert state["awaiting_photo"] is False
+        assert state["has_photo"] is False
+        assert state["awaiting_photo"] is True
+
+    def test_skip_photo_still_blocks_post(self):
+        history = [
+            {"role": "user", "message": "share 5 apples"},
+            {
+                "role": "assistant",
+                "message": "Should this go under Do Good Warehouse?",
+            },
+            {"role": "user", "message": "yes"},
+            {
+                "role": "assistant",
+                "message": "When does it expire?",
+            },
+            {"role": "user", "message": "tomorrow"},
+            {
+                "role": "assistant",
+                "message": "Please upload a photo.",
+            },
+            {"role": "user", "message": "skip photo"},
+        ]
+        reason = posting_tool_block_reason(
+            "yes, post it",
+            history,
+            {
+                "title": "apples",
+                "qty": 5,
+                "community_name": "Do Good Warehouse",
+                "community_confirmed": True,
+                "expiration_date": "2026-07-25",
+            },
+        )
+        assert reason is not None
+        assert "photo" in reason.lower()
+        assert "skip" in reason.lower() or "required" in reason.lower()
 
 
 class TestNoPostChipsAfterShareSuccess:
-    def test_all_set_shared_returns_empty(self):
+    def test_all_set_shared_gets_next_step_chips(self):
         text = (
             "All set! Your tomatoes and carrots baskets are shared and ready "
             "for pickup at 1423 Park St, expiring July 24. Anything else you "
             "want to share today?"
         )
-        assert generate_quick_replies(text) == []
+        out = generate_quick_replies(text)
+        assert "Yes, post it" not in out
+        assert "Skip photo" not in out
+        joined = " ".join(out).lower()
+        assert "share" in joined or "find" in joined or "all" in joined
 
     def test_shall_i_post_still_gets_confirm_chips(self):
         text = (

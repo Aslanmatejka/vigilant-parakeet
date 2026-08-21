@@ -4,6 +4,7 @@ import Footer from "../common/Footer";
 import AIChatPanel from "../assistant/AIChatPanel";
 import UserChatWidget from "../common/UserChatWidget";
 import Tutorial from "../common/Tutorial";
+import NouriGuideBar from "../common/NouriGuideBar";
 import AIHealthBanner from "../common/AIHealthBanner";
 import { useTutorial } from "../../utils/TutorialContext";
 import { useAuthContext } from "../../utils/AuthContext";
@@ -52,8 +53,14 @@ function MainLayout({ children }) {
 
     return (
         <div data-name="main-layout" className="min-h-screen flex flex-col bg-gradient-to-br from-cyan-50 via-white to-cyan-100">
+            <a
+                href="#main-content"
+                className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-[10000] focus:px-4 focus:py-2 focus:bg-white focus:text-gray-900 focus:rounded-lg focus:shadow-lg focus:outline focus:outline-2 focus:outline-[#2CABE3]"
+            >
+                Skip to main content
+            </a>
             <Header/>
-            <main className="flex-grow container mx-auto px-2 sm:px-4 py-3 sm:py-8">
+            <main id="main-content" tabIndex={-1} className="flex-grow container mx-auto px-2 sm:px-4 py-3 sm:py-8 outline-none">
                 <div className="rounded-xl sm:rounded-3xl shadow-lg sm:shadow-2xl bg-white/80 backdrop-blur-md border border-cyan-100 p-3.5 sm:p-6 md:p-10 transition-all duration-300">
                     {children}
                 </div>
@@ -71,6 +78,9 @@ function MainLayout({ children }) {
 
             {/* AI Self-Healing Status Banner */}
             <AIHealthBanner />
+
+            {/* Unified Nouri accessibility + AI guide bar */}
+            <NouriGuideBar />
         </div>
     );
 }

@@ -12,8 +12,7 @@ import {
     browseCommunityIdsForUser,
     listingVisibleToCommunityScope,
 } from '../utils/communityScope';
-import useFormVoiceGuide, { CLAIM_FOOD_WELCOME, CLAIM_FOOD_HINTS, FORM_NAMES } from '../hooks/useFormVoiceGuide';
-import FormVoiceGuide from '../components/common/FormVoiceGuide';
+import useFormVoiceGuide, { CLAIM_FOOD_WELCOME, CLAIM_FOOD_HINTS } from '../hooks/useFormVoiceGuide';
 
 // Calculate next Friday from today (food returns to inventory at 11:59PM Friday)
 const getNextFriday = () => {
@@ -57,9 +56,9 @@ export default function ClaimFoodForm() {
     const maxAllowed = Math.min(MAX_CLAIM, availableQty);
     const [claimQty, setClaimQty] = React.useState(1);
     const guide = useFormVoiceGuide({
-        formName: FORM_NAMES.claim,
         welcomeMessage: CLAIM_FOOD_WELCOME,
         hints: CLAIM_FOOD_HINTS,
+        formId: 'claim-food',
     });
     const { speakField } = guide;
 
@@ -392,7 +391,6 @@ export default function ClaimFoodForm() {
                 </Button>
             </div>
 
-            <FormVoiceGuide guide={guide} className="mb-6" />
 
             {/* Food Details Section */}
             <div className="bg-white rounded-2xl shadow-lg p-6 mb-6 border border-gray-100">
@@ -433,7 +431,7 @@ export default function ClaimFoodForm() {
                             <div className="flex items-center">
                                 <i className="fas fa-hand-holding text-[#2CABE3] w-6"></i>
                                 <span className="text-gray-700 font-medium">How many do you want?</span>
-                                <div className="ml-3 flex items-center gap-2">
+                                <div className="ml-3 flex items-center gap-2" data-guide-field="claimQty">
                                     <button
                                         type="button"
                                         onClick={() => setClaimQty(q => Math.max(1, q - 1))}

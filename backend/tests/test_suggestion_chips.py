@@ -232,3 +232,159 @@ class TestBuildTurnSuggestions:
         labels = [c if isinstance(c, str) else c.get("label") for c in chips]
         assert "DoGoods Warehouse" in labels
         assert "Mission Hub" in labels
+
+
+    def test_guided_step_gets_done_chips(self):
+        text = (
+            "GUIDED — STEP 1 of 9 (SHARE FOOD — Open Share Food):\n"
+            "Click Name / Organization and type your name. "
+            "When finished, say 'done' or 'what's next'."
+        )
+        chips = build_turn_suggestions(text, "en", tool_results=[], min_chips=0)
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert "Done" in labels
+        assert "What's next?" in labels
+        assert "Yes" not in labels
+        assert "Yes, post it" not in labels
+
+    def test_headerless_guided_open_page_not_fork_chips(self):
+        """After Guide me, model often drops GUIDED header — still not fork chips."""
+        text = (
+            "You got it! First, please open the Share Food page by tapping "
+            "Share Food on the main menu. Let me know when you see the form "
+            "and we'll go to the next step together."
+        )
+        chips = build_turn_suggestions(
+            text,
+            "en",
+            tool_results=[],
+            min_chips=0,
+            last_user_message="Guide me step by step",
+            assistance_reminder="GUIDED MODE: coach one baby step at a time.",
+        )
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert "Open the form" not in labels
+        assert "Do it for me" not in labels
+        assert "Guide me step by step" not in labels
+        assert "Done" in labels
+        assert "I see the form" in labels or "What's next?" in labels
+
+    def test_guided_donor_type_gets_role_chips(self):
+        text = (
+            "GUIDED — STEP 2 of 9 (SHARE FOOD — Donor Information):\n"
+            "Find Donor Type and choose Individual/Family or Organization. "
+            "Say 'done' when selected."
+        )
+        chips = build_turn_suggestions(text, "en", tool_results=[], min_chips=0)
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert any("Individual" in (l or "") for l in labels)
+        assert any("Organization" in (l or "") for l in labels)
+
+    def test_single_claim_qty_not_multi_each_chips(self):
+        text = "Nice choice! How many of the Fresh Bread would you like? They have 5 available."
+        chips = build_turn_suggestions(text, "en", tool_results=[], min_chips=0)
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert "2 each" not in labels
+        assert "1" in labels or "2" in labels or "All of them" in labels
+
+    def test_ready_to_claim_no_generic_yes_no(self):
+        chips = build_turn_suggestions(
+            "Ready to claim these? 2× bread and 3× apples.",
+            "en",
+            tool_results=[],
+            min_chips=0,
+        )
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert any(l and "Yes, claim these" in l for l in labels)
+        assert "Yes" not in labels
+        assert "Later" not in labels
+
+    def test_community_question_not_post_chips(self):
+        text = (
+            "Which community should I list the 10 loaves of bread under? "
+            "Your profile is set to Alameda Unified—should I post it there?"
+        )
+        chips = build_turn_suggestions(text, "en", tool_results=[], min_chips=0)
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert "Alameda Unified" in labels
+        assert "Yes, post it" not in labels
+
+    def test_photo_required_no_question_gets_upload_chips(self):
+        chips = build_turn_suggestions(
+            "Please upload a photo of the food — required before posting.",
+            "en",
+            tool_results=[],
+            min_chips=0,
+        )
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert any(l and ("add" in l.lower() or "upload" in l.lower() or "already" in l.lower()) for l in labels)
+        assert not any(l and "skip" in (l or "").lower() for l in labels)
+
+    def test_assistance_reminder_forces_fork(self):
+        chips = build_turn_suggestions(
+            "Sure — happy to help.",
+            "en",
+            tool_results=[],
+            min_chips=0,
+            last_user_message="I want to share food",
+            assistance_reminder=(
+                "ASSISTANCE MODE (required this turn):\nAsk ONCE how they want help."
+            ),
+        )
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert labels == [
+            "Open the form",
+            "Do it for me",
+            "Guide me step by step",
+        ]
+
+    def test_single_claim_confirm_not_multi(self):
+        chips = build_turn_suggestions(
+            "Shall I claim listing #12 for you?",
+            "en",
+            tool_results=[],
+            min_chips=0,
+        )
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert "Yes, claim it" in labels
+        assert "Yes, claim these" not in labels
+        assert "Yes" not in labels
+
+    def test_vague_share_proceed_not_yes_no(self):
+        chips = build_turn_suggestions(
+            "How would you like to proceed with sharing?",
+            "en",
+            tool_results=[],
+            min_chips=0,
+            last_user_message="I want to share food",
+        )
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert "Open the form" in labels
+        assert "Yes" not in labels
+        assert "Later" not in labels
+
+    def test_find_fork_not_open_the_form(self):
+        chips = build_turn_suggestions(
+            "Want me to handle the search for you, or guide you on Find Food step by step?",
+            "en",
+            tool_results=[],
+            min_chips=0,
+            last_user_message="I want to find food",
+        )
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert labels[0] == "Open Find Food"
+        assert "Open the form" not in labels
+        assert "Do it for me" in labels
+
+    def test_find_fork_already_on_page_omits_open(self):
+        chips = build_turn_suggestions(
+            "Want me to handle the search, or guide you step by step?",
+            "en",
+            tool_results=[],
+            min_chips=0,
+            last_user_message="find food near me",
+            user_context={"pageKey": "find", "path": "/find"},
+        )
+        labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+        assert "Open the form" not in labels
+        assert labels == ["Open Find Food", "Do it for me", "Guide me step by step"]

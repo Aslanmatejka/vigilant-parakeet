@@ -171,6 +171,10 @@ class TestShareDraftDoesNotBleedPriorFood:
         assert share_drafts_ready(drafts, community_confirmed=True) is False
         drafts[1]["expiry"] = "2026-07-21"
         drafts[1]["photo_declined"] = True
+        # Declining a photo no longer makes the draft ready.
+        assert share_drafts_ready(drafts, community_confirmed=True) is False
+        drafts[1]["photo_url"] = "https://x/b.jpg"
+        drafts[1]["photo_declined"] = False
         assert share_drafts_ready(drafts, community_confirmed=True) is True
 
 

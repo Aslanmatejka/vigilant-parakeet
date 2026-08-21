@@ -32,16 +32,42 @@ class TestPostListingTimestampValidation:
         assert "past" in r["error"].lower()
 
     async def test_past_expiration_date_rejected(self):
-        past = datetime.utcnow() - timedelta(hours=2)
+        # Far-past calendar day (not off-by-one) must still be rejected.
+        past = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
         r = await execute_tool("post_food_listing", {
             "user_id": "1",
             "title": "Old milk",
             "category": "packaged",
             "qty": 1,
-            "expiration_date": _iso(past),
+            "expiration_date": past,
+            "images": ["https://example.com/milk.jpg"],
+            "community_confirmed": True,
+            "community_name": "Test Community",
         })
         assert isinstance(r, dict) and "error" in r
         assert "past" in r["error"].lower()
+
+    async def test_date_only_today_is_coerced_not_rejected(self):
+        """Made-today style expiry=today must not bounce as 'already past'."""
+        from backend.ai.conversation_flow import normalize_expiration_date_for_post
+        from datetime import date, timedelta
+
+        today = date.today().isoformat()
+        coerced = normalize_expiration_date_for_post(today)
+        assert coerced == (date.today() + timedelta(days=1)).isoformat()
+        r = await execute_tool("post_food_listing", {
+            "user_id": "1",
+            "title": "Fresh pizza",
+            "category": "prepared",
+            "qty": 10,
+            "expiration_date": today,
+            "images": ["https://example.com/pizza.jpg"],
+        })
+        # Should get past the timestamp gate (photo/community may still block).
+        assert isinstance(r, dict)
+        err = str(r.get("error") or r.get("message") or "").lower()
+        assert "past" not in err or "expiration" not in err
+        assert "expiration_date is in the past" not in str(r.get("error") or "")
 
     async def test_window_start_after_end_rejected(self):
         now = datetime.utcnow()

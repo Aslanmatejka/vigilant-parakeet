@@ -35,6 +35,16 @@ const NAV_TARGET_ROUTES = {
   request: '/request',
   'request-food': '/request',
   'community-requests': '/community-requests',
+  claim: '/claim',
+  profile: '/profile',
+  settings: '/settings',
+  receipts: '/receipts',
+  listings: '/listings',
+  'near-me': '/near-me',
+  notifications: '/notifications',
+  login: '/login',
+  signup: '/signup',
+  home: '/',
   dashboard: '/dashboard',
   dispatch: '/admin/distribution',
   admin: '/admin',
@@ -149,7 +159,20 @@ export function UIControlProvider({ children, navigate }) {
 
     switch (action) {
       case 'navigate': {
-        const path = normalized.path || normalized.target
+        let path = normalized.path
+        const targetKey = normalized.target
+          ? String(normalized.target).replace(/_/g, '-')
+          : null
+        if (!path && targetKey) {
+          path = NAV_TARGET_ROUTES[targetKey] || (
+            targetKey.startsWith('/') ? targetKey : null
+          )
+        }
+        // Legacy: target was sometimes a raw path segment like "create"
+        // which must not become "/create".
+        if (!path && targetKey && targetKey.startsWith('/')) {
+          path = targetKey
+        }
         if (path && typeof navigate === 'function') {
           navigate(path.startsWith('/') ? path : `/${path}`)
           minimizeAssistantForNavigation()

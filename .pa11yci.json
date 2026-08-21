@@ -1,0 +1,17 @@
+{
+  "defaults": {
+    "standard": "WCAG2AA",
+    "timeout": 90000,
+    "wait": 2000,
+    "runners": ["axe"],
+    "chromeLaunchConfig": {
+      "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+    },
+    "hideElements": ".mapboxgl-map, .mapboxgl-canvas, iframe[src*='mapbox'], .tutorial-overlay"
+  },
+  "urls": [
+    "http://127.0.0.1:4173/login",
+    "http://127.0.0.1:4173/signup",
+    "http://127.0.0.1:4173/how-it-works"
+  ]
+}

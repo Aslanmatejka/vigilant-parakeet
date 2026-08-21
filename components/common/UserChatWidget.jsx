@@ -22,6 +22,24 @@ function UserChatWidget() {
     }, [messages]);
 
     React.useEffect(() => {
+        const onOpenSupport = (event) => {
+            const prefill = event?.detail?.message || '';
+            setIsOpen(true);
+            if (prefill) setNewMessage(prefill);
+        };
+        const onHandoffSuggested = () => {
+            setIsOpen(true);
+            setNewMessage((prev) => prev || 'Nouri could not help me after several tries. I need a person to assist.');
+        };
+        window.addEventListener('nouri:open-human-support', onOpenSupport);
+        window.addEventListener('nouri:handoff-suggested', onHandoffSuggested);
+        return () => {
+            window.removeEventListener('nouri:open-human-support', onOpenSupport);
+            window.removeEventListener('nouri:handoff-suggested', onHandoffSuggested);
+        };
+    }, []);
+
+    React.useEffect(() => {
         if (isOpen && isAuthenticated && user?.id) {
             loadConversation();
         }

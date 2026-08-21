@@ -171,6 +171,7 @@ class TestQuickReplyChips:
         reply = "Would you like to add a photo to your listing?"
         chips = generate_quick_replies(reply, "en")
         assert "I'll add one" in chips
+        assert "Skip the photo" not in chips
 
     def test_open_ended_wh_question_returns_no_guess_chips(self):
         reply = "What are your upcoming pickups this week?"

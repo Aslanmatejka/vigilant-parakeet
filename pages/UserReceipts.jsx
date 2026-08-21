@@ -4,6 +4,8 @@ import Receipt from '../components/common/Receipt';
 import receiptService from '../utils/receiptService';
 import supabase from '../utils/supabaseClient';
 import { reportError } from '../utils/helpers';
+import useFormVoiceGuide from '../hooks/useFormVoiceGuide';
+import { RECEIPTS_WELCOME, RECEIPTS_HINTS } from '../hooks/formGuideHints';
 
 const TABS = [
     { key: 'all', label: 'All' },
@@ -18,6 +20,11 @@ export default function UserReceipts() {
     const [loading, setLoading] = useState(true);
     const [activeTab, setActiveTab] = useState('all');
     const [expiryRunning, setExpiryRunning] = useState(false);
+    const { speakField } = useFormVoiceGuide({
+        formId: 'receipts',
+        welcomeMessage: RECEIPTS_WELCOME,
+        hints: RECEIPTS_HINTS,
+    });
 
     const fetchReceipts = useCallback(async () => {
         if (!user?.id) return;
@@ -157,11 +164,12 @@ export default function UserReceipts() {
                 </div>
 
                 {/* Filter tabs */}
-                <div className="flex space-x-2 mb-6 overflow-x-auto">
+                <div className="flex space-x-2 mb-6 overflow-x-auto" data-guide-field="receiptsTabs" onFocus={() => speakField('receiptsTabs')}>
                     {TABS.map((tab) => (
                         <button
                             key={tab.key}
                             onClick={() => setActiveTab(tab.key)}
+                            onFocus={() => speakField('receiptsTabs')}
                             className={`px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap transition-all ${
                                 activeTab === tab.key
                                     ? 'bg-green-600 text-white shadow-md'

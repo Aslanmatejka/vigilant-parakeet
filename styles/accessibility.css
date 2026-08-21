@@ -1,0 +1,132 @@
+/* Accessibility preference classes — applied on <html> via AccessibilityContext */
+
+.a11y-large-text {
+  font-size: 112.5%;
+}
+
+.a11y-large-text body {
+  line-height: 1.6;
+}
+
+.a11y-large-text input,
+.a11y-large-text select,
+.a11y-large-text textarea,
+.a11y-large-text button {
+  font-size: 1.05rem;
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+}
+
+.a11y-easy-mode button[type="submit"],
+.a11y-easy-mode .easy-mode-nav-btn {
+  min-height: 3rem;
+  padding-left: 1.25rem;
+  padding-right: 1.25rem;
+  font-size: 1.05rem;
+}
+
+.a11y-list-first-find .find-food-map-panel[data-collapsed="true"] {
+  display: none;
+}
+
+body.has-nouri-guide-bar {
+  padding-bottom: 5.5rem;
+}
+
+.a11y-high-contrast {
+  color-scheme: light;
+}
+
+.a11y-high-contrast body {
+  background-color: #ffffff;
+  color: #000000;
+}
+
+.a11y-high-contrast a {
+  color: #0047ab;
+  text-decoration: underline;
+}
+
+.a11y-high-contrast input,
+.a11y-high-contrast select,
+.a11y-high-contrast textarea {
+  border-color: #000000;
+  background-color: #ffffff;
+  color: #000000;
+}
+
+.a11y-high-contrast button:focus-visible,
+.a11y-high-contrast a:focus-visible,
+.a11y-high-contrast input:focus-visible,
+.a11y-high-contrast select:focus-visible,
+.a11y-high-contrast textarea:focus-visible {
+  outline: 3px solid #000000;
+  outline-offset: 2px;
+}
+
+.a11y-reduce-motion *,
+.a11y-reduce-motion *::before,
+.a11y-reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+.a11y-simple-language {
+  letter-spacing: 0.01em;
+}
+
+.a11y-simple-language p,
+.a11y-simple-language li,
+.a11y-simple-language label {
+  line-height: 1.65;
+}
+
+.nouri-field-guided {
+  outline: 3px solid #2CABE3 !important;
+  outline-offset: 3px;
+  box-shadow: 0 0 0 6px rgba(44, 171, 227, 0.28) !important;
+  border-radius: 0.5rem;
+  position: relative;
+  z-index: 2;
+  animation: nouri-guide-pulse 1.4s ease-in-out 2;
+}
+
+@keyframes nouri-guide-pulse {
+  0%, 100% { box-shadow: 0 0 0 6px rgba(44, 171, 227, 0.28); }
+  50% { box-shadow: 0 0 0 10px rgba(44, 171, 227, 0.12); }
+}
+
+.a11y-high-contrast .nouri-field-guided {
+  outline-color: #000000 !important;
+  box-shadow: 0 0 0 6px #ffff00 !important;
+}
+
+/* Global AI caption bar */
+.nouri-ai-caption-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9998;
+  background: rgba(17, 24, 39, 0.94);
+  color: #f9fafb;
+  padding: 0.75rem 1rem;
+  font-size: 0.9375rem;
+  line-height: 1.45;
+  border-top: 2px solid #2CABE3;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.a11y-high-contrast .nouri-ai-caption-bar {
+  background: #000000;
+  color: #ffffff;
+  border-top-color: #ffffff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nouri-field-guided {
+    scroll-behavior: auto;
+  }
+}

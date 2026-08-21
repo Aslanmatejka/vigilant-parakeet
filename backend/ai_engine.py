@@ -1639,9 +1639,10 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "gluten, eggs, soy, shellfish)'. Important for recipient "
         "safety. If donor says 'no allergens' or 'none', record an "
         "empty list and move on.\n"
-        "  9. PHOTO — 'Could you snap a quick photo? It really helps "
-        "people decide.' Photos roughly double pickup rates. If the "
-        "donor declines, accept it and move on.\n"
+        "  9. PHOTO — REQUIRED. 'Please attach a photo of the food — I "
+        "can't post without it.' Never ask as optional ('want to "
+        "snap…?', 'or skip the photo'). If they decline or ask to "
+        "post without a photo, refuse and re-ask for an upload.\n"
         "Optional (only ask if it would actually matter):\n"
         "  10. DIETARY TAGS — vegetarian / vegan / halal / kosher, "
         "etc. Mention this only if relevant to the food.\n"
@@ -1668,11 +1669,11 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "donors. Ask it, get a 'yes' or community name, then proceed.\n"
         "\n"
         "## Confirm + post (ALWAYS, NO EXCEPTIONS)\n"
-        "Once you've gathered enough (including photo if provided), "
+        "Once you've gathered enough (including a REQUIRED photo), "
         "write ONE short summary covering title, qty, handoff method "
         "(pickup vs drop-off + radius if any), freshness, pickup window, "
         "address (read it back so the donor can verify), community name "
-        "(read it back), allergens, photo (yes/no), and ask for an "
+        "(read it back), allergens, photo attached, and ask for an "
         "explicit go-ahead:\n"
         "  'Quick check — 3 loaves of sourdough, baked yesterday, "
         "pickup at your place at 1423 Park St (your profile address), "
@@ -1692,8 +1693,7 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "the pin. If status=pending / awaiting_approval=true, say "
         "'Posted! Listing #N is awaiting admin approval' instead and do "
         "NOT claim it is on Find Food yet. Then stop — don't ask follow-up "
-        "questions unless something is missing (e.g. 'still want to "
-        "add a photo?').\n"
+        "questions unless something is missing.\n"
         "\n"
         "## Worked examples\n"
         "Full intake (donor offers minimal info):\n"
@@ -1718,7 +1718,7 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "  Donor: 'tonight 6 to 8'\n"
         "  AI:    'Any allergens beyond gluten? (nuts, dairy, eggs)'\n"
         "  Donor: 'just gluten and maybe eggs'\n"
-        "  AI:    'Want to snap a quick photo? Helps a lot.'\n"
+        "  AI:    'Please attach a photo of the food — required before I can post.'\n"
         "  Donor: 'sure'\n"
         "  AI:    'Go ahead!'\n"
         "  Donor: [uploads image]\n"
@@ -1764,8 +1764,8 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "  Donor: 'yes that one'\n"
         "  AI:    'Any allergens beyond gluten?'\n"
         "  Donor: 'just gluten'\n"
-        "  AI:    'Want to snap a quick photo? It really helps "
-        "people decide.'\n"
+        "  AI:    'Please attach a photo of the food — required before I "
+        "can post.'\n"
         "  Donor: 'sure'\n"
         "  AI:    'Ready when you are!'\n"
         "  Donor: [uploads photo]\n"
@@ -1826,12 +1826,12 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "concrete date before calling the tool.\n"
         "  6. NEVER skip the freshness, pickup-window, allergen, or "
         "photo questions UNLESS (a) the donor already volunteered the "
-        "answer, (b) the donor explicitly said 'just post it' / 'skip "
-        "the rest' / 'no photo' / 'skip photo', or (c) you've already "
-        "asked twice and they didn't answer. Food safety + recipient "
-        "safety depend on these. NOTE: photo MUST always be asked as "
-        "its own separate turn — never combined with the allergen "
-        "question or any other question.\n"
+        "answer, or (b) you've already asked twice and they didn't "
+        "answer — EXCEPT photo: a photo is ALWAYS REQUIRED to post a "
+        "donation. Never accept 'skip photo' / 'no photo' / post without "
+        "an uploaded image. Wait for an 'image: <url>' in chat. NOTE: "
+        "photo MUST always be asked as its own separate turn — never "
+        "combined with the allergen question or any other question.\n"
         "  7. ACKNOWLEDGE warmly but BRIEFLY ('Got it.', 'Perfect.', "
         "'Noted.'). No long preambles, no listing-style summaries "
         "until the final confirm sentence.\n"
@@ -1855,14 +1855,19 @@ def _build_system_prompt(training_data: dict[str, Any]) -> str:
         "language listings break search and filters.\n"
         "\n"
         "### PHOTO HANDLING (IMPORTANT)\n"
-        "CRITICAL WORKFLOW: If you ask 'Want to add a photo?' and the "
-        "donor agrees to add one ('sure', 'I'll add one', 'yes', 'ok'), "
-        "you MUST WAIT for the actual photo upload before proceeding to "
-        "the final summary. Say something brief like 'Ready when you "
-        "are!' or 'Go ahead!' and PAUSE. Do NOT show the final "
-        "confirmation ('Quick check... Post it?') until you see the "
-        "photo arrive. Saying 'I'll add one' is NOT the same as "
-        "uploading — wait for the actual 'image: URL' message.\n"
+        "Photos are REQUIRED for every donation listing — never optional. "
+        "Ask firmly: 'Please attach a photo of the food — required before "
+        "I can post.' NEVER say 'Want to add a photo?', 'or skip the "
+        "photo', or 'can I post without a photo'. If they try to skip, "
+        "refuse and re-ask. "
+        "CRITICAL WORKFLOW: After they agree to add one ('sure', 'I'll "
+        "add one', 'yes', 'ok'), you MUST WAIT for the actual photo "
+        "upload before proceeding to the final summary. Say something "
+        "brief like 'Ready when you are!' or 'Go ahead!' and PAUSE. Do "
+        "NOT show the final confirmation ('Quick check... Post it?') "
+        "until you see the photo arrive. Saying 'I'll add one' is NOT "
+        "the same as uploading — wait for the actual 'image: URL' "
+        "message.\n"
         "\n"
         "When the donor uploads a photo, the chat will contain a user "
         "message that starts with 'image: ' followed by a public https:// "
@@ -3837,6 +3842,11 @@ class ConversationEngine:
 
     async def clear_history(self, user_id: str) -> int:
         try:
+            try:
+                from backend.ai.conversation_flow import clear_user_ai_caches
+                clear_user_ai_caches(user_id)
+            except Exception:
+                pass
             return await supabase_delete("ai_conversations", {
                 "user_id": f"eq.{user_id}",
             })
@@ -5391,9 +5401,9 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
         and any(k in t for k in photo_add_keys)
     ):
         if es:
-            add("Adjuntar foto", "Sin foto", "Después")
+            add("Adjuntar foto", "Ya la subí")
         else:
-            add("I'll add one", "Skip the photo", "Maybe later")
+            add("I'll add one", "I already uploaded it")
         return out
 
     # Pickup window / when
@@ -5405,14 +5415,16 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
             add("Today 5–8pm", "Tomorrow morning", "Next 24h", "Whenever")
         return out
 
-    # Freshness / expiration
-    if any(k in t for k in ("best by", "expir", "fresh", "baked", "made it",
-                            "when was", "how long", "good for", "spoils",
-                            "caduc", "vence", "fresco", "horneado", "preparado")):
+    # Freshness / good-until (NOT bake date)
+    if any(k in t for k in (
+        "best by", "best-by", "good until", "good for", "use by",
+        "when does it expire", "expiration", "expiry date", "best before",
+        "caduc", "vence", "fecha de venc",
+    )):
         if es:
-            add("Hecho hoy", "Hecho ayer", "Vence mañana")
+            add("Mañana", "En 2 días", "En 3 días", "Bueno 24h")
         else:
-            add("Made today", "Made yesterday", "Good for 24h")
+            add("Tomorrow", "In 2 days", "In 3 days", "Good for 24 hours")
         return out
 
     # Quantity prompt — require an explicit count cue. "how much"

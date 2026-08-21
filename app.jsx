@@ -59,6 +59,7 @@ import { AuthProvider, useAuthContext } from './utils/AuthContext';
 import { GoodsProvider } from './utils/stores/goodsStore.jsx';
 import { MapProvider } from './utils/MapContext.jsx';
 import { UIControlProvider } from './utils/UIControlContext.jsx';
+import { NouriGuideProvider } from './utils/NouriGuideContext.jsx';
 import AdminRoute from './components/admin/AdminRoute.jsx';
 import ErrorBoundary from './components/common/ErrorBoundary';
 import RecipientRoute from './components/common/RecipientRoute.jsx';
@@ -189,15 +190,17 @@ export default function App() {
     return (
         <ErrorBoundary>
             <AuthProvider>
-                <GoodsProvider>
-                    <TutorialProvider>
-                        <MapProvider>
-                            <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center"><div className="text-center"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#2CABE3] mx-auto mb-4"></div><p className="text-gray-600">Loading...</p></div></div>}>
-                                <AppContent />
-                            </React.Suspense>
-                        </MapProvider>
-                    </TutorialProvider>
-                </GoodsProvider>
+                <NouriGuideProvider>
+                    <GoodsProvider>
+                        <TutorialProvider>
+                            <MapProvider>
+                                <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center"><div className="text-center"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#2CABE3] mx-auto mb-4"></div><p className="text-gray-600">Loading...</p></div></div>}>
+                                    <AppContent />
+                                </React.Suspense>
+                            </MapProvider>
+                        </TutorialProvider>
+                    </GoodsProvider>
+                </NouriGuideProvider>
             </AuthProvider>
         </ErrorBoundary>
     );

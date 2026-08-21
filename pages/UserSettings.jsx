@@ -5,6 +5,7 @@ import Input from "../components/common/Input";
 import Button from "../components/common/Button";
 import { useAuth } from "../utils/hooks/useSupabase";
 import DietaryPreferences from "../components/profile/DietaryPreferences";
+import AccessibilitySettings from "../components/settings/AccessibilitySettings";
 import { useTutorial } from "../utils/TutorialContext";
 import supabase from "../utils/supabaseClient";
 import { geocodeAddress } from "../utils/geocoding";
@@ -738,6 +739,8 @@ function UserSettings() {
                         </div>
                     </div>
                 </Card>
+
+                <AccessibilitySettings />
 
                 {/* Tutorial Section */}
                 <Card>

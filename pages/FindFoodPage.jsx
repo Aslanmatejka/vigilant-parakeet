@@ -1,4 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
+import useFormVoiceGuide from "../hooks/useFormVoiceGuide";
+import { FIND_FOOD_WELCOME, FIND_FOOD_HINTS } from "../hooks/formGuideHints";
+import { useNouriGuide } from "../utils/NouriGuideContext";
 import { useNavigate, useLocation as useRouterLocation, Link } from 'react-router-dom';
 import Button from "../components/common/Button";
 import Input from "../components/common/Input";
@@ -82,6 +85,18 @@ function FindFoodPage({ initialCategory }) {
     const navigate = useNavigate();
     const routerLocation = useRouterLocation();
     const { isAuthenticated, user, isAdmin } = useAuthContext();
+
+    const { settings } = useNouriGuide();
+    const { speakField } = useFormVoiceGuide({
+        formId: 'find-food',
+        welcomeMessage: FIND_FOOD_WELCOME,
+        hints: FIND_FOOD_HINTS,
+    });
+    const [mapOpen, setMapOpen] = useState(false);
+
+    useEffect(() => {
+        if (!settings.listFirstFind) setMapOpen(true);
+    }, [settings.listFirstFind]);
 
     const allowedCommunityIds = useMemo(
         () => browseCommunityIdsForUser(user, { isAdmin }),
@@ -433,6 +448,7 @@ function FindFoodPage({ initialCategory }) {
                                 name="search"
                                 value={searchTerm}
                                 onChange={e => setSearchTerm(e.target.value)}
+                                onFocus={() => speakField('search')}
                                 placeholder="Search food..."
                                 aria-label="Search food listings"
                                 className="w-full min-h-[44px] pl-10 pr-10 py-2.5 rounded-full bg-white border border-gray-200 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3]"
@@ -453,6 +469,7 @@ function FindFoodPage({ initialCategory }) {
                             name="category"
                             value={filters.category}
                             onChange={handleFilterChange}
+                            onFocus={() => speakField('category')}
                             aria-label="Filter by category"
                             className="w-full sm:w-48 min-h-[44px] rounded-full bg-white border border-gray-200 px-4 py-2.5 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#2CABE3]"
                         >
@@ -472,6 +489,7 @@ function FindFoodPage({ initialCategory }) {
                                 name="sortBy"
                                 value={filters.sortBy}
                                 onChange={handleFilterChange}
+                                onFocus={() => speakField('sortBy')}
                                 aria-label="Sort listings"
                                 className="bg-transparent text-sm text-gray-700 focus:outline-none pr-1 py-1 cursor-pointer"
                             >
@@ -527,11 +545,27 @@ function FindFoodPage({ initialCategory }) {
 
                 </div>
                 <div className="mt-4 sm:mt-12">
+                    {settings.listFirstFind && (
+                        <div className="mb-4">
+                            <button
+                                type="button"
+                                onClick={() => setMapOpen((o) => !o)}
+                                className="inline-flex items-center gap-2 min-h-[44px] px-4 rounded-full border border-gray-200 bg-white text-sm font-medium text-gray-800 hover:bg-gray-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2CABE3]"
+                                aria-expanded={mapOpen}
+                                aria-controls="find-food-map-panel"
+                            >
+                                <i className={`fas ${mapOpen ? 'fa-map-marked-alt' : 'fa-map'}`} aria-hidden="true" />
+                                {mapOpen ? 'Hide map' : 'Show map (optional)'}
+                            </button>
+                        </div>
+                    )}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
-                        {/* Listings first on mobile so available food is the
-                            primary above-the-fold content; map sits to the
-                            right on desktop and just below on phones. */}
-                        <aside aria-labelledby="food-map-heading" className="order-2">
+                        <aside
+                            id="find-food-map-panel"
+                            aria-labelledby="food-map-heading"
+                            className={`find-food-map-panel order-2 ${settings.listFirstFind && !mapOpen ? 'hidden' : ''}`}
+                            data-collapsed={settings.listFirstFind && !mapOpen ? 'true' : 'false'}
+                        >
                             <div className="lg:sticky lg:top-24 overflow-visible">
                                 <h2
                                     id="food-map-heading"
@@ -550,7 +584,7 @@ function FindFoodPage({ initialCategory }) {
                             </div>
                         </aside>
 
-                        <div className="order-1">
+                        <div className="order-1 find-food-list-panel">
                             <h2
                                 id="food-listings-heading"
                                 className="scroll-mt-28 text-lg sm:text-2xl font-bold text-gray-800 mb-3 sm:mb-4"

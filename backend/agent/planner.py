@@ -7,7 +7,7 @@ Generates and executes multi-step plans for complex user requests.
 Example: "Help me donate 5 items"
 Plan:
 1. Ask for first item details
-2. Ask for photo (optional)
+2. Ask for photo (REQUIRED)
 3. Post listing
 4. Repeat for remaining items
 5. Confirm all posted
@@ -143,6 +143,20 @@ def _plan_donate(entities: Dict[str, Any], user_context: Dict[str, Any], message
             result=None,
         ))
     
+    # Step 2: Require a photo before posting
+    steps.append(PlanStep(
+        step_number=len(steps) + 1,
+        action="Ask for a required food photo",
+        tool_name="ask_user",
+        tool_args={
+            "question": (
+                "Please attach a photo of the food — required before posting."
+            ),
+        },
+        status="pending",
+        result=None,
+    ))
+
     # Step 3: Post the listing
     steps.append(PlanStep(
         step_number=len(steps) + 1,

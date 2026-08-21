@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => {
   
   return {
     plugins: [react()],
+    appType: 'spa',
     root: '.',
     build: {
       outDir: 'dist',
@@ -27,6 +28,10 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
         },
       },
+    },
+    preview: {
+      port: 4173,
+      strictPort: false,
     },
     resolve: {
       alias: {

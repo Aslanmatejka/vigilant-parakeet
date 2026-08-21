@@ -10,6 +10,38 @@ jest.mock('../utils/AuthContext.jsx', () => ({
   useAuthContext: () => mockAuthCtx,
 }))
 
+jest.mock('../utils/NouriGuideContext.jsx', () => ({
+  useNouriGuide: () => ({
+    settings: {
+      largeText: false,
+      highContrast: false,
+      reduceMotion: false,
+      alwaysShowCaptions: true,
+      preferTextOverVoice: false,
+      simpleLanguage: false,
+      easyMode: false,
+      listFirstFind: true,
+      preferredLanguage: 'en',
+      screenReaderOptimized: false,
+      smsGuideEnabled: false,
+    },
+    guide: {
+      source: 'system',
+      caption: '',
+      text: '',
+      isSpeaking: false,
+      isMuted: false,
+      isDismissed: false,
+      hasResume: false,
+      stepIndex: 0,
+      stepTotal: 0,
+    },
+    syncFromChat: jest.fn(),
+    speak: jest.fn(),
+    cancelVoice: jest.fn(),
+  }),
+}))
+
 // Mock aiChatService
 const mockSendMessage = jest.fn()
 const mockGetHistory = jest.fn().mockResolvedValue([])

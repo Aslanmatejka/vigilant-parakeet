@@ -3,6 +3,8 @@ import PropTypes from 'prop-types';
 import Input from '../common/Input';
 import Button from '../common/Button';
 import { reportError, safeDownload } from '../../utils/helpers';
+import useFormVoiceGuide from '../../hooks/useFormVoiceGuide';
+import { BULK_UPLOAD_WELCOME, BULK_UPLOAD_HINTS } from '../../hooks/formGuideHints';
 
 function BulkUploadForm({
     initialData = null,
@@ -22,6 +24,11 @@ function BulkUploadForm({
     const [previewItems, setPreviewItems] = useState([]);
     const [isProcessing, setIsProcessing] = useState(false);
     const [imagePreviews, setImagePreviews] = useState([]);
+    const { speakField, reportError: reportGuideError } = useFormVoiceGuide({
+        formId: 'bulk-upload',
+        welcomeMessage: BULK_UPLOAD_WELCOME,
+        hints: BULK_UPLOAD_HINTS,
+    });
 
     const csvTemplate = `title,description,quantity,unit,category,expiryDate
 Fresh Apples,Organic Red Delicious,5,kg,produce,2025-08-13
@@ -325,6 +332,7 @@ Milk,Organic Whole Milk,1,gallon,dairy,2025-08-08`;
                         name="csvFile"
                         type="file"
                         onChange={handleChange}
+                        onFocus={() => speakField('csvFile')}
                         accept=".csv"
                         error={errors.csvFile}
                         required
@@ -360,6 +368,7 @@ Milk,Organic Whole Milk,1,gallon,dairy,2025-08-08`;
                     name="location"
                     value={formData.location}
                     onChange={handleChange}
+                    onFocus={() => speakField('location')}
                     error={errors.location}
                     required
                     icon={<i className="fas fa-map-marker-alt"></i>}

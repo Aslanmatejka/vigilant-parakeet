@@ -109,7 +109,8 @@ const Input = ({ label, value, onChange, disabled, className, type = "text", ...
 
     return (
         <div 
-            data-name="input-wrapper" 
+            data-name="input-wrapper"
+            data-guide-field={props.name || undefined}
             className="w-full"
             role={type === 'select' ? 'group' : undefined}
         >

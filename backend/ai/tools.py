@@ -723,9 +723,19 @@ TOOL_DEFINITIONS = [
                     },
                     "allergens": {"type": "array", "items": {"type": "string"}},
                     "dietary_tags": {"type": "array", "items": {"type": "string"}},
-                    "images": {"type": "array", "items": {"type": "string"}, "description": "Photo URLs from chat (image: …)."},
+                    "images": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "REQUIRED photo URL(s) from chat (image: …). "
+                            "Posting without a photo is not allowed."
+                        ),
+                    },
                 },
-                "required": ["user_id", "title", "qty", "expiration_date", "community_name", "community_confirmed"],
+                "required": [
+                    "user_id", "title", "qty", "expiration_date",
+                    "community_name", "community_confirmed", "images",
+                ],
             },
         },
     },
@@ -736,7 +746,7 @@ TOOL_DEFINITIONS = [
             "description": (
                 "ACTION: create TWO OR MORE food listings in one call. Use when the "
                 "donor is sharing multiple distinct foods (e.g. bread AND apples). "
-                "Each item in items[] gets its OWN photo via images[]. Shared "
+                "Each item in items[] gets its OWN photo via images[] (REQUIRED). Shared "
                 "community_name + community_confirmed apply to the whole batch. "
                 "Prefer this over calling post_food_listing repeatedly. For a "
                 "single item, use post_food_listing instead."
@@ -1096,6 +1106,16 @@ TOOL_DEFINITIONS = [
                             "request",
                             "request-food",
                             "community-requests",
+                            "claim",
+                            "profile",
+                            "settings",
+                            "receipts",
+                            "listings",
+                            "near-me",
+                            "notifications",
+                            "login",
+                            "signup",
+                            "home",
                             "dashboard",
                             "dispatch",
                             "admin",
@@ -1121,10 +1141,11 @@ TOOL_DEFINITIONS = [
                             "sms-consent",
                         ],
                         "description": (
-                            "Which UI surface to act on. 'map' / 'list' toggle the main "
-                            "view; the rest open a dedicated page. 'filters' / 'favorites' "
-                            "control the side panels. 'chat' / 'voice' control the AI "
-                            "chatbot itself."
+                            "Which UI surface to act on. Core product pages: "
+                            "list/find (/find), create/share (/share), request, claim, "
+                            "profile, settings, receipts, listings, near-me, dashboard, "
+                            "community-requests, login, signup, home. "
+                            "'map'/'list' toggle the main view; 'chat'/'voice' control Nouri."
                         ),
                     },
                     "query": {
@@ -2867,6 +2888,15 @@ def _validate_listing_timestamps(
     and legacy SQL post paths so behaviour is consistent regardless of
     which backend actually stores the listing.
     """
+    # Coerce date-only today/past → tomorrow before comparing to UTC now.
+    # Models often pass expiration=today for "Made today", which is midnight
+    # and fails as "already past" later the same UTC day.
+    try:
+        from backend.ai.conversation_flow import normalize_expiration_date_for_post
+        expiration_date = normalize_expiration_date_for_post(expiration_date)
+    except Exception:
+        pass
+
     try:
         win_start = _parse_iso(pickup_window_start)
         win_end = _parse_iso(pickup_window_end)
@@ -2886,12 +2916,19 @@ def _validate_listing_timestamps(
     if win_start is not None and win_end is not None and win_start > win_end:
         return {"error": "pickup_window_start must be before pickup_window_end"}
     if exp_dt is not None and exp_dt <= now:
-        return {
-            "error": (
-                "expiration_date is in the past — listing would be expired. "
-                f"Today is {now.strftime('%Y-%m-%d %H:%M UTC')}."
-            )
-        }
+        # Date-only expiries arrive as midnight — compare calendar days so
+        # "good until today" is still valid for the rest of the day.
+        exp_day = exp_dt.date() if hasattr(exp_dt, "date") else None
+        today = now.date()
+        if exp_day is None or exp_day < today:
+            return {
+                "error": (
+                    "expiration_date is in the past — listing would be expired. "
+                    f"Today is {now.strftime('%Y-%m-%d %H:%M UTC')}. "
+                    "Ask for a good-until date of today or later "
+                    "(e.g. Tomorrow, In 2 days, Good for 24 hours)."
+                )
+            }
     return None
 
 
@@ -3885,11 +3922,22 @@ async def _post_food_listing_via_supabase(
         cid, cname = await _resolve_community(None, community_id)
         if cid:
             community_id, community_name = cid, cname
+        else:
+            # Name was stuffed into community_id and still failed — clear the
+            # bogus id so the confirmed-without-name guard can ask again.
+            community_id = None
     elif community_name and not community_id:
         from backend.tools import _resolve_community
         cid, cname = await _resolve_community(community_name, None)
         if cid:
             community_id, community_name = cid, cname
+    elif community_name and community_id:
+        from backend.tools import _resolve_community
+        cid, cname = await _resolve_community(community_name, community_id)
+        if cid:
+            community_id, community_name = cid, cname
+        else:
+            community_id = None
 
     if not confirmed:
         suggested_id, suggested_name = await _fallback_community_for_user(str(user_id))
@@ -3996,8 +4044,14 @@ async def _post_food_listing_via_supabase(
             out["suggested_expiry_date"] = result["suggested_expiry_date"]
     elif err_code == "community_required":
         out["next_step"] = (
-            "Ask them to pick a community by name, confirm it, then retry the post."
+            "Ask them to pick an active catalog community by exact name "
+            "(call get_active_communities with max_results=100), confirm it, "
+            "then retry the post with community_name + community_confirmed=true."
         )
+        if isinstance(result.get("active_communities"), list):
+            out["active_communities"] = result["active_communities"]
+        if result.get("suggested_community_name"):
+            out["suggested_community_name"] = result["suggested_community_name"]
     return out
 
 
@@ -4010,7 +4064,7 @@ async def _post_food_listings(
     address: Optional[str] = None,
     **_ignored,
 ) -> dict:
-    """Create two or more listings, each with its own optional photo."""
+    """Create two or more listings, each with its own REQUIRED photo."""
     if not (user_id or "").strip():
         return {"error": "Invalid user_id", "success": False}
     if not isinstance(items, list) or len(items) < 2:
@@ -4143,6 +4197,16 @@ async def _post_food_listing(
     community_id: Optional[str] = None,
     community_confirmed: bool = False,
 ) -> dict:
+    # Coerce date-only today/past → tomorrow so the insert uses a safe day
+    # (validation alone is not enough — callers must store the coerced value).
+    try:
+        from backend.ai.conversation_flow import normalize_expiration_date_for_post
+        expiration_date = (
+            normalize_expiration_date_for_post(expiration_date) or expiration_date
+        )
+    except Exception:
+        pass
+
     # Reject bad timestamps BEFORE any DB / auth work so donors get an
     # immediate, actionable error and we don't burn quota on a Supabase
     # insert that would leave a "born-expired" listing.
@@ -4158,6 +4222,20 @@ async def _post_food_listing(
         return {"error": f"Invalid qty: {qty!r}"}
     if qty_val <= 0:
         return {"error": "qty must be greater than 0"}
+
+    cleaned_images = [
+        str(u).strip() for u in (images or []) if u and str(u).strip()
+    ]
+    if not cleaned_images:
+        return {
+            "error": "photo_required",
+            "ok": False,
+            "message": (
+                "A photo is required before posting. Ask the donor to upload "
+                "an image in chat, then retry post_food_listing with images[]. "
+                "Do not offer to post without a photo."
+            ),
+        }
 
     return await _post_food_listing_via_supabase(
         user_id=user_id,
@@ -4232,6 +4310,14 @@ async def _post_food_listing_legacy_sqlalchemy(
         return {"error": f"Invalid perishability '{perishability}'. Allowed: low, medium, high"}
 
     try:
+        from backend.ai.conversation_flow import normalize_expiration_date_for_post
+        expiration_date = (
+            normalize_expiration_date_for_post(expiration_date) or expiration_date
+        )
+    except Exception:
+        pass
+
+    try:
         exp_dt = _parse_iso(expiration_date)
         win_start = _parse_iso(pickup_window_start)
         win_end = _parse_iso(pickup_window_end)
@@ -4276,12 +4362,18 @@ async def _post_food_listing_legacy_sqlalchemy(
         )
         exp_dt = max(win_end, now + timedelta(days=peri_days))
     elif exp_dt <= now:
-        return {
-            "error": (
-                "expiration_date is in the past — listing would be expired. "
-                f"Today is {now.strftime('%Y-%m-%d %H:%M UTC')}."
-            )
-        }
+        # Date-only expiries are midnight — allow the calendar day of "today".
+        exp_day = exp_dt.date() if hasattr(exp_dt, "date") else None
+        today = now.date()
+        if exp_day is None or exp_day < today:
+            return {
+                "error": (
+                    "expiration_date is in the past — listing would be expired. "
+                    f"Today is {now.strftime('%Y-%m-%d %H:%M UTC')}. "
+                    "Use a good-until date of today or later "
+                    "(Tomorrow, In 2 days, Good for 24 hours)."
+                )
+            }
 
     try:
         qty_val = float(qty)
@@ -5154,31 +5246,39 @@ async def _show_route_to_listing(
 # Display labels for navigate_ui targets, used to build a friendly summary.
 _NAV_TARGET_LABELS = {
     "map": "the map",
-    "list": "the list view",
-    "create": "the new-listing form",
-    "bulk-create": "the bulk listing form",
-    "request": "the Request Food form",
-    "request-food": "the Request Food form",
+    "list": "Find Food",
+    "create": "Share Food",
+    "bulk-create": "Share Food (bulk)",
+    "request": "Request Food",
+    "request-food": "Request Food",
     "community-requests": "Community Requests",
+    "claim": "Claim Food",
+    "profile": "your profile",
+    "settings": "Settings",
+    "receipts": "Receipts / pickups",
+    "listings": "My Listings",
+    "near-me": "Near Me",
+    "notifications": "Notifications",
+    "login": "Login",
+    "signup": "Sign up",
+    "home": "Home",
     "dashboard": "your dashboard",
     "dispatch": "the dispatch console",
     "admin": "the admin panel",
     "driver": "the driver interface",
-    "schedule": "the schedule manager",
-    "partners": "community partners",
+    "schedule": "donation schedules",
+    "partners": "Sponsors",
     "food-rescue": "the food-rescue network",
-    "meal-planning": "meal planning",
+    "meal-planning": "Recipes",
     "ai-matching": "AI matching",
     "routes": "volunteer routes",
-    "emergency": "emergency response",
+    "emergency": "Contact",
     "nutrition": "nutrition tracker",
     "consumption": "the consumption tracker",
     "filters": "the filters panel",
     "favorites": "your favorites",
     "chat": "the chat assistant",
     "voice": "the voice assistant",
-    # Recipient-facing AI features (mounted modals invoked via
-    # window.openXXX() on the frontend).
     "meal-suggestions": "AI meal suggestions",
     "spoilage-alerts": "spoilage risk alerts",
     "storage-coach": "the AI storage coach",
@@ -5197,12 +5297,22 @@ _NAV_TARGET_PATHS = {
     "request": "/request",
     "request-food": "/request",
     "community-requests": "/community-requests",
+    "claim": "/claim",
+    "profile": "/profile",
+    "settings": "/settings",
+    "receipts": "/receipts",
+    "listings": "/listings",
+    "near-me": "/near-me",
+    "notifications": "/notifications",
+    "login": "/login",
+    "signup": "/signup",
+    "home": "/",
     "dashboard": "/dashboard",
     "dispatch": "/admin/distribution",
     "admin": "/admin",
     "driver": "/admin",
     "schedule": "/donations",
-    "partners": "/featured",
+    "partners": "/sponsors",
     "food-rescue": "/find",
     "meal-planning": "/recipes",
     "ai-matching": "/find",

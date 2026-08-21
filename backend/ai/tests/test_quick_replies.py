@@ -3,7 +3,9 @@ from backend.ai.ai_engine import generate_quick_replies
 
 
 def test_no_question_returns_empty():
-    assert generate_quick_replies("Posted! Listing #42 is live.") == []
+    # Bare status with no next ask — still OK to offer light next-steps.
+    out = generate_quick_replies("Posted! Listing #42 is live.")
+    assert "Yes" not in out and "Later" not in out
     assert generate_quick_replies("") == []
 
 
@@ -83,8 +85,19 @@ def test_allergen_question():
 
 def test_yes_no_fallback_only_when_truly_yes_no():
     out = generate_quick_replies("Would you like me to remind you tomorrow?")
-    # "Would you like" with no open-wh and no specific branch → yes/no/later.
-    assert "Yes" in out and "No" in out
+    assert "Yes, remind me" in out
+    assert "Yes" not in out or out[0] != "Yes"
+    assert "Later" not in out
+
+
+def test_ambiguous_would_you_like_returns_empty_not_yes_no():
+    """Regression: polite 'would you like' must not become Yes/No/Later."""
+    out = generate_quick_replies(
+        "Would you like me to open Find Food, or help another way?"
+    )
+    assert out[:3] != ["Yes", "No", "Later"]
+    # Prefer fork chips or empty — never bare Yes/No.
+    assert "Later" not in out
 
 
 def test_help_menu_does_not_get_claim_pick_chips():
@@ -113,7 +126,9 @@ def test_real_search_results_still_get_pick_chips():
 
 
 def test_es_no_question_returns_empty():
-    assert generate_quick_replies("¡Listo! Publicación #42 en vivo.", lang="es") == []
+    out = generate_quick_replies("¡Listo! Publicación #42 en vivo.", lang="es")
+    assert "Más tarde" not in out
+    assert "Sí" not in out or any("compart" in s.lower() or "buscar" in s.lower() or "todo" in s.lower() for s in out)
 
 
 def test_es_what_food_question_suggests_food_options():
@@ -190,23 +205,50 @@ def test_es_pickup_window():
 
 
 def test_es_freshness_question():
-    out = generate_quick_replies("¿Cuándo se horneó? ¿Vence pronto?", lang="es")
+    out = generate_quick_replies(
+        "¿Hasta cuándo es bueno? ¿Fecha de vencimiento?", lang="es",
+    )
     assert out
     joined = " ".join(out).lower()
-    assert "hecho" in joined or "vence" in joined
+    assert "mañana" in joined or "días" in joined or "24" in joined
+    assert "hecho hoy" not in joined
+    assert "hecho ayer" not in joined
+
+
+def test_good_until_chips_not_made_today():
+    out = generate_quick_replies(
+        "When is this food good until? Best-by or use-by date?",
+    )
+    assert "Tomorrow" in out
+    assert "In 2 days" in out
+    assert "Made today" not in out
+    assert "Made yesterday" not in out
+
+
+def test_fresh_food_question_does_not_get_expiry_chips():
+    out = generate_quick_replies(
+        "What fresh food are you sharing today?",
+    )
+    joined = " ".join(out).lower()
+    assert "made today" not in joined
+    assert "in 2 days" not in joined
+    assert "good for 24" not in joined
 
 
 def test_es_photo_question():
     out = generate_quick_replies("¿Puedes mandar una foto?", lang="es")
     assert out
     joined = " ".join(out).lower()
-    assert "foto" in joined or "después" in joined
+    assert "foto" in joined or "adjunt" in joined
+    assert "sin foto" not in joined
 
 
 def test_es_yes_no_fallback():
     out = generate_quick_replies("¿Quieres que te recuerde mañana?", lang="es")
-    # Generic yes/no in Spanish
-    assert "Sí" in out and "No" in out
+    joined = " ".join(out).lower()
+    assert "recuer" in joined.replace("é", "e").replace("á", "a")
+    assert "Más tarde" not in out
+    assert out[:3] != ["Sí", "No", "Más tarde"]
 
 
 def test_foolproof_help_menu_chips():
@@ -229,6 +271,43 @@ def test_foolproof_combined_food_qty_chips():
     assert len(out) >= 2
     joined = " ".join(out).lower()
     assert "apple" in joined or "bread" in joined or "egg" in joined
+
+
+def test_hands_on_food_and_how_much_not_bare_qty():
+    """Do-it-for-me opener must get food+qty examples, not 1/3/5/10."""
+    out = generate_quick_replies(
+        "You got it! What food do you want to share, and how much do you have?",
+        user_message="Do it for me",
+    )
+    assert out
+    assert out != ["1", "3", "5", "10"]
+    joined = " ".join(out).lower()
+    assert "apple" in joined or "bread" in joined or "vegetable" in joined or "egg" in joined
+
+
+def test_hands_on_qty_after_food_known():
+    out = generate_quick_replies(
+        "Yum, pizza! How many slices or whole pizzas are you sharing?",
+        user_message="pizza",
+    )
+    assert out == ["1", "3", "5", "10"] or set(out) >= {"1", "3", "5"}
+
+
+def test_hands_on_community_confirm_and_pick():
+    out = generate_quick_replies(
+        "Should I post this under Alameda Unified School District, since that is your community?",
+        suggested_community="Alameda Unified School District",
+    )
+    assert "Alameda Unified School District" in out
+    assert "Different one" in out
+
+    pick = generate_quick_replies(
+        "Got it, you want to post your pizza in a different community. Which community should I use?",
+        user_message="Different one",
+        communities=["NEA/ACLC CC", "Do Good Warehouse", "Ruby Bridges Elementary CC"],
+    )
+    assert "NEA/ACLC CC" in pick
+    assert "Do Good Warehouse" in pick
 
 
 def test_community_confirm_shows_suggested_and_different():
@@ -295,4 +374,211 @@ def test_homebound_mobility_chips():
     assert out
     joined = " ".join(out).lower()
     assert "delivery" in joined or "closest" in joined or "request" in joined
+
+
+def test_guided_without_question_mark_gets_done_chips():
+    out = generate_quick_replies(
+        "GUIDED — STEP 1 of 9 (SHARE FOOD):\n"
+        "Click Name / Organization and type your name. Say done when finished."
+    )
+    assert "Done" in out
+    assert "What's next?" in out
+    assert "Yes" not in out
+
+
+def test_community_ask_does_not_return_post_chips():
+    out = generate_quick_replies(
+        "Which community should I list the 10 loaves under? "
+        "Your profile is set to Alameda Unified—should I post it there?"
+    )
+    assert "Yes, post it" not in out
+    joined = " ".join(out).lower()
+    assert "community" in joined or "different" in joined or "profile" in joined
+
+
+def test_ready_to_claim_not_generic_yes_no():
+    out = generate_quick_replies("Ready to claim these? 2 bread and 3 apples.")
+    assert "Yes, claim these" in out
+    assert out[:3] != ["Yes", "No", "Later"]
+
+
+def test_claim_listing_yes_no_is_ok():
+    out = generate_quick_replies("Would you like me to claim this listing for you?")
+    assert "Yes, claim it" in out
+    assert "Later" not in out
+    assert out[:3] != ["Yes", "No", "Later"]
+
+
+def test_photo_ask_never_offers_skip_chip():
+    for text in (
+        "Please attach a photo of the food — required before I can post.",
+        "Want to snap a quick photo of the tomatoes or carrots, or skip the photos?",
+        "Can I post without a photo?",
+    ):
+        out = generate_quick_replies(text, user_message="share food")
+        joined = " ".join(out).lower()
+        assert "skip" not in joined, (text, out)
+        assert "without" not in joined, (text, out)
+        assert out[:3] != ["Yes", "No", "Later"]
+
+
+def test_vague_share_proceed_gets_fork_not_yes_no():
+    out = generate_quick_replies(
+        "How would you like to proceed with sharing?"
+    )
+    assert "Open the form" in out
+    assert "Do it for me" in out
+    assert "Guide me step by step" in out
+    assert "Yes" not in out
+
+
+def test_shall_i_claim_single_not_multi():
+    out = generate_quick_replies("Shall I claim listing #12 for you?")
+    assert "Yes, claim it" in out
+    assert "Yes, claim these" not in out
+
+
+def test_find_food_fork_not_yes_no():
+    out = generate_quick_replies(
+        "I can search nearby. Want me to handle the search for you, "
+        "or guide you on Find Food step by step?"
+    )
+    assert "Open Find Food" in out
+    assert "Open the form" not in out
+    assert "Do it for me" in out
+    assert "Guide me step by step" in out
+    assert out[:3] != ["Yes", "No", "Later"]
+
+
+def test_find_food_fork_omits_open_when_already_on_find():
+    from backend.agent.suggestion_chips import share_assistance_fork_chips
+
+    chips = share_assistance_fork_chips(
+        "Want me to handle the search, or guide you step by step on Find Food?",
+        "en",
+        user_message="find food near me",
+        guide_state={"pageKey": "find", "path": "/find"},
+    )
+    labels = [c["label"] for c in chips]
+    assert "Open the form" not in labels
+    assert labels[0] == "Open Find Food"  # still show; never "Open the form"
+    assert "Do it for me" in labels
+    assert "Guide me step by step" in labels
+
+
+def test_share_fork_keeps_open_the_form():
+    from backend.agent.suggestion_chips import share_assistance_fork_chips
+
+    chips = share_assistance_fork_chips(
+        "Want me to handle everything in chat, or guide you step by step on Share Food?",
+        "en",
+        user_message="I want to share food",
+    )
+    labels = [c["label"] for c in chips]
+    assert labels[0] == "Open the form"
+    assert "Open Find Food" not in labels
+
+
+def test_spanish_assist_fork_chips_match_language():
+    out = generate_quick_replies(
+        "¿Quieres que yo lo haga TODO por ti aquí en el chat, o te guío paso a paso?",
+        lang="en",  # sticky lag — chips must still be Spanish
+        user_message="Quiero compartir comida",
+    )
+    assert out == [
+        "Abrir el formulario",
+        "Hazlo por mí",
+        "Guíame paso a paso",
+    ]
+    assert "Do it for me" not in out
+
+
+def test_share_assistance_fork_forced_from_reminder():
+    from backend.agent.suggestion_chips import share_assistance_fork_chips
+
+    chips = share_assistance_fork_chips(
+        "How would you like to proceed?",
+        "en",
+        user_message="I want to share food",
+        assistance_reminder=(
+            "ASSISTANCE MODE (required this turn):\n"
+            "The user wants to share food. Ask ONCE..."
+        ),
+    )
+    labels = [c["label"] for c in chips]
+    assert labels == [
+        "Open the form",
+        "Do it for me",
+        "Guide me step by step",
+    ]
+
+
+def test_share_assistance_fork_from_rephrased_reply():
+    from backend.agent.suggestion_chips import share_assistance_fork_chips
+
+    chips = share_assistance_fork_chips(
+        "I can help you share — want me to handle it in chat, or prefer "
+        "I walk you through the form yourself?",
+        "en",
+        user_message="share some food",
+    )
+    labels = [c["label"] for c in chips]
+    assert "Open the form" in labels
+    assert "Do it for me" in labels
+    assert "Guide me step by step" in labels
+
+
+def test_share_fork_open_form_always_present():
+    from backend.agent.suggestion_chips import share_assistance_fork_chips, build_turn_suggestions
+    from backend.ai.ai_engine import generate_quick_replies
+
+    t1 = (
+        "Great! Would you like me to handle everything for you here in chat, "
+        "or would you rather I guide you step by step on the Share Food page?"
+    )
+    t2 = (
+        "Great! Would you like me to handle the whole posting here in chat, "
+        "or do you want step-by-step help on the Share Food page? Just pick one below."
+    )
+    for t in (t1, t2):
+        for chips in (
+            share_assistance_fork_chips(t, "en", user_message="I want to share food"),
+            generate_quick_replies(t, user_message="I want to share food"),
+            build_turn_suggestions(
+                t, "en", tool_results=[], min_chips=0,
+                last_user_message="I want to share food",
+            ),
+        ):
+            labels = [
+                c if isinstance(c, str) else c.get("label")
+                for c in chips
+            ]
+            assert labels[0] in ("Open the form", "Abrir el formulario"), labels
+            assert "Do it for me" in labels or "Hazlo por mí" in labels
+            assert any("step" in (l or "").lower() or "paso" in (l or "").lower() for l in labels)
+            assert "5 apples" not in labels
+
+
+def test_rephrased_share_turns_get_real_chips():
+    """Common model rephrasings must not return empty / Yes-No."""
+    cases = {
+        "Got it. Tell me the food name and roughly how much you have.": ("apple", "bread", "vegetable", "egg"),
+        "What should we call this listing?": ("bread", "vegetable", "meal", "fresh"),
+        "Please add a short description for recipients.": ("fresh", "allergen", "pickup", "ready"),
+        "Where should people pick this up?": ("address", "saved", "different"),
+        "Perfect — anything else you want to share today?": ("share", "find", "all"),
+        "Your listing is live! Want to share another item?": ("share", "find", "all"),
+        "Select Individual/Family or Organization for donor type.": ("individual", "organization"),
+        "Cool. Please attach a photo of the food — required before posting.": ("add", "upload", "already"),
+        "Should I use Alameda Unified for the community?": ("alameda", "different", "profile"),
+        "Claim #1 for you — sound good?": ("claim", "cancel", "thanks"),
+        "Pick one of the options above (1, 2, or 3).": ("1", "2", "3"),
+        "Say yes if you want me to publish now.": ("post", "edit", "cancel"),
+    }
+    for text, needles in cases.items():
+        out = generate_quick_replies(text, user_message="share food")
+        assert out, f"empty chips for: {text!r}"
+        joined = " ".join(out).lower()
+        assert out[:3] != ["Yes", "No", "Later"], text
+        assert any(n in joined for n in needles), f"{text!r} -> {out}"
 

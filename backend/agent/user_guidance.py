@@ -292,9 +292,73 @@ ACCESSIBILITY_GUIDANCE = """**Guiding confused or non-technical users (CRITICAL)
 - Never scold. Never say "invalid" or "that doesn't make sense". Stay warm.
 """
 
+_LANG_LABELS = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "vi": "Vietnamese",
+    "zh": "Chinese (Simplified)",
+}
+
+
+def build_accessibility_profile_prompt(profile: dict | None) -> str:
+    """Turn client accessibility_profile JSON into a system prompt block."""
+    if not profile or not isinstance(profile, dict):
+        return ""
+
+    lines: list[str] = ["**User accessibility preferences (honor on every reply):**"]
+
+    lang = str(profile.get("preferredLanguage") or profile.get("language") or "").strip().lower()
+    if lang and lang != "en":
+        label = _LANG_LABELS.get(lang, lang)
+        lines.append(
+            f"- Preferred response language: {label} ({lang}). "
+            f"Respond ENTIRELY in this language unless the user clearly switches."
+        )
+
+    if profile.get("simpleLanguage"):
+        lines.append(
+            "- Use simple language at roughly a 6th-grade reading level: "
+            "short sentences, everyday words, no jargon."
+        )
+
+    if profile.get("preferTextOverVoice"):
+        lines.append(
+            "- User prefers text over voice: keep replies concise, scannable, "
+            "and suitable for on-screen reading (they may not hear audio)."
+        )
+
+    if profile.get("easyMode"):
+        lines.append(
+            "- Easy Mode is ON: one step at a time, never overwhelm with "
+            "multiple tasks or long paragraphs."
+        )
+
+    if profile.get("screenReaderOptimized"):
+        lines.append(
+            "- Screen reader optimized: describe actions in words, avoid "
+            "emoji-only replies, and name buttons/links clearly."
+        )
+
+    if profile.get("alwaysShowCaptions"):
+        lines.append("- Captions are enabled — pair spoken guidance with clear written text.")
+
+    if profile.get("largeText") or profile.get("highContrast"):
+        lines.append("- Visual accessibility is enabled — favor clarity over dense UI instructions.")
+
+    if profile.get("listFirstFind"):
+        lines.append(
+            "- Find Food uses list-first layout: describe listings before map directions."
+        )
+
+    if len(lines) <= 1:
+        return ""
+    return "\n".join(lines)
+
 
 __all__ = [
     "ACCESSIBILITY_GUIDANCE",
+    "build_accessibility_profile_prompt",
     "TurnAssessment",
     "assess_user_turn",
     "format_welcome_menu",

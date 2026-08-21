@@ -1,5 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuthContext } from '../AuthContext.jsx'
+import { useNouriGuide } from '../NouriGuideContext.jsx'
+import { buildAccessibilityProfilePayload } from '../accessibilityProfileService.js'
+import { getNouriGuideState, clearGuideState } from '../nouriGuide/engine.js'
+import { recordGuideFailure, recordGuideSuccess, clearGuideFailures } from '../nouriGuide/humanHandoff.js'
+import {
+  pickInitialChatLanguage,
+  chatErrorMessage,
+  getToneLabels,
+  CHAT_UI_LANGUAGES,
+  isValidChatLanguage,
+  t as chatT,
+} from '../chatI18n.js'
 import aiChatService from '../services/aiChatService.js'
 import normalizeToolResults from '../services/normalizeToolResults.js'
 
@@ -12,44 +24,23 @@ function normalizeAssistantAction(action) {
   return action
 }
 
-// Pick the best initial UI language:
-//   1) sessionStorage cache from a prior turn this session.
-//   2) explicit user.language profile preference, if Spanish.
-//   3) navigator.language starting with 'es'.
-//   4) default English.
-function pickInitialLanguage(user) {
-  try {
-    if (typeof sessionStorage !== 'undefined') {
-      const cached = sessionStorage.getItem('dg.ai.lang')
-      if (cached === 'es' || cached === 'en') return cached
-    }
-  } catch { /* private mode */ }
-  const pref = (user?.language || '').toString().toLowerCase()
-  if (pref.startsWith('es')) return 'es'
-  if (typeof navigator !== 'undefined') {
-    const nav = (navigator.language || (navigator.languages && navigator.languages[0]) || '').toLowerCase()
-    if (nav.startsWith('es')) return 'es'
-  }
-  return 'en'
+// Pick the best initial UI language (see utils/chatI18n.js).
+function pickInitialLanguage(user, preferredLanguage) {
+  return pickInitialChatLanguage(user, preferredLanguage)
 }
 
 export const AI_TONE_OPTIONS = ['warm', 'professional', 'casual', 'empathetic']
 const DEFAULT_TONE = 'warm'
 
 export const AI_TONE_LABELS = {
-  en: {
-    warm: 'Warm',
-    professional: 'Professional',
-    casual: 'Casual',
-    empathetic: 'Empathetic',
-  },
-  es: {
-    warm: 'Cálido',
-    professional: 'Profesional',
-    casual: 'Informal',
-    empathetic: 'Empático',
-  },
+  en: getToneLabels('en'),
+  es: getToneLabels('es'),
+  fr: getToneLabels('fr'),
+  vi: getToneLabels('vi'),
+  zh: getToneLabels('zh'),
 }
+
+export { CHAT_UI_LANGUAGES }
 
 function pickInitialTone() {
   try {
@@ -61,12 +52,77 @@ function pickInitialTone() {
   return DEFAULT_TONE
 }
 
+function pageKeyFromPath(pathname) {
+  const p = String(pathname || '/').replace(/\/+$/, '') || '/'
+  if (p === '/') return 'home'
+  if (p.startsWith('/admin')) return 'admin'
+  if (p.startsWith('/community/')) return 'community'
+  if (p.startsWith('/blog')) return 'blog'
+  const exact = {
+    '/share': 'share',
+    '/find': 'find',
+    '/near-me': 'near-me',
+    '/request': 'request',
+    '/claim': 'claim',
+    '/profile': 'profile',
+    '/settings': 'settings',
+    '/receipts': 'receipts',
+    '/dashboard': 'dashboard',
+    '/listings': 'listings',
+    '/community-requests': 'community-requests',
+    '/login': 'login',
+    '/signup': 'signup',
+    '/donations': 'donations',
+    '/notifications': 'notifications',
+    '/recipes': 'recipes',
+    '/contact': 'contact',
+    '/how-it-works': 'how-it-works',
+    '/sponsors': 'sponsors',
+    '/donate': 'donate',
+    '/faqs': 'faqs',
+    '/news': 'news',
+    '/featured': 'featured',
+  }
+  if (exact[p]) return exact[p]
+  return p.replace(/^\//, '').split('/')[0] || 'unknown'
+}
+
+function snapshotGuideState() {
+  const g = getNouriGuideState() || {}
+  let path = ''
+  let search = ''
+  let hash = ''
+  try {
+    if (typeof window !== 'undefined') {
+      path = window.location.pathname || ''
+      search = window.location.search || ''
+      hash = window.location.hash || ''
+    }
+  } catch { /* SSR / private */ }
+  const pageKey = pageKeyFromPath(path)
+  return {
+    formId: g.formId || null,
+    goalKey: g.goalKey || null,
+    stepIndex: g.stepIndex ?? 0,
+    stepTotal: g.stepTotal ?? 0,
+    fieldName: g.fieldName || '',
+    label: g.label || '',
+    section: g.section || '',
+    source: g.source || 'system',
+    path,
+    search,
+    hash,
+    pageKey,
+  }
+}
+
 export function useAIChat() {
   const { user, isAuthenticated, initialized } = useAuthContext()
+  const { settings: a11ySettings } = useNouriGuide()
   const [messages, setMessages] = useState([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [language, setLanguage] = useState(() => pickInitialLanguage(null))
+  const [language, setLanguage] = useState(() => pickInitialLanguage(null, 'en'))
   const [tone, setToneState] = useState(pickInitialTone)
   // Mirror the active language into sessionStorage so a page refresh
   // mid-conversation doesn't snap a Spanish user back to English.
@@ -101,13 +157,12 @@ export function useAIChat() {
     // have one set. Falls back to current state (which already honored
     // navigator.language at mount). Never auto-flips an EN session to
     // ES once the user has chosen a language explicitly via the toggle.
-    const preferred = pickInitialLanguage(user)
+    const preferred = pickInitialLanguage(user, a11ySettings?.preferredLanguage)
     setLanguage((prev) => (preferred !== 'en' ? preferred : prev))
     setMessages([])
     setToneState(pickInitialTone())
     setError(null)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, isAuthenticated])
+  }, [user?.id, isAuthenticated, a11ySettings?.preferredLanguage])
 
   // Load conversation history from backend when user logs in.
   // Gate on `initialized` so we don't fire this authenticated call during the
@@ -208,56 +263,16 @@ export function useAIChat() {
    * stuck staring at a raw `error_code` like "model_unavailable".
    */
   const friendlyErrorMessage = useCallback((code, lang = language) => {
-    // Fall back to the user's profile preference if the sticky lang
-    // hasn't resolved yet (e.g. the very first turn errored before the
-    // backend could echo a `lang` field). Without this, a Spanish-only
-    // user can see their first error in English.
-    const profileLang = (user?.language || '').toString().toLowerCase().startsWith('es') ? 'es' : null
-    const isEs = (lang || profileLang || 'en') === 'es'
-    switch (code) {
-      case 'timeout':
-        return isEs
-          ? 'Mi respuesta tardó demasiado. Intenta de nuevo en un momento.'
-          : 'My response took too long. Please try again in a moment.'
-      case 'rate_limit':
-        return isEs
-          ? 'Estoy recibiendo muchas solicitudes ahora mismo. Intenta de nuevo en unos segundos.'
-          : "I'm getting a lot of requests right now. Please try again in a few seconds."
-      case 'model_unavailable':
-        return isEs
-          ? 'Mi modelo de IA no está disponible temporalmente. Vuelve a intentarlo.'
-          : 'My AI model is temporarily unavailable. Please try again.'
-      case 'circuit_open':
-        return isEs
-          ? 'Estoy recuperándome de un problema. Intenta de nuevo en unos segundos.'
-          : "I'm recovering from a hiccup. Please try again in a few seconds."
-      case 'auth':
-        return isEs
-          ? 'Hay un problema con mi autenticación. Contacta a soporte si esto continúa.'
-          : "There's an authentication issue. Please contact support if this keeps happening."
-      case 'invalid_input':
-        return isEs
-          ? 'No pude procesar esa solicitud. Intenta reformularla.'
-          : "I couldn't process that request. Please try rephrasing it."
-      default:
-        return isEs
-          ? 'Estoy teniendo un pequeño problema. ¿Puedes intentar de nuevo?'
-          : "I'm having a little trouble right now. Please try again."
-    }
+    const profileLang = (user?.language || '').toString().toLowerCase()
+    const resolved = lang || (profileLang.startsWith('es') ? 'es' : language)
+    return chatErrorMessage(code || 'internal', resolved)
   }, [language, user?.language])
 
-  // Render a localized 'please sign in' assistant bubble and return true if
-  // the user isn't authenticated. The backend rejects unauthenticated AI
-  // calls with 401, which used to surface as a confusing 'authentication
-  // issue — contact support' error bubble. Catching it client-side avoids
-  // the wasted round-trip AND the wasted per-IP rate-limit bucket.
   const renderSignInRequired = useCallback(() => {
     setMessages(prev => [...prev, {
       id: `assistant-signin-${Date.now()}`,
       role: 'assistant',
-      message: language === 'es'
-        ? 'Necesitas iniciar sesión para hablar conmigo. Crea una cuenta o inicia sesión y vuelve a intentarlo.'
-        : "You need to sign in to chat with me. Please log in or create an account and try again.",
+      message: chatT(language, 'signInRequired'),
       isError: false,
       timestamp: new Date().toISOString(),
     }])
@@ -296,9 +311,12 @@ export function useAIChat() {
     }
 
     try {
+      const accessibilityProfile = buildAccessibilityProfilePayload(a11ySettings)
       const result = await aiChatService.sendMessage(text.trim(), {
         userId: user.id,
         tone,
+        accessibilityProfile,
+        guideState: snapshotGuideState(),
       })
 
       // Drop the response if a newer request was started while this one
@@ -316,6 +334,7 @@ export function useAIChat() {
       // Typed backend error — render an error bubble carrying the retry
       // metadata so the panel can show a Retry button + diagnostic chip.
       if (result.error) {
+        recordGuideFailure(result.error.code || 'chat_error')
         const err = result.error
         const errorBubble = {
           id: `error-${Date.now()}`,
@@ -354,16 +373,20 @@ export function useAIChat() {
       }
 
       setMessages(prev => [...prev, assistantMsg])
+      recordGuideSuccess()
     } catch (err) {
       if (seq !== reqSeqRef.current) return
-      // Unexpected exception (shouldn't happen now that the service catches
-      // structured errors, but defensive coding for the chat surface).
+      recordGuideFailure(err?.message || 'network_error')
+      const isNetwork = !err?.status
+        || err.status === 0
+        || /fetch|network|ECONNREFUSED|Failed to fetch/i.test(String(err?.message || ''))
+      const errorCode = isNetwork ? 'network' : 'internal'
       const errorBubble = {
         id: `error-${Date.now()}`,
         role: 'assistant',
-        message: friendlyErrorMessage('internal'),
+        message: friendlyErrorMessage(errorCode, language),
         isError: true,
-        errorCode: 'internal',
+        errorCode,
         errorRetryable: true,
         retryText: text.trim(),
         timestamp: new Date().toISOString(),
@@ -376,7 +399,7 @@ export function useAIChat() {
         setIsLoading(false)
       }
     }
-  }, [language, tone, user?.id, friendlyErrorMessage])
+  }, [language, tone, user?.id, friendlyErrorMessage, a11ySettings])
 
   const sendMessage = useCallback(async (text) => {
     if (!text?.trim() || isLoadingRef.current) return
@@ -441,10 +464,13 @@ export function useAIChat() {
     setError(null)
 
     try {
+      const accessibilityProfile = buildAccessibilityProfilePayload(a11ySettings)
       const result = await aiChatService.sendVoice(audioBlob, {
         userId: user.id,
         includeAudio: true,
         tone,
+        accessibilityProfile,
+        guideState: snapshotGuideState(),
       })
 
       if (seq !== reqSeqRef.current) return
@@ -531,21 +557,25 @@ export function useAIChat() {
     isLoadingRef.current = false
     setIsLoading(false)
 
+    let ok = true
     try {
       if (isAuthenticated && user?.id) {
         await aiChatService.clearHistory(user.id)
       }
-      // Empty array → WelcomeHero renders immediately (no stale bubbles).
-      setMessages([])
-      setError(null)
-      // Mark loaded so the history effect does NOT re-fetch old rows.
-      setHistoryLoaded(true)
-      return true
     } catch (err) {
       console.error('Failed to clear AI history:', err)
       setError(err.message || 'Failed to clear conversation')
-      return false
+      ok = false
     }
+
+    // Always wipe the visible thread + local caches so Clear feels immediate
+    // even if the network delete fails.
+    setMessages([])
+    if (ok) setError(null)
+    setHistoryLoaded(true)
+    try { clearGuideState() } catch { /* noop */ }
+    try { clearGuideFailures() } catch { /* noop */ }
+    return ok
   }, [isAuthenticated, user?.id])
 
   const submitFeedback = useCallback(async (messageId, rating) => {
@@ -593,9 +623,12 @@ export function useAIChat() {
     // background and must not block the user from typing/sending real
     // messages. The assistant reply still appears as a normal bubble.
     try {
+      const accessibilityProfile = buildAccessibilityProfilePayload(a11ySettings)
       const result = await aiChatService.sendMessage(text.trim(), {
         userId: user.id,
         silent: true,
+        accessibilityProfile,
+        guideState: snapshotGuideState(),
       })
       if (result.lang && result.lang !== language) setLanguage(result.lang)
       if (result.error) {
@@ -619,7 +652,7 @@ export function useAIChat() {
       // failed bulk-upload reactions don't disappear silently in dev.
       console.warn('sendSilentMessage failed:', err)
     }
-  }, [language, user?.id, isAuthenticated])
+  }, [language, user?.id, isAuthenticated, a11ySettings])
 
   const confirmPendingAction = useCallback(async (confirmed = true) => {
     if (!isAuthenticated || !user?.id || isLoadingRef.current) return

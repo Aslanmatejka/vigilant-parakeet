@@ -14,6 +14,8 @@ from backend.ai_engine import compute_next_step
 Chip = Union[str, Dict[str, Any]]
 
 _MAX_CHIPS = 6
+# Community list picks need the full catalog (NEA/ACLC, Ruby Bridges, …).
+_MAX_COMMUNITY_CHIPS = 40
 
 _MENU_CHIPS_EN = [
     "Find food near me",
@@ -53,6 +55,187 @@ _SEARCH_TOOLS = frozenset({
     "search_nearby_food",
     "find_food",
 })
+
+
+def _normalize_chip_text(text: str) -> str:
+    """Normalize hyphens/spacing so 'step-by-step' matches 'step by step'."""
+    t = (text or "").lower()
+    t = t.replace("–", "-").replace("—", "-")
+    t = re.sub(r"[-_/]+", " ", t)
+    t = re.sub(r"\s+", " ", t)
+    return t.strip()
+
+
+def _infer_assistance_fork_goal(
+    reply: str,
+    user_message: str = "",
+    assistance_reminder: str = "",
+    guide_state: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Return share | find | request for assistance-fork chips."""
+    rem = (assistance_reminder or "").lower()
+    combined = f"{reply} {user_message} {rem}".lower()
+    page_key = ""
+    path = ""
+    if isinstance(guide_state, dict):
+        page_key = str(guide_state.get("pageKey") or "").lower()
+        path = str(guide_state.get("path") or "").lower()
+
+    # Explicit reminder / copy wins.
+    if any(k in rem for k in ("share food", "to share", "compartir")):
+        return "share"
+    if any(k in rem for k in ("request food", "to request", "solicitar")):
+        return "request"
+    if any(k in rem for k in ("find food", "to find", "buscar comida", "search")):
+        return "find"
+
+    share_hit = any(k in combined for k in (
+        "share food", "sharing", "donate", "donating", "posting", "compartir",
+        "share food page", "/share",
+    ))
+    request_hit = any(k in combined for k in (
+        "request food", "solicitar", "request food page", "/request",
+    ))
+    find_hit = any(k in combined for k in (
+        "find food", "finding food", "search nearby", "near you", "find free",
+        "buscar comida", "find food page", "/find", "near-me", "search for you",
+        "handle the search",
+    ))
+
+    if share_hit and not request_hit:
+        return "share"
+    if request_hit and not share_hit:
+        return "request"
+    if find_hit and not share_hit and not request_hit:
+        return "find"
+
+    # Live page when the ask is ambiguous.
+    if page_key == "share" or "/share" in path:
+        return "share"
+    if page_key == "request" or "/request" in path:
+        return "request"
+    if page_key in {"find", "near-me", "claim"} or "/find" in path or "/near-me" in path:
+        return "find"
+
+    return "share"
+
+
+def share_assistance_fork_chips(
+    response_text: str,
+    language: str = "en",
+    *,
+    user_message: str = "",
+    assistance_reminder: Optional[str] = None,
+    guide_state: Optional[Dict[str, Any]] = None,
+) -> List[Chip]:
+    """Forced chips when Nouri asks do-it-for-me vs guide (share / find / request).
+
+    Share: lead with **Open the form** → `/share`.
+    Request: lead with **Open Request Food** → `/request`.
+    Find: lead with **Open Find Food** → `/find` (never "Open the form").
+    Always show the open chip so users get three options; label must match the goal.
+    """
+    rem = (assistance_reminder or "").strip()
+    rem_l = _normalize_chip_text(rem)
+    reply = _normalize_chip_text(response_text or "")
+    um = _normalize_chip_text(user_message or "")
+
+    explicit_fork = any(
+        k in reply for k in (
+            "do it for me", "handle everything", "handle the whole",
+            "guide me step by step", "walk you through", "step by step",
+            "do everything for you", "yourself on the", "on the pages",
+            "on the form", "share food page", "find food page", "request food page",
+            "hazlo por", "paso a paso", "yo te guio", "todo por ti", "te guio",
+            "shall i handle", "prefer i handle", "or guide me",
+            "or walk you", "do it myself",
+            "handle it for you", "do this for you", "or would you rather",
+            "open the form", "open find food", "open request food",
+            "three options", "handle everything for you",
+            "in chat for you", "in chat or", "here in chat",
+            "handle the search", "search for you", "find it for you",
+            "guide you on", "guide you through", "or guide you",
+            "step by step help", "help on the share", "help on the find",
+        )
+    )
+    share_ctx = any(k in f"{reply} {um} {rem_l}" for k in (
+        "share", "sharing", "donate", "donating", "post ", "posting", "listing",
+        "find food", "request food", "finding food", "requesting",
+        "search nearby", "search for", "near you", "find free",
+        "compartir", "donar", "publicar", "buscar comida", "solicitar",
+    ))
+    vague_proceed = share_ctx and any(k in reply for k in (
+        "how would you like", "how do you want", "how should we",
+        "how would you prefer", "prefer to proceed", "like to proceed",
+        "would you like me to handle", "would you rather",
+        "como quieres", "como prefieres", "de que forma",
+    ))
+    asking_fork = (
+        rem_l.startswith(("assistance mode", "modo de ayuda"))
+        or explicit_fork
+        or vague_proceed
+    )
+    if not asking_fork:
+        return []
+
+    # Never re-offer the mode fork once the user already picked a path.
+    if (
+        rem_l.startswith(("guided", "guiado", "hands-on", "hands on", "modo manos"))
+        or _is_guided_response(response_text or "")
+        or _looks_like_guided_tutorial(response_text or "")
+        or _user_chose_guided(user_message or "", assistance_reminder or "")
+        or _user_chose_hands_on(user_message or "", assistance_reminder or "")
+    ):
+        if not rem_l.startswith(("assistance mode", "modo de ayuda")):
+            return []
+
+    es = language == "es" or "¿" in (response_text or "") or any(
+        k in reply for k in ("quieres", "guio", "hazlo")
+    ) or rem_l.startswith("modo de ayuda")
+
+    goal = _infer_assistance_fork_goal(
+        reply, um, rem_l, guide_state=guide_state,
+    )
+
+    path = ""
+    if isinstance(guide_state, dict):
+        path = str(guide_state.get("path") or "").lower()
+
+    if goal == "share":
+        nav_path, nav_target = "/share", "create"
+        open_label = "Abrir el formulario" if es else "Open the form"
+        open_message = open_label
+    elif goal == "request":
+        nav_path, nav_target = "/request", "request"
+        open_label = "Abrir Solicitar comida" if es else "Open Request Food"
+        open_message = open_label
+    else:
+        # Find Food — never label this "Open the form".
+        nav_path = "/near-me" if ("near-me" in path or (isinstance(guide_state, dict) and str(guide_state.get("pageKey") or "").lower() == "near-me")) else "/find"
+        nav_target = "near-me" if nav_path == "/near-me" else "list"
+        open_label = "Abrir Buscar comida" if es else "Open Find Food"
+        open_message = open_label
+
+    chips: List[Chip] = [{
+        "label": open_label,
+        "message": open_message,
+        "action": "navigate",
+        "target": nav_target,
+        "path": nav_path,
+        "href": nav_path,
+    }]
+
+    if es:
+        chips.extend([
+            {"label": "Hazlo por mí", "message": "Hazlo por mí"},
+            {"label": "Guíame paso a paso", "message": "Guíame paso a paso"},
+        ])
+    else:
+        chips.extend([
+            {"label": "Do it for me", "message": "Do it for me"},
+            {"label": "Guide me step by step", "message": "Guide me step by step"},
+        ])
+    return chips
 
 
 def get_menu_chips(language: str = "en") -> List[str]:
@@ -192,25 +375,48 @@ def _chips_from_search_results(
     return []
 
 
-_CLAIM_CONFIRM_RESPONSE_CUES = (
+# Multi-item claim confirmation only (plural / batch language).
+_CLAIM_CONFIRM_MULTI_CUES = (
     "ready to claim",
     "claim these",
     "claim both",
     "claim all of these",
-    "shall i claim",
-    "want me to claim",
+    "claim all",
     "listo para reclamar",
     "reclamar estos",
     "reclamo estos",
+    "reclamar ambos",
+    "reclamar todos",
 )
 
+# Single listing claim confirmation.
+_CLAIM_CONFIRM_SINGLE_CUES = (
+    "shall i claim",
+    "want me to claim",
+    "claim this listing",
+    "claim it for you",
+    "claim this for you",
+    "claim that listing",
+    "reclamar este",
+    "reclamarlo",
+    "quieres que lo reclame",
+    "quieres que reclame",
+)
+
+# Back-compat alias used by filters.
+_CLAIM_CONFIRM_RESPONSE_CUES = _CLAIM_CONFIRM_MULTI_CUES + _CLAIM_CONFIRM_SINGLE_CUES
+
+# Multi-item qty only — "how many of the bread" is a SINGLE listing ask.
 _CLAIM_QTY_MULTI_CUES = (
-    "how many of the",
     "how many for each",
     "quantity for each",
-    "cuántos de",
-    "cuantos de",
+    "how many of each",
+    "cuántos de cada",
+    "cuantos de cada",
+    "para cada uno",
     "para cada",
+    "2 each",
+    "de cada uno",
 )
 
 
@@ -224,20 +430,38 @@ def _chips_for_multi_claim_flow(
         return []
     es = language == "es"
 
-    if any(c in text for c in _CLAIM_CONFIRM_RESPONSE_CUES):
+    if any(c in text for c in _CLAIM_CONFIRM_MULTI_CUES):
         if es:
             return [
                 {"label": "Sí, reclamar todos", "message": "Sí, reclama todos"},
                 {"label": "Cambiar cantidades", "message": "Quiero cambiar las cantidades"},
+                {"label": "Cancelar", "message": "Cancelar"},
             ]
         return [
             {"label": "Yes, claim these", "message": "Yes, claim these"},
             {"label": "Change amounts", "message": "I want to change the amounts"},
+            {"label": "Cancel", "message": "Cancel"},
         ]
 
-    if any(c in text for c in _CLAIM_QTY_MULTI_CUES) or (
-        "how many" in text and any(k in text for k in ("and", "both", "each", "first", "second"))
-    ):
+    if any(c in text for c in _CLAIM_CONFIRM_SINGLE_CUES):
+        if es:
+            return [
+                {"label": "Sí, reclámalo", "message": "Sí, reclámalo"},
+                {"label": "No, gracias", "message": "No, gracias"},
+                {"label": "Cancelar", "message": "Cancelar"},
+            ]
+        return [
+            {"label": "Yes, claim it", "message": "Yes, claim it"},
+            {"label": "No thanks", "message": "No thanks"},
+            {"label": "Cancel", "message": "Cancel"},
+        ]
+
+    multi_qty = any(c in text for c in _CLAIM_QTY_MULTI_CUES) or (
+        "how many" in text
+        and any(k in text for k in (" each", "both", " and ", "first", "second", "para cada"))
+        and any(k in text for k in ("claim", "reclamar", "of the", "de los", "de las", "items"))
+    )
+    if multi_qty and any(k in text for k in ("and", "both", "each", "cada", "first", "second", "#")):
         if es:
             return [
                 {"label": "2 de cada uno", "message": "2 de cada uno"},
@@ -250,6 +474,254 @@ def _chips_for_multi_claim_flow(
             {"label": "1 each", "message": "1 each"},
         ]
     return []
+
+
+_GUIDED_MARKERS = ("guided —", "guided -", "guiado —", "guiado -", "guided — step", "guiado — paso")
+
+
+def _is_guided_response(text: str) -> bool:
+    t = (text or "").lower()
+    return any(m in t for m in _GUIDED_MARKERS) or t.lstrip().startswith(("guided", "guiado"))
+
+
+def _looks_like_guided_tutorial(text: str) -> bool:
+    """True when the model dropped the GUIDED header but is still coaching."""
+    if _is_guided_response(text):
+        return True
+    t = _normalize_chip_text(text)
+    open_ask = any(k in t for k in (
+        "open the share food", "open share food", "open the find food",
+        "open find food", "open the request food", "open request food",
+        "tap share food", "tap find food", "tap request food",
+        "click share food", "click find food", "click request food",
+        "please open the", "look at the top", "top of the screen",
+        "top menu", "main menu", "tapping share food", "tapping find food",
+        "abre compartir", "abre buscar", "abre solicitar",
+        "mira arriba", "pulsa compartir", "pulsa buscar", "pulsa solicitar",
+        "menu principal", "menú de arriba",
+    ))
+    wait_done = any(k in t for k in (
+        "say done", "let me know when", "when you see", "next step",
+        "see the form", "see find food", "together",
+        "di listo", "avisame cuando", "avísame cuando", "cuando veas",
+        "siguiente paso", "ves el formulario",
+    ))
+    baby_step = any(k in t for k in (
+        "baby step", "look at the blue", "look at the green",
+        "tap the box", "type your name", "scroll down to",
+        "caja azul", "caja verde", "escribe tu nombre",
+    ))
+    return (open_ask and wait_done) or baby_step
+
+
+def _user_chose_guided(user_message: str = "", assistance_reminder: str = "") -> bool:
+    rem = _normalize_chip_text(assistance_reminder)
+    um = _normalize_chip_text(user_message)
+    if rem.startswith(("guided", "guiado")):
+        return True
+    return any(k in um for k in (
+        "guide me", "step by step", "walk me through", "show me the steps",
+        "guíame", "guiame", "paso a paso", "enseñame", "ensename",
+    ))
+
+
+def _user_chose_hands_on(user_message: str = "", assistance_reminder: str = "") -> bool:
+    rem = _normalize_chip_text(assistance_reminder)
+    um = _normalize_chip_text(user_message)
+    if rem.startswith(("hands-on", "hands on", "modo manos")):
+        return True
+    return any(k in um for k in (
+        "do it for me", "handle everything", "handle it for me", "do everything for me",
+        "hazlo por mí", "hazlo por mi", "hazlo todo", "tú hazlo", "tu hazlo",
+    ))
+
+
+def _chips_for_guided_response(
+    response_text: str,
+    language: str,
+    *,
+    force: bool = False,
+) -> List[Chip]:
+    """Tappable replies that match a GUIDED UI-coaching turn."""
+    if not force and not _looks_like_guided_tutorial(response_text):
+        return []
+    text = response_text or ""
+    low = text.lower()
+    es = language == "es"
+
+    chips: List[Chip] = []
+
+    # Field-specific options from the guided body.
+    if any(k in low for k in ("donor type", "tipo de donante")):
+        if es:
+            chips.extend([
+                {"label": "Individual / Familia", "message": "Individual/Familia"},
+                {"label": "Organización", "message": "Organización"},
+            ])
+        else:
+            chips.extend([
+                {"label": "Individual / Family", "message": "Individual/Family"},
+                {"label": "Organization", "message": "Organization"},
+            ])
+    elif any(k in low for k in ("allerg", "dietary", "dietética", "dietetica", "restricciones")):
+        if es:
+            chips.extend(["Ninguna", "Vegetariano", "Sin frutos secos"])
+        else:
+            chips.extend(["None", "Vegetarian", "Nut-free"])
+    elif any(k in low for k in ("photo", "picture", "foto", "imagen")):
+        if es:
+            chips.extend([
+                {"label": "Adjuntar foto", "message": "Adjuntaré una foto"},
+            ])
+        else:
+            chips.extend([
+                {"label": "I'll add a photo", "message": "I'll add a photo"},
+            ])
+    elif any(k in low for k in ("claim", "reclamar", "+ / −", "+/−", "portion")):
+        if es:
+            chips.extend(["1", "2", "3", "Listo"])
+        else:
+            chips.extend(["1", "2", "3", "Done"])
+    elif any(k in low for k in (
+        "what kind of food", "qué tipo de comida", "que tipo de comida",
+        "looking for", "buscas", "what food", "qué alimento",
+    )):
+        if es:
+            chips.extend(["Pan", "Frutas", "Verduras", "Comida preparada"])
+        else:
+            chips.extend(["Bread", "Fruit", "Vegetables", "Prepared meal"])
+    elif any(k in low for k in (
+        "open the share", "open share", "open the find", "open find",
+        "open the request", "open request", "tap share food", "tap find food",
+        "see the form", "main menu", "top menu",
+        "abre compartir", "abre buscar", "ves el formulario",
+    )):
+        if es:
+            chips.extend([
+                {"label": "Ya veo el formulario", "message": "listo — ya veo el formulario"},
+            ])
+        else:
+            chips.extend([
+                {"label": "I see the form", "message": "done — I see the form"},
+            ])
+
+    # Always offer advance / help for guided coaching.
+    if es:
+        chips.extend([
+            {"label": "Listo", "message": "listo"},
+            {"label": "Siguiente", "message": "siguiente"},
+            {"label": "¿Ayuda?", "message": "Necesito ayuda con este paso"},
+        ])
+    else:
+        chips.extend([
+            {"label": "Done", "message": "done"},
+            {"label": "What's next?", "message": "what's next"},
+            {"label": "Need help", "message": "I need help with this step"},
+        ])
+
+    # Deduplicate while preserving order.
+    out: List[Chip] = []
+    seen: set[str] = set()
+    for chip in chips:
+        label = _chip_label(chip)
+        key = label.lower()
+        if not label or key in seen:
+            continue
+        seen.add(key)
+        out.append(chip)
+    return out[:_MAX_CHIPS]
+
+
+def _filter_chips_to_match_response(
+    response_text: str,
+    chips: List[Chip],
+    language: str,
+) -> List[Chip]:
+    """Drop chips that clearly conflict with what the assistant just asked."""
+    if not chips:
+        return chips
+    text = (response_text or "").lower()
+    if not text:
+        return chips
+
+    drop_labels: set[str] = set()
+    es = language == "es"
+
+    # Claim confirm → never show generic Yes/No/Later or post chips.
+    if any(c in text for c in _CLAIM_CONFIRM_RESPONSE_CUES):
+        drop_labels.update({
+            "yes", "no", "later", "sí", "si", "más tarde", "mas tarde",
+            "yes, post it", "sí, publícalo", "si, publicalo", "wait, edit it",
+        })
+
+    # Community ask → never show post-it chips.
+    if _is_community_selection_turn(response_text or ""):
+        drop_labels.update({
+            "yes, post it", "sí, publícalo", "si, publicalo",
+            "wait, edit it", "espera, edítalo", "cancel", "cancelar",
+            "yes", "no", "later",
+        })
+
+    # Guided coaching → drop unrelated menu / claim / post starters.
+    if _is_guided_response(response_text or ""):
+        drop_labels.update({
+            "find food near me", "buscar comida cerca",
+            "i want to share food", "quiero compartir comida",
+            "yes, post it", "sí, publícalo",
+            "claim #1", "reclamar #1",
+            "yes", "no", "later", "sí", "más tarde",
+        })
+
+    # Photo required → never skip / bare yes-no.
+    if any(k in text for k in ("photo", "picture", "foto", "imagen")) and any(
+        k in text for k in ("upload", "attach", "required", "please", "add a", "add one", "sube", "adjunt")
+    ):
+        drop_labels.update({
+            "skip", "skip photo", "no photo", "sin foto", "later", "más tarde",
+            "yes", "no", "sí",
+        })
+
+    # Assistance fork → only mode chips.
+    if any(k in text for k in (
+        "do it for me", "guide me step by step", "walk you through",
+        "handle everything", "do everything for you",
+        "hazlo por mí", "hazlo por mi", "paso a paso", "yo te guío", "yo te guio",
+    )):
+        keep = {
+            "do it for me", "guide me step by step", "open the form",
+            "open find food", "open request food",
+            "hazlo por mí", "hazlo por mi", "guíame paso a paso", "guiame paso a paso",
+            "abrir el formulario", "abrir buscar comida", "abrir solicitar comida",
+        }
+        filtered = []
+        for chip in chips:
+            label = _chip_label(chip).lower()
+            if (
+                label in keep
+                or "do it" in label
+                or "guide me" in label
+                or "open the form" in label
+                or "open find food" in label
+                or "open request food" in label
+                or "abrir el formulario" in label
+                or "abrir buscar" in label
+                or "abrir solicitar" in label
+                or "hazlo" in label
+                or "guía" in label
+                or "guia" in label
+            ):
+                filtered.append(chip)
+        if filtered:
+            return filtered[:_MAX_CHIPS]
+
+    out: List[Chip] = []
+    for chip in chips:
+        label = _chip_label(chip)
+        if label.lower() in drop_labels:
+            continue
+        # Prefix drops for Claim # when not a search turn
+        out.append(chip)
+    return out[:_MAX_CHIPS]
 
 
 _COMMUNITY_CUES = (
@@ -294,8 +766,10 @@ _COMMUNITY_SUFFIXES = (
 )
 
 _DIFFERENT_COMMUNITY_USER_CUES = (
+    "different one", "another one", "other one",
     "different community", "use a different community", "another community",
-    "other community", "otra comunidad", "usar otra comunidad",
+    "other community", "different school", "another school",
+    "otra comunidad", "usar otra comunidad", "otra escuela",
 )
 
 _OPEN_COMMUNITY_PICK_KEYS = (
@@ -526,7 +1000,7 @@ def _chips_for_community_list_pick(
             chips.append({"label": name, "message": f"Sí, publicar en {name}"})
         else:
             chips.append({"label": name, "message": f"Yes, list under {name}"})
-        if len(chips) >= _MAX_CHIPS:
+        if len(chips) >= _MAX_COMMUNITY_CHIPS:
             break
 
     if not chips:
@@ -568,7 +1042,7 @@ def _community_names_from_context(
         _add(result.get("suggested_community_name"))
         communities = result.get("communities") or []
         if isinstance(communities, list):
-            for row in communities[:5]:
+            for row in communities:
                 if isinstance(row, dict):
                     _add(row.get("name"))
 
@@ -640,8 +1114,13 @@ def build_turn_suggestions(
     last_user_message: str = "",
     *,
     min_chips: int = 4,
+    assistance_reminder: Optional[str] = None,
 ) -> List[Chip]:
-    """Build up to six tappable chips for the chat UI."""
+    """Build up to six tappable chips for the chat UI.
+
+    Priority-ordered: first matching category wins. Mixing Yes/No with
+    claim/search/fork chips is worse than returning fewer chips.
+    """
     out: List[Chip] = []
     seen: set[str] = set()
 
@@ -652,27 +1131,63 @@ def build_turn_suggestions(
         seen.add(label)
         out.append(chip)
 
+    # Align chip language with the reply when Spanish markers are present.
+    text_l = (response_text or "").lower()
+    if language != "es" and (
+        "¿" in (response_text or "")
+        or any(k in text_l for k in (
+            " qué ", " cuál ", " cómo ", "quieres que", "paso a paso",
+            "hazlo por", "comida",
+        ))
+    ):
+        language = "es"
+
     # Lazy import: live quick-reply heuristics live in backend.ai.ai_engine.
-    # Importing at module load would create a cycle with ConversationEngine.
     from backend.ai.ai_engine import generate_quick_replies
 
-    next_step = compute_next_step(tool_results, language)
-    if next_step:
-        # Normalize to FE shape: SuggestedActionButton uses message/prompt.
-        add({
-            "label": next_step.get("label") or "",
-            "message": next_step.get("prompt") or next_step.get("message") or next_step.get("label") or "",
-            "kind": "next_step",
-        })
+    # 0) Active GUIDED walkthrough — never re-show Open/Do it/Guide fork.
+    if (
+        _user_chose_guided(last_user_message or "", assistance_reminder or "")
+        or _looks_like_guided_tutorial(response_text or "")
+    ):
+        guided_chips = _chips_for_guided_response(
+            response_text or "", language, force=True,
+        )
+        if guided_chips:
+            return guided_chips[:_MAX_CHIPS]
 
+    # 1) Assistance fork (reminder or reply text) — exclusive.
+    fork = share_assistance_fork_chips(
+        response_text or "",
+        language,
+        user_message=last_user_message or "",
+        assistance_reminder=assistance_reminder,
+        guide_state=user_context if isinstance(user_context, dict) else None,
+    )
+    if fork:
+        return fork[:_MAX_CHIPS]
+
+    # 2) GUIDED UI coaching — exclusive.
+    guided_chips = _chips_for_guided_response(response_text or "", language)
+    if guided_chips:
+        return _filter_chips_to_match_response(
+            response_text or "", guided_chips[:_MAX_CHIPS], language,
+        )
+
+    # 3) Search / claim tool chips — exclusive when present.
     search_chips = _chips_from_search_results(tool_results, language)
-    for chip in search_chips:
-        add(chip)
+    if search_chips:
+        return _filter_chips_to_match_response(
+            response_text or "", search_chips[:_MAX_CHIPS], language,
+        )
 
     multi_claim_chips = _chips_for_multi_claim_flow(response_text or "", language)
-    for chip in multi_claim_chips:
-        add(chip)
+    if multi_claim_chips:
+        return _filter_chips_to_match_response(
+            response_text or "", multi_claim_chips[:_MAX_CHIPS], language,
+        )
 
+    # 4) Community selection — exclusive.
     list_pick_chips = _chips_for_community_list_pick(
         response_text or "",
         language,
@@ -681,46 +1196,57 @@ def build_turn_suggestions(
         tool_results=tool_results,
     )
     if list_pick_chips:
-        for chip in list_pick_chips:
-            add(chip)
-    else:
-        community_chips = _chips_for_community_selection(
+        return _filter_chips_to_match_response(
+            response_text or "", list_pick_chips[:_MAX_COMMUNITY_CHIPS], language,
+        )
+
+    community_chips = _chips_for_community_selection(
+        response_text or "",
+        language,
+        user_context=user_context,
+        tool_results=tool_results,
+    )
+    if community_chips:
+        return _filter_chips_to_match_response(
+            response_text or "", community_chips[:_MAX_COMMUNITY_CHIPS], language,
+        )
+
+    # 5) Next-step after successful tool (claim/post) — only when no ask chips.
+    next_step = compute_next_step(tool_results, language)
+    if next_step:
+        add({
+            "label": next_step.get("label") or "",
+            "message": next_step.get("prompt") or next_step.get("message") or next_step.get("label") or "",
+            "kind": "next_step",
+        })
+
+    # 6) Reply-text heuristics (photo / post confirm / food / yes-no…).
+    if not out:
+        for chip in generate_quick_replies(
             response_text or "",
             language,
-            user_context=user_context,
-            tool_results=tool_results,
-        )
-        if community_chips:
-            for chip in community_chips:
-                add(chip)
-        elif not search_chips:
-            # Skip bare 1/2/3 quick-replies when Claim #N chips already match
-            # the search results — avoids duplicate / less specific chips.
-            for chip in generate_quick_replies(
-                response_text or "",
-                language,
-                user_message=last_user_message or "",
-                communities=(user_context or {}).get("active_communities") or None,
-                suggested_community=(user_context or {}).get("suggested_community"),
-            ):
-                add(chip)
+            user_message=last_user_message or "",
+            communities=(user_context or {}).get("active_communities") or None,
+            suggested_community=(user_context or {}).get("suggested_community"),
+        ):
+            add(chip)
 
-    for item in pending_suggestions or []:
-        if isinstance(item, str):
-            add(item)
-        elif isinstance(item, dict):
-            if item.get("kind") == "next_step":
-                continue
-            normalized = _normalize_proactive(item)
-            if normalized:
-                add(normalized)
+    # 7) Pending proactive suggestions only when nothing else matched.
+    if not out:
+        for item in pending_suggestions or []:
+            if isinstance(item, str):
+                add(item)
+            elif isinstance(item, dict):
+                if item.get("kind") == "next_step":
+                    continue
+                normalized = _normalize_proactive(item)
+                if normalized:
+                    add(normalized)
 
-    # Only fall back to generic lazy chips when nothing contextual was found.
-    # Padding to min_chips mixed "Find food" with "Claim #1" / yes-no replies.
     if len(out) == 0:
         for chip in get_lazy_default_chips(language, detected_intent, guide_mode):
             add(chip)
             if len(out) >= _MAX_CHIPS:
                 break
 
-    return out[:_MAX_CHIPS]
+    return _filter_chips_to_match_response(response_text or "", out[:_MAX_CHIPS], language)

@@ -807,8 +807,12 @@ TOOL_DEFINITIONS = [
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "Maximum number of communities to return (default 10)",
-                        "default": 10,
+                        "description": (
+                            "Maximum communities to return (default 100, max 500). "
+                            "Use a high value when offering the donor a choice so "
+                            "every active school/hub is included."
+                        ),
+                        "default": 100,
                     },
                 },
                 "required": [],
@@ -1142,10 +1146,17 @@ TOOL_DEFINITIONS = [
                     },
                     "image_url": {
                         "type": "string",
-                        "description": "Optional public URL of a photo for this listing (https://... Supabase storage URL). Include when the donor uploads a photo before posting.",
+                        "description": (
+                            "REQUIRED public URL of a photo for this listing "
+                            "(https://... Supabase storage URL from chat "
+                            "image: …). Posting without a photo is not allowed."
+                        ),
                     },
                 },
-                "required": ["user_id", "title", "quantity", "unit", "category", "expiry_date"],
+                "required": [
+                    "user_id", "title", "quantity", "unit", "category",
+                    "expiry_date", "image_url",
+                ],
             },
         },
     },
@@ -1312,7 +1323,13 @@ TOOL_DEFINITIONS = [
                     "longitude": {"type": "number"},
                     "dietary_tags": {"type": "array", "items": {"type": "string"}},
                     "allergens": {"type": "array", "items": {"type": "string"}},
-                    "image_url": {"type": "string", "description": "Optional public photo URL (https://...). Include when the donor provides a photo."},
+                    "image_url": {
+                        "type": "string",
+                        "description": (
+                            "REQUIRED public photo URL (https://... from chat "
+                            "image: …). Posting without a photo is not allowed."
+                        ),
+                    },
                 },
                 "required": ["user_id", "title", "quantity", "unit", "category", "expiry_date"],
             },
@@ -4205,29 +4222,78 @@ async def _get_storage_tips(
 # get_active_communities — local food sharing groups
 # ---------------------------------------------------------------------------
 
+_COMMUNITY_FETCH_LIMIT = 500
+
+
+async def _fetch_all_active_community_rows(
+    *,
+    select: str = "id,name",
+) -> list[dict]:
+    """Return every active community row (catalog source of truth).
+
+    Used by resolve + listing tools so no school/hub is silently dropped
+    by a low default limit.
+    """
+    from backend.ai_engine import supabase_get
+
+    try:
+        rows = await supabase_get("communities", {
+            "is_active": "eq.true",
+            "select": select,
+            "order": "name.asc",
+            "limit": str(_COMMUNITY_FETCH_LIMIT),
+        })
+    except Exception as exc:
+        logger.warning("fetch all active communities failed: %s", exc)
+        return []
+    out: list[dict] = []
+    for row in rows or []:
+        if isinstance(row, dict) and (row.get("id") is not None) and str(row.get("name") or "").strip():
+            out.append(row)
+    return out
+
+
 async def _get_active_communities(
     user_id: str | None = None,
-    max_results: int = 10,
+    max_results: int = 100,
 ) -> dict:
-    """Fetch active food sharing communities, optionally sorted by proximity."""
+    """Fetch active food sharing communities, optionally sorted by proximity.
+
+    Returns the full active catalog by default (capped only by max_results).
+    Every row is a real community/school/hub — never invent free-text names.
+    """
     from backend.ai_engine import supabase_get
+
+    try:
+        max_results = int(max_results or 100)
+    except (TypeError, ValueError):
+        max_results = 100
+    max_results = max(1, min(max_results, _COMMUNITY_FETCH_LIMIT))
 
     logger.info("get_active_communities: user_id=%s max=%d", user_id, max_results)
 
-    # Fetch all active communities
-    try:
-        communities = await supabase_get("communities", {
-            "is_active": "eq.true",
-            "select": (
-                "id,name,location,contact,hours,phone,description,"
-                "latitude,longitude,food_given_lb,families_helped,"
-                "school_staff_helped,image"
-            ),
-            "limit": "50",
-        })
-    except Exception as exc:
-        logger.error("Failed to fetch communities: %s", exc)
-        return {"error": f"Could not fetch communities: {str(exc)}"}
+    communities = await _fetch_all_active_community_rows(
+        select=(
+            "id,name,location,contact,hours,phone,description,"
+            "latitude,longitude,food_given_lb,families_helped,"
+            "school_staff_helped,image"
+        ),
+    )
+    if not communities:
+        # Fall back to a direct fetch so callers still get an error shape.
+        try:
+            communities = await supabase_get("communities", {
+                "is_active": "eq.true",
+                "select": (
+                    "id,name,location,contact,hours,phone,description,"
+                    "latitude,longitude,food_given_lb,families_helped,"
+                    "school_staff_helped,image"
+                ),
+                "limit": str(_COMMUNITY_FETCH_LIMIT),
+            }) or []
+        except Exception as exc:
+            logger.error("Failed to fetch communities: %s", exc)
+            return {"error": f"Could not fetch communities: {str(exc)}"}
 
     if not communities:
         return {"communities": [], "total": 0, "summary": "No active communities found."}
@@ -4310,22 +4376,27 @@ async def _get_active_communities(
     if user_lat:
         results.sort(key=lambda x: x.get("distance_km", 9999))
     else:
-        results.sort(key=lambda x: x["name"])
+        results.sort(key=lambda x: x["name"] or "")
 
+    total_available = len(results)
     results = results[:max_results]
 
     # Build summary
     total_food = sum(r["impact"]["food_given_lb"] for r in results)
     total_families = sum(r["impact"]["families_helped"] for r in results)
     summary = (
-        f"Found {len(results)} active food sharing communit{'y' if len(results) == 1 else 'ies'} "
+        f"Found {len(results)} of {total_available} active food sharing "
+        f"communit{'y' if total_available == 1 else 'ies'} "
         f"that have collectively distributed {total_food:,} lbs of food "
-        f"and helped {total_families:,} families."
+        f"and helped {total_families:,} families. "
+        f"ONLY these catalog names are valid communities — never invent "
+        f"a county or free-text hub."
     )
 
     return {
         "communities": results,
-        "total": len(results),
+        "total": total_available,
+        "returned": len(results),
         "summary": summary,
     }
 
@@ -4536,14 +4607,70 @@ async def _forward_geocode(address: str) -> Optional[tuple[float, float]]:
         return None
 
 
+def _looks_like_community_id(value: object) -> bool:
+    """True when value is a UUID or integer community primary key."""
+    s = str(value or "").strip()
+    if not s:
+        return False
+    if s.isdigit():
+        return True
+    # UUID (with or without hyphens)
+    import re as _re
+    return bool(_re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+        r"|[0-9a-fA-F]{32}",
+        s,
+    ))
+
+
+def _sanitize_community_query(name: str) -> str:
+    """Strip quotes/prefixes and normalize slash spacing for community names.
+
+    Do NOT strip trailing school/district/community — those are part of
+    real catalog names (e.g. Alameda Unified School District).
+    """
+    import re as _re
+
+    q = (name or "").strip()
+    q = q.strip(" \t\n\r\"'“”‘’")
+    q = _re.sub(r"\s*/\s*", "/", q)
+    q = _re.sub(r"\s+", " ", q).strip()
+    q = _re.sub(
+        r"^(?:the|a|an|please|use|pick|choose|under|list under|go under)\s+",
+        "",
+        q,
+        flags=_re.I,
+    ).strip()
+    q = _re.sub(
+        r"\s+(?:please|instead|thanks|thank you)\.?$",
+        "",
+        q,
+        flags=_re.I,
+    ).strip(" \t\n\r\"'“”‘’.,")
+    return q
+
+
 async def _resolve_community(community_name: Optional[str], community_id: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Resolve a community name or id to (id, name). Returns (None, None) on miss."""
+    """Resolve a community name or id to (id, name). Returns (None, None) on miss.
+
+    Enforcement: only active catalog communities resolve. Free-text counties
+    and invented hubs return (None, None).
+    """
     from backend.ai_engine import supabase_get
 
-    if community_id:
+    raw_id = str(community_id or "").strip()
+    raw_name = (community_name or "").strip()
+
+    # Models often put the school name in community_id. Treat non-id values as names.
+    if raw_id and not _looks_like_community_id(raw_id):
+        if not raw_name:
+            raw_name = raw_id
+        raw_id = ""
+
+    if raw_id:
         try:
             rows = await supabase_get("communities", {
-                "id": f"eq.{community_id}",
+                "id": f"eq.{raw_id}",
                 "is_active": "eq.true",
                 "select": "id,name",
                 "limit": "1",
@@ -4553,42 +4680,56 @@ async def _resolve_community(community_name: Optional[str], community_id: Option
         except Exception as exc:
             logger.warning("community lookup by id failed: %s", exc)
 
-    name = (community_name or "").strip()
+    name = _sanitize_community_query(raw_name)
     if not name:
         return None, None
+    # Also try slash-spacing variants: "NEA / ACLC CC" ↔ "NEA/ACLC CC"
+    name_variants = [name]
+    spaced_slash = name.replace("/", " / ")
+    if spaced_slash not in name_variants:
+        name_variants.append(spaced_slash)
+    tight_slash = name.replace(" / ", "/").replace("/ ", "/").replace(" /", "/")
+    if tight_slash not in name_variants:
+        name_variants.append(tight_slash)
+
     try:
         # Try exact match first (case-insensitive via ilike).
         # Only match active communities so inactive ones can't be silently
         # assigned to new listings (frontend RLS would hide them anyway).
-        rows = await supabase_get("communities", {
-            "name": f"ilike.{name}",
-            "is_active": "eq.true",
-            "select": "id,name",
-            "limit": "1",
-        })
-        if not rows:
-            # Fall back to fuzzy contains match using % as the ILIKE wildcard.
-            # httpx URL-encodes % → %25; PostgREST URL-decodes it back to %
-            # before passing to PostgreSQL, so ILIKE '%name%' works correctly.
+        rows = []
+        for variant in name_variants:
             rows = await supabase_get("communities", {
-                "name": f"ilike.%{name}%",
+                "name": f"ilike.{variant}",
                 "is_active": "eq.true",
                 "select": "id,name",
                 "limit": "1",
             })
+            if rows:
+                break
+        if not rows:
+            # Fall back to fuzzy contains match using % as the ILIKE wildcard.
+            # httpx URL-encodes % → %25; PostgREST URL-decodes it back to %
+            # before passing to PostgreSQL, so ILIKE '%name%' works correctly.
+            for variant in name_variants:
+                rows = await supabase_get("communities", {
+                    "name": f"ilike.%{variant}%",
+                    "is_active": "eq.true",
+                    "select": "id,name",
+                    "limit": "1",
+                })
+                if rows:
+                    break
         if rows:
             return str(rows[0]["id"]), rows[0].get("name")
 
-        # Last resort: score all active communities locally (handles partial
-        # names like "Do Good" → "Do Good Warehouse", typos, word reorder).
-        all_rows = await supabase_get("communities", {
-            "is_active": "eq.true",
-            "select": "id,name",
-            "limit": "50",
-        })
-        hit = _best_community_name_match(name, all_rows or [])
-        if hit:
-            return str(hit["id"]), hit.get("name")
+        # Last resort: score the FULL active catalog locally (handles partial
+        # names like "Do Good" → "Do Good Warehouse", typos, word reorder,
+        # and every school/hub including NEA/ACLC CC).
+        all_rows = await _fetch_all_active_community_rows(select="id,name")
+        for variant in name_variants:
+            hit = _best_community_name_match(variant, all_rows or [])
+            if hit:
+                return str(hit["id"]), hit.get("name")
     except Exception as exc:
         logger.warning("community lookup by name failed: %s", exc)
     return None, None
@@ -4634,17 +4775,32 @@ def _best_community_name_match(query: str, rows: list) -> Optional[dict]:
     import difflib
     import re as _re
 
-    q = (query or "").strip().lower()
-    q = _re.sub(
-        r"^(?:the|a|an|please|use|pick|choose|under|list under|go under)\s+",
+    q = _sanitize_community_query(query).lower()
+    # "Contra Costa County" / "Alameda County" → try core place name too.
+    q_variants = [q]
+    no_county = _re.sub(r"\s+county\b", "", q).strip()
+    if no_county and no_county != q:
+        q_variants.append(no_county)
+    no_usd = _re.sub(
+        r"\s+(?:unified(?:\s+school)?\s+district|school\s+district|usd)\b",
         "",
         q,
     ).strip()
-    q = _re.sub(r"\s+(?:please|instead|community|school)\.?$", "", q).strip()
-    if len(q) < 2 or not rows:
+    if no_usd and no_usd not in q_variants:
+        q_variants.append(no_usd)
+    # Slash spacing variants for hubs like NEA/ACLC CC.
+    if "/" in q:
+        spaced = q.replace("/", " / ")
+        tight = q.replace(" / ", "/")
+        for v in (spaced, tight):
+            if v and v not in q_variants:
+                q_variants.append(v)
+
+    if not rows:
+        return None
+    if all(len(v) < 2 for v in q_variants):
         return None
 
-    q_tokens = set(_re.findall(r"[a-z0-9]+", q))
     best_row: Optional[dict] = None
     best_score = 0.0
     for row in rows:
@@ -4652,20 +4808,25 @@ def _best_community_name_match(query: str, rows: list) -> Optional[dict]:
         if not name:
             continue
         n_lower = name.lower()
-        n_tokens = set(_re.findall(r"[a-z0-9]+", n_lower))
-        if q == n_lower:
-            score = 1.0
-        elif q in n_lower or n_lower in q:
-            score = 0.93
-        else:
-            score = difflib.SequenceMatcher(None, q, n_lower).ratio()
-            if q_tokens and n_tokens:
-                overlap = len(q_tokens & n_tokens) / max(len(q_tokens), len(n_tokens))
-                score = max(score, overlap)
-        if score > best_score:
-            best_score = score
-            best_row = row
-    if best_row and best_score >= 0.55:
+        n_norm = _sanitize_community_query(name).lower()
+        n_tokens = set(_re.findall(r"[a-z0-9]+", n_norm))
+        for variant in q_variants:
+            q_tokens = set(_re.findall(r"[a-z0-9]+", variant))
+            if variant == n_lower or variant == n_norm:
+                score = 1.0
+            elif variant in n_norm or n_norm in variant:
+                score = 0.93
+            else:
+                score = difflib.SequenceMatcher(None, variant, n_norm).ratio()
+                if q_tokens and n_tokens:
+                    overlap = len(q_tokens & n_tokens) / max(len(q_tokens), len(n_tokens))
+                    # Prefer token overlap for multi-word county/school names.
+                    score = max(score, overlap * 0.98)
+            if score > best_score:
+                best_score = score
+                best_row = row
+    # Slightly lower threshold so "X County" can still hit "X Unified…".
+    if best_row and best_score >= 0.48:
         return best_row
     return None
 
@@ -4773,6 +4934,18 @@ async def _create_food_listing(
         return {"success": False, "error": "title is required"}
     unit_s = (unit or "items").strip()[:40] or "items"
 
+    photo = (image_url or "").strip() if isinstance(image_url, str) else ""
+    if not photo:
+        return {
+            "success": False,
+            "error": "photo_required",
+            "message": (
+                "A photo is required before posting. Ask the donor to upload "
+                "an image in chat, then retry with image_url. Do not offer to "
+                "post without a photo."
+            ),
+        }
+
     try:
         qty = float(quantity)
         if qty <= 0:
@@ -4827,16 +5000,31 @@ async def _create_food_listing(
         suggested_id, suggested_name = (None, None)
         if donor.get("community_id"):
             suggested_id, suggested_name = await _resolve_community(None, str(donor["community_id"]))
+        # Include the FULL active catalog so the model can offer real chips
+        # (counties that aren't in the catalog must be remapped to a school).
+        active_names: list[str] = []
+        try:
+            active_rows = await _fetch_all_active_community_rows(select="id,name")
+            for row in active_rows or []:
+                nm = str(row.get("name") or "").strip()
+                if nm:
+                    active_names.append(nm)
+        except Exception:
+            active_names = []
+        asked = (community_name or "").strip()
         return {
             "success": False,
             "error": "community_required",
             "message": (
-                "Could not resolve the community. Ask the donor to pick one "
-                "(call get_active_communities if needed), confirm their choice, "
-                "then pass community_name with community_confirmed=true."
+                f"Could not resolve community {asked!r}. Every donation must use "
+                "an active catalog community (school/hub). Counties and free-text "
+                "names are invalid. Call get_active_communities(max_results=100), "
+                "show the donor the exact names as chips, get confirmation, then "
+                "retry with that exact community_name and community_confirmed=true."
             ),
             "suggested_community_name": suggested_name,
             "suggested_community_id": suggested_id,
+            "active_communities": active_names,
         }
 
     listing_status = await _resolve_create_listing_status()
@@ -4853,15 +5041,25 @@ async def _create_food_listing(
         row["description"] = str(description).strip()[:2000]
 
     resolved_expiry = _normalize_expiry_date(expiry_date, expiration_date, best_before)
+    if resolved_expiry:
+        try:
+            from backend.ai.conversation_flow import normalize_expiration_date_for_post
+            resolved_expiry = (
+                normalize_expiration_date_for_post(resolved_expiry) or resolved_expiry
+            )
+        except Exception:
+            pass
     if not resolved_expiry:
         return {
             "success": False,
             "error": "expiry_date_required",
             "message": (
-                "Ask the donor when the food expires or was made (best-by date). "
+                "Ask the donor when the food is good until (best-by / use-by). "
                 "Map their answer to expiry_date as YYYY-MM-DD before calling "
-                "post_food_listing. Examples: made today → today's date; "
-                "good for 24h → tomorrow; bakery → 2 days out."
+                "post_food_listing. Prefer: Tomorrow, In 2 days, In 3 days, "
+                "Good for 24 hours. Do NOT use Made today/yesterday as the "
+                "expiry date — those are bake dates; convert them to a future "
+                "good-until date (made today → tomorrow)."
             ),
             "suggested_expiry_date": _suggested_expiry_for_category(cat),
         }

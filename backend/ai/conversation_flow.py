@@ -4,10 +4,11 @@ from __future__ import annotations
 import difflib
 import os
 import re
+import time
 from typing import Literal, Optional
 
 FlowKind = Literal["idle", "posting", "claiming", "finding", "requesting"]
-AssistanceMode = Literal["hands_on", "guided"]
+AssistanceMode = Literal["hands_on", "guided", "open_page"]
 AssistanceGoal = Literal["find", "share", "request"]
 
 _PHOTO_URL_RE = re.compile(
@@ -19,11 +20,17 @@ _PHOTO_URL_RE = re.compile(
 )
 
 _PHOTO_DECLINE_PHRASES: tuple[str, ...] = (
-    "no photo", "skip photo", "without a photo", "without photo",
-    "no picture", "sin foto", "no foto", "skip the photo",
-    "don't have a photo", "dont have a photo",
+    "no photo", "skip photo", "skip the photo", "skip the photos",
+    "skip photos", "or skip the photo", "or skip the photos",
+    "without a photo", "without photo", "without a picture",
+    "without photos", "no picture", "sin foto", "no foto",
+    "don't have a photo", "dont have a photo", "don't have a picture",
     "post without", "publish without", "post without a photo",
-    "post without photo", "sin imagen", "publicar sin foto",
+    "post without photo", "post without photos", "can i post without",
+    "can we post without", "post it without", "publish it without",
+    "no photo needed", "photo is optional", "photos are optional",
+    "sin imagen", "publicar sin foto", "sin fotos", "saltar la foto",
+    "saltar las fotos", "puedo publicar sin",
 )
 
 _PHOTO_ALREADY_SHARED_PHRASES: tuple[str, ...] = (
@@ -196,6 +203,19 @@ def _looks_like_food_quantity_spec(message: str) -> bool:
     return any(w in _FOOD_WORDS for w in _tokenize_words(message))
 
 
+def _hands_on_assistance_goal(
+    message: str,
+    history: list | None = None,
+) -> Optional[AssistanceGoal]:
+    """Goal when the user chose (or is mid) hands-on chat assistance."""
+    mode = detect_assistance_mode(message)
+    if mode is None:
+        mode = _assistance_mode_from_history(history)
+    if mode != "hands_on":
+        return None
+    return _goal_from_recent_user_intent(history)
+
+
 def is_posting_flow(message: str, history: list | None = None) -> bool:
     """True when the user is sharing/donating food (donor listing flow)."""
     if _is_distress(message):
@@ -204,6 +224,9 @@ def is_posting_flow(message: str, history: list | None = None) -> bool:
         return False
     t = (message or "").lower()
     if any(k in t for k in _SHARE_TRIGGERS):
+        return True
+    # "Do it for me" (and follow-ups) after a share ask — stay in posting.
+    if _hands_on_assistance_goal(message, history) == "share":
         return True
     if not history:
         return False
@@ -232,6 +255,8 @@ def is_request_flow(message: str, history: list | None = None) -> bool:
     if any(k in t for k in _REQUEST_TRIGGERS):
         if not is_posting_flow(message, history):
             return True
+    if _hands_on_assistance_goal(message, history) == "request":
+        return True
     if history:
         for msg in reversed(history[-8:]):
             text = (msg.get("message") or "").lower()
@@ -263,6 +288,16 @@ _HANDS_ON_MODE_PHRASES: tuple[str, ...] = (
     "hazlo tú", "hazlo tu", "encárgate", "encargate",
 )
 
+# Open page only — navigate, then stop. Never treated as guided coaching.
+_OPEN_PAGE_MODE_PHRASES: tuple[str, ...] = (
+    "open the form", "open share food", "open the share form",
+    "open share-food", "take me to the form",
+    "open find food", "open request food", "open buscar comida",
+    "abre el formulario", "abrir el formulario", "abre compartir",
+    "abrir buscar comida", "abrir solicitar comida",
+    "abrir el formulario de compartir",
+)
+
 _GUIDED_MODE_PHRASES: tuple[str, ...] = (
     "guide me", "guide me step by step", "walk me through",
     "step by step", "show me how", "show me the steps",
@@ -276,6 +311,7 @@ _ASSIST_MODE_ASK_MARKERS: tuple[str, ...] = (
     "do it for me", "handle everything", "guide me step by step",
     "walk you through", "do everything for you", "yourself step by step",
     "in chat for you", "pages yourself",
+    "open the form", "open find food", "open request food",
     "hazlo por mí", "hazlo por mi", "paso a paso", "guíame", "guiame",
     "yo te guío", "yo te guio", "tú lo haces", "tu lo haces",
 )
@@ -305,12 +341,13 @@ _FRESH_REQUEST_ASK_TRIGGERS: tuple[str, ...] = (
 
 
 def detect_assistance_mode(message: str) -> Optional[AssistanceMode]:
-    """Return hands_on / guided when the user explicitly picks a mode."""
+    """Return hands_on / guided / open_page when the user explicitly picks a mode."""
     t = (message or "").strip().lower()
     if not t:
         return None
-    # Prefer guided when both match ("guide me" contains no hands-on, but
-    # "do it for me step by step" is rare — check hands_on first for clarity).
+    # Open-page chips are navigate-only — check before guided (shared words).
+    if any(k in t for k in _OPEN_PAGE_MODE_PHRASES):
+        return "open_page"
     if any(k in t for k in _HANDS_ON_MODE_PHRASES):
         return "hands_on"
     if any(k in t for k in _GUIDED_MODE_PHRASES):
@@ -403,30 +440,152 @@ def _assistant_asked_assistance_mode(history: list | None) -> bool:
 
 
 def _assistance_mode_from_history(history: list | None) -> Optional[AssistanceMode]:
-    """Mode already chosen earlier in this find/share/request session."""
+    """Mode already chosen earlier in this find/share/request session.
+
+    Looks farther back than a single turn so a long guided walkthrough does
+    not silently lose "Guide me" after ~10 messages.
+    """
     if not history:
         return None
+    # Prefer an explicit mode phrase anywhere in the recent window.
+    for msg in reversed(history[-24:]):
+        if msg.get("role") != "user":
+            continue
+        mode = detect_assistance_mode(msg.get("message") or "")
+        if mode:
+            return mode
+    # Still mid guided walkthrough even if the user never said "done".
+    if _guided_steps_delivered(history) > 0:
+        return "guided"
     asked = False
-    for msg in reversed(history[-10:]):
+    for msg in reversed(history[-12:]):
         role = msg.get("role")
         text = (msg.get("message") or "").lower()
         if role == "assistant" and any(k in text for k in _ASSIST_MODE_ASK_MARKERS):
             asked = True
             continue
-        if role == "user":
-            mode = detect_assistance_mode(text)
-            if mode:
-                return mode
-            # User jumped past the fork with concrete action — treat as hands_on.
-            if asked and (
-                _looks_like_food_quantity_spec(text)
-                or any(k in text for k in (
-                    "near me", "search", "post", "claim", "apples", "bread",
-                    "request", "solicitud",
-                ))
-            ):
-                return "hands_on"
+        if role == "user" and asked and (
+            _looks_like_food_quantity_spec(text)
+            or any(k in text for k in (
+                "near me", "search", "post", "claim", "apples", "bread",
+                "request", "solicitud",
+            ))
+        ):
+            return "hands_on"
     return None
+
+
+# Durable per-user assistance session so guided mode survives history truncation.
+_ASSIST_SESSION: dict[str, dict] = {}
+_ASSIST_SESSION_TTL_S = 45 * 60
+
+
+def _assist_session_key(user_id: str | None) -> str:
+    return str(user_id or "").strip()
+
+
+def get_assistance_session(user_id: str | None) -> Optional[dict]:
+    key = _assist_session_key(user_id)
+    if not key:
+        return None
+    row = _ASSIST_SESSION.get(key)
+    if not row:
+        return None
+    try:
+        age = time.time() - float(row.get("updated_at") or 0)
+    except (TypeError, ValueError):
+        age = _ASSIST_SESSION_TTL_S + 1
+    if age > _ASSIST_SESSION_TTL_S:
+        _ASSIST_SESSION.pop(key, None)
+        return None
+    return row
+
+
+def set_assistance_session(
+    user_id: str | None,
+    *,
+    mode: Optional[AssistanceMode],
+    goal: Optional[AssistanceGoal],
+) -> None:
+    key = _assist_session_key(user_id)
+    if not key or not mode:
+        return
+    _ASSIST_SESSION[key] = {
+        "mode": mode,
+        "goal": goal,
+        "updated_at": time.time(),
+    }
+
+
+def clear_assistance_session(user_id: str | None) -> None:
+    key = _assist_session_key(user_id)
+    if key:
+        _ASSIST_SESSION.pop(key, None)
+
+
+def clear_user_ai_caches(user_id: str | None) -> None:
+    """Drop all per-user in-memory AI chat state (drafts, searches, modes).
+
+    Called when the user clears conversation history so the next turn does
+    not continue an old share/claim/assistance session from cache.
+    """
+    uid = str(user_id or "").strip()
+    if not uid:
+        return
+    clear_assistance_session(uid)
+    clear_share_drafts(uid)
+    clear_claim_drafts(uid)
+    clear_last_search_listings(uid)
+    clear_last_bulk_posted_ids(uid)
+    _last_donor_listings_by_user.pop(uid, None)
+    _last_write_action_by_user.pop(uid, None)
+
+
+def resolve_assistance_mode(
+    message: str,
+    history: list | None = None,
+    *,
+    user_id: str | None = None,
+    guide_state: dict | None = None,
+) -> Optional[AssistanceMode]:
+    """Explicit mode from this turn, durable session, or history.
+
+    Form focus / FormVoiceGuide does NOT force guided — voice on forms is
+    separate. Open-page is one-shot (explicit this turn only).
+    """
+    del guide_state  # reserved; page focus must not flip modes
+    explicit = detect_assistance_mode(message)
+    if explicit:
+        return explicit
+    session = get_assistance_session(user_id)
+    if session and session.get("mode") in ("guided", "hands_on"):
+        return session["mode"]  # type: ignore[return-value]
+    # open_page session: already opened — do not re-inject open_page
+    hist = _assistance_mode_from_history(history)
+    if hist and hist != "open_page":
+        return hist
+    return None
+
+
+def needs_assistance_mode_choice(
+    message: str,
+    history: list | None = None,
+    *,
+    user_id: str | None = None,
+    guide_state: dict | None = None,
+) -> bool:
+    """True when Nouri should ask open / do-it-for-me / guide-me before acting."""
+    if _is_distress(message):
+        return False
+    if resolve_assistance_mode(
+        message, history, user_id=user_id, guide_state=guide_state,
+    ):
+        return False
+    session = get_assistance_session(user_id)
+    if session and session.get("mode") in ("guided", "hands_on", "open_page"):
+        return False
+    goal = detect_assistance_goal(message, history)
+    return goal is not None
 
 
 def _posting_already_underway(history: list | None) -> bool:
@@ -475,29 +634,6 @@ def _request_already_underway(history: list | None) -> bool:
         "qué necesitas", "solicitud de comida",
         "post a food request for", "request posted",
     ))
-
-
-def needs_assistance_mode_choice(
-    message: str,
-    history: list | None = None,
-) -> bool:
-    """True when Nouri should ask do-it-for-me vs guide-me before acting."""
-    if _is_distress(message):
-        return False
-    if detect_assistance_mode(message):
-        return False
-    if _assistance_mode_from_history(history):
-        return False
-    goal = detect_assistance_goal(message, history)
-    return goal is not None
-
-
-def resolve_assistance_mode(
-    message: str,
-    history: list | None = None,
-) -> Optional[AssistanceMode]:
-    """Explicit mode from this turn, or previously chosen in-session."""
-    return detect_assistance_mode(message) or _assistance_mode_from_history(history)
 
 
 def _assistance_action_label(goal: AssistanceGoal, lang: str = "en") -> str:
@@ -583,16 +719,30 @@ _GUIDED_ADVANCE_SUBSTRINGS: tuple[str, ...] = (
 )
 
 
-def _guided_steps_delivered(history: list | None) -> int:
-    """How many GUIDED step instructions the assistant already sent."""
-    n = 0
+_GUIDED_STEP_RE = re.compile(
+    r"(?:GUIDED\s*[—–-]\s*STEP|GUIADO\s*[—–-]\s*PASO)\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _guided_last_step_no(history: list | None) -> int:
+    """Highest GUIDED step number the assistant already spoke (0 if none)."""
+    last = 0
     for m in history or []:
         if m.get("role") != "assistant":
             continue
         text = m.get("message") or ""
-        if re.search(r"GUIDED — STEP \d+", text) or re.search(r"GUIADO — PASO \d+", text):
-            n += 1
-    return n
+        for match in _GUIDED_STEP_RE.finditer(text):
+            try:
+                last = max(last, int(match.group(1)))
+            except (TypeError, ValueError):
+                continue
+    return last
+
+
+def _guided_steps_delivered(history: list | None) -> int:
+    """How many GUIDED step instructions the assistant already sent."""
+    return _guided_last_step_no(history)
 
 
 def _user_guided_advance(message: str) -> bool:
@@ -602,14 +752,138 @@ def _user_guided_advance(message: str) -> bool:
     return any(p in t for p in _GUIDED_ADVANCE_SUBSTRINGS)
 
 
-def _guided_step_index(history: list | None, message: str, total: int) -> tuple[int, bool]:
-    """Return (step_index, is_repeat)."""
-    delivered = _guided_steps_delivered(history)
+def _page_already_open(guide_state: dict | None, goal: str) -> bool:
+    if not isinstance(guide_state, dict):
+        return False
+    form_id = str(guide_state.get("formId") or "").lower()
+    path = str(guide_state.get("path") or "").lower()
+    page_key = str(guide_state.get("pageKey") or _page_key_from_path(path)).lower()
+    blob = f"{form_id} {path} {page_key}"
+    if goal == "share":
+        return "share" in blob or page_key == "share"
+    if goal == "request":
+        return "request" in blob or page_key == "request"
+    if goal in ("find", "claim"):
+        return (
+            page_key in {"find", "claim", "near-me"}
+            or "find" in blob
+            or "claim" in blob
+            or "near" in blob
+        )
+    if goal == "profile":
+        return page_key == "profile" or "profile" in blob
+    if goal == "settings":
+        return page_key == "settings" or "settings" in blob
+    if goal == "receipts":
+        return page_key == "receipts" or "receipts" in blob
+    return False
+
+
+def _guide_state_step_index(guide_state: dict | None, total: int) -> Optional[int]:
+    if not isinstance(guide_state, dict):
+        return None
+    raw = guide_state.get("stepIndex")
+    try:
+        idx = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if idx < 0:
+        return None
+    return min(idx, max(0, total - 1))
+
+
+def _guided_index_for_field(steps: tuple[dict, ...] | None, field_name: str) -> Optional[int]:
+    """Map a live form field to its guided-step index (prefer non-open steps)."""
+    if not steps or not field_name:
+        return None
+    open_hit: Optional[int] = None
+    for i, step in enumerate(steps):
+        if step.get("field") != field_name:
+            continue
+        if step.get("is_open_step"):
+            open_hit = i
+            continue
+        return i
+    return open_hit
+
+
+def _guided_step_index(
+    history: list | None,
+    message: str,
+    total: int,
+    guide_state: dict | None = None,
+    steps: tuple[dict, ...] | None = None,
+) -> tuple[int, bool]:
+    """Return (step_index, is_repeat).
+
+    Prefer mapping guide_state.fieldName → step (form hint indices are NOT
+    the same as guided steps). Fall back to chat GUIDED history.
+    """
+    field = ""
+    if isinstance(guide_state, dict):
+        field = str(guide_state.get("fieldName") or "").strip()
+    mapped = _guided_index_for_field(steps, field) if field else None
+    if mapped is not None:
+        if _user_guided_advance(message):
+            return min(mapped + 1, total - 1), False
+        t = (message or "").strip().lower()
+        repeat = t in {
+            "help", "huh", "what", "repeat", "again", "stuck", "ayuda", "otra vez",
+        }
+        return mapped, repeat
+
+    delivered = _guided_last_step_no(history)
     if delivered == 0:
         return 0, False
     if _user_guided_advance(message):
         return min(delivered, total - 1), False
-    return max(0, delivered - 1), True
+    t = (message or "").strip().lower()
+    repeat = t in {
+        "help", "huh", "what", "repeat", "again", "stuck", "ayuda", "otra vez",
+    }
+    return max(0, delivered - 1), repeat
+
+
+def _guided_from_steps(
+    steps: tuple[dict, ...],
+    *,
+    goal_label: str,
+    message: str,
+    history: list | None,
+    lang: str,
+    goal_key: str = "find",
+    guide_state: dict | None = None,
+) -> str:
+    idx, repeat = _guided_step_index(
+        history, message, len(steps), guide_state, steps=steps,
+    )
+    already = _page_already_open(guide_state, goal_key)
+    # Skip "open the page" when they are already on Share/Find/Request.
+    if (
+        already
+        and idx == 0
+        and steps
+        and steps[0].get("is_open_step")
+        and len(steps) > 1
+        and _guided_last_step_no(history) == 0
+    ):
+        idx = 1
+    step = steps[idx]
+    section = step["section_es"] if lang == "es" else step["section_en"]
+    body = step["body_es"] if lang == "es" else step["body_en"]
+    field = step.get("field") or None
+    return _guided_format_step(
+        goal=goal_label,
+        step_no=idx + 1,
+        total=len(steps),
+        section=section,
+        body=body,
+        lang=lang,
+        repeat=repeat,
+        field=field,
+        open_target=None,
+        already_open=already,
+    )
 
 
 def _guided_format_step(
@@ -621,200 +895,372 @@ def _guided_format_step(
     body: str,
     lang: str,
     repeat: bool,
+    field: str | None = None,
+    open_target: str | None = None,
+    already_open: bool = False,
 ) -> str:
+    del open_target  # never auto-navigate; we only TELL them what to do
+    field_bit = f" [field:{field}]" if field else ""
     repeat_note = (
-        "\nREPEAT — they may be stuck. Re-explain this SAME step more simply "
-        "with a concrete example. Do NOT skip ahead."
+        "\nREPEAT — they are stuck. Re-explain THIS same step even simpler, "
+        "like teaching a child. One tiny action only. Do NOT skip ahead."
         if repeat else
-        "\nGive ONLY this one step. Wait for them to say done / ok / what's next "
-        "before moving on. Do NOT dump future steps."
+        "\nGive ONLY this one baby-step. Wait for them to say done / ok / "
+        "what's next / listo before the next step. Do NOT dump future steps."
     )
+    already_bit = ""
+    if already_open and step_no == 1:
+        already_bit = (
+            "They are ALREADY on the right page — skip 'open the page' and "
+            "start the first on-page action instead.\n"
+            if lang != "es" else
+            "YA están en la página correcta — no pidas abrirla; empieza la "
+            "primera acción en la página.\n"
+        )
     if lang == "es":
         header = f"GUIADO — PASO {step_no} de {total} ({goal})"
         if section:
             header += f" — {section}"
+        header += field_bit
         return (
             f"{header}:\n"
+            "MODO GUIADO = tutorial IDIOTA-PROOF (como a un niño).\n"
+            "CRÍTICO: NO llames navigate_ui. NO abras ninguna página tú.\n"
+            "Solo DILE en el tutorial cómo abrirla "
+            "(menú → Compartir / Buscar / Solicitar). Ellos la abren.\n"
+            "Palabras cortas. UNA sola acción. Frases de 5–12 palabras.\n"
+            "Di exactamente dónde mirar y qué tocar/escribir.\n"
+            "Resalta SOLO el campo de este paso — no saltes campos.\n"
+            f"{already_bit}"
             f"{body}\n"
-            "Responde en 3–6 frases cortas, claras y amables. "
-            "NO llames post_food_listing, post_food_request, claim_*, ni search_* "
-            "en modo guiado salvo que lo pidan explícitamente."
+            "Tu respuesta visible DEBE empezar exactamente con esa línea GUIADO, "
+            "luego un renglón en blanco, luego 2–5 frases MUY simples. "
+            "Ejemplo de tono: 'Mira arriba. Pulsa Compartir comida. ¿Ya la ves? "
+            "Di listo.'\n"
+            "NO llames post_food_listing, post_food_request, claim_*, search_*, "
+            "ni navigate_ui salvo que lo pidan explícitamente."
             f"{repeat_note}"
         )
     header = f"GUIDED — STEP {step_no} of {total} ({goal})"
     if section:
         header += f" — {section}"
+    header += field_bit
     return (
         f"{header}:\n"
+        "GUIDED MODE = IDIOT-PROOF baby-step TUTORIAL.\n"
+        "CRITICAL: Do NOT call navigate_ui. Do NOT open any page yourself.\n"
+        "Only TELL the user how to open the page in the tutorial "
+        "(menu → Share Food / Find Food / Request Food). They open it.\n"
+        "Tiny words. ONE action only. Sentences of about 5–12 words.\n"
+        "Say exactly where to look and what to tap or type.\n"
+        "Highlight ONLY this step's field — do not skip required fields.\n"
+        f"{already_bit}"
         f"{body}\n"
-        "Reply in 3–6 short, clear, friendly sentences the user can follow easily. "
-        "Do NOT call post_food_listing, post_food_request, claim_*, or search_* "
-        "in guided mode unless they explicitly ask you to."
+        "Your user-visible reply MUST start with that GUIDED header line exactly, "
+        "then a blank line, then 2–5 VERY simple sentences. "
+        "Tone example: 'Look at the top menu. Tap Share Food. Do you see the form? "
+        "Say done.'\n"
+        "Do NOT call post_food_listing, post_food_request, claim_*, search_*, "
+        "or navigate_ui unless they explicitly ask you to."
         f"{repeat_note}"
     )
 
 
-# Detailed UI walkthrough steps — mirrors the real Share Food form layout.
+# Idiot-proof UI walkthrough: open the page first, then ONE required field
+# per step so every Share Food input gets highlighted (keep in sync with
+# utils/nouriGuide/registry.js → share-food.steps).
 _SHARE_GUIDED_UI: tuple[dict, ...] = (
     {
         "section_en": "Open Share Food",
         "section_es": "Abrir Compartir Comida",
+        "field": None,
+        "is_open_step": True,
         "body_en": (
-            "THIS turn call navigate_ui action=open target=create once (opens Share Food).\n"
-            "Tell them:\n"
-            "• The form has TWO parts — do not mix them up: "
-            "(1) Donor Information = blue box at the TOP, "
-            "(2) Food Listing Details = green box BELOW.\n"
-            "• Start in Donor Information: click the **Name / Organization** field "
-            "and type their full name or organization name.\n"
-            "• When finished, say 'done' or 'what's next' and you'll guide the next field."
+            "Tell them this, very slowly:\n"
+            "1) Look at the top of the screen.\n"
+            "2) Find the button or link that says Share Food (or Compartir).\n"
+            "3) Tap it.\n"
+            "4) Wait until you see a form with boxes to fill in.\n"
+            "5) Ask: 'Do you see the Share Food form now? Say done.'"
         ),
         "body_es": (
-            "ESTE turno llama navigate_ui action=open target=create una vez (abre Compartir Comida).\n"
-            "Explícales:\n"
-            "• El formulario tiene DOS partes — no las mezcles: "
-            "(1) Información del donante = caja azul ARRIBA, "
-            "(2) Detalles del alimento = caja verde ABAJO.\n"
-            "• Empieza en Información del donante: haz clic en **Nombre / Organización** "
-            "y escribe su nombre completo u organización.\n"
-            "• Cuando termine, que diga 'listo' o 'siguiente' y guías el siguiente campo."
+            "Diles esto, muy despacio:\n"
+            "1) Mira arriba en la pantalla.\n"
+            "2) Busca Compartir comida.\n"
+            "3) Púlsalo.\n"
+            "4) Espera hasta ver un formulario con cajas.\n"
+            "5) Pregunta: '¿Ya ves el formulario? Di listo.'"
         ),
     },
     {
-        "section_en": "Donor Information",
-        "section_es": "Información del donante",
+        "section_en": "Your name",
+        "section_es": "Tu nombre",
+        "field": "donor_name",
         "body_en": (
-            "Still in the blue **Donor Information** box at the top.\n"
-            "• Find **Donor Type** (dropdown).\n"
-            "• Choose **Individual/Family** if donating personally, or **Organization** "
-            "if representing a business or group.\n"
-            "• Say 'done' when selected."
+            "Baby step:\n"
+            "• Look at the TOP blue box — Donor Information.\n"
+            "• Tap Name / Organization (it should be highlighted).\n"
+            "• Type your name. Example: Maria Lopez.\n"
+            "• Say done when the name is there."
         ),
         "body_es": (
-            "Sigue en la caja azul **Información del donante** arriba.\n"
-            "• Busca **Tipo de donante** (menú).\n"
-            "• Elige **Individual/Familia** o **Organización** según corresponda.\n"
-            "• Di 'listo' cuando lo hayas seleccionado."
+            "Paso de bebé:\n"
+            "• Mira la caja azul ARRIBA — Información del donante.\n"
+            "• Pulsa Nombre u Organización (debe estar resaltado).\n"
+            "• Escribe tu nombre. Ejemplo: María López.\n"
+            "• Di listo cuando esté."
         ),
     },
     {
-        "section_en": "Donor Information",
-        "section_es": "Información del donante",
+        "section_en": "Donor type",
+        "section_es": "Tipo de donante",
+        "field": "donor_type",
         "body_en": (
-            "Still in **Donor Information** (blue box).\n"
-            "• Fill **ZIP Code**, **City**, and **State** — these are the pickup area details.\n"
-            "• Use the state dropdown for State.\n"
-            "• Say 'done' when all three are filled."
+            "Baby step:\n"
+            "• Stay in the blue box at the top.\n"
+            "• Tap Donor Type (highlighted).\n"
+            "• Choose Individual/Family OR Organization.\n"
+            "• Say done."
         ),
         "body_es": (
-            "Sigue en **Información del donante** (caja azul).\n"
-            "• Completa **Código postal**, **Ciudad** y **Estado**.\n"
-            "• Usa el menú desplegable para el Estado.\n"
-            "• Di 'listo' cuando los tres estén llenos."
+            "Paso de bebé:\n"
+            "• Quédate en la caja azul de arriba.\n"
+            "• Pulsa Tipo de donante (resaltado).\n"
+            "• Elige Individual/Familia u Organización.\n"
+            "• Di listo."
         ),
     },
     {
-        "section_en": "Donor Information",
-        "section_es": "Información del donante",
+        "section_en": "ZIP code",
+        "section_es": "Código postal",
+        "field": "donor_zip",
         "body_en": (
-            "Still in **Donor Information**.\n"
-            "• Open **Active Communities** and pick the school or community this donation belongs to.\n"
-            "• If it's locked to their signup community, leave it as shown.\n"
-            "• Say 'done' when set."
+            "Baby step:\n"
+            "• Still in the blue box.\n"
+            "• Tap ZIP Code (highlighted).\n"
+            "• Type your ZIP. Example: 94501.\n"
+            "• Say done."
         ),
         "body_es": (
-            "Sigue en **Información del donante**.\n"
-            "• Abre **Comunidades activas** y elige la escuela o comunidad.\n"
-            "• Si está bloqueado a su comunidad de registro, déjalo como está.\n"
-            "• Di 'listo' cuando esté."
+            "Paso de bebé:\n"
+            "• Sigue en la caja azul.\n"
+            "• Pulsa Código postal (resaltado).\n"
+            "• Escribe el ZIP. Ejemplo: 94501.\n"
+            "• Di listo."
         ),
     },
     {
-        "section_en": "Donor Information",
-        "section_es": "Información del donante",
+        "section_en": "City",
+        "section_es": "Ciudad",
+        "field": "donor_city",
         "body_en": (
-            "Still in **Donor Information**.\n"
-            "• Enter **Email** and/or **Phone** — at least one is required.\n"
-            "• Then scroll to **Full Address (for map location)** and type the complete "
-            "street address where food will be picked up (e.g. 123 Main St, City, ST 12345).\n"
-            "• Wait for the green checkmark that the address was located on the map.\n"
-            "• Say 'done' when the address is verified."
+            "Baby step:\n"
+            "• Tap City (highlighted).\n"
+            "• Type your city. Example: Alameda.\n"
+            "• Say done."
         ),
         "body_es": (
-            "Sigue en **Información del donante**.\n"
-            "• Ingresa **Correo** y/o **Teléfono** — al menos uno es obligatorio.\n"
-            "• Luego completa **Dirección completa** para el mapa.\n"
-            "• Espera la marca verde de verificación.\n"
-            "• Di 'listo' cuando la dirección esté verificada."
+            "Paso de bebé:\n"
+            "• Pulsa Ciudad (resaltado).\n"
+            "• Escribe la ciudad. Ejemplo: Alameda.\n"
+            "• Di listo."
         ),
     },
     {
-        "section_en": "Food Listing Details",
-        "section_es": "Detalles del alimento",
+        "section_en": "State",
+        "section_es": "Estado",
+        "field": "donor_state",
         "body_en": (
-            "Now scroll down to the green **Food Listing Details** section — "
-            "this is separate from donor info.\n"
-            "• Click **What are you donating?** and type a short food name (e.g. Fresh Apples).\n"
-            "• Open **Category** and pick the best match (Produce, Dairy, Bakery, etc.).\n"
-            "• Say 'done' when both are filled."
+            "Baby step:\n"
+            "• Tap State (highlighted).\n"
+            "• Pick your state from the list.\n"
+            "• Say done."
         ),
         "body_es": (
-            "Baja a la sección verde **Detalles del alimento** — separada del donante.\n"
-            "• En **¿Qué estás donando?** escribe un nombre corto (ej. Manzanas frescas).\n"
-            "• En **Categoría** elige la mejor opción.\n"
-            "• Di 'listo' cuando ambos estén llenos."
+            "Paso de bebé:\n"
+            "• Pulsa Estado (resaltado).\n"
+            "• Elige el estado de la lista.\n"
+            "• Di listo."
         ),
     },
     {
-        "section_en": "Food Listing Details",
-        "section_es": "Detalles del alimento",
+        "section_en": "Community",
+        "section_es": "Comunidad",
+        "field": "school_district",
         "body_en": (
-            "Still in **Food Listing Details** (green box).\n"
-            "• Fill **Description** — a few sentences about condition, source, and anything "
-            "recipients should know.\n"
-            "• Then enter **Quantity** (number) and choose a **Unit** (lb, kg, count, etc.).\n"
-            "• Say 'done' when complete."
+            "Baby step:\n"
+            "• Tap Active Communities / school list (highlighted).\n"
+            "• Pick your school or community.\n"
+            "• Say done."
         ),
         "body_es": (
-            "Sigue en **Detalles del alimento** (caja verde).\n"
-            "• Completa **Descripción**.\n"
-            "• Luego **Cantidad** y **Unidad**.\n"
-            "• Di 'listo' cuando termines."
+            "Paso de bebé:\n"
+            "• Pulsa Comunidades activas (resaltado).\n"
+            "• Elige tu escuela o comunidad.\n"
+            "• Di listo."
         ),
     },
     {
-        "section_en": "Food Listing Details",
-        "section_es": "Detalles del alimento",
+        "section_en": "Email or phone",
+        "section_es": "Correo o teléfono",
+        "field": "donor_email",
         "body_en": (
-            "Still in **Food Listing Details**.\n"
-            "• If category is NOT Fresh Produce, fill **Expiration Date**.\n"
-            "• Produce can skip expiry. **Pickup Deadline** is optional.\n"
-            "• Dietary tags and allergens are optional — check any that apply or skip.\n"
-            "• Say 'done' when ready for the photo step."
+            "Baby step:\n"
+            "• Tap Email (highlighted) OR Phone.\n"
+            "• Type one contact — email or phone is enough.\n"
+            "• Say done."
         ),
         "body_es": (
-            "Sigue en **Detalles del alimento**.\n"
-            "• Si NO es producto fresco, completa **Fecha de vencimiento**.\n"
-            "• Etiquetas dietéticas y alérgenos son opcionales.\n"
-            "• Di 'listo' para el paso de la foto."
+            "Paso de bebé:\n"
+            "• Pulsa Correo (resaltado) O Teléfono.\n"
+            "• Escribe uno — correo o teléfono basta.\n"
+            "• Di listo."
         ),
     },
     {
-        "section_en": "Food Listing Details",
-        "section_es": "Detalles del alimento",
+        "section_en": "Pickup address",
+        "section_es": "Dirección de recogida",
+        "field": "full_address",
         "body_en": (
-            "Last required field in **Food Listing Details**.\n"
-            "• Click **Photo**, choose **Upload**, and select a real photo of the food "
-            "(no stock images).\n"
-            "• Review everything: donor info at top, food details below.\n"
-            "• Click **Submit Listing** at the bottom.\n"
-            "• Tell them you'll wait — ask them to say 'submitted' when done or if they hit an error."
+            "Baby step:\n"
+            "• Tap Full Address / Pickup Address (highlighted).\n"
+            "• Type your street address slowly.\n"
+            "• Wait for the green check on the map.\n"
+            "• Say done."
         ),
         "body_es": (
-            "Último campo obligatorio en **Detalles del alimento**.\n"
-            "• Sube una **Foto** real del alimento.\n"
-            "• Revisa todo y pulsa **Enviar listado**.\n"
-            "• Pídeles que digan 'enviado' cuando terminen o si hay un error."
+            "Paso de bebé:\n"
+            "• Pulsa Dirección completa (resaltado).\n"
+            "• Escribe la calle despacio.\n"
+            "• Espera la marca verde del mapa.\n"
+            "• Di listo."
+        ),
+    },
+    {
+        "section_en": "Food name",
+        "section_es": "Nombre del alimento",
+        "field": "title",
+        "body_en": (
+            "Baby step:\n"
+            "• Scroll DOWN to the green box — Food Listing Details.\n"
+            "• Tap What are you donating? (highlighted).\n"
+            "• Type the food name. Example: Fresh apples.\n"
+            "• Say done."
+        ),
+        "body_es": (
+            "Paso de bebé:\n"
+            "• Baja a la caja verde — Detalles del alimento.\n"
+            "• Pulsa ¿Qué estás donando? (resaltado).\n"
+            "• Escribe el nombre. Ejemplo: Manzanas frescas.\n"
+            "• Di listo."
+        ),
+    },
+    {
+        "section_en": "Category",
+        "section_es": "Categoría",
+        "field": "category",
+        "body_en": (
+            "Baby step:\n"
+            "• Tap Category (highlighted).\n"
+            "• Pick one (produce, bakery, prepared…).\n"
+            "• Say done."
+        ),
+        "body_es": (
+            "Paso de bebé:\n"
+            "• Pulsa Categoría (resaltado).\n"
+            "• Elige una (fruta, panadería, preparada…).\n"
+            "• Di listo."
+        ),
+    },
+    {
+        "section_en": "Description",
+        "section_es": "Descripción",
+        "field": "description",
+        "body_en": (
+            "Baby step:\n"
+            "• Tap Description (highlighted).\n"
+            "• Write one short sentence about the food.\n"
+            "• Say done."
+        ),
+        "body_es": (
+            "Paso de bebé:\n"
+            "• Pulsa Descripción (resaltado).\n"
+            "• Escribe una frase corta sobre la comida.\n"
+            "• Di listo."
+        ),
+    },
+    {
+        "section_en": "Quantity",
+        "section_es": "Cantidad",
+        "field": "quantity",
+        "body_en": (
+            "Baby step:\n"
+            "• Tap Quantity (highlighted).\n"
+            "• Type how many. Example: 5.\n"
+            "• Say done."
+        ),
+        "body_es": (
+            "Paso de bebé:\n"
+            "• Pulsa Cantidad (resaltado).\n"
+            "• Escribe cuántos. Ejemplo: 5.\n"
+            "• Di listo."
+        ),
+    },
+    {
+        "section_en": "Unit",
+        "section_es": "Unidad",
+        "field": "unit",
+        "body_en": (
+            "Baby step:\n"
+            "• Tap Unit (highlighted).\n"
+            "• Pick a unit (lb, count, boxes…).\n"
+            "• Say done."
+        ),
+        "body_es": (
+            "Paso de bebé:\n"
+            "• Pulsa Unidad (resaltado).\n"
+            "• Elige una (lb, unidades, cajas…).\n"
+            "• Di listo."
+        ),
+    },
+    {
+        "section_en": "Expiration",
+        "section_es": "Caducidad",
+        "field": "expiry_date",
+        "body_en": (
+            "Baby step:\n"
+            "• Tap Expiration Date (highlighted).\n"
+            "• Pick a day (required unless this is fresh produce).\n"
+            "• Fresh produce only: you may say done without a date.\n"
+            "• Say done."
+        ),
+        "body_es": (
+            "Paso de bebé:\n"
+            "• Pulsa Fecha de vencimiento (resaltado).\n"
+            "• Elige un día (obligatorio salvo producto fresco).\n"
+            "• Solo producto fresco: puedes decir listo sin fecha.\n"
+            "• Di listo."
+        ),
+    },
+    {
+        "section_en": "Photo & submit",
+        "section_es": "Foto y enviar",
+        "field": "image",
+        "body_en": (
+            "Baby step:\n"
+            "• Tap Photo (highlighted) — REQUIRED; you cannot submit without one.\n"
+            "• Tap Upload and pick a real picture of YOUR food.\n"
+            "• Look at the whole form once.\n"
+            "• Tap Submit Listing at the bottom.\n"
+            "• Say submitted when it works, or tell me if you see an error."
+        ),
+        "body_es": (
+            "Paso de bebé:\n"
+            "• Pulsa Foto (resaltado) — OBLIGATORIA; no se puede enviar sin ella.\n"
+            "• Pulsa Subir y elige una foto REAL de TU comida.\n"
+            "• Mira el formulario una vez.\n"
+            "• Pulsa Enviar listado abajo.\n"
+            "• Di enviado si salió bien, o cuéntame el error."
         ),
     },
 )
@@ -823,77 +1269,112 @@ _REQUEST_GUIDED_UI: tuple[dict, ...] = (
     {
         "section_en": "Open Request Food",
         "section_es": "Abrir Solicitar Comida",
+        "field": "title",
+        "is_open_step": True,
         "body_en": (
-            "THIS turn call navigate_ui action=open target=request once.\n"
-            "Tell them:\n"
-            "• You're opening the **Request Food** form.\n"
-            "• First field: **What food do you need?** — type what they're looking for "
-            "(e.g. Rice, baby formula, fresh vegetables).\n"
-            "• Say 'done' or 'what's next' when filled."
+            "Tell them this, very slowly:\n"
+            "1) Look at the top menu.\n"
+            "2) Find Request Food.\n"
+            "3) Tap it.\n"
+            "4) Wait for the request form to show.\n"
+            "5) Ask: 'Do you see the Request Food form? Say done.'"
         ),
         "body_es": (
-            "ESTE turno llama navigate_ui action=open target=request una vez.\n"
-            "• Abres el formulario **Solicitar Comida**.\n"
-            "• Primer campo: **¿Qué alimento necesitas?**\n"
-            "• Di 'listo' o 'siguiente' cuando lo hayas llenado."
+            "Diles esto, muy despacio:\n"
+            "1) Mira el menú de arriba.\n"
+            "2) Busca Solicitar comida.\n"
+            "3) Púlsalo.\n"
+            "4) Espera el formulario.\n"
+            "5) Pregunta: '¿Ya ves el formulario? Di listo.'"
         ),
     },
     {
-        "section_en": "Request form",
-        "section_es": "Formulario de solicitud",
+        "section_en": "What you need",
+        "section_es": "Qué necesitas",
+        "field": "title",
         "body_en": (
-            "• Select **Category** from the dropdown.\n"
-            "• Enter **How much?** (quantity) and pick a **Unit** (items, lb, bags, etc.).\n"
-            "• Say 'done' when both are set."
+            "Baby step:\n"
+            "• Tap What food do you need?\n"
+            "• Type one food. Example: Rice.\n"
+            "• Say done."
         ),
         "body_es": (
-            "• Elige **Categoría**.\n"
-            "• Ingresa **¿Cuánto?** y la **Unidad**.\n"
-            "• Di 'listo' cuando esté."
+            "Paso de bebé:\n"
+            "• Pulsa ¿Qué alimento necesitas?\n"
+            "• Escribe uno. Ejemplo: Arroz.\n"
+            "• Di listo."
         ),
     },
     {
-        "section_en": "Request form",
-        "section_es": "Formulario de solicitud",
+        "section_en": "How much",
+        "section_es": "Cuánto",
+        "field": "category",
         "body_en": (
-            "• **Needed by** is optional — add a date if they have a deadline.\n"
-            "• Choose **School / community** so donors in their area can see the request.\n"
-            "• Say 'done' when the community is selected."
+            "Baby step:\n"
+            "• Tap Category and pick one.\n"
+            "• Tap How much? and type a number.\n"
+            "• Pick a Unit (items, lb, bags…).\n"
+            "• Say done."
         ),
         "body_es": (
-            "• **Necesito para** es opcional.\n"
-            "• Elige **Escuela / comunidad**.\n"
-            "• Di 'listo' cuando esté."
+            "Paso de bebé:\n"
+            "• Elige Categoría.\n"
+            "• Escribe ¿Cuánto? con un número.\n"
+            "• Elige Unidad.\n"
+            "• Di listo."
         ),
     },
     {
-        "section_en": "Request form",
-        "section_es": "Formulario de solicitud",
+        "section_en": "Community",
+        "section_es": "Comunidad",
+        "field": "school_district",
         "body_en": (
-            "• **Details** and **Dietary needs** are optional — add household size or "
-            "allergies if relevant.\n"
-            "• Fill **Your name** and **Email** (required).\n"
-            "• **Phone** and **Preferred pickup area** are optional.\n"
-            "• Say 'done' when contact info is complete."
+            "Baby step:\n"
+            "• Needed by is optional — skip if you have no date.\n"
+            "• Tap School / community and pick yours.\n"
+            "• Say done."
         ),
         "body_es": (
-            "• **Detalles** y **Necesidades dietéticas** son opcionales.\n"
-            "• Completa **Tu nombre** y **Correo** (obligatorios).\n"
-            "• Di 'listo' cuando la info de contacto esté lista."
+            "Paso de bebé:\n"
+            "• Necesito para es opcional — sáltalo si no hay fecha.\n"
+            "• Elige Escuela / comunidad.\n"
+            "• Di listo."
         ),
     },
     {
-        "section_en": "Submit request",
-        "section_es": "Enviar solicitud",
+        "section_en": "Your contact",
+        "section_es": "Tu contacto",
+        "field": "requester_name",
         "body_en": (
-            "• Review all fields.\n"
-            "• Click **Submit food request** at the bottom.\n"
-            "• Ask them to say 'submitted' when done or tell you if something blocked them."
+            "Baby step:\n"
+            "• Type Your name.\n"
+            "• Type Email.\n"
+            "• Phone is optional.\n"
+            "• Say done."
         ),
         "body_es": (
-            "• Revisa todos los campos.\n"
-            "• Pulsa **Enviar solicitud de comida**.\n"
-            "• Pídeles que digan 'enviado' cuando terminen."
+            "Paso de bebé:\n"
+            "• Escribe Tu nombre.\n"
+            "• Escribe Correo.\n"
+            "• Teléfono es opcional.\n"
+            "• Di listo."
+        ),
+    },
+    {
+        "section_en": "Submit",
+        "section_es": "Enviar",
+        "field": "requester_email",
+        "body_en": (
+            "Baby step:\n"
+            "• Look at the form one time.\n"
+            "• Tap Submit food request at the bottom.\n"
+            "• Say submitted when it works, or tell me the error."
+        ),
+        "body_es": (
+            "Paso de bebé:\n"
+            "• Mira el formulario una vez.\n"
+            "• Pulsa Enviar solicitud de comida.\n"
+            "• Di enviado si salió bien, o cuéntame el error."
         ),
     },
 )
@@ -902,106 +1383,413 @@ _FIND_GUIDED_UI: tuple[dict, ...] = (
     {
         "section_en": "Open Find Food",
         "section_es": "Abrir Buscar Comida",
+        "field": "search",
+        "is_open_step": True,
         "body_en": (
-            "THIS turn call navigate_ui action=open target=list once (opens Find Food).\n"
-            "Tell them:\n"
-            "• You're opening **Find Food** where available donations are listed.\n"
-            "• They can browse cards, use filters on the side, or tell you what they want "
-            "and you can search for them.\n"
-            "• Ask: 'What kind of food are you looking for today?'"
+            "Tell them this, very slowly:\n"
+            "1) Look at the top menu.\n"
+            "2) Find Find Food (or Buscar comida).\n"
+            "3) Tap it.\n"
+            "4) Wait until you see food cards or a search box.\n"
+            "5) Ask: 'Do you see Find Food now? Say done.'"
         ),
         "body_es": (
-            "ESTE turno llama navigate_ui action=open target=list una vez.\n"
-            "• Abres **Buscar Comida** con donaciones disponibles.\n"
-            "• Pueden explorar tarjetas o decirte qué buscan.\n"
-            "• Pregunta: '¿Qué tipo de comida buscas hoy?'"
+            "Diles esto, muy despacio:\n"
+            "1) Mira el menú de arriba.\n"
+            "2) Busca Buscar comida.\n"
+            "3) Púlsalo.\n"
+            "4) Espera ver tarjetas o un buscador.\n"
+            "5) Pregunta: '¿Ya ves Buscar comida? Di listo.'"
         ),
     },
     {
-        "section_en": "Find Food — search",
-        "section_es": "Buscar Comida — búsqueda",
+        "section_en": "What to look for",
+        "section_es": "Qué buscar",
+        "field": "search",
         "body_en": (
-            "• Ask if they have **allergies or dietary restrictions** to filter by "
-            "(vegetarian, nut-free, etc.). If none, they can say 'none'.\n"
-            "• Then call search_food_near_user THIS turn with their food type and any "
-            "dietary filters.\n"
-            "• Show results clearly with numbers and say: 'Pick a number, or tell me "
-            "which one you want.'"
+            "Baby step:\n"
+            "• Look for the search box on Find Food.\n"
+            "• Or just tell me in chat what food you want.\n"
+            "• Example: 'bread' or 'apples'.\n"
+            "• Say done when you typed it or told me."
         ),
         "body_es": (
-            "• Pregunta por **alergias o restricciones dietéticas**. Si no hay, 'ninguna'.\n"
-            "• Llama search_food_near_user ESTE turno.\n"
-            "• Muestra resultados numerados y pide que elijan uno."
+            "Paso de bebé:\n"
+            "• Busca la caja de búsqueda.\n"
+            "• O dime en el chat qué comida quieres.\n"
+            "• Ejemplo: 'pan' o 'manzanas'.\n"
+            "• Di listo cuando lo hayas dicho."
         ),
     },
     {
-        "section_en": "Claim food",
-        "section_es": "Reclamar comida",
+        "section_en": "Look at results",
+        "section_es": "Ver resultados",
+        "field": "search",
         "body_en": (
-            "• When they pick a listing (#1, #2, etc.), tell them:\n"
-            "  1) Click **Claim** on that food card on Find Food, OR say the number "
-            "and you can claim it for them in chat.\n"
-            "  2) On the claim page, use **+ / −** to choose how many portions.\n"
-            "  3) Read the pickup location and deadline carefully.\n"
-            "  4) Click **Confirm Claim**.\n"
-            "• Offer to claim in chat if they prefer not to use the page."
+            "Baby step:\n"
+            "• Look at the food cards on the page.\n"
+            "• Or ask me to search for you in chat.\n"
+            "• Pick one food you like.\n"
+            "• Say the number or the name. Example: '#1' or 'the bread'.\n"
+            "• Say done when you picked one."
         ),
         "body_es": (
-            "• Cuando elijan un listado:\n"
-            "  1) Pulsa **Reclamar** en la tarjeta, o diles el número y reclamas en el chat.\n"
-            "  2) En la página de reclamo, usa **+ / −** para la cantidad.\n"
-            "  3) Lee ubicación y fecha límite.\n"
-            "  4) Pulsa **Confirmar reclamo**.\n"
-            "• Ofrece reclamar en el chat si prefieren."
+            "Paso de bebé:\n"
+            "• Mira las tarjetas de comida.\n"
+            "• O pídeme buscar en el chat.\n"
+            "• Elige una.\n"
+            "• Di el número o el nombre. Ejemplo: '#1'.\n"
+            "• Di listo cuando elijas."
+        ),
+    },
+    {
+        "section_en": "Claim it",
+        "section_es": "Reclamarla",
+        "field": "claimQty",
+        "body_en": (
+            "Baby step:\n"
+            "• Tap Claim on that food card.\n"
+            "• Or tell me 'claim it for me'.\n"
+            "• Use + and − to pick how many.\n"
+            "• Read the pickup place.\n"
+            "• Tap Confirm Claim.\n"
+            "• Say done when it is confirmed."
+        ),
+        "body_es": (
+            "Paso de bebé:\n"
+            "• Pulsa Reclamar en esa tarjeta.\n"
+            "• O dime 'reclámala por mí'.\n"
+            "• Usa + y − para la cantidad.\n"
+            "• Lee el lugar de recogida.\n"
+            "• Pulsa Confirmar reclamo.\n"
+            "• Di listo cuando esté."
         ),
     },
 )
 
 
-def _guided_from_steps(
-    steps: tuple[dict, ...],
-    *,
-    goal_label: str,
+def _guided_share_step(
     message: str,
     history: list | None,
-    lang: str,
+    lang: str = "en",
+    guide_state: dict | None = None,
 ) -> str:
-    idx, repeat = _guided_step_index(history, message, len(steps))
-    step = steps[idx]
-    section = step["section_es"] if lang == "es" else step["section_en"]
-    body = step["body_es"] if lang == "es" else step["body_en"]
-    return _guided_format_step(
-        goal=goal_label,
-        step_no=idx + 1,
-        total=len(steps),
-        section=section,
-        body=body,
-        lang=lang,
-        repeat=repeat,
-    )
-
-
-def _guided_share_step(message: str, history: list | None, lang: str = "en") -> str:
     """Detailed UI walkthrough for Share Food — one clear step per turn."""
     label = "COMPARTIR" if lang == "es" else "SHARE FOOD"
     return _guided_from_steps(
-        _SHARE_GUIDED_UI, goal_label=label, message=message, history=history, lang=lang,
+        _SHARE_GUIDED_UI,
+        goal_label=label,
+        message=message,
+        history=history,
+        lang=lang,
+        goal_key="share",
+        guide_state=guide_state,
     )
 
 
-def _guided_request_step(message: str, history: list | None, lang: str = "en") -> str:
+def _guided_request_step(
+    message: str,
+    history: list | None,
+    lang: str = "en",
+    guide_state: dict | None = None,
+) -> str:
     """Detailed UI walkthrough for Request Food."""
     label = "SOLICITUD" if lang == "es" else "REQUEST FOOD"
     return _guided_from_steps(
-        _REQUEST_GUIDED_UI, goal_label=label, message=message, history=history, lang=lang,
+        _REQUEST_GUIDED_UI,
+        goal_label=label,
+        message=message,
+        history=history,
+        lang=lang,
+        goal_key="request",
+        guide_state=guide_state,
     )
 
 
-def _guided_find_step(message: str, history: list | None, lang: str = "en") -> str:
+def _guided_find_step(
+    message: str,
+    history: list | None,
+    lang: str = "en",
+    guide_state: dict | None = None,
+) -> str:
     """Detailed UI walkthrough for Find / Claim food."""
     label = "BUSCAR" if lang == "es" else "FIND FOOD"
     return _guided_from_steps(
-        _FIND_GUIDED_UI, goal_label=label, message=message, history=history, lang=lang,
+        _FIND_GUIDED_UI,
+        goal_label=label,
+        message=message,
+        history=history,
+        lang=lang,
+        goal_key="find",
+        guide_state=guide_state,
+    )
+
+
+def build_live_guide_prompt(guide_state: dict | None, lang: str = "en") -> Optional[str]:
+    """Tell the model what the user is looking at on screen right now."""
+    if not isinstance(guide_state, dict):
+        return None
+    form_id = guide_state.get("formId")
+    field = guide_state.get("fieldName")
+    label = guide_state.get("label")
+    path = guide_state.get("path")
+    page_key = guide_state.get("pageKey") or _page_key_from_path(str(path or ""))
+    search = guide_state.get("search") or ""
+    source = guide_state.get("source")
+    if not (form_id or field or path or page_key):
+        return None
+    step = guide_state.get("stepIndex")
+    total = guide_state.get("stepTotal")
+    step_bit = ""
+    try:
+        if step is not None and total:
+            step_bit = f" Guide step {int(step) + 1} of {int(total)}."
+    except (TypeError, ValueError):
+        step_bit = ""
+    search_bit = f"\n- Query: {search}" if search else ""
+    if lang == "es":
+        return (
+            "ESTADO EN VIVO DE LA APP (fuente de verdad — no lo adivines):\n"
+            f"- Página: {path or 'desconocida'} (clave: {page_key or 'desconocida'})"
+            f"{search_bit}\n"
+            f"- Formulario: {form_id or 'ninguno'}\n"
+            f"- Campo enfocado: {label or field or 'ninguno'}"
+            f"{' (`' + str(field) + '`)' if field else ''}\n"
+            f"- Origen de la guía: {source or 'desconocido'}.{step_bit}\n"
+            "Habla de ESE campo/página. No reinicies el flujo ni pidas abrir "
+            "una página que ya está abierta."
+        )
+    return (
+        "LIVE APP STATE (source of truth — do not guess):\n"
+        f"- Page: {path or 'unknown'} (key: {page_key or 'unknown'})"
+        f"{search_bit}\n"
+        f"- Form: {form_id or 'none'}\n"
+        f"- Focused field: {label or field or 'none'}"
+        f"{' (`' + str(field) + '`)' if field else ''}\n"
+        f"- Guide source: {source or 'unknown'}.{step_bit}\n"
+        "Talk about THAT field/page. Do not restart the flow or ask them to "
+        "open a page that is already open."
+    )
+
+
+def _page_key_from_path(path: str) -> str:
+    p = (path or "/").rstrip("/") or "/"
+    if p == "/":
+        return "home"
+    if p.startswith("/admin"):
+        return "admin"
+    if p.startswith("/community/"):
+        return "community"
+    if p.startswith("/blog"):
+        return "blog"
+    exact = {
+        "/share": "share",
+        "/find": "find",
+        "/near-me": "near-me",
+        "/request": "request",
+        "/claim": "claim",
+        "/profile": "profile",
+        "/settings": "settings",
+        "/receipts": "receipts",
+        "/dashboard": "dashboard",
+        "/listings": "listings",
+        "/community-requests": "community-requests",
+        "/login": "login",
+        "/signup": "signup",
+        "/donations": "donations",
+        "/notifications": "notifications",
+        "/recipes": "recipes",
+        "/contact": "contact",
+        "/how-it-works": "how-it-works",
+        "/sponsors": "sponsors",
+        "/donate": "donate",
+        "/faqs": "faqs",
+        "/featured": "featured",
+        "/news": "news",
+    }
+    if p in exact:
+        return exact[p]
+    return p.lstrip("/").split("/", 1)[0] or "unknown"
+
+
+_PAGE_KNOWLEDGE_EN: dict[str, str] = {
+    "home": (
+        "HOME (/). Marketing landing. Main CTAs: Find Food (/find), Share Food (/share), "
+        "Request Food (/request). Offer those three paths; use navigate_ui to open them."
+    ),
+    "share": (
+        "SHARE FOOD (/share) — donor listing form. Fields: donor name/org, donor type, "
+        "food title, quantity, allergens, description, photos (REQUIRED before post), "
+        "community, pickup address, pickup window, expiry. Hands-on: collect in chat then "
+        "post_food_listing with images[]. Guided: coach one field at a time; navigate_ui "
+        "target=create only if not already on /share. Never skip photo."
+    ),
+    "find": (
+        "FIND FOOD (/find) — recipient browse/map/list. Search/filter listings, claim from "
+        "cards or via claim_listing in chat. Hands-on: search_food_near_user then claim. "
+        "Guided: coach filters/map; navigate_ui target=list if not on /find. Near-me is /near-me."
+    ),
+    "near-me": (
+        "NEAR ME (/near-me) — location-first browse. Same claim/search tools as Find Food. "
+        "navigate_ui target=near-me."
+    ),
+    "request": (
+        "REQUEST FOOD (/request) — recipient posts a need (text-only, NO photos). "
+        "post_food_request tool. Guided: coach the request form; navigate_ui target=request."
+    ),
+    "claim": (
+        "CLAIM FOOD (/claim) — claim a specific listing (often opened with listing state). "
+        "Prefer claim_listing in chat when they have a listing id; else navigate_ui target=claim "
+        "and coach quantity/confirm. Do not invent listing ids."
+    ),
+    "profile": (
+        "PROFILE (/profile) — user identity, dietary prefs, listings tabs, stats. "
+        "get_user_profile / update_user_profile. navigate_ui target=profile. "
+        "Do not post food from here; send donors to /share."
+    ),
+    "settings": (
+        "SETTINGS (/settings) — account + Accessibility (Easy Mode, voice, captions). "
+        "navigate_ui target=settings. Explain a11y toggles plainly; never change settings "
+        "without clear consent."
+    ),
+    "receipts": (
+        "RECEIPTS / PICKUPS (/receipts) — claim history and pickup details. "
+        "navigate_ui target=receipts. Help find pickup times/addresses for their claims."
+    ),
+    "dashboard": (
+        "DASHBOARD (/dashboard) — impact summary and shortcuts. navigate_ui target=dashboard. "
+        "Offer Find / Share / Request based on community_role."
+    ),
+    "listings": (
+        "MY LISTINGS (/listings) — donor manages their posts. Update/delete via tools; "
+        "navigate_ui target=listings. New posts go through /share."
+    ),
+    "community-requests": (
+        "COMMUNITY REQUESTS (/community-requests) — donors fulfill open requests. "
+        "navigate_ui target=community-requests. Prefill share via navigate_ui create+query."
+    ),
+    "community": (
+        "COMMUNITY DETAIL (/community/:id) — one community's info. Stay on-page; "
+        "help browse that community's food or open Find/Share with that community context."
+    ),
+    "login": (
+        "LOGIN (/login). Coach email/password fields. Guests need auth for most AI tools. "
+        "navigate_ui target=login. Offer signup if they have no account."
+    ),
+    "signup": (
+        "SIGNUP (/signup). Coach name/email/password/role. navigate_ui target=signup."
+    ),
+    "donations": (
+        "DONATION SCHEDULES (/donations). Recurring donor schedules. navigate_ui target=schedule."
+    ),
+    "notifications": (
+        "NOTIFICATIONS (/notifications). Alerts inbox. navigate_ui target=notifications."
+    ),
+    "recipes": (
+        "RECIPES (/recipes). Meal ideas from claimed/expiring food. "
+        "navigate_ui target=meal-planning or meal-suggestions."
+    ),
+    "admin": (
+        "ADMIN (/admin…). Org ops: approvals, share-food, distribution. "
+        "navigate_ui target=admin or dispatch. Be careful; confirm destructive actions."
+    ),
+    "contact": (
+        "CONTACT (/contact). Support form. navigate_ui target=emergency (maps to contact)."
+    ),
+    "how-it-works": (
+        "HOW IT WORKS (/how-it-works). Explain Find / Share / Request simply; offer to open those pages."
+    ),
+    "sponsors": (
+        "SPONSORS (/sponsors). Community partners. navigate_ui target=partners."
+    ),
+    "faqs": (
+        "FAQs (/faqs). Answer from product knowledge; deep-link to Find/Share/Request when useful."
+    ),
+}
+
+_PAGE_KNOWLEDGE_ES: dict[str, str] = {
+    "home": (
+        "INICIO (/). CTAs: Buscar comida (/find), Compartir (/share), Solicitar (/request). "
+        "Ofrece esas rutas; usa navigate_ui para abrirlas."
+    ),
+    "share": (
+        "COMPARTIR COMIDA (/share). Formulario de donante. Foto OBLIGATORIA antes de publicar. "
+        "navigate_ui target=create si no están en /share."
+    ),
+    "find": (
+        "BUSCAR COMIDA (/find). Mapa/lista para receptores. Buscar y reclamar. "
+        "navigate_ui target=list."
+    ),
+    "near-me": "CERCA DE MÍ (/near-me). Misma lógica que Find. navigate_ui target=near-me.",
+    "request": (
+        "SOLICITAR COMIDA (/request). Pedido solo texto (sin fotos). "
+        "navigate_ui target=request."
+    ),
+    "claim": "RECLAMAR (/claim). Usa claim_listing o navega target=claim.",
+    "profile": "PERFIL (/profile). Datos y preferencias. navigate_ui target=profile.",
+    "settings": "AJUSTES (/settings). Accesibilidad. navigate_ui target=settings.",
+    "receipts": "RECIBOS (/receipts). Recogidas. navigate_ui target=receipts.",
+    "dashboard": "PANEL (/dashboard). Resumen. navigate_ui target=dashboard.",
+    "listings": "MIS PUBLICACIONES (/listings). navigate_ui target=listings.",
+    "community-requests": (
+        "SOLICITUDES DE COMUNIDAD (/community-requests). navigate_ui target=community-requests."
+    ),
+    "community": "DETALLE DE COMUNIDAD (/community/:id). Ayuda en contexto de esa comunidad.",
+    "login": "INICIAR SESIÓN (/login). navigate_ui target=login.",
+    "signup": "REGISTRO (/signup). navigate_ui target=signup.",
+    "donations": "HORARIOS DE DONACIÓN (/donations). navigate_ui target=schedule.",
+    "notifications": "NOTIFICACIONES (/notifications). navigate_ui target=notifications.",
+    "recipes": "RECETAS (/recipes). navigate_ui target=meal-planning.",
+    "admin": "ADMIN (/admin…). navigate_ui target=admin o dispatch.",
+    "contact": "CONTACTO (/contact).",
+    "how-it-works": "CÓMO FUNCIONA (/how-it-works). Explica Find/Share/Request.",
+    "sponsors": "PATROCINADORES (/sponsors). navigate_ui target=partners.",
+    "faqs": "PREGUNTAS FRECUENTES (/faqs).",
+}
+
+
+def build_page_knowledge_prompt(
+    guide_state: dict | None = None,
+    lang: str = "en",
+    path: str | None = None,
+) -> Optional[str]:
+    """Deep product knowledge for the page the user is on right now."""
+    page_key = None
+    path_val = path
+    if isinstance(guide_state, dict):
+        page_key = guide_state.get("pageKey")
+        path_val = path_val or guide_state.get("path")
+    if not page_key:
+        page_key = _page_key_from_path(str(path_val or ""))
+    if not page_key or page_key == "unknown":
+        return None
+    mapping = _PAGE_KNOWLEDGE_ES if lang == "es" else _PAGE_KNOWLEDGE_EN
+    body = mapping.get(str(page_key))
+    if not body:
+        # Fallback: still orient the model to the raw path.
+        if lang == "es":
+            return (
+                f"CONOCIMIENTO DE PÁGINA: el usuario está en `{path_val or page_key}`. "
+                "Ayúdalo con lo que esa pantalla permite en DoGoods. "
+                "Si no sabes el detalle, ofrece Find/Share/Request."
+            )
+        return (
+            f"PAGE KNOWLEDGE: the user is on `{path_val or page_key}`. "
+            "Help with what that DoGoods screen can do. "
+            "If unsure, offer Find Food / Share Food / Request Food."
+        )
+    if lang == "es":
+        return (
+            "CONOCIMIENTO DE ESTA PÁGINA (DoGoods — sé preciso):\n"
+            f"{body}\n"
+            "Usa navigate_ui cuando deban cambiar de pantalla. "
+            "No inventes pantallas que no existan."
+        )
+    return (
+        "PAGE KNOWLEDGE (DoGoods — be precise):\n"
+        f"{body}\n"
+        "Use navigate_ui when they should change screens. "
+        "Do not invent screens that do not exist."
     )
 
 
@@ -1009,49 +1797,119 @@ def build_assistance_mode_reminder(
     message: str,
     history: list | None = None,
     lang: str = "en",
+    guide_state: dict | None = None,
+    user_id: str | None = None,
 ) -> Optional[str]:
     """Per-turn injection: ask for mode, or run hands_on / guided path."""
     if _is_distress(message):
         return None
 
-    mode = resolve_assistance_mode(message, history)
+    mode = resolve_assistance_mode(
+        message, history, user_id=user_id, guide_state=guide_state,
+    )
     goal = detect_assistance_goal(message, history)
+    if goal is None and isinstance(guide_state, dict):
+        fid = str(guide_state.get("formId") or guide_state.get("path") or "").lower()
+        page_key = str(guide_state.get("pageKey") or "").lower()
+        if "share" in fid or page_key == "share":
+            goal = "share"
+        elif "request" in fid or page_key == "request":
+            goal = "request"
+        elif page_key in {"find", "claim", "near-me"} or "find" in fid or "claim" in fid:
+            goal = "find"
+    if goal is None:
+        session = get_assistance_session(user_id)
+        if session and session.get("goal") in ("find", "share", "request"):
+            goal = session["goal"]  # type: ignore[assignment]
     if goal is None and mode and (
         _assistant_asked_assistance_mode(history)
         or _guided_steps_delivered(history) > 0
     ):
         goal = _goal_from_recent_user_intent(history)
 
-    if mode is None and needs_assistance_mode_choice(message, history):
+    if mode and goal:
+        set_assistance_session(user_id, mode=mode, goal=goal)
+
+    if mode is None and needs_assistance_mode_choice(
+        message, history, user_id=user_id, guide_state=guide_state,
+    ):
         goal = goal or detect_assistance_goal(message, history) or "find"
         action = _assistance_action_label(goal, lang)
+        if goal == "find":
+            open_opt_en = "Open Find Food"
+            open_opt_es = "Abrir Buscar comida"
+        elif goal == "request":
+            open_opt_en = "Open Request Food"
+            open_opt_es = "Abrir Solicitar comida"
+        else:
+            open_opt_en = "Open the form"
+            open_opt_es = "Abrir el formulario"
         if lang == "es":
             return (
                 f"MODO DE AYUDA (obligatorio este turno):\n"
                 f"El usuario quiere {action}. NO llames search_food_near_user, "
                 f"claim_*, ni post_food_* todavía.\n"
-                f"Pregunta UNA vez, cálido y breve: ¿quieres que yo lo haga TODO "
-                f"por ti aquí en el chat, o te guío paso a paso para que lo hagas "
-                f"tú en la app?\n"
-                f"Ofrece exactamente dos caminos (los chips cubren las respuestas)."
+                f"Pregunta UNA vez, cálido y breve, ofreciendo TRES opciones:\n"
+                f"(1) {open_opt_es} — SOLO abre la página, nada más;\n"
+                f"(2) Hazlo por mí — tú lo haces en el chat;\n"
+                f"(3) Guíame paso a paso — te dice cómo abrir la página y te guía "
+            f"paso a paso muy simple (como a un niño).\n"
+                f"Los chips muestran exactamente esas tres respuestas. "
+                f"Nunca digas 'Abrir el formulario' para Buscar comida."
             )
         return (
             f"ASSISTANCE MODE (required this turn):\n"
             f"The user wants to {action}. Do NOT call search_food_near_user, "
             f"claim_*, or post_food_* yet.\n"
-            f"Ask ONCE, warm and brief: want me to handle everything for you "
-            f"here in chat, or walk you through doing it yourself step by step "
-            f"on the pages?\n"
-            f"Offer exactly those two paths (chips will cover the replies)."
+            f"Ask ONCE, warm and brief, offering THREE options:\n"
+            f"(1) {open_opt_en} — ONLY opens the page, nothing else;\n"
+            f"(2) Do it for me — you handle everything in chat;\n"
+            f"(3) Guide me step by step — tells you to open the page, then "
+            f"baby-step coaching (very simple).\n"
+            f"The chips show exactly those three replies. "
+            f"Never say 'Open the form' for Find Food — that label is only "
+            f"for Share Food / Request Food forms."
+        )
+
+    if mode == "open_page" and goal:
+        if goal == "find":
+            target, path = "list", "/find"
+            page_en, page_es = "Find Food", "Buscar Comida"
+        elif goal == "request":
+            target, path = "request", "/request"
+            page_en, page_es = "Request Food", "Solicitar Comida"
+        else:
+            target, path = "create", "/share"
+            page_en, page_es = "Share Food", "Compartir Comida"
+        if lang == "es":
+            return (
+                f"ABRIR PÁGINA SOLAMENTE ({page_es}):\n"
+                f"1) Llama navigate_ui action=open target={target} (ruta {path}) "
+                f"UNA vez este turno.\n"
+                f"2) Responde en 1–2 frases cortas: confirma que abriste {page_es}.\n"
+                f"3) NO preguntes qué quieren compartir / buscar / solicitar.\n"
+                f"4) NO inicies GUIDED. NO recojas detalles. NO llames "
+                f"search_*, post_*, ni claim_*.\n"
+                f"La guía de voz del formulario sigue disponible si usan la página."
+            )
+        return (
+            f"OPEN PAGE ONLY ({page_en}):\n"
+            f"1) Call navigate_ui action=open target={target} (path {path}) "
+            f"ONCE this turn.\n"
+            f"2) Reply in 1–2 short sentences confirming you opened {page_en}.\n"
+            f"3) Do NOT ask what they want to share / find / request.\n"
+            f"4) Do NOT start GUIDED steps. Do NOT collect details. Do NOT call "
+            f"search_*, post_*, or claim_*.\n"
+            f"Form voice guidance on the page still works if they use the form."
         )
 
     if mode == "guided" and goal:
-        # Detailed UI walkthrough — one step per turn via step trackers below.
+        # Chat-panel walkthrough — one step per turn; never open pages.
         if goal == "share":
-            return _guided_share_step(message, history, lang)
+            return _guided_share_step(message, history, lang, guide_state)
         if goal == "request":
-            return _guided_request_step(message, history, lang)
-        return _guided_find_step(message, history, lang)
+            return _guided_request_step(message, history, lang, guide_state)
+        return _guided_find_step(message, history, lang, guide_state)
 
     if mode == "hands_on" and goal:
         if lang == "es":
@@ -1103,9 +1961,42 @@ def assistance_mode_tool_block_reason(
     tool_name: str,
     message: str,
     history: list | None = None,
+    *,
+    user_id: str | None = None,
+    guide_state: dict | None = None,
 ) -> Optional[str]:
-    """Block find/share/request write tools until the user picks assistance mode."""
-    if not needs_assistance_mode_choice(message, history):
+    """Block tools that conflict with the user's assistance-mode choice."""
+    mode = resolve_assistance_mode(
+        message, history, user_id=user_id, guide_state=guide_state,
+    )
+    if mode == "guided" and tool_name == "navigate_ui":
+        return (
+            "GUIDED tutorial mode — do NOT open pages with navigate_ui. "
+            "TELL the user in the tutorial how to open the page themselves "
+            "(look at the menu, tap Share Food / Find Food / Request Food). "
+            "Never navigate for them while guiding."
+        )
+    if mode == "open_page":
+        write_tools = {
+            "search_food_near_user",
+            "get_recent_listings",
+            "claim_listing",
+            "claim_listings",
+            "post_food_listing",
+            "post_food_listings",
+            "post_food_request",
+            "bulk_import_listings",
+        }
+        if tool_name in write_tools:
+            return (
+                "OPEN PAGE mode — only navigate_ui this turn. "
+                "Do not search, post, or claim."
+            )
+        return None
+
+    if not needs_assistance_mode_choice(
+        message, history, user_id=user_id, guide_state=guide_state,
+    ):
         return None
     blocked = {
         "search_food_near_user",
@@ -1120,8 +2011,8 @@ def assistance_mode_tool_block_reason(
     if tool_name not in blocked:
         return None
     return (
-        "Ask the user first: do everything for them in chat, or guide them "
-        "step by step on the pages. Do not call this tool until they choose."
+        "Ask the user first: open the page, do everything in chat, or guide "
+        "them step by step in chat. Do not call this tool until they choose."
     )
 
 
@@ -1132,9 +2023,14 @@ def is_finding_flow(message: str, history: list | None = None) -> bool:
     # Explicit food-request posts are a different flow.
     if any(k in t for k in _REQUEST_TRIGGERS):
         return False
+    if is_posting_flow(message, history):
+        return False
     if _user_clears_claim_flow(message):
         return True
     if any(k in t for k in _FIND_TRIGGERS):
+        return True
+    # "Do it for me" (and follow-ups) after a find ask — stay in finding.
+    if _hands_on_assistance_goal(message, history) == "find":
         return True
     # Generic "food" + desire verbs — "food" is not in _FOOD_WORDS (produce
     # lexicon), so without this branch "i want some food" never entered finding.
@@ -1349,17 +2245,13 @@ def posting_flow_state(message: str, history: list | None) -> dict:
         "which community", "which school", "community should",
         "under which", "go under", "comunidad", "escuela",
     ))
+    # Photo is REQUIRED — only a real upload URL counts (never verbal skip
+    # or "I already shared photos" without an image: URL in chat).
     has_photo = bool(_PHOTO_URL_RE.search(scoped_blob))
-    # Donor insists photos were already sent, or assistant already ack'd them.
-    msg_l = (message or "").lower()
-    if any(p in msg_l for p in _PHOTO_ALREADY_SHARED_PHRASES):
-        has_photo = True
-    if any(p in scoped_blob_l for p in _PHOTO_RECEIVED_ASSISTANT):
-        has_photo = True
     photo_asked = any(p in scoped_blob_l for p in (
         "photo", "picture", "snap a", "upload a", "foto", "imagen",
     ))
-    photo_declined = _user_declined_photo(scoped_hist, message)
+    photo_declined = False  # declines no longer unlock posting
     post_summary_offered = any(p in scoped_blob_l for p in _POST_CONFIRM_PHRASES)
     expiry_asked = any(p in scoped_blob_l for p in (
         "expire", "expiry", "best by", "best-by", "use by", "how fresh",
@@ -1369,7 +2261,7 @@ def posting_flow_state(message: str, history: list | None) -> dict:
     expiry_provided = bool(_best_user_expiry_from_thread(message, history)) or bool(
         re.search(r"\d{4}-\d{2}-\d{2}", scoped_blob)
     ) or bool(_extract_expiry_from_text(scoped_blob))
-    awaiting_photo = photo_asked and not has_photo and not photo_declined
+    awaiting_photo = photo_asked and not has_photo
     return {
         "has_photo": has_photo,
         "photo_asked": photo_asked,
@@ -1389,6 +2281,10 @@ def _extract_expiry_from_text(text: str) -> Optional[str]:
     Month-name forms ("24th July", "July 24th this year") are required —
     without them the model invents a wrong year (often a past year) and
     traps the donor in an expiry confirmation loop.
+
+    "Made today/yesterday" are *bake dates*, not expiry — map them to a
+    short remaining shelf life so posting does not use a past/today-midnight
+    date that the server rejects.
     """
     if not text:
         return None
@@ -1404,12 +2300,34 @@ def _extract_expiry_from_text(text: str) -> Optional[str]:
         return _normalize_expiry_date(m.group(0))
 
     blob = text.lower()
-    if any(k in blob for k in ("today", "tonight", "hoy", "esta noche")):
+
+    # Shelf-life phrases first (good-until), before bare "today".
+    shelf = _parse_shelf_life_expiry(blob)
+    if shelf:
+        return shelf
+
+    # "Made today/yesterday" → remaining good-for window, not the bake date.
+    if any(k in blob for k in (
+        "made today", "baked today", "cooked today", "hecho hoy", "horneado hoy",
+        "prepared today", "prep today",
+    )):
+        from datetime import date, timedelta
+        return (date.today() + timedelta(days=1)).isoformat()
+    if any(k in blob for k in (
+        "made yesterday", "baked yesterday", "cooked yesterday",
+        "hecho ayer", "horneado ayer", "prepared yesterday",
+    )):
         from datetime import date
         return date.today().isoformat()
+
     if any(k in blob for k in ("tomorrow", "mañana")):
         from datetime import date, timedelta
         return (date.today() + timedelta(days=1)).isoformat()
+    # Bare "today" / "tonight" as an answer to "good until?" → end of today
+    # is allowed as a calendar date (validation is date-only).
+    if any(k in blob for k in ("today", "tonight", "hoy", "esta noche")):
+        from datetime import date
+        return date.today().isoformat()
 
     relative = _parse_relative_expiry_date(blob)
     if relative:
@@ -1418,6 +2336,46 @@ def _extract_expiry_from_text(text: str) -> Optional[str]:
     spoken = _parse_spoken_expiry_date(blob)
     if spoken:
         return spoken
+    return None
+
+
+def _parse_shelf_life_expiry(blob: str) -> Optional[str]:
+    """Parse 'good for 24h', 'good for 2 days', 'in 3 days' as good-until dates."""
+    from datetime import date, timedelta
+
+    if not blob:
+        return None
+    text = blob.lower()
+
+    m = re.search(
+        r"\b(?:good\s+for|lasts?\s+|vence\s+en|válido\s+por|valido\s+por)\s+"
+        r"(\d{1,3})\s*(?:hours?|hrs?|h|horas?)\b",
+        text,
+    )
+    if m:
+        try:
+            hours = int(m.group(1))
+            if 1 <= hours <= 72:
+                # Round up to whole days for date-only expiry.
+                days = max(1, (hours + 23) // 24)
+                return (date.today() + timedelta(days=days)).isoformat()
+        except (TypeError, ValueError):
+            pass
+
+    m = re.search(
+        r"\b(?:good\s+for|lasts?\s+|in|within|vence\s+en)\s+(\d{1,3})\s+days?\b",
+        text,
+    )
+    if m:
+        try:
+            days = int(m.group(1))
+            if 0 < days <= 365:
+                return (date.today() + timedelta(days=days)).isoformat()
+        except (TypeError, ValueError):
+            pass
+
+    if "good for 24" in text or "good for twenty" in text:
+        return (date.today() + timedelta(days=1)).isoformat()
     return None
 
 
@@ -1440,6 +2398,72 @@ def _best_user_expiry_from_thread(
         if exp:
             return exp
     return None
+
+
+def _thread_has_made_today_bake_date(
+    message: str,
+    history: list | None,
+) -> bool:
+    """True when the donor gave a bake/cook date of today (not a good-until)."""
+    parts = [message or ""]
+    for msg in history or []:
+        if msg.get("role") == "user":
+            parts.append(msg.get("message") or "")
+    blob = " ".join(parts).lower()
+    return any(k in blob for k in (
+        "made today", "baked today", "cooked today", "hecho hoy",
+        "horneado hoy", "prepared today", "prep today",
+    ))
+
+
+def normalize_expiration_date_for_post(
+    raw: Optional[str],
+    *,
+    message: str = "",
+    history: list | None = None,
+) -> Optional[str]:
+    """Return a postable YYYY-MM-DD expiry (never midnight-today / past).
+
+    Chat models often map \"Made today\" → expiration=today, which fails at
+    UTC midnight. Prefer the donor thread, then coerce date-only today/past
+    to tomorrow so Yes→post does not bounce.
+    """
+    from datetime import date, timedelta
+
+    thread = _best_user_expiry_from_thread(message, history)
+    if thread:
+        return thread
+
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+
+    d: Optional[date] = None
+    try:
+        if len(s) >= 10 and s[4:5] == "-" and s[7:8] == "-":
+            d = date.fromisoformat(s[:10])
+    except ValueError:
+        d = None
+    if d is None:
+        spoken = _extract_expiry_from_text(s)
+        if spoken:
+            return spoken
+        return s
+
+    today = date.today()
+    # Bake-date phrasing in thread without a parseable user expiry → tomorrow.
+    if _thread_has_made_today_bake_date(message, history):
+        return (today + timedelta(days=1)).isoformat()
+
+    # Date-only today (midnight UTC) fails as "already past" later the same day.
+    if d == today:
+        return (today + timedelta(days=1)).isoformat()
+    # Off-by-one / made-yesterday mapped to a past calendar day — heal once.
+    if d < today and (today - d).days <= 1:
+        return (today + timedelta(days=1)).isoformat()
+    return d.isoformat()
 
 
 _MONTH_NAME_TO_NUM: dict[str, int] = {
@@ -1610,49 +2634,87 @@ def _assistant_last_asked_kind(history: list | None) -> str | None:
     return None
 
 
+def _is_different_community_choice(message: str) -> bool:
+    """True when the donor rejected the suggested community (chip or phrase)."""
+    t = (message or "").strip().lower()
+    if not t:
+        return False
+    if t in {
+        "different one", "another one", "other one", "different",
+        "otra", "otra comunidad", "otro", "otra escuela",
+    }:
+        return True
+    return any(k in t for k in (
+        "different community", "different school", "another community",
+        "another school", "other community", "other school",
+        "use a different community", "pick a different", "choose another",
+        "otra comunidad", "otra escuela", "una diferente",
+    ))
+
+
+def _looks_like_community_name_answer(message: str) -> bool:
+    """True when a user reply is likely a school/hub name, not food/qty."""
+    u = (message or "").strip()
+    ul = u.lower()
+    if len(ul) < 3 or _is_different_community_choice(u):
+        return False
+    if re.fullmatch(r"\d+", ul):
+        return False
+    if ul in {
+        "wait", "hold on", "tomorrow", "later", "idk", "not sure",
+        "maybe", "hmm", "ok wait", "bread", "food", "photo", "picture",
+    }:
+        return False
+    if any(k in ul for k in (
+        "loaf", "loaves", "egg", "eggs", "pound", "lb", "box",
+        "bag", "portion", "serving", "photo", "picture", "address",
+        "allergen", "no allergen",
+    )):
+        return False
+    tokens = _tokenize_words(u)
+    if any(w in _FOOD_WORDS for w in tokens):
+        return False
+    if re.search(
+        r"(school|academy|college|community|unified|elementary|middle|high|"
+        r"district|usd|hub|center|aclc|nea)",
+        ul,
+    ):
+        return True
+    if "/" in ul or "&" in ul:
+        return True
+    # Multi-word proper-ish names ("Ruby Bridges", "Oakland Tech").
+    if len(ul.split()) >= 2 and not ul.startswith(("http", "image:")):
+        return True
+    return False
+
+
 def _community_was_confirmed(history: list | None) -> bool:
-    """True once the donor explicitly picked or confirmed a community."""
+    """True once the donor explicitly picked or confirmed a community.
+
+    Scans all user turns after a community ask in the thread so a wrong
+    intervening question (e.g. re-asking food) does not lose a later
+    school-name reply like ``NEA/ACLC CC``.
+    """
     if not history:
         return False
-    for i, msg in enumerate(history):
-        if msg.get("role") != "assistant":
-            continue
-        text = (msg.get("message") or "").lower()
-        if not any(k in text for k in (
+    asked = False
+    for msg in history:
+        role = msg.get("role")
+        text = (msg.get("message") or "").strip()
+        ul = text.lower()
+        if role == "assistant" and any(k in ul for k in (
             "community", "school", "comunidad", "escuela", "go under", "list under",
         )):
+            asked = True
             continue
-        for j in range(i + 1, len(history)):
-            if history[j].get("role") == "assistant":
-                break
-            if history[j].get("role") != "user":
-                continue
-            u = (history[j].get("message") or "").strip()
-            ul = u.lower()
-            if _is_affirmative_post_confirm(u) or _is_short_affirmative(u):
-                return True
-            # Free-text confirmation: look like a school/community name, not
-            # qty/expiry/address filler ("5 loaves", "tomorrow", "wait").
-            if len(ul) < 3:
-                continue
-            if re.search(r"\d", ul) and not re.search(
-                r"(school|academy|college|community|unified|elementary|middle|high)",
-                ul,
-            ):
-                continue
-            if ul in {
-                "wait", "hold on", "tomorrow", "later", "idk", "not sure",
-                "maybe", "hmm", "ok wait",
-            }:
-                continue
-            if any(k in ul for k in (
-                "loaf", "loaves", "egg", "eggs", "pound", "lb", "box",
-                "bag", "portion", "serving", "photo", "picture", "address",
-            )):
-                continue
-            # Likely a name answer ("Alameda High", "Ruby Bridges", "my school").
-            if len(ul.split()) >= 1 and not ul.startswith(("http", "image:")):
-                return True
+        if not asked or role != "user":
+            continue
+        if _is_different_community_choice(text):
+            continue
+        if _is_affirmative_post_confirm(text) or _is_short_affirmative(text):
+            return True
+        if _looks_like_community_name_answer(text):
+            return True
     return False
 
 
@@ -1726,8 +2788,9 @@ _COMMUNITY_FROM_ASSISTANT_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 def _clean_community_phrase(text: str) -> str | None:
     """Normalize a raw community phrase from chat text."""
-    name = (text or "").strip().strip('"').strip("'").strip()
+    name = (text or "").strip().strip('"').strip("'").strip("“”‘’")
     name = re.sub(r"\s+", " ", name)
+    name = re.sub(r"\s*/\s*", "/", name)
     name = re.sub(
         r"^(?:the|a|an|please|thanks|thank you|yes|yeah|sure|ok|okay)\s+",
         "",
@@ -1739,7 +2802,7 @@ def _clean_community_phrase(text: str) -> str | None:
         "",
         name,
         flags=re.I,
-    ).strip(" .,;:-—")
+    ).strip(" .,;:-—\"'“”‘’")
     if len(name) < 3:
         return None
     if name.lower() in {"yes", "no", "ok", "okay", "sure", "si", "sí", "y", "n"}:
@@ -2008,39 +3071,46 @@ def _current_posting_boundary_index(history: list | None) -> int:
 
 
 def _user_declined_photo(history: list | None, message: str = "") -> bool:
-    """True only when the donor explicitly skips adding a photo.
+    """Photo is required — skip/decline never unlocks posting.
 
-    Requires photo context (assistant recently asked for a photo, or the
-    phrase itself mentions skipping a photo) so "post now" / bare "without"
-    does not accidentally count as a decline after an unrelated turn.
+    Kept as a named helper so older call sites keep working; always False.
     """
-    def _matches(ul: str) -> bool:
-        return any(p in ul for p in _PHOTO_DECLINE_PHRASES)
-
-    blob = _history_blob(history or [], message).lower()
-    photo_context = any(p in blob for p in (
-        "photo", "picture", "snap a", "upload a", "foto", "imagen",
-    ))
-    ul = (message or "").lower()
-    if _matches(ul) and (photo_context or any(
-        k in ul for k in ("photo", "picture", "foto", "imagen", "without")
-    )):
-        # Exclude bare post-confirm phrases that are not photo skips.
-        if ul.strip() in {"post now", "publish now", "post it", "post them"}:
-            return False
-        return True
-    for msg in history or []:
-        if msg.get("role") != "user":
-            continue
-        hl = (msg.get("message") or "").lower()
-        if _matches(hl) and (
-            photo_context
-            or any(k in hl for k in ("photo", "picture", "foto", "imagen", "without"))
-        ):
-            if hl.strip() in {"post now", "publish now", "post it", "post them"}:
-                continue
-            return True
     return False
+
+
+def _user_trying_to_skip_photo(message: str = "", history: list | None = None) -> bool:
+    """True when the donor asks to skip/post without a photo this turn."""
+    text = " ".join(
+        str(message or "").lower().replace("-", " ").replace("_", " ").split()
+    )
+    if any(p in text for p in _PHOTO_DECLINE_PHRASES):
+        return True
+    # Short soft declines right after we asked for a photo.
+    last_asked = _assistant_last_asked_kind(history)
+    if last_asked == "photo" and text in {
+        "no", "nope", "nah", "skip", "later", "no thanks", "no thank you",
+        "not now", "pass", "sin", "después", "despues", "más tarde", "mas tarde",
+    }:
+        return True
+    return False
+
+
+def _photo_required_refuse_nudge(lang: str = "en") -> str:
+    if lang == "es":
+        return (
+            "OBLIGATORIO: la foto NO es opcional. El donante quiere saltarla "
+            "o publicar sin foto — rechaza con amabilidad y pide que adjunte "
+            "una foto en el chat (clip / image: …). NUNCA digas '¿puedo "
+            "publicar sin foto?' ni ofrezcas saltar. NO llames "
+            "post_food_listing todavía."
+        )
+    return (
+        "HARD RULE: a photo is REQUIRED — never optional. The donor wants "
+        "to skip or post without a photo. Refuse briefly and ask them to "
+        "attach a photo in chat (paperclip / image: …). NEVER say "
+        "'can I post without a photo', 'or skip the photo', or similar. "
+        "Do NOT call post_food_listing yet."
+    )
 
 
 def normalize_public_image_url(url: str | None) -> str | None:
@@ -2476,20 +3546,16 @@ def upsert_share_drafts_from_message(
     # Apply expiry from this message or earlier donor turns in the thread.
     exp = _best_user_expiry_from_thread(message, history)
     if exp:
+        exp = normalize_expiration_date_for_post(
+            exp, message=message, history=history,
+        ) or exp
         for d in by_title.values():
             if not d.get("expiry"):
                 d["expiry"] = exp
 
-    # Per-draft photo decline when the donor says skip while naming the food.
-    ul = (message or "").lower()
-    if any(p in ul for p in _PHOTO_DECLINE_PHRASES):
-        named = _normalize_share_title(message)
-        for d in by_title.values():
-            title = str(d.get("title") or "").lower()
-            if named and named.lower() in ul and title in ul:
-                d["photo_declined"] = True
-            elif len(by_title) == 1:
-                d["photo_declined"] = True
+    # Photo declines are ignored — every listing needs an uploaded photo.
+    for d in by_title.values():
+        d["photo_declined"] = False
 
     drafts = list(by_title.values())
     # Stable order: existing titles first, then new ones by parse order.
@@ -2550,7 +3616,7 @@ def assign_photos_to_drafts(
     ]
     ui = 0
     for d in drafts:
-        if d.get("photo_url") or d.get("photo_declined"):
+        if d.get("photo_url"):
             continue
         if ui >= len(unused):
             break
@@ -2572,7 +3638,7 @@ def share_drafts_missing(drafts: list[dict] | None) -> list[dict]:
             gaps.append("qty")
         if not d.get("expiry"):
             gaps.append("expiry")
-        if not d.get("photo_url") and not d.get("photo_declined"):
+        if not d.get("photo_url"):
             gaps.append("photo")
         if gaps:
             missing.append({
@@ -2625,9 +3691,7 @@ def build_share_drafts_reminder(
     missing = share_drafts_missing(drafts)
     lines = []
     for d in drafts:
-        photo = "photo=yes" if d.get("photo_url") else (
-            "photo=skipped" if d.get("photo_declined") else "photo=missing"
-        )
+        photo = "photo=yes" if d.get("photo_url") else "photo=missing"
         exp = d.get("expiry") or "expiry=?"
         lines.append(
             f"- {d.get('title')}: qty={d.get('qty')} {d.get('unit')}, "
@@ -2806,20 +3870,14 @@ def posting_batch_tool_block_reason(
                 miss.append("expiry")
             imgs = item.get("images") if isinstance(item.get("images"), list) else []
             if not imgs:
-                # Allow decline only when drafts say so for that title.
-                title = str(item.get("title") or "").lower()
-                declined = any(
-                    str(d.get("title") or "").lower() == title and d.get("photo_declined")
-                    for d in drafts
-                )
-                if not declined and not state.get("photo_declined"):
-                    miss.append("photo")
+                miss.append("photo")
             if miss:
                 gaps.append(f"{item.get('title') or i}: {', '.join(miss)}")
         if gaps:
             return (
                 "Batch incomplete — still need: " + "; ".join(gaps) + ". "
-                "Ask for the next missing field, then retry post_food_listings."
+                "Each listing needs an uploaded photo (images[]). Ask for "
+                "the next missing photo/field, then retry post_food_listings."
             )
     else:
         missing = share_drafts_missing(drafts)
@@ -2863,21 +3921,21 @@ def enrich_post_food_listing_args(
     # often replays images[] from a prior listing in full chat context —
     # never trust model-passed images/image_url without scoped validation.
     out.pop("image_url", None)
-    if state["photo_declined"]:
-        out.pop("images", None)
+    photo_url = _extract_photo_url_for_current_posting(history, message)
+    if photo_url:
+        norm = normalize_public_image_url(photo_url) or photo_url
+        out["images"] = [norm]
     else:
-        photo_url = _extract_photo_url_for_current_posting(history, message)
-        if photo_url:
-            norm = normalize_public_image_url(photo_url) or photo_url
-            out["images"] = [norm]
-        else:
-            out.pop("images", None)
+        out.pop("images", None)
 
     user_exp = _best_user_expiry_from_thread(message, history)
     model_exp = out.get("expiration_date") or out.get("expiry_date")
     # Always prefer the donor's spoken/typed date — the model inventing
     # a past year (e.g. 2024 for "July 24th") was trapping share flows.
-    exp = user_exp or model_exp
+    # Also coerce date-only today/past (common "Made today" mis-map).
+    exp = normalize_expiration_date_for_post(
+        user_exp or model_exp, message=message, history=history,
+    )
     if exp:
         out["expiration_date"] = exp
         out["expiry_date"] = exp
@@ -2969,47 +4027,59 @@ def posting_tool_block_reason(
             "Map their answer to expiration_date (YYYY-MM-DD). Do not guess silently."
         )
 
-    # After "Shall I post? / yes", post immediately — but still require the
-    # photo step to have happened at least once (ask OR upload OR decline).
+    # After "Shall I post? / yes", post immediately — but ONLY with a real photo.
+    args_images = args.get("images") if isinstance(args.get("images"), list) else []
+    has_photo_arg = bool([u for u in args_images if u and str(u).strip()])
+    if not state["has_photo"] and not has_photo_arg and _user_trying_to_skip_photo(
+        message, history,
+    ):
+        return (
+            "A photo is REQUIRED. The donor asked to skip or post without one. "
+            "Refuse and ask them to attach a photo in chat. Never offer to "
+            "post without a photo. Do NOT call post_food_listing yet."
+        )
     if ready:
-        if not state["photo_asked"] and not state["has_photo"] and not state["photo_declined"]:
+        if not state["has_photo"] and not has_photo_arg:
             return (
-                "Ask for a photo once before calling post_food_listing "
-                "(the donor may decline)."
+                "A photo is REQUIRED before posting. Ask the donor to upload/"
+                "attach a photo in chat (image: … URL). Do NOT offer to skip "
+                "or post without a photo. Do NOT call post_food_listing yet."
             )
-        # Re-asking photo after a Ready-to-post yes is what trapped the
-        # tomatoes/carrots share — only keep waiting if no summary was offered yet.
         if state["awaiting_photo"] and not state["post_summary_offered"]:
             if last_asked == "photo" and _is_short_affirmative(message):
                 return (
                     "The donor said yes/ok but no photo URL is in the chat yet. "
-                    "Ask them to upload/attach the photo in chat, or say 'skip photo' "
-                    "to continue without one. Do NOT call post_food_listing yet."
+                    "Ask them to upload/attach the photo in chat. Photos are "
+                    "required — do not offer to skip. Do NOT call post_food_listing yet."
                 )
             return (
-                "Still waiting for a photo upload (image: … URL in chat) or an "
-                "explicit 'no photo' / 'skip photo' before posting."
+                "Still waiting for a required photo upload (image: … URL in chat) "
+                "before posting. Do not offer to skip the photo."
             )
         return None
 
-    if not state["photo_asked"] and not state["has_photo"]:
+    if not state["has_photo"] and not has_photo_arg:
+        if not state["photo_asked"]:
+            return (
+                "Ask for a photo before calling post_food_listing. A photo is "
+                "REQUIRED — do not offer to skip or post without one."
+            )
         return (
-            "Ask for a photo once before calling post_food_listing "
-            "(the donor may decline)."
+            "Still waiting for a required photo upload (image: … URL in chat) "
+            "before posting. Do not offer to skip the photo."
         )
 
     if state["awaiting_photo"]:
         if last_asked == "photo" and _is_short_affirmative(message):
             return (
                 "The donor said yes/ok but no photo URL is in the chat yet. "
-                "Ask them to upload/attach the photo in chat, or say 'skip photo' "
-                "to continue without one. Do NOT call post_food_listing yet."
+                "Ask them to upload/attach the photo in chat. Photos are "
+                "required — do not offer to skip. Do NOT call post_food_listing yet."
             )
-        if not state["has_photo"] and not state["photo_declined"]:
-            return (
-                "Still waiting for a photo upload (image: … URL in chat) or an "
-                "explicit 'no photo' / 'skip photo' before posting."
-            )
+        return (
+            "Still waiting for a required photo upload (image: … URL in chat) "
+            "before posting. Do not offer to skip the photo."
+        )
 
     return _post_confirm_needed_reason(message, history)
 
@@ -3027,6 +4097,31 @@ def build_posting_step_reminder(
     last_asked = _assistant_last_asked_kind(history)
     parsed_exp = _best_user_expiry_from_thread(message, history)
     ready = _posting_ready_to_execute(message, history)
+
+    # Donor trying to skip photo — override every other nudge.
+    if not state["has_photo"] and _user_trying_to_skip_photo(message, history):
+        return _photo_required_refuse_nudge(lang)
+
+    # "Different one" after a community ask = different SCHOOL, never reset food.
+    if _is_different_community_choice(message) or (
+        last_asked == "community" and _is_different_community_choice(message)
+    ):
+        if lang == "es":
+            return (
+                "COMUNIDAD DIFERENTE (este turno):\n"
+                "El donante rechazó la comunidad sugerida. Pregunta cuál "
+                "escuela/comunidad quiere (o llama get_active_communities y "
+                "ofrece opciones). NO cambies ni vuelvas a pedir la comida, "
+                "cantidad, ni fecha que ya dieron. Solo cambia la comunidad."
+            )
+        return (
+            "DIFFERENT COMMUNITY (this turn):\n"
+            "The donor rejected the suggested community. Ask which "
+            "school/community they want instead (or call "
+            "get_active_communities and offer choices). Do NOT change or "
+            "re-ask the food, quantity, or expiry already collected — only "
+            "switch the community."
+        )
 
     if lang == "es":
         if not state["community_confirmed"]:
@@ -3055,9 +4150,7 @@ def build_posting_step_reminder(
                 "Sugerencia: el donante ya dio la fecha de vencimiento."
                 f"{exp_hint} No la vuelvas a pedir — sigue con foto o resumen."
             )
-        if ready and (
-            state["photo_asked"] or state["has_photo"] or state["photo_declined"]
-        ):
+        if ready and state["has_photo"]:
             exp_hint = (
                 f" Usa expiration_date={parsed_exp} exactamente."
                 if parsed_exp else ""
@@ -3070,18 +4163,21 @@ def build_posting_step_reminder(
         if state["awaiting_photo"] and last_asked == "photo" and _is_short_affirmative(message):
             return (
                 "Sugerencia: dijeron sí pero aún no hay foto adjunta. "
-                "No publiques. Pide que suban la foto o pregúntales si "
-                "prefieren seguir sin ella."
+                "No publiques. Pide que suban la foto — es OBLIGATORIA, "
+                "no ofrezcas publicar sin foto."
             )
-        if state["awaiting_photo"]:
+        if state["awaiting_photo"] or not state["has_photo"]:
             return (
-                "Sugerencia: espera a que suban la foto o digan 'sin foto' "
-                "antes de resumir o publicar."
+                "Sugerencia: la foto es OBLIGATORIA — nunca opcional. "
+                "Pide que la adjunten en el chat (image: …). Frase firmemente, "
+                "NO digas '¿quieres una foto?' ni 'o saltamos la foto'. "
+                "Espera la subida antes de resumir o publicar."
             )
         if not state["photo_asked"]:
             return (
-                "Sugerencia: pregunta por foto una vez (pueden decir que "
-                "no), luego un resumen breve y '¿listo para publicar?'."
+                "Sugerencia: pide una foto OBLIGATORIA: 'Adjunta una foto "
+                "de la comida — es necesaria para publicar.' Nunca ofrezcas "
+                "saltar. Luego un resumen breve y '¿listo para publicar?'."
             )
         if not state["post_summary_offered"]:
             return (
@@ -3103,7 +4199,9 @@ def build_posting_step_reminder(
         return (
             "Nudge: ask which school or community this goes under, and "
             "wait for a clear yes before moving on. Phrase it however "
-            "sounds natural — this is not a fixed script."
+            "sounds natural — this is not a fixed script. If they already "
+            "named food/qty/expiry earlier, do NOT re-ask those — only "
+            "the community."
         )
     if not state["expiry_provided"]:
         if not state["expiry_asked"]:
@@ -3124,9 +4222,7 @@ def build_posting_step_reminder(
             "Nudge: the donor already gave a best-by / expiry date."
             f"{exp_hint} Do NOT ask again — move on to photo or post summary."
         )
-    if ready and (
-        state["photo_asked"] or state["has_photo"] or state["photo_declined"]
-    ):
+    if ready and state["has_photo"]:
         exp_hint = (
             f" Use expiration_date={parsed_exp} exactly — do not invent another year."
             if parsed_exp else ""
@@ -3140,18 +4236,22 @@ def build_posting_step_reminder(
     if state["awaiting_photo"] and last_asked == "photo" and _is_short_affirmative(message):
         return (
             "Nudge: they said 'yes/ok' but no photo is attached yet. "
-            "Don't post. Warmly ask them to upload it, or offer to "
-            "continue without one."
+            "Don't post. Warmly ask them to upload it — a photo is "
+            "REQUIRED. Do not offer to continue without one."
         )
-    if state["awaiting_photo"]:
+    if state["awaiting_photo"] or not state["has_photo"]:
         return (
-            "Nudge: waiting on either a photo upload or an explicit "
-            "'no photo' before summarizing / posting."
+            "Nudge: a photo is REQUIRED — never optional. Ask them to attach "
+            "one in chat (image: … URL). Phrase it as required, NOT "
+            "'want to snap…?' / 'or skip the photo'. Wait for the upload "
+            "before summarizing or posting."
         )
     if not state["photo_asked"]:
         return (
-            "Nudge: ask about a photo once (declining is fine), then give "
-            "ONE short summary and check 'Ready to post?'."
+            "Nudge: ask for a photo (REQUIRED — cannot be skipped). Say "
+            "'Please attach a photo of the food — required before I can "
+            "post.' Never offer skip. Then give a short summary and "
+            "'Ready to post?'."
         )
     if not state["post_summary_offered"]:
         return (
@@ -3230,6 +4330,21 @@ def _post_confirm_needed_reason(message: str, history: list | None) -> str | Non
     )
 
 
+def _defer_to_guided_block(lang: str = "en") -> str:
+    """Checklist stub when GUIDED is already injected by assistance reminder."""
+    if lang == "es":
+        return (
+            "Modo GUIADO activo — sigue SOLO el bloque GUIDED/GUIADO de este turno. "
+            "No inventes un checklist paralelo ni llames search/post/claim salvo "
+            "que ese bloque lo pida."
+        )
+    return (
+        "GUIDED mode active — follow ONLY this turn's GUIDED block. "
+        "Do not invent a parallel checklist or call search/post/claim unless "
+        "that block asks for it."
+    )
+
+
 def _posting_checklist(message: str, history: list | None, lang: str) -> str:
     """Legacy checklist — prefer build_posting_step_reminder for live turns."""
     if needs_assistance_mode_choice(message, history):
@@ -3247,7 +4362,7 @@ def _posting_checklist(message: str, history: list | None, lang: str) -> str:
         )
     mode = resolve_assistance_mode(message, history)
     if mode == "guided":
-        return _guided_share_step(message, history, lang)
+        return _defer_to_guided_block(lang)
     contextual = build_posting_step_reminder(message, history, lang=lang)
     if contextual:
         return contextual
@@ -3438,7 +4553,7 @@ def _finding_checklist(message: str, history: list | None, lang: str) -> str:
 
     mode = resolve_assistance_mode(message, history)
     if mode == "guided":
-        return _guided_find_step(message, history, lang)
+        return _defer_to_guided_block(lang)
 
     blob_l = _history_blob(history, message, 8).lower()
     searched = any(k in blob_l for k in (
@@ -3497,7 +4612,7 @@ def _request_checklist(message: str, history: list | None, lang: str) -> str:
         )
     mode = resolve_assistance_mode(message, history)
     if mode == "guided":
-        return _guided_request_step(message, history, lang)
+        return _defer_to_guided_block(lang)
     if lang == "es":
         return (
             "FLUJO ACTIVO — SOLICITUD EXPLÍCITA:\n"

@@ -38,6 +38,29 @@ jest.mock('../components/common/Input', () => {
   };
 });
 
+jest.mock('../hooks/useFormVoiceGuide', () => ({
+  __esModule: true,
+  default: () => ({
+    registerForm: jest.fn(),
+    onFieldFocus: jest.fn(),
+    reportError: jest.fn(),
+    notifyFieldActivity: jest.fn(),
+  }),
+}))
+
+jest.mock('../utils/NouriGuideContext', () => ({
+  useNouriGuide: () => ({
+    settings: {
+      preferTextOverVoice: false,
+      simpleLanguage: false,
+      alwaysShowCaptions: true,
+      preferredLanguage: 'en',
+    },
+    updateSetting: jest.fn(),
+    resetSettings: jest.fn(),
+  }),
+}))
+
 import LoginPage from '../pages/LoginPage';
 import { useAuthContext } from '../utils/AuthContext';
 

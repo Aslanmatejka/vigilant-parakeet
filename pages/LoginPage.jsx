@@ -1,9 +1,11 @@
+import React from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAuthContext } from "../utils/AuthContext";
 import { safeInternalRedirect } from "../utils/safeRedirect";
 import Button from "../components/common/Button";
 import Input from "../components/common/Input";
-import React from "react";
+import useFormVoiceGuide from '../hooks/useFormVoiceGuide';
+import { LOGIN_WELCOME, LOGIN_HINTS } from '../hooks/formGuideHints';
 
 function LoginPage() {
     const navigate = useNavigate();
@@ -19,6 +21,11 @@ function LoginPage() {
     const [submitting, setSubmitting] = React.useState(false);
     const [successMessage, setSuccessMessage] = React.useState(null);
     const [showPassword, setShowPassword] = React.useState(false);
+    const { speakField, reportError } = useFormVoiceGuide({
+        formId: 'login',
+        welcomeMessage: LOGIN_WELCOME,
+        hints: LOGIN_HINTS,
+    });
 
     // Redirect if already authenticated
     React.useEffect(() => {
@@ -52,14 +59,18 @@ function LoginPage() {
     const validateForm = () => {
         if (!formData.email || !formData.password) {
             setError('Please fill in all required fields');
+            if (!formData.email) reportError('email', 'Email is required');
+            else reportError('password', 'Password is required');
             return false;
         }
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
             setError('Please enter a valid email address');
+            reportError('email', 'Please enter a valid email address');
             return false;
         }
         if (formData.password.length < 8) {
             setError('Password must be at least 8 characters long');
+            reportError('password', 'Password must be at least 8 characters long');
             return false;
         }
         return true;
@@ -173,6 +184,7 @@ function LoginPage() {
                                         required
                                         value={formData.email}
                                         onChange={handleChange}
+                                        onFocus={() => speakField('email')}
                                         className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-primary-500 focus:border-primary-500 sm:text-sm"
                                     />
                                 </div>
@@ -191,6 +203,7 @@ function LoginPage() {
                                         required
                                         value={formData.password}
                                         onChange={handleChange}
+                                        onFocus={() => speakField('password')}
                                         className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-primary-500 focus:border-primary-500 sm:text-sm"
                                     />
                                     <button
@@ -211,6 +224,7 @@ function LoginPage() {
                                         type="checkbox"
                                         checked={formData.rememberMe}
                                         onChange={handleChange}
+                                        onFocus={() => speakField('rememberMe')}
                                         className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
                                     />
                                     <label htmlFor="remember-me" className="ml-2 block text-sm text-gray-900">

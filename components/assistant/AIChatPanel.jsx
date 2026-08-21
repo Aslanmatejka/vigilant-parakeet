@@ -5,7 +5,7 @@ import { useCommunityRole } from '../../utils/hooks/useCommunityRole.js'
 import { useMapContext } from '../../utils/MapContext.jsx'
 import { useUIControl } from '../../utils/UIControlContext.jsx'
 import VoiceOutput from './VoiceOutput.jsx'
-import { textToSpeech, playAudioBlob } from '../../utils/openaiVoice.js'
+import { useNouriGuide } from '../../utils/NouriGuideContext.jsx'
 import aiChatService from '../../utils/services/aiChatService.js'
 import { parseListingsCsv, downloadCsvTemplate, sanitizeListingExpiry, visionDraftToRow, matchCommunityByName } from '../../utils/csvListings.js'
 import { assignImagestoRows, assignFoodImage } from '../../utils/foodImages.js'
@@ -17,126 +17,20 @@ import {
   browseCommunityIdsForUser,
   listingVisibleToCommunityScope,
 } from '../../utils/communityScope.js'
-
-// ─── Welcome hero categories (richer onboarding surface) ───────────
-// Replaces the flat 6-pill row when the chat is empty. Each category
-// surfaces 2 starter prompts so the user immediately understands what
-// Nouri can do, organized by intent (Find / Share / Manage / Learn).
-const WELCOME_CATEGORIES_EN = [
-  {
-    key: 'guide',
-    icon: 'fa-compass',
-    accent: 'amber',
-    title: 'Not sure?',
-    blurb: 'I’ll walk you through it',
-    prompts: [
-      'I\'m not sure what to do — help me',
-      'How does DoGoods work?',
-    ],
-  },
-  {
-    key: 'find',
-    icon: 'fa-magnifying-glass-location',
-    accent: 'emerald',
-    title: 'Find food',
-    blurb: 'I’ll ask how you want help',
-    prompts: [
-      'I want to find food',
-      'Find free food near me',
-    ],
-  },
-  {
-    key: 'share',
-    icon: 'fa-hand-holding-heart',
-    accent: 'fuchsia',
-    title: 'Share food',
-    blurb: 'I’ll ask how you want help',
-    prompts: [
-      'I want to share food',
-      'Share extra food from my address',
-    ],
-  },
-  {
-    key: 'request',
-    icon: 'fa-clipboard-list',
-    accent: 'sky',
-    title: 'Request food',
-    blurb: 'I’ll ask how you want help',
-    prompts: [
-      'I want to request food',
-      'Request food that isn’t listed yet',
-    ],
-  },
-  {
-    key: 'manage',
-    icon: 'fa-list-check',
-    accent: 'cyan',
-    title: 'Manage activity',
-    blurb: 'Pickups, claims, impact',
-    prompts: [
-      'What are my upcoming pickups?',
-      'Show my impact stats',
-    ],
-  },
-]
-
-const WELCOME_CATEGORIES_ES = [
-  {
-    key: 'guide',
-    icon: 'fa-compass',
-    accent: 'amber',
-    title: '¿No estás seguro?',
-    blurb: 'Te guío paso a paso',
-    prompts: [
-      'No sé qué hacer — ayúdame',
-      '¿Cómo funciona DoGoods?',
-    ],
-  },
-  {
-    key: 'find',
-    icon: 'fa-magnifying-glass-location',
-    accent: 'emerald',
-    title: 'Buscar comida',
-    blurb: 'Te pregunto cómo ayudar',
-    prompts: [
-      'Quiero buscar comida',
-      'Buscar comida gratis cerca',
-    ],
-  },
-  {
-    key: 'share',
-    icon: 'fa-hand-holding-heart',
-    accent: 'fuchsia',
-    title: 'Compartir comida',
-    blurb: 'Te pregunto cómo ayudar',
-    prompts: [
-      'Quiero compartir comida',
-      'Compartir comida extra desde mi dirección',
-    ],
-  },
-  {
-    key: 'request',
-    icon: 'fa-clipboard-list',
-    accent: 'sky',
-    title: 'Solicitar comida',
-    blurb: 'Te pregunto cómo ayudar',
-    prompts: [
-      'Quiero solicitar comida',
-      'Solicitar comida que aún no está listada',
-    ],
-  },
-  {
-    key: 'manage',
-    icon: 'fa-list-check',
-    accent: 'cyan',
-    title: 'Mi actividad',
-    blurb: 'Recogidas, reclamos, impacto',
-    prompts: [
-      '¿Cuáles son mis próximas recogidas?',
-      'Muestra mis estadísticas de impacto',
-    ],
-  },
-]
+import {
+  getWelcomeCategories,
+  getSuggestions,
+  welcomeGreeting,
+  t as chatT,
+  dateLocale,
+  dateLabel,
+  languageSwitchPrompt,
+  CHAT_UI_LANGUAGES,
+  CHAT_LANGUAGE_LABELS,
+  getToneLabels,
+  chatLang,
+  onlineToneLabel,
+} from '../../utils/chatI18n.js'
 
 // Map accent → tailwind classes so the welcome cards stay on-brand
 // while still being visually distinct from each other.
@@ -175,19 +69,15 @@ const ACCENT_MAP = {
 
 // ─── WelcomeHero — empty-state onboarding surface ──────────────────
 function WelcomeHero({ language, userName, onPromptClick, communityRole }) {
-  const all = language === 'es' ? WELCOME_CATEGORIES_ES : WELCOME_CATEGORIES_EN
+  const all = getWelcomeCategories(language)
   const role = String(communityRole || '').toLowerCase()
   const categories = all.filter((cat) => {
     if (role === 'donor') return cat.key !== 'find' && cat.key !== 'request'
     if (role === 'recipient') return cat.key !== 'share'
     return true
   })
-  const greeting = language === 'es'
-    ? (userName ? `¡Hola, ${userName}!` : '¡Hola!')
-    : (userName ? `Hi, ${userName}!` : 'Hi there!')
-  const subtitle = language === 'es'
-    ? 'Elige una sugerencia abajo, una tarjeta, o escribe — te pregunto si lo hago yo o te guío paso a paso.'
-    : 'Tap a suggestion below, a card, or type — I’ll ask whether to do it for you or guide you step by step.'
+  const greeting = welcomeGreeting(language, userName)
+  const subtitle = chatT(language, 'welcomeSubtitle')
 
   return (
     <div className="px-4 pt-3 pb-2">
@@ -242,13 +132,13 @@ function formatSeparator(iso, language) {
   const now = new Date()
   const startOfDay = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
   const diffDays = Math.round((startOfDay(now) - startOfDay(d)) / 86400000)
-  const es = language === 'es'
-  if (diffDays === 0) return es ? 'Hoy' : 'Today'
-  if (diffDays === 1) return es ? 'Ayer' : 'Yesterday'
+  const loc = dateLocale(language)
+  if (diffDays === 0) return dateLabel(language, 'today')
+  if (diffDays === 1) return dateLabel(language, 'yesterday')
   if (diffDays < 7) {
-    return d.toLocaleDateString(es ? 'es-ES' : 'en-US', { weekday: 'long' })
+    return d.toLocaleDateString(loc, { weekday: 'long' })
   }
-  return d.toLocaleDateString(es ? 'es-ES' : 'en-US', { month: 'short', day: 'numeric' })
+  return d.toLocaleDateString(loc, { month: 'short', day: 'numeric' })
 }
 
 function DateSeparator({ label }) {
@@ -271,68 +161,15 @@ function ScrollToBottomPill({ visible, onClick, language }) {
       type="button"
       onClick={onClick}
       className="absolute bottom-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/90 backdrop-blur-md border border-[#2CABE3]/20 text-[#2CABE3] text-xs shadow-lg shadow-[#2CABE3]/10 hover:bg-white hover:border-[#2CABE3]/40 hover:scale-105 active:scale-95 transition-all animate-fade-in"
-      aria-label={language === 'es' ? 'Ir al final' : 'Jump to latest'}
+      aria-label={chatT(language, 'jumpLatest')}
     >
       <i className="fas fa-arrow-down text-[10px]" aria-hidden="true" />
-      {language === 'es' ? 'Más reciente' : 'Latest'}
+      {chatT(language, 'latest')}
     </button>
   )
 }
 
-// ─── Autocomplete suggestion pool ─────────────────────────────
-const SUGGESTIONS_EN = [
-  'What food is available near me?',
-  'What food is available within 5 miles?',
-  'Show me food listings nearby',
-  'What are my upcoming pickups?',
-  'What are my recent claims?',
-  'Cancel my pickup',
-  'Show my dashboard',
-  'Show my impact stats',
-  'How many meals have I shared?',
-  'Can you suggest a recipe from available food?',
-  'Give me a recipe for leftovers',
-  'How do I store fresh produce?',
-  'I want to share some food',
-  'How do I post a food listing?',
-  'What distribution events are coming up?',
-  'Find a distribution center near me',
-  'Route me to the nearest pickup',
-  'How does DoGoods work?',
-  'How do I verify my account?',
-  'Update my profile address',
-  'Switch to Spanish',
-  'Open the map',
-  'Find food expiring soon',
-  'Show urgent listings',
-]
-
-const SUGGESTIONS_ES = [
-  '¿Qué comida hay disponible cerca de mí?',
-  '¿Qué comida hay a menos de 5 millas?',
-  'Muéstrame las publicaciones cercanas',
-  '¿Cuáles son mis próximas recogidas?',
-  '¿Cuáles son mis reclamos recientes?',
-  'Cancela mi recogida',
-  'Muestra mi panel',
-  'Muestra mis estadísticas de impacto',
-  '¿Cuántas comidas he compartido?',
-  '¿Puedes sugerirme una receta con comida disponible?',
-  'Dame una receta para sobras',
-  '¿Cómo guardo productos frescos?',
-  'Quiero compartir comida',
-  '¿Cómo publico una donación?',
-  '¿Qué eventos de distribución hay próximamente?',
-  'Encuentra un centro de distribución cerca',
-  'Llévame a la recogida más cercana',
-  '¿Cómo funciona DoGoods?',
-  '¿Cómo verifico mi cuenta?',
-  'Actualiza la dirección de mi perfil',
-  'Cambia a inglés',
-  'Abre el mapa',
-  'Comida que vence pronto',
-  'Muestra publicaciones urgentes',
-]
+// ─── Autocomplete suggestion pool (see utils/chatI18n.js) ─────────
 
 function TypingIndicator() {
   return (
@@ -1294,7 +1131,14 @@ function MessageBubble({
   const [avatarBroken, setAvatarBroken] = useState(false)
   const [copied, setCopied] = useState(false)
   const isUser = msg.role === 'user'
-  const suggestionItems = msg.suggestions || msg.suggestedActions || []
+  const suggestionItems = useMemo(() => {
+    const raw = msg.suggestions || msg.suggestedActions || []
+    const responseText = msg.message || msg.text || ''
+    return resolveInputChips(raw, language, null, {
+      allowLazy: false,
+      responseText,
+    })
+  }, [msg.suggestions, msg.suggestedActions, msg.message, msg.text, language])
   const isVoiceMessage = msg.source === 'voice'
 
   const handleFeedback = (rating) => {
@@ -1572,14 +1416,21 @@ function SuggestedActionButton({ action, onSuggestionClick, disabled = false, co
   const handleClick = () => {
     if (disabled) return
 
+    const isOpenForm = /^(open the form|abrir el formulario)$/i.test(String(sendText || label || '').trim())
+
     if (actionType === 'navigate' && asObject && (action.target || action.href || action.path)) {
       const target = action.target || action.href || action.path
+      const path = action.path || (typeof target === 'string' && target.startsWith('/') ? target : undefined)
       executeUIAction({
         ok: true,
         action: 'navigate',
-        path: typeof target === 'string' && target.startsWith('/') ? target : undefined,
-        target: typeof target === 'string' && !target.startsWith('/') ? target : undefined,
+        path: path || (isOpenForm ? '/share' : undefined),
+        target: typeof target === 'string' && !String(target).startsWith('/') ? target : undefined,
       })
+      // Still send the chat message so Nouri enters guided mode.
+      if (sendText && onSuggestionClick) {
+        onSuggestionClick(sendText)
+      }
       return
     }
 
@@ -2334,6 +2185,7 @@ function AIChatPanel() {
     [authUser?.community_id, isAdmin],
   )
   const communityRole = useCommunityRole()
+  const { settings: a11ySettings, guide, syncFromChat, cancelVoice, updateSetting } = useNouriGuide()
   // Photo / CSV attach is donor-only (list food, attach listing photos, bulk CSV).
   const canAttachFiles = communityRole !== 'recipient'
   // Staged photos for the composer (attach + optional text, then send together).
@@ -2418,12 +2270,16 @@ function AIChatPanel() {
           && lastAppliedToolMsgRef.current !== last.id) {
         lastAppliedToolMsgRef.current = last.id
         applyToolResults(last.toolResults)
-        const navCount = executeUIActionsFromToolResults(last.toolResults)
-        if (navCount === 0 && last.action && !last.fromHistory) {
+        // GUIDED tutorial: never auto-open pages — Nouri only tells the user how.
+        const guidedTutorial = /^guided\b|^guiado\b/i.test(String(last.message || '').trim())
+        const navCount = guidedTutorial
+          ? 0
+          : executeUIActionsFromToolResults(last.toolResults)
+        if (!guidedTutorial && navCount === 0 && last.action && !last.fromHistory) {
           executeUIAction({ ok: true, ...last.action })
         }
         // Route optimizer hint → open dashboard so PickupRouteOptimizer can render stops.
-        const wantsRouteUi = last.toolResults.some((tr) => {
+        const wantsRouteUi = !guidedTutorial && last.toolResults.some((tr) => {
           const r = tr.result ?? tr
           const hint = r?.frontend_hint || tr.frontend_hint
           return tr.tool === 'optimize_pickup_route'
@@ -2600,7 +2456,7 @@ function AIChatPanel() {
     const u2 = registerHandler('setAssistantExpanded', (exp) => setIsExpanded(!!exp))
     const u3 = registerHandler('clearMapOverlays', () => clearAIOverlays())
     const u4 = registerHandler('setLanguage', (lang) => {
-      if (lang === 'en' || lang === 'es') setLanguage(lang)
+      if (CHAT_UI_LANGUAGES.includes(chatLang(lang))) setLanguage(chatLang(lang))
     })
     return () => { u1(); u2(); u3(); u4() }
   }, [registerHandler, clearAIOverlays, setLanguage, closeAssistant])
@@ -2685,7 +2541,7 @@ function AIChatPanel() {
 
   // Autocomplete always follows the sticky conversation language — never
   // flip pools mid-typing from accent marks in English loan-words.
-  const suggestionPool = language === 'es' ? SUGGESTIONS_ES : SUGGESTIONS_EN
+  const suggestionPool = getSuggestions(language)
   const filteredSuggestions = useMemo(() => {
     const q = inputText.trim().toLowerCase()
     if (!q) return []
@@ -2887,14 +2743,45 @@ function AIChatPanel() {
 
   const handleQuickAction = useCallback((msg) => {
     if (isLoading) return
-    sendMessage(msg)
+    const text = String(msg || '').trim()
+    if (!text) return
+    // Open Share / Find / Request — page-aware labels.
+    const openForm = /^(open the form|abrir el formulario|open find food|abrir buscar comida|open request food|abrir solicitar comida)$/i.test(text)
+    if (openForm) {
+      let path = '/share'
+      const lower = text.toLowerCase()
+      try {
+        const lastAsst = [...messages].reverse().find(
+          (m) => m.role === 'assistant' && !m.isError && m.id !== 'welcome',
+        )
+        const locPath = typeof window !== 'undefined' ? (window.location.pathname || '') : ''
+        const ctx = `${lastAsst?.message || ''} ${text} ${locPath}`.toLowerCase()
+        if (/open find food|abrir buscar|find food|buscar comida|\/find|near-me/.test(lower + ctx)
+          && !/open the form|abrir el formulario|share food|\/share/.test(lower)) {
+          path = locPath.includes('near-me') ? '/near-me' : '/find'
+        } else if (/open request food|abrir solicitar|request food|\/request/.test(lower + ctx)
+          && !/open the form|share food|\/share/.test(lower)) {
+          path = '/request'
+        } else if (/(find food|buscar comida|search nearby|near you)/.test(ctx)
+          && !/(share food|\/share|compartir|donate|posting)/.test(ctx)) {
+          path = locPath.includes('near-me') ? '/near-me' : '/find'
+        } else if (/(request food|solicitar)/.test(ctx)
+          && !/(share food|\/share|compartir|donate|posting)/.test(ctx)) {
+          path = '/request'
+        }
+      } catch { /* keep /share */ }
+      try {
+        executeUIAction?.({ ok: true, action: 'navigate', path })
+      } catch { /* UI control optional */ }
+    }
+    sendMessage(text)
     requestAnimationFrame(() => inputRef.current?.focus())
-  }, [isLoading, sendMessage])
+  }, [isLoading, sendMessage, executeUIAction, messages])
 
   // Quick-suggestion chip rail above the input.
-  // Conversation start: always show role-aware starter chips.
-  // Mid-conversation: never mirror bubble suggestions onto the rail
-  // (and no generic lazy chips — those would clash with claim/qty turns).
+  // Conversation start: role-aware starter chips.
+  // Mid-conversation: mirror the same backend chips as the bubble (no lazy
+  // fallbacks — empty rail is better than mismatched "Find food" chips).
   const railChips = useMemo(() => {
     if (isLoading || pendingUpload || voiceMode || pendingChatPhotos.length > 0) return []
     if (messages.length <= 1) {
@@ -2910,7 +2797,11 @@ function AIChatPanel() {
     }
     if (!lastAssistant || lastAssistant.requiresConfirmation) return []
     const backendSuggestions = Array.isArray(lastAssistant.suggestions) ? lastAssistant.suggestions : []
-    return resolveInputChips(backendSuggestions, language, communityRole, { allowLazy: false })
+    const responseText = String(lastAssistant.message || lastAssistant.text || '')
+    return resolveInputChips(backendSuggestions, language, communityRole, {
+      allowLazy: false,
+      responseText,
+    })
   }, [messages, isLoading, pendingUpload, voiceMode, language, communityRole, pendingChatPhotos.length])
 
   // ─── File uploads (photo + CSV → bulk-listings) ───────
@@ -3798,88 +3689,42 @@ function AIChatPanel() {
 
   // Voice mode is manual — user taps the orb to start each recording
 
-  // OpenAI TTS: speak latest assistant message in voice mode
-  // Skip the initial welcome message — only speak new responses
+  // Unified guide sync + voice for every assistant reply
+  const lastGuideMsgRef = useRef(null)
   useEffect(() => {
-    if (!voiceMode || !lastAssistantMessage || isLoading) return
+    if (!lastAssistantMessage || isLoading) return
     if (lastAssistantMessage.id === 'welcome') return
-    if (lastAssistantMessage.id === lastSpokenIdRef.current) return
-    lastSpokenIdRef.current = lastAssistantMessage.id
+    if (lastAssistantMessage.id === lastGuideMsgRef.current) return
+    lastGuideMsgRef.current = lastAssistantMessage.id
 
-    const speakWithOpenAI = async () => {
-      try {
-        const cleanText = lastAssistantMessage.message
-          .replace(/\*\*(.*?)\*\*/g, '$1')
-          .replace(/[#*_~`]/g, '')
-          .replace(/\n+/g, '. ')
-          .replace(/\s+/g, ' ')
-          .trim()
-        if (!cleanText) return
+    const lang = language === 'es' ? 'es' : (a11ySettings.preferredLanguage || language || 'en')
+    const shouldSpeak =
+      voiceMode
+      && !a11ySettings.preferTextOverVoice
+      && lastAssistantMessage.id !== lastSpokenIdRef.current
 
-        // Mute the mic stream to prevent feedback loop (AI voice → mic → Whisper → sends message)
-        if (mediaStreamRef.current) {
-          mediaStreamRef.current.getAudioTracks().forEach(t => { t.enabled = false })
-        }
-
-        setIsVoiceSpeaking(true)
-        try {
-          const audioBlob = await textToSpeech(cleanText, { lang: language === 'es' ? 'es' : 'en' })
-          // The TTS request can take hundreds of ms; if the user exited voice
-          // mode in the meantime, abandon the audio rather than play it with
-          // no visible indicator (and skip the fallback path too).
-          if (!voiceModeRef.current) { setIsVoiceSpeaking(false); return }
-          const { play, stop } = playAudioBlob(
-            audioBlob,
-            () => { setTapToHear(null); setIsVoiceSpeaking(true) },
-            () => setIsVoiceSpeaking(false),
-            // Autoplay blocked (iOS): expose a replay handler for the
-            // "Tap to hear" button instead of silently dropping the audio.
-            (replay) => {
-              setIsVoiceSpeaking(false)
-              setTapToHear(() => () => {
-                setTapToHear(null)
-                setIsVoiceSpeaking(true)
-                replay()
-              })
-            }
-          )
-          currentAudioRef.current = stop
-          await play
-          currentAudioRef.current = null
-          return
-        } catch (ttsErr) {
-          console.warn('OpenAI TTS failed, falling back to browser speech:', ttsErr)
-        }
-
-        // Fallback: browser SpeechSynthesis — also gated on voice mode so an
-        // exit during the failed TTS request doesn't trigger background audio.
-        if (voiceModeRef.current && typeof window !== 'undefined' && window.speechSynthesis) {
-          await new Promise((resolve) => {
-            const utterance = new SpeechSynthesisUtterance(cleanText.slice(0, 500))
-            utterance.lang = language === 'es' ? 'es-ES' : 'en-US'
-            utterance.rate = 1.0
-            utterance.onend = resolve
-            utterance.onerror = resolve
-            window.speechSynthesis.speak(utterance)
-          })
-        }
-        setIsVoiceSpeaking(false)
-      } catch (err) {
-        console.error('Voice output failed:', err)
-        setIsVoiceSpeaking(false)
-      } finally {
-        // Re-enable mic tracks after TTS finishes (with delay to avoid echo).
-        // Only re-enable if voice mode is still active — exitVoiceMode already
-        // stopped the stream and we don't want to re-arm a freshly muted one.
-        setTimeout(() => {
-          if (voiceModeRef.current && mediaStreamRef.current) {
-            mediaStreamRef.current.getAudioTracks().forEach(t => { t.enabled = true })
-          }
-        }, 500)
+    if (shouldSpeak) {
+      lastSpokenIdRef.current = lastAssistantMessage.id
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getAudioTracks().forEach((t) => { t.enabled = false })
       }
     }
-    speakWithOpenAI()
-  }, [voiceMode, lastAssistantMessage, isLoading, language])
+
+    syncFromChat(lastAssistantMessage.message, { lang, speak: shouldSpeak })
+
+    if (shouldSpeak) {
+      const micTimer = setTimeout(() => {
+        if (voiceModeRef.current && mediaStreamRef.current) {
+          mediaStreamRef.current.getAudioTracks().forEach((t) => { t.enabled = true })
+        }
+      }, 3500)
+      return () => clearTimeout(micTimer)
+    }
+  }, [voiceMode, lastAssistantMessage, isLoading, language, a11ySettings.preferTextOverVoice, syncFromChat])
+
+  useEffect(() => {
+    if (voiceMode) setIsVoiceSpeaking(guide.isSpeaking)
+  }, [guide.isSpeaking, voiceMode])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -3897,6 +3742,7 @@ function AIChatPanel() {
         currentAudioRef.current()
         currentAudioRef.current = null
       }
+      cancelVoice()
     }
   }, [])
 
@@ -4103,29 +3949,32 @@ function AIChatPanel() {
               />
               <span>
                 {isAuthenticated
-                  ? (language === 'es'
-                    ? `En línea · tono ${AI_TONE_LABELS.es[tone] || tone}`
-                    : `Online · ${AI_TONE_LABELS.en[tone] || tone} tone`)
-                  : (language === 'es' ? 'Inicia sesión para más funciones' : 'Sign in for full features')}
+                  ? onlineToneLabel(language, getToneLabels(language)[tone] || tone)
+                  : chatT(language, 'signInForFeatures')}
               </span>
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-1">
-          {/* Language toggle — flag-style for instant recognition */}
-          <button
-            onClick={() => {
-              const newLang = language === 'es' ? 'en' : 'es'
-              sendMessage(newLang === 'es' ? 'Hola, habla en español por favor' : 'Hi, please speak in English')
+          <label className="sr-only" htmlFor="nouri-chat-language">{chatT(language, 'chatLanguage')}</label>
+          <select
+            id="nouri-chat-language"
+            value={chatLang(language)}
+            onChange={(e) => {
+              const newLang = chatLang(e.target.value)
+              if (newLang === chatLang(language)) return
+              setLanguage(newLang)
+              updateSetting('preferredLanguage', newLang)
+              sendMessage(languageSwitchPrompt(newLang))
             }}
-            className="flex items-center gap-1 text-[#2CABE3] hover:text-[#2299c7] text-[11px] font-semibold px-2 py-1 rounded-full bg-[#2CABE3]/10 transition-colors border border-[#2CABE3]/20 hover:border-[#2CABE3]/35"
-            title={language === 'es' ? 'Switch to English' : 'Cambiar a Español'}
-            aria-label={language === 'es' ? 'Switch to English' : 'Cambiar a Español'}
+            className="text-[#2CABE3] hover:text-[#2299c7] text-[11px] font-semibold px-2 py-1 rounded-full bg-[#2CABE3]/10 border border-[#2CABE3]/20 hover:border-[#2CABE3]/35 max-w-[5.5rem] truncate"
+            aria-label={chatT(language, 'chatLanguage')}
           >
-            <span aria-hidden="true">{language === 'es' ? '🇺🇸' : '🇪🇸'}</span>
-            <span className="tracking-wide">{language === 'es' ? 'EN' : 'ES'}</span>
-          </button>
+            {CHAT_UI_LANGUAGES.map((code) => (
+              <option key={code} value={code}>{CHAT_LANGUAGE_LABELS[code]}</option>
+            ))}
+          </select>
 
           {/* Menu */}
           <div className="relative z-40">
@@ -4143,10 +3992,10 @@ function AIChatPanel() {
               <div className="absolute right-0 top-full mt-1 bg-white/95 rounded-lg shadow-xl border border-[#2CABE3]/15 py-1 w-52 z-50 backdrop-blur-md">
                 <div className="px-2 pt-1 pb-0.5">
                   <p className="text-[10px] uppercase tracking-wider text-gray-400 px-2 py-1">
-                    {language === 'es' ? 'Tono de conversación' : 'Conversation tone'}
+                    {chatT(language, 'conversationTone')}
                   </p>
                   {AI_TONE_OPTIONS.map((t) => {
-                    const labels = AI_TONE_LABELS[language === 'es' ? 'es' : 'en']
+                    const labels = getToneLabels(language)
                     const active = tone === t
                     return (
                       <button
@@ -4640,26 +4489,34 @@ function AIChatPanel() {
             ))}
           </div>
         )}
-        {/* Quick-suggestion chip rail — starter chips on every new conversation;
-            mid-conversation only when the backend didn't return per-turn
-            bubble suggestions. */}
+        {/* Quick-suggestion chip rail — starter chips on a new conversation;
+            mid-conversation shows the latest backend contextual chips (prechips). */}
         {railChips.length > 0 && (
           <div
             role="toolbar"
             aria-label={language === 'es' ? 'Sugerencias rápidas' : 'Quick suggestions'}
             className="flex gap-1.5 overflow-x-auto pb-1 nourish-scrollbar-h"
           >
-            {railChips.map((chip) => (
-              <button
-                key={chip}
-                type="button"
-                onClick={() => handleQuickAction(chip)}
-                disabled={isLoading}
-                className="whitespace-nowrap flex-shrink-0 text-[11px] px-2.5 py-1 rounded-full border border-[#2CABE3]/30 bg-white/90 text-[#1a7a9e] font-medium hover:bg-[#2CABE3]/10 hover:border-[#2CABE3]/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {chip}
-              </button>
-            ))}
+            {railChips.map((chip, i) => {
+              const label = typeof chip === 'string'
+                ? chip
+                : (chip?.label || chip?.message || '')
+              const message = typeof chip === 'string'
+                ? chip
+                : (chip?.message || chip?.label || '')
+              if (!label) return null
+              return (
+                <button
+                  key={`${label}-${i}`}
+                  type="button"
+                  onClick={() => handleQuickAction(message)}
+                  disabled={isLoading}
+                  className="whitespace-nowrap flex-shrink-0 text-[11px] px-2.5 py-1 rounded-full border border-[#2CABE3]/30 bg-white/90 text-[#1a7a9e] font-medium hover:bg-[#2CABE3]/10 hover:border-[#2CABE3]/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {label}
+                </button>
+              )
+            })}
           </div>
         )}
 
@@ -4784,8 +4641,8 @@ function AIChatPanel() {
               onBlur={() => setTimeout(() => setSuggestionsOpen(false), 120)}
               placeholder={
                 pendingChatPhotos.length > 0
-                  ? (language === 'es' ? 'Añade un mensaje (opcional)…' : 'Add a caption (optional)…')
-                  : (language === 'es' ? 'Pregunta lo que quieras…' : 'Message Nouri…')
+                  ? chatT(language, 'photoCaptionPlaceholder')
+                  : chatT(language, 'messagePlaceholder')
               }
               className={`w-full resize-none rounded-2xl border bg-white/90 text-gray-800 placeholder-gray-400 px-4 py-2.5 text-sm leading-relaxed max-h-32 outline-none transition-all backdrop-blur-sm ${
                 isLoading

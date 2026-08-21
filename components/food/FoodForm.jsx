@@ -6,8 +6,9 @@ import { useAuthContext } from '../../utils/AuthContext';
 import supabase from '../../utils/supabaseClient';
 import { API_CONFIG } from '../../utils/config';
 import dataService from '../../utils/dataService';
-import useFormVoiceGuide, { SHARE_FOOD_WELCOME, SHARE_FOOD_HINTS, FORM_NAMES } from '../../hooks/useFormVoiceGuide';
-import FormVoiceGuide from '../common/FormVoiceGuide';
+import useFormVoiceGuide, { SHARE_FOOD_WELCOME, SHARE_FOOD_HINTS } from '../../hooks/useFormVoiceGuide';
+import EasyModeProgress, { EasyModeSectionGate, useEasyModeSections } from '../common/EasyModeProgress';
+import { reapplyPendingGuideField } from '../../utils/formFieldGuide';
 
 function FoodForm({
     initialData = null,
@@ -183,17 +184,43 @@ function FoodForm({
     const [errors, setErrors] = useState({});
     const [imagePreview, setImagePreview] = useState(null);
     const guide = useFormVoiceGuide({
-        formName: FORM_NAMES.share,
         welcomeMessage: SHARE_FOOD_WELCOME,
         hints: SHARE_FOOD_HINTS,
+        formId: 'share-food',
     });
-    const { speakField } = guide;
+    const { speakField, reportError, fieldName: guidedField } = guide;
+    const easyNav = useEasyModeSections(2);
     const [submitError, setSubmitError] = useState(null);
     const [geocodeTimeout, setGeocodeTimeout] = useState(null);
     // Ref holds the active debounce timer so the cleanup always cancels the
     // most-recently-scheduled call. Using state caused a re-render per keystroke
     // and the cleanup closed over a stale (previous) timer id.
     const geocodeTimerRef = React.useRef(null);
+
+    // Easy Mode hides one section — open the section that owns the guided field.
+    useEffect(() => {
+        if (!easyNav.easyMode || !guidedField) return;
+        const donorFields = new Set([
+            'donor_name', 'donor_type', 'donor_zip', 'donor_city', 'donor_state',
+            'school_district', 'donor_email', 'donor_phone', 'full_address',
+            'donor_occupation',
+        ]);
+        const foodFields = new Set([
+            'title', 'category', 'description', 'quantity', 'unit', 'expiry_date',
+            'pickup_by', 'dietary_tags', 'allergens', 'ingredients', 'image',
+        ]);
+        if (donorFields.has(guidedField) && easyNav.activeSection !== 0) {
+            easyNav.goToSection(0);
+        } else if (foodFields.has(guidedField) && easyNav.activeSection !== 1) {
+            easyNav.goToSection(1);
+        }
+    }, [guidedField, easyNav.easyMode, easyNav.activeSection, easyNav.goToSection]);
+
+    // After Easy Mode reveals a section, retry the pending field highlight.
+    useEffect(() => {
+        const t = setTimeout(() => reapplyPendingGuideField(), 80);
+        return () => clearTimeout(t);
+    }, [easyNav.activeSection, guidedField]);
 
     useEffect(() => {
         if (initialData?.image_url) {
@@ -420,6 +447,7 @@ function FoodForm({
         // If there are errors, scroll to and focus on the first error field
         if (Object.keys(newErrors).length > 0) {
             const firstErrorField = Object.keys(newErrors)[0];
+            reportError(firstErrorField, newErrors[firstErrorField]);
             // Use setTimeout to ensure DOM has updated with error messages
             setTimeout(() => {
                 const fieldElement = document.querySelector(`[name="${firstErrorField}"]`);
@@ -466,7 +494,11 @@ function FoodForm({
             noValidate
         >
             {sharingGuidelines}
-            <FormVoiceGuide guide={guide} className="mb-2" />
+            <EasyModeProgress
+                sectionIndex={easyNav.activeSection}
+                sectionTotal={easyNav.sectionCount}
+                sectionTitle={easyNav.activeSection === 0 ? 'Donor Information' : 'Food Listing Details'}
+            />
             {submitError && (
                 <div 
                     className="bg-red-50 border border-red-200 rounded-lg p-4" 
@@ -480,6 +512,7 @@ function FoodForm({
             )}
 
             {/* Donor Info Section - Top of Form */}
+            <EasyModeSectionGate easyMode={easyNav.easyMode} sectionIndex={0} activeSection={easyNav.activeSection}>
             <div className="mb-8 p-6 bg-primary-50 rounded-xl border border-primary-200">
                 <h2 className="text-xl font-bold text-primary-700 mb-4">Donor Information</h2>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -493,6 +526,23 @@ function FoodForm({
                         required
                         maxLength={100}
                         helperText="Enter your full name or organization name."
+                    />
+                    <Input
+                        label="Donor Type"
+                        name="donor_type"
+                        type="select"
+                        value={formData.donor_type}
+                        onChange={handleChange}
+                        onFocus={() => speakField('donor_type')}
+                        error={errors.donor_type}
+                        required
+                        options={[
+                            { value: '', label: 'Select type' },
+                            { value: 'individual', label: 'Individual / Family' },
+                            { value: 'organization', label: 'Organization' },
+                        ]}
+                        aria-describedby="donor_type-error"
+                        helperText="Are you donating as a person/family or an organization?"
                     />
                     <Input
                         label="ZIP Code"
@@ -705,25 +755,10 @@ function FoodForm({
                         maxLength={100}
                         helperText="Optional — your occupation or role in the organization."
                     />
-                    <Input
-                    label="Donor Type"
-                    name="donor_type"
-                    type="select"
-                    value={formData.donor_type}
-                    onChange={handleChange}
-                    onFocus={() => speakField('donor_type')}
-                    error={errors.donor_type}
-                    required
-                    options={[
-                        { value: '', label: 'Select type' },
-                        { value: 'individual', label: 'Individual/Family' },
-                        { value: 'organization', label: 'Organization' }
-                    ]}
-                    aria-describedby="donor_type-error"
-                />
-                    
                 </div>
             </div>
+            </EasyModeSectionGate>
+            <EasyModeSectionGate easyMode={easyNav.easyMode} sectionIndex={1} activeSection={easyNav.activeSection}>
             <div className="mb-8 p-6 bg-emerald-50 rounded-xl border border-emerald-200">
                 <h2 className="text-xl font-bold text-emerald-800 mb-4">Food Listing Details</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -785,12 +820,12 @@ function FoodForm({
                     />
                 </div>
 
-                <div>
+                <div data-guide-field="quantity" className="nouri-guide-target">
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                         Quantity <span className="text-red-500">*</span>
                     </label>
                     <div className="flex gap-2">
-                        <div className="flex-1">
+                        <div className="flex-1" data-guide-field="quantity">
                             <input
                                 type="number"
                                 name="quantity"
@@ -807,7 +842,7 @@ function FoodForm({
                                 aria-describedby="quantity-error"
                             />
                         </div>
-                        <div className="w-40">
+                        <div className="w-40" data-guide-field="unit">
                             <select
                                 name="unit"
                                 value={formData.unit}
@@ -983,6 +1018,20 @@ function FoodForm({
                 {/* Listing Type field removed */}
             </div>
             </div>
+            </EasyModeSectionGate>
+
+            {easyNav.easyMode && (
+                <div className="flex gap-2 justify-between mb-4">
+                    <Button type="button" variant="secondary" className="easy-mode-nav-btn" disabled={!easyNav.canPrev} onClick={easyNav.goPrev}>
+                        Back
+                    </Button>
+                    {easyNav.canNext && (
+                        <Button type="button" variant="primary" className="easy-mode-nav-btn" onClick={easyNav.goNext}>
+                            Next: Food listing
+                        </Button>
+                    )}
+                </div>
+            )}
 
             <div className="flex justify-end space-x-4">
                 <Button

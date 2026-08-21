@@ -350,6 +350,8 @@ class AIChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=200000)
     include_audio: bool = False
     tone: Optional[str] = Field(default=None, max_length=32)
+    accessibility_profile: Optional[dict] = None
+    guide_state: Optional[dict] = None
 
 
 class AIChatResponse(BaseModel):
@@ -1037,6 +1039,8 @@ async def ai_chat(
             message=body.message,
             include_audio=body.include_audio,
             tone=body.tone,
+            accessibility_profile=body.accessibility_profile,
+            guide_state=body.guide_state,
         )
     except HTTPException:
         raise
@@ -1437,6 +1441,8 @@ async def ai_voice(
     user_id: str = Form(..., min_length=1, max_length=64),
     include_audio: bool = Form(default=True),
     tone: Optional[str] = Form(default=None),
+    accessibility_profile: Optional[str] = Form(default=None),
+    guide_state: Optional[str] = Form(default=None),
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
     _enforce_rate_limit(request)
@@ -1458,6 +1464,25 @@ async def ai_voice(
     if len(audio_bytes) == 0:
         raise HTTPException(400, "Empty audio file")
 
+    a11y_payload = None
+    guide_payload = None
+    try:
+        if accessibility_profile:
+            import json as _json
+            parsed = _json.loads(accessibility_profile)
+            if isinstance(parsed, dict):
+                a11y_payload = parsed
+    except Exception:
+        a11y_payload = None
+    try:
+        if guide_state:
+            import json as _json
+            parsed = _json.loads(guide_state)
+            if isinstance(parsed, dict):
+                guide_payload = parsed
+    except Exception:
+        guide_payload = None
+
     lang = resolve_lang(request)
     whisper_name = _audio_filename_for_whisper(audio.filename, audio.content_type)
     try:
@@ -1474,6 +1499,8 @@ async def ai_voice(
             message=transcript,
             include_audio=include_audio,
             tone=tone,
+            accessibility_profile=a11y_payload,
+            guide_state=guide_payload,
         )
         result["transcript"] = transcript
         return result

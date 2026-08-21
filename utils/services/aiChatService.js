@@ -84,7 +84,7 @@ class AIChatService {
    *       requestId, status }, requestId, lang }
    *   On network error → throws, caller handles it.
    */
-  async sendMessage(message, { userId, includeAudio = false, silent = false, tone = null } = {}) {
+  async sendMessage(message, { userId, includeAudio = false, silent = false, tone = null, accessibilityProfile = null, guideState = null } = {}) {
     const response = await resilientFetch(
       `${API_BASE}/chat`,
       {
@@ -96,6 +96,8 @@ class AIChatService {
           include_audio: includeAudio,
           silent,
           ...(tone ? { tone } : {}),
+          ...(accessibilityProfile ? { accessibility_profile: accessibilityProfile } : {}),
+          ...(guideState ? { guide_state: guideState } : {}),
         }),
       },
       { timeout: REQUEST_TIMEOUT }
@@ -132,7 +134,7 @@ class AIChatService {
    * @param {boolean} silent       - skip persisting the transcript as a user row
    * @returns {{ response: string, transcript: string, lang: string, audioUrl: string|null }}
    */
-  async sendVoice(audioBlob, { userId, includeAudio = true, silent = false, tone = null } = {}) {
+  async sendVoice(audioBlob, { userId, includeAudio = true, silent = false, tone = null, accessibilityProfile = null, guideState = null } = {}) {
     try {
       const formData = new FormData()
       // Match filename extension to the recorded blob type. Always sending
@@ -157,6 +159,12 @@ class AIChatService {
       formData.append('include_audio', includeAudio.toString())
       formData.append('silent', silent ? 'true' : 'false')
       if (tone) formData.append('tone', tone)
+      if (accessibilityProfile) {
+        formData.append('accessibility_profile', JSON.stringify(accessibilityProfile))
+      }
+      if (guideState) {
+        formData.append('guide_state', JSON.stringify(guideState))
+      }
 
       const response = await resilientFetch(
         `${API_BASE}/voice`,
