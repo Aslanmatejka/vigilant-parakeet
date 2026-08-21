@@ -66,6 +66,7 @@ jobs:
     needs: [frontend]
     runs-on: ubuntu-latest
     continue-on-error: true
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -116,7 +117,8 @@ jobs:
 
   deploy-frontend:
     name: Deploy Frontend (Netlify)
-    needs: [frontend, backend, a11y-pa11y]
+    # Pa11y is advisory (continue-on-error) — do not gate production deploys on it.
+    needs: [frontend, backend]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     environment: production
@@ -159,7 +161,7 @@ jobs:
 
   deploy-backend:
     name: Deploy Backend (Railway)
-    needs: [frontend, backend, a11y-pa11y]
+    needs: [frontend, backend]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     environment: production
