@@ -185,8 +185,11 @@ class TestQuickReplyChips:
     def test_freshness_question_gets_expiry_chips(self):
         reply = "When was it made and how long is it good for?"
         chips = generate_quick_replies(reply, "en")
-        assert "Made today" in chips
-        assert "Good for 24h" in chips
+        # Never suggest Made today/yesterday as expiry — those break posting.
+        assert "Tomorrow" in chips
+        assert "In 2 days" in chips
+        assert "Made today" not in chips
+        assert any("24" in c for c in chips)
 
     def test_chip_language_helper_does_not_override_en_conv(self):
         reply = "Sure — ¿Quieres que lo publique ahora?"

@@ -139,8 +139,30 @@ class TestBestCommunityNameMatch:
 
 
 @pytest.mark.asyncio
-async def test_resolve_treats_name_stuffed_into_community_id():
+async def test_resolve_treats_name_stuffed_into_community_id(monkeypatch):
     from backend.tools import _resolve_community
+
+    catalog = [
+        {"id": "3", "name": "NEA/ACLC CC"},
+        {"id": "1", "name": "Alameda Unified School District"},
+    ]
+
+    async def fake_supabase_get(table, params):
+        if table != "communities":
+            return []
+        name_q = str(params.get("name") or "")
+        if name_q.startswith("ilike."):
+            needle = name_q[len("ilike."):].strip("%").lower()
+            for row in catalog:
+                if needle and needle in row["name"].lower():
+                    return [row]
+        return []
+
+    async def fake_fetch_rows(**_kwargs):
+        return catalog
+
+    monkeypatch.setattr("backend.ai_engine.supabase_get", fake_supabase_get)
+    monkeypatch.setattr("backend.tools._fetch_all_active_community_rows", fake_fetch_rows)
 
     cid, cname = await _resolve_community(None, "NEA/ACLC CC")
     assert cid == "3"
@@ -152,8 +174,19 @@ async def test_resolve_treats_name_stuffed_into_community_id():
 
 
 @pytest.mark.asyncio
-async def test_get_active_communities_returns_full_catalog_by_default():
+async def test_get_active_communities_returns_full_catalog_by_default(monkeypatch):
     from backend.tools import _get_active_communities
+
+    catalog = [
+        {"id": "3", "name": "NEA/ACLC CC"},
+        {"id": "1", "name": "Alameda Unified School District"},
+        {"id": "2", "name": "Do Good Warehouse"},
+    ] + [{"id": str(i), "name": f"School {i}"} for i in range(10, 25)]
+
+    async def fake_fetch_rows(**_kwargs):
+        return catalog
+
+    monkeypatch.setattr("backend.tools._fetch_all_active_community_rows", fake_fetch_rows)
 
     result = await _get_active_communities(max_results=100)
     assert not result.get("error")

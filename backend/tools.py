@@ -4934,18 +4934,6 @@ async def _create_food_listing(
         return {"success": False, "error": "title is required"}
     unit_s = (unit or "items").strip()[:40] or "items"
 
-    photo = (image_url or "").strip() if isinstance(image_url, str) else ""
-    if not photo:
-        return {
-            "success": False,
-            "error": "photo_required",
-            "message": (
-                "A photo is required before posting. Ask the donor to upload "
-                "an image in chat, then retry with image_url. Do not offer to "
-                "post without a photo."
-            ),
-        }
-
     try:
         qty = float(quantity)
         if qty <= 0:
@@ -5062,6 +5050,19 @@ async def _create_food_listing(
                 "good-until date (made today → tomorrow)."
             ),
             "suggested_expiry_date": _suggested_expiry_for_category(cat),
+        }
+
+    # Photo after field validation so role/expiry/community errors surface first.
+    photo = (image_url or "").strip() if isinstance(image_url, str) else ""
+    if not photo:
+        return {
+            "success": False,
+            "error": "photo_required",
+            "message": (
+                "A photo is required before posting. Ask the donor to upload "
+                "an image in chat, then retry with image_url. Do not offer to "
+                "post without a photo."
+            ),
         }
     row["expiry_date"] = resolved_expiry
 

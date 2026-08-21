@@ -66,6 +66,7 @@ async def test_fulfilling_request_id_skips_community_confirm(monkeypatch):
         expiry_date="2099-12-31",
         community_confirmed=False,  # normally blocks — should be overridden
         fulfilling_request_id="req-42",
+        image_url="https://example.com/sourdough.jpg",
     )
 
     assert result.get("success") is True

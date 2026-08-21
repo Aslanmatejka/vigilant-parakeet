@@ -58,6 +58,7 @@ class TestCreateFoodListingExpiry:
                 community_name="Test Community",
                 community_confirmed=True,
                 location="123 Main St",
+                image_url="https://example.com/bread.jpg",
             )
         assert result["success"] is True
         assert result["expiry_date"] == "2026-06-12"

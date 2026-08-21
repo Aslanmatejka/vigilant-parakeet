@@ -4216,6 +4216,11 @@ async def _post_food_listing(
     if ts_error is not None:
         return ts_error
 
+    # Role guard before photo so recipients get a clear wrong-role error.
+    role_block = await _check_recipient_role_block(str(user_id))
+    if role_block is not None:
+        return role_block
+
     try:
         qty_val = float(qty)
     except (TypeError, ValueError):

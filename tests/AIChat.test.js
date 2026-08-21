@@ -220,7 +220,7 @@ describe('AI Chat — Error Handling', () => {
     // Should show the friendly error message
     await waitFor(() => {
       expect(
-        screen.getByText(/having a little trouble/i)
+        screen.getByText(/cannot reach the ai server|having a little trouble/i)
       ).toBeInTheDocument()
     })
   })

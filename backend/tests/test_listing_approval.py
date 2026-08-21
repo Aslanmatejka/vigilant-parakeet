@@ -64,6 +64,7 @@ class TestCreateFoodListingApproval:
                 community_name="Test Community",
                 community_confirmed=True,
                 location="123 Main St, Alameda, CA",
+                image_url="https://example.com/sourdough.jpg",
             )
 
         assert result["success"] is True
@@ -98,6 +99,7 @@ class TestCreateFoodListingApproval:
                 community_name="Test Community",
                 community_confirmed=True,
                 location="123 Main St, Alameda, CA",
+                image_url="https://example.com/apples.jpg",
             )
 
         assert result["success"] is True
