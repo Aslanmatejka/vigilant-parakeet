@@ -187,7 +187,88 @@ def polish_assistant_response(
     if not text:
         return text
 
+    corrected = _correct_false_success_claim(text, actions, lang=lang)
+    if corrected != text:
+        text = corrected
+
     out = _strip_uuids(text)
     out = _strip_internal_refs(out)
     out = _dedupe_search_prose(out, actions or [])
     return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
+def _correct_false_success_claim(
+    text: str,
+    actions: Optional[list[dict]],
+    *,
+    lang: str = "en",
+) -> str:
+    """Replace 'Posted!' copy when no write tool actually succeeded."""
+    from backend.ai.reflection import detect_hallucinated_success
+
+    if not detect_hallucinated_success(text, actions):
+        return text
+
+    es = lang == "es"
+    failed: Optional[dict] = None
+    for act in actions or []:
+        if not isinstance(act, dict):
+            continue
+        tool = str(act.get("tool") or "")
+        if tool in {
+            "post_food_listing", "post_food_listings",
+            "claim_listing", "claim_listings",
+        } and not act.get("ok"):
+            failed = act
+            break
+
+    err = str((failed or {}).get("error") or "").lower()
+    detail = str(
+        (failed or {}).get("message")
+        or (failed or {}).get("summary")
+        or ""
+    ).strip()
+
+    if err == "community_required" or "could not resolve community" in detail.lower():
+        return (
+            "Todavía no pude publicarlo — necesito una escuela/comunidad "
+            "exacta de nuestro catálogo (no solo el condado). "
+            "¿Cuál escuela o hub quieres usar?"
+            if es else
+            "I wasn't able to post that yet — I need an exact school/community "
+            "from our catalog (not just the county name). Which school or hub "
+            "should this go under?"
+        )
+    if err == "expiry_date_required" or "expiry" in err:
+        return (
+            "Todavía no pude publicarlo — necesito una fecha clara de "
+            "vencimiento (por ejemplo, mañana, en 3 días, o 2 meses). "
+            "¿Hasta cuándo es buena la comida?"
+            if es else
+            "I wasn't able to post that yet — I still need a clear best-by "
+            "date (for example tomorrow, in 3 days, or 2 months from now). "
+            "How long is the food good for?"
+        )
+    if err == "photo_required" or "photo" in err:
+        return (
+            "Todavía no pude publicarlo — necesito una foto real adjunta "
+            "en el chat antes de publicar."
+            if es else
+            "I wasn't able to post that yet — I still need a real photo "
+            "attached in chat before I can publish."
+        )
+    if failed:
+        return (
+            "Intenté publicarlo pero algo falló en el sistema. "
+            "Déjame revisar el detalle contigo y lo intentamos otra vez."
+            if es else
+            "I tried to post that but something failed on my side. "
+            "Let me double-check the details with you and try again."
+        )
+    return (
+        "Aún no he podido completar esa acción — no se publicó todavía. "
+        "Revisemos los detalles juntos."
+        if es else
+        "I haven't actually completed that action yet — nothing was posted. "
+        "Let's double-check the details together."
+    )

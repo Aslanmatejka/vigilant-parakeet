@@ -471,51 +471,34 @@ def build_allergen_reminder(
     lang: str = "en",
     flow: str = "idle",
 ) -> Optional[str]:
-    """Nudge the model to ask about allergens once during the posting flow.
-
-    Only fires when:
-      * we're in a posting flow;
-      * the detected food is allergen-sensitive (baked, prepared, dairy,
-        protein, condiment, canned, snack, bulk_dry);
-      * the assistant has not already asked, and the donor has not
-        already declared / declined allergens.
-
-    Runs silently otherwise — no derailing of unrelated turns.
-    """
+    """Nudge the model to ask about allergens once during the posting flow."""
     if flow != "posting":
         return None
     if allergens_answered(message, history) or allergens_asked(message, history):
         return None
 
     try:
-        from backend.ai.world_model import detect_food_kind
-        entry = detect_food_kind(message)
-        if not entry and history:
-            for msg in reversed(history[-6:]):
-                if msg.get("role") != "user":
-                    continue
-                entry = detect_food_kind(msg.get("message") or "")
-                if entry:
-                    break
+        from backend.ai.conversation_flow import posting_flow_state, is_posting_flow
+        if not is_posting_flow(message, history):
+            return None
+        state = posting_flow_state(message, history)
+        if not state.get("expiry_provided"):
+            return None
     except Exception:  # pragma: no cover
-        entry = None
-    if not entry or entry["kind"] not in _ALLERGEN_SENSITIVE_KINDS:
-        return None
+        pass
 
     if lang == "es":
         return (
-            f"Alergénos — este es un producto tipo '{entry['kind']}'. Pregunta "
-            "una vez sobre alérgenos comunes (maní, frutos secos, lácteos, "
-            "gluten, huevo, soya, mariscos, sésamo). No lo dejes vacío al "
-            "publicar: pasa la lista en 'allergens', o pasa una lista vacía "
-            "si el donante confirma que no hay ninguno."
+            "Alergénos — pregunta UNA vez sobre alérgenos comunes (maní, "
+            "frutos secos, lácteos, gluten, huevo, soya, mariscos, sésamo). "
+            "Pasa la lista en 'allergens', o una lista vacía si confirman "
+            "que no hay ninguno."
         )
     return (
-        f"Allergens — this is a '{entry['kind']}' item where allergens "
-        "matter. Ask ONCE about the big-8 (peanuts, tree nuts, dairy, "
-        "eggs, wheat/gluten, soy, fish, shellfish, sesame). Don't leave "
-        "it blank at post_food_listing time: pass an 'allergens' list "
-        "(empty list is fine when the donor confirms there are none)."
+        "Allergens — ask ONCE about the big-8 (peanuts, tree nuts, dairy, "
+        "eggs, wheat/gluten, soy, fish, shellfish, sesame). Pass an "
+        "'allergens' list at post time (empty list is fine when they "
+        "confirm none)."
     )
 
 

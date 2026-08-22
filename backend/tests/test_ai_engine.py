@@ -170,7 +170,8 @@ class TestQuickReplyChips:
     def test_add_photo_prompt_gets_add_chips(self):
         reply = "Would you like to add a photo to your listing?"
         chips = generate_quick_replies(reply, "en")
-        assert "I'll add one" in chips
+        assert "Attach a photo" in chips
+        assert "I already uploaded it" not in chips
         assert "Skip the photo" not in chips
 
     def test_open_ended_wh_question_returns_no_guess_chips(self):

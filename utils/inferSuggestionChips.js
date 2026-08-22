@@ -15,6 +15,24 @@ function chip(label, message = label, extra = {}) {
   return { label, message: message || label, ...extra }
 }
 
+function isPostSuccessResponse(raw) {
+  const t = norm(raw)
+  if (!t) return false
+  const text = String(raw || '')
+  if (text.includes('?') || text.includes('¿')) {
+    if (/(should|shall|want me|would you|which community|which school|list under|go under|ready to post)/.test(t)) {
+      return false
+    }
+  }
+  if (/listing is live|successfully posted|posted!|posted your|all set|is now live|went live|are shared|is shared|awaiting admin approval|anything else you want to share|ya est[aá] publicado/.test(t)) {
+    return true
+  }
+  if (/(listed under|posted under)/.test(t) && /(your|done|all set|live|shared|posted|successfully|awaiting|approval|anything else)/.test(t)) {
+    return true
+  }
+  return false
+}
+
 /**
  * Infer up to 6 contextual chips from the latest assistant reply.
  * Returns [] when nothing safe matches (empty > wrong).
@@ -112,14 +130,23 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   }
 
   // Photo — required; never offer skip / later / without.
+  // Skip when the turn is really a post confirm or success summary.
   if (/photo|picture|foto|imagen/.test(t)
-    && /required|please|need|upload|attach|add a|send a photo|before post|so we can post|snap|skip the photo|without a photo/.test(t)) {
+    && /required|please|need|upload|attach|add a|send a photo|before post|so we can post|snap|skip the photo|without a photo/.test(t)
+    && !/ready to post|shall i post|want me to post|photos received|got your photo|with your photos/.test(t)) {
     return es
-      ? [chip('Adjuntar foto'), chip('Ya la subí')]
-      : [chip("I'll add one"), chip('I already uploaded it')]
+      ? [chip('Adjuntar foto')]
+      : [chip('Attach a photo')]
   }
 
-  // Success / anything else
+  // Success / anything else — before community / post chips
+  if (isPostSuccessResponse(raw)) {
+    return es
+      ? [chip('Compartir otra cosa'), chip('Buscar comida'), chip('Eso es todo')]
+      : [chip('Share something else'), chip('Find food near me'), chip("That's all for now")]
+  }
+
+  // Success / anything else (legacy patterns)
   if (/listing is live|are shared|is shared|posted!|successfully posted|share another|anything else you want to share|you're all set|claimed successfully/.test(t)) {
     return es
       ? [chip('Compartir otra cosa'), chip('Buscar comida'), chip('Eso es todo')]
@@ -155,8 +182,10 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Yes, claim it'), chip('No thanks'), chip('Cancel')]
   }
 
-  // Community confirm / pick (hands-on share)
-  if (/which community|which school|list under|listed under|should i use|community should|post (this |it )?under|go under|school district|your community|comunidad|escuela|publicar bajo|bajo qu[eé]/.test(t)) {
+  // Community confirm / pick (hands-on share) — only when actively asking
+  if (!isPostSuccessResponse(raw)
+    && /which community|which school|list under|listed under|should i use|community should|post (this |it )?under|go under|school district|your community|comunidad|escuela|publicar bajo|bajo qu[eé]/.test(t)
+    && (/(\?|¿|should|shall|want me|would you)/.test(t))) {
     // Try to surface the suggested school name from the reply when present.
     const nameMatch = String(responseText || '').match(
       /(?:under|—|-)\s*([A-Z][A-Za-z0-9 &.'/-]{2,48}?)(?:\s*,|\s*\?|\s*$)/,

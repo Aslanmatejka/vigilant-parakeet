@@ -830,6 +830,12 @@ def _community_relevant_segment(text: str) -> str:
 
 
 def _is_community_selection_turn(text: str) -> bool:
+    try:
+        from backend.ai.conversation_flow import is_post_success_response
+        if is_post_success_response(text or ""):
+            return False
+    except Exception:  # pragma: no cover
+        pass
     full = (text or "").lower()
     if "?" not in full and "¿" not in full:
         return False

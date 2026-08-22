@@ -317,8 +317,8 @@ class TestBuildTurnSuggestions:
             min_chips=0,
         )
         labels = [c if isinstance(c, str) else c.get("label") for c in chips]
-        assert any(l and ("add" in l.lower() or "upload" in l.lower() or "already" in l.lower()) for l in labels)
-        assert not any(l and "skip" in (l or "").lower() for l in labels)
+        assert any(l and "attach" in (l or "").lower() for l in labels)
+        assert not any(l and ("skip" in (l or "").lower() or "already" in (l or "").lower()) for l in labels)
 
     def test_assistance_reminder_forces_fork(self):
         chips = build_turn_suggestions(

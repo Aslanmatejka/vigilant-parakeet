@@ -59,6 +59,20 @@ class TestPhotoAlwaysRequired:
             "can I post without a photo?", self._share_history(),
         )
         assert _user_trying_to_skip_photo("no photo", self._share_history())
+        assert _user_trying_to_skip_photo(
+            "I already uploaded it", self._share_history(),
+        )
+
+    def test_ready_to_post_requires_photo_url(self):
+        from backend.ai.conversation_flow import _posting_ready_to_execute
+
+        history = self._share_history() + [
+            {
+                "role": "assistant",
+                "message": "Ready to post: 2 loaves under Do Good Warehouse. Shall I post?",
+            },
+        ]
+        assert _posting_ready_to_execute("yes, post it", history) is False
 
     def test_skip_photo_reminder_refuses(self):
         rem = build_posting_step_reminder(

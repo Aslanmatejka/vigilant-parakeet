@@ -76,6 +76,18 @@ class TestSpokenExpiryShelfLife:
             date.today() + timedelta(days=2)
         ).isoformat()
 
+    def test_in_2_months(self):
+        from backend.ai.conversation_flow import _add_calendar_months
+        assert _extract_expiry_from_text("2 months from now") == (
+            _add_calendar_months(date.today(), 2).isoformat()
+        )
+
+    def test_in_two_months_phrase(self):
+        from backend.ai.conversation_flow import _add_calendar_months
+        assert _extract_expiry_from_text("expires in 2 months") == (
+            _add_calendar_months(date.today(), 2).isoformat()
+        )
+
     def test_normalize_bumps_date_only_today_to_tomorrow(self):
         from datetime import timedelta
         from backend.ai.conversation_flow import normalize_expiration_date_for_post
@@ -300,6 +312,18 @@ class TestNoPostChipsAfterShareSuccess:
         joined = " ".join(out).lower()
         assert "share" in joined or "find" in joined or "all" in joined
 
+    def test_listed_under_success_no_community_chips(self):
+        text = (
+            "Done! Your 100 boxes of vegetables are listed under "
+            "Alameda Unified School District and awaiting admin approval."
+        )
+        out = generate_quick_replies(text)
+        assert "Different one" not in out
+        assert "Alameda Unified" not in out
+        assert "Yes, post it" not in out
+        joined = " ".join(out).lower()
+        assert "share" in joined or "find" in joined or "all" in joined
+
     def test_shall_i_post_still_gets_confirm_chips(self):
         text = (
             "Ready to post: 1 basket of tomatoes and 1 basket of carrots. "
@@ -307,3 +331,58 @@ class TestNoPostChipsAfterShareSuccess:
         )
         out = generate_quick_replies(text)
         assert "Yes, post it" in out
+
+
+class TestCustomExpiryHandsOnPath:
+    def _history(self, extra=None):
+        history = [
+            {"role": "user", "message": "Do it for me"},
+            {"role": "assistant", "message": "What food do you want to share, and how much?"},
+            {"role": "user", "message": "100 boxes of vegetables"},
+            {"role": "assistant", "message": "Should this go under Alameda Unified?"},
+            {"role": "user", "message": "Alameda County"},
+            {"role": "assistant", "message": "When does it expire?"},
+            {"role": "user", "message": "2 months from now"},
+        ]
+        return history + (extra or [])
+
+    def test_two_months_is_parsed_and_stateful(self):
+        from backend.ai.conversation_flow import _add_calendar_months
+
+        history = self._history()
+        state = posting_flow_state("2 months from now", history[:-1])
+        assert state["expiry_provided"] is True
+        assert _extract_expiry_from_text("2 months from now") == (
+            _add_calendar_months(date.today(), 2).isoformat()
+        )
+
+    def test_cannot_post_without_photo_url(self):
+        history = self._history([
+            {"role": "assistant", "message": "Please attach a photo — required before I can post."},
+            {"role": "user", "message": "I already uploaded it"},
+            {
+                "role": "assistant",
+                "message": "Ready to post 100 boxes of vegetables under Alameda Unified?",
+            },
+        ])
+        reason = posting_tool_block_reason(
+            "yes, post it",
+            history,
+            {
+                "title": "vegetables",
+                "qty": 100,
+                "community_name": "Alameda Unified",
+                "community_confirmed": True,
+                "expiration_date": _extract_expiry_from_text("2 months from now"),
+            },
+        )
+        assert reason is not None
+        assert "photo" in reason.lower()
+
+    def test_photo_ask_chip_is_attach_only(self):
+        out = generate_quick_replies(
+            "Please attach a photo of the vegetables — required before I can post."
+        )
+        assert "Attach a photo" in out
+        assert "I already uploaded it" not in out
+        assert "Skip photo" not in out

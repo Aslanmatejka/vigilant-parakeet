@@ -5401,9 +5401,9 @@ def generate_quick_replies(text: str, lang: str = "en") -> list[str]:
         and any(k in t for k in photo_add_keys)
     ):
         if es:
-            add("Adjuntar foto", "Ya la subí")
+            add("Adjuntar foto")
         else:
-            add("I'll add one", "I already uploaded it")
+            add("Attach a photo")
         return out
 
     # Pickup window / when

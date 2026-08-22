@@ -12,6 +12,16 @@ def test_tool_result_ok_prefers_success_flag():
     assert tool_result_ok({"summary": "ok"}) is True
 
 
+def test_polish_corrects_false_post_success():
+    from backend.ai.response_polish import polish_assistant_response
+
+    text = "Posted! Your vegetables are live under Alameda Unified."
+    actions = [{"tool": "post_food_listing", "ok": False, "error": "community_required"}]
+    out = polish_assistant_response(text, actions, lang="en")
+    assert "wasn't able to post" in out.lower() or "not able to post" in out.lower()
+    assert "posted!" not in out.lower()
+
+
 def test_polish_strips_uuids():
     text = "Claim id d7cf24db-166e-4f6c-8cd5-076d7135784d done"
     out = polish_assistant_response(text, [], lang="en")

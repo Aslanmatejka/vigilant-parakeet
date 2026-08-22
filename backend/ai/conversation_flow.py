@@ -2261,6 +2261,23 @@ def posting_flow_state(message: str, history: list | None) -> dict:
     expiry_provided = bool(_best_user_expiry_from_thread(message, history)) or bool(
         re.search(r"\d{4}-\d{2}-\d{2}", scoped_blob)
     ) or bool(_extract_expiry_from_text(scoped_blob))
+    description_asked = any(p in scoped_blob_l for p in (
+        "description", "describe the food", "short note", "tell me more about",
+        "descripción", "descripcion", "cuéntame más", "cuentame mas",
+    ))
+    description_provided = bool(re.search(
+        r"\b(?:description|descripci[oó]n)\s*[:=]\s*\S",
+        scoped_blob,
+        re.I,
+    )) or any(
+        len((msg.get("message") or "").strip()) >= 24
+        and msg.get("role") == "user"
+        and any(k in (msg.get("message") or "").lower() for k in (
+            "fresh", "organic", "boxed", "packaged", "includes", "contains",
+            "variety", "assorted", "mixed", "leftover", "surplus",
+        ))
+        for msg in scoped_hist
+    )
     awaiting_photo = photo_asked and not has_photo
     return {
         "has_photo": has_photo,
@@ -2272,6 +2289,8 @@ def posting_flow_state(message: str, history: list | None) -> dict:
         "post_summary_offered": post_summary_offered,
         "expiry_asked": expiry_asked,
         "expiry_provided": expiry_provided,
+        "description_asked": description_asked,
+        "description_provided": description_provided,
     }
 
 
@@ -2371,6 +2390,18 @@ def _parse_shelf_life_expiry(blob: str) -> Optional[str]:
             days = int(m.group(1))
             if 0 < days <= 365:
                 return (date.today() + timedelta(days=days)).isoformat()
+        except (TypeError, ValueError):
+            pass
+
+    m = re.search(
+        r"\b(?:good\s+for|lasts?\s+|in|within|vence\s+en)\s+(\d{1,2})\s+months?\b",
+        text,
+    )
+    if m:
+        try:
+            months = int(m.group(1))
+            if 0 < months <= 36:
+                return _add_calendar_months(date.today(), months).isoformat()
         except (TypeError, ValueError):
             pass
 
@@ -2557,8 +2588,22 @@ _WEEKDAY_TO_NUM: dict[str, int] = {
 }
 
 
+def _add_calendar_months(base, months: int):
+    """Return base + N months, clamping day to month length."""
+    from calendar import monthrange
+    from datetime import date
+
+    if months <= 0:
+        return base
+    month_idx = base.month - 1 + months
+    year = base.year + month_idx // 12
+    month = month_idx % 12 + 1
+    day = min(base.day, monthrange(year, month)[1])
+    return date(year, month, day)
+
+
 def _parse_relative_expiry_date(blob: str) -> Optional[str]:
-    """Parse 'in 3 days', 'next friday', 'this friday', bare weekday names."""
+    """Parse 'in 3 days', 'in 2 months', 'next friday', bare weekday names."""
     from datetime import date, timedelta
 
     if not blob:
@@ -2576,6 +2621,19 @@ def _parse_relative_expiry_date(blob: str) -> Optional[str]:
                 return (date.today() + timedelta(days=days)).isoformat()
         except (TypeError, ValueError):
             pass
+
+    for pat in (
+        r"\b(?:in|within)\s+(\d{1,2})\s+months?\b",
+        r"\b(\d{1,2})\s+months?\s+from\s+now\b",
+    ):
+        m = re.search(pat, text)
+        if m:
+            try:
+                months = int(m.group(1))
+                if 0 < months <= 36:
+                    return _add_calendar_months(date.today(), months).isoformat()
+            except (TypeError, ValueError):
+                pass
 
     weekdays = "|".join(sorted(_WEEKDAY_TO_NUM.keys(), key=len, reverse=True))
     m = re.search(rf"\b(?:next|this|on)?\s*({weekdays})\b", text)
@@ -2612,6 +2670,15 @@ def _assistant_last_asked_kind(history: list | None) -> str | None:
             "listo para reclamar", "reclamar estos", "reclamo estos",
         )):
             return "claim_confirm"
+        if any(k in text for k in (
+            "allerg", "alérgen", "alergen", "alergia", "dietary restriction",
+        )):
+            return "allergen"
+        if any(k in text for k in (
+            "description", "describe", "tell me more about", "short note",
+            "descripción", "descripcion", "cuéntame más", "cuentame mas",
+        )):
+            return "description"
         if any(k in text for k in (
             "expire", "expiry", "best by", "best-by", "use by", "how fresh",
             "how long", "when was it made", "good until", "vence", "caduca",
@@ -2888,7 +2955,17 @@ def _match_community_in_catalog(
     if not q:
         return None
     q_lower = q.lower()
-    q_tokens = set(re.findall(r"[a-z0-9]+", q_lower))
+    q_variants = [q_lower]
+    no_county = re.sub(r"\s+county\b", "", q_lower).strip()
+    if no_county and no_county not in q_variants:
+        q_variants.append(no_county)
+    no_usd = re.sub(
+        r"\s+(?:unified(?:\s+school)?\s+district|school\s+district|usd)\b",
+        "",
+        q_lower,
+    ).strip()
+    if no_usd and no_usd not in q_variants:
+        q_variants.append(no_usd)
 
     best_row: dict | None = None
     best_score = 0.0
@@ -2898,19 +2975,21 @@ def _match_community_in_catalog(
             continue
         n_lower = name.lower()
         n_tokens = set(re.findall(r"[a-z0-9]+", n_lower))
-        if q_lower == n_lower:
-            score = 1.0
-        elif q_lower in n_lower or n_lower in q_lower:
-            score = 0.92
-        else:
-            score = difflib.SequenceMatcher(None, q_lower, n_lower).ratio()
-            if q_tokens and n_tokens:
-                overlap = len(q_tokens & n_tokens) / max(len(q_tokens), len(n_tokens))
-                score = max(score, overlap)
-        if score > best_score:
-            best_score = score
-            best_row = row
-    if best_row and best_score >= 0.55:
+        for variant in q_variants:
+            q_tokens = set(re.findall(r"[a-z0-9]+", variant))
+            if variant == n_lower:
+                score = 1.0
+            elif variant in n_lower or n_lower in variant:
+                score = 0.92
+            else:
+                score = difflib.SequenceMatcher(None, variant, n_lower).ratio()
+                if q_tokens and n_tokens:
+                    overlap = len(q_tokens & n_tokens) / max(len(q_tokens), len(n_tokens))
+                    score = max(score, overlap * 0.98)
+            if score > best_score:
+                best_score = score
+                best_row = row
+    if best_row and best_score >= 0.48:
         return best_row
     return None
 
@@ -3048,6 +3127,31 @@ _POST_SUCCESS_MARKERS: tuple[str, ...] = (
 )
 
 
+def is_post_success_response(text: str) -> bool:
+    """True when assistant copy confirms a completed post (not a community ask)."""
+    if not text:
+        return False
+    raw = str(text)
+    t = raw.lower()
+    if "?" in raw or "¿" in raw:
+        if any(k in t for k in (
+            "should", "shall", "want me", "would you", "which community",
+            "which school", "list under", "go under", "ready to post",
+            "listo para publicar", "¿publico", "¿lo publico",
+        )):
+            return False
+    if any(marker in t for marker in _POST_SUCCESS_MARKERS):
+        return True
+    if ("listed under" in t or "posted under" in t) and any(
+        k in t for k in (
+            "your", "done", "all set", "live", "shared", "posted",
+            "successfully", "awaiting", "approval", "anything else",
+        )
+    ):
+        return True
+    return False
+
+
 def _current_posting_boundary_index(history: list | None) -> int:
     """Index of the first history entry that belongs to the *current*
     posting flow.
@@ -3078,8 +3182,25 @@ def _user_declined_photo(history: list | None, message: str = "") -> bool:
     return False
 
 
+def _user_claims_photo_without_url(message: str = "") -> bool:
+    """True when donor says they uploaded/sent a photo but no URL is attached."""
+    text = (message or "").strip()
+    if not text or _PHOTO_URL_RE.search(text):
+        return False
+    lower = text.lower()
+    return any(p in lower for p in (
+        "already uploaded", "already attached", "already sent the photo",
+        "already sent a photo", "already shared the photo", "already shared photos",
+        "i uploaded it", "i already uploaded", "photo is attached",
+        "ya la subí", "ya la subi", "ya subí", "ya subi", "ya la mandé",
+        "ya la mande", "foto adjunta", "foto subida",
+    ))
+
+
 def _user_trying_to_skip_photo(message: str = "", history: list | None = None) -> bool:
     """True when the donor asks to skip/post without a photo this turn."""
+    if _user_claims_photo_without_url(message):
+        return True
     text = " ".join(
         str(message or "").lower().replace("-", " ").replace("_", " ").split()
     )
@@ -3106,10 +3227,11 @@ def _photo_required_refuse_nudge(lang: str = "en") -> str:
         )
     return (
         "HARD RULE: a photo is REQUIRED — never optional. The donor wants "
-        "to skip or post without a photo. Refuse briefly and ask them to "
-        "attach a photo in chat (paperclip / image: …). NEVER say "
+        "to skip, post without a photo, or claims they already uploaded "
+        "without an image: URL in chat. Refuse briefly and ask them to "
+        "attach a photo here (paperclip / image: …). NEVER say "
         "'can I post without a photo', 'or skip the photo', or similar. "
-        "Do NOT call post_food_listing yet."
+        "Do NOT call post_food_listing until a real upload URL is present."
     )
 
 
@@ -4148,8 +4270,15 @@ def build_posting_step_reminder(
             )
             return (
                 "Sugerencia: el donante ya dio la fecha de vencimiento."
-                f"{exp_hint} No la vuelvas a pedir — sigue con foto o resumen."
+                f"{exp_hint} No la vuelvas a pedir — sigue con alérgenos, "
+                "descripción corta o foto."
             )
+        if state["expiry_provided"] and not state.get("description_provided") and not ready:
+            if not state.get("description_asked"):
+                return (
+                    "Sugerencia: pide una descripción corta (estado, empaque, "
+                    "qué incluye). Pásala como description al publicar."
+                )
         if ready and state["has_photo"]:
             exp_hint = (
                 f" Usa expiration_date={parsed_exp} exactamente."
@@ -4179,7 +4308,7 @@ def build_posting_step_reminder(
                 "de la comida — es necesaria para publicar.' Nunca ofrezcas "
                 "saltar. Luego un resumen breve y '¿listo para publicar?'."
             )
-        if not state["post_summary_offered"]:
+        if not state["post_summary_offered"] and state["has_photo"]:
             return (
                 "Sugerencia: da UN resumen corto y pregunta "
                 "'¿Listo para publicar?' UNA vez. Tras su sí, llama al "
@@ -4220,8 +4349,17 @@ def build_posting_step_reminder(
         )
         return (
             "Nudge: the donor already gave a best-by / expiry date."
-            f"{exp_hint} Do NOT ask again — move on to photo or post summary."
+            f"{exp_hint} Do NOT ask again — move on to allergens, a short "
+            "description, or photo next (one question per turn)."
         )
+    if state["expiry_provided"] and not state.get("description_provided") and not ready:
+        if not state.get("description_asked"):
+            return (
+                "Nudge: ask for a one-sentence description of the food "
+                "(condition, packaging, what's included). Pass it as "
+                "description when posting. One question — then continue "
+                "with allergens or photo."
+            )
     if ready and state["has_photo"]:
         exp_hint = (
             f" Use expiration_date={parsed_exp} exactly — do not invent another year."
@@ -4254,6 +4392,11 @@ def build_posting_step_reminder(
             "'Ready to post?'."
         )
     if not state["post_summary_offered"]:
+        if not state["has_photo"]:
+            return (
+                "Nudge: do NOT offer 'Ready to post?' yet — a real photo "
+                "upload (image: … URL in chat) is REQUIRED first."
+            )
         return (
             "Nudge: give ONE short summary and ask 'Ready to post?' once. "
             "After they say yes, call the post tool immediately — do NOT "
@@ -4289,8 +4432,10 @@ def _is_affirmative_post_confirm(message: str) -> bool:
 
 def _posting_ready_to_execute(message: str, history: list | None) -> bool:
     """True when the donor already greenlit posting this turn."""
-    last = _assistant_last_asked_kind(history)
     state = posting_flow_state(message, history)
+    if not state.get("has_photo"):
+        return False
+    last = _assistant_last_asked_kind(history)
     affirmative = (
         _is_affirmative_post_confirm(message)
         or _is_short_affirmative(message)
@@ -4311,10 +4456,16 @@ def _posting_ready_to_execute(message: str, history: list | None) -> bool:
 
 def _post_confirm_needed_reason(message: str, history: list | None) -> str | None:
     """Ask for exactly one Ready-to-post confirm — never a second one."""
+    state = posting_flow_state(message, history)
+    if not state.get("has_photo"):
+        return (
+            "A photo is REQUIRED before offering 'Ready to post?' or calling "
+            "post_food_listing. Ask the donor to attach a photo in chat "
+            "(image: … URL). Do NOT call post_food_listing yet."
+        )
     if _posting_ready_to_execute(message, history):
         return None
     last = _assistant_last_asked_kind(history)
-    state = posting_flow_state(message, history)
     if last == "post_confirm" or state.get("post_summary_offered"):
         if _is_affirmative_post_confirm(message) or _is_short_affirmative(message):
             return None

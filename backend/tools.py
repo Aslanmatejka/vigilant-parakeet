@@ -1331,7 +1331,7 @@ TOOL_DEFINITIONS = [
                         ),
                     },
                 },
-                "required": ["user_id", "title", "quantity", "unit", "category", "expiry_date"],
+                "required": ["user_id", "title", "quantity", "unit", "category", "expiry_date", "image_url"],
             },
         },
     },
@@ -4924,6 +4924,14 @@ async def _create_food_listing(
         apply_donor_defaults_to_listing,
         _is_placeholder_address,
     )
+
+    # Accept images[] from the chat tool layer; photo is mandatory.
+    if not (image_url and str(image_url).strip()):
+        raw_images = _ignored.get("images") if isinstance(_ignored.get("images"), list) else []
+        for raw in raw_images:
+            if raw and str(raw).strip():
+                image_url = str(raw).strip()
+                break
 
     logger.info("create_food_listing: user=%s title=%s qty=%s", user_id, title, quantity)
     if not user_id:

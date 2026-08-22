@@ -252,19 +252,28 @@ class TestEnrichSearch:
 
 class TestReminder:
     def test_baked_goods_triggers_reminder(self):
+        history = [
+            {"role": "user", "message": "I want to share some cookies"},
+            {"role": "assistant", "message": "When does it expire?"},
+            {"role": "user", "message": "in 3 days"},
+        ]
         reminder = build_allergen_reminder(
-            "I want to share some cookies",
-            history=[], lang="en", flow="posting",
+            "ok", history, lang="en", flow="posting",
         )
         assert reminder is not None
         assert "allerg" in reminder.lower()
 
-    def test_apples_no_reminder(self):
-        # Countable produce — no allergen nudge needed.
+    def test_apples_triggers_reminder_after_expiry(self):
+        history = [
+            {"role": "user", "message": "sharing 100 boxes of vegetables"},
+            {"role": "assistant", "message": "When does it expire?"},
+            {"role": "user", "message": "2 months from now"},
+        ]
         reminder = build_allergen_reminder(
-            "sharing 6 apples", history=[], lang="en", flow="posting",
+            "ok", history, lang="en", flow="posting",
         )
-        assert reminder is None
+        assert reminder is not None
+        assert "allerg" in reminder.lower()
 
     def test_answered_stops_reminder(self):
         # Donor already declared allergens → reminder falls silent.

@@ -593,7 +593,7 @@ def test_rephrased_share_turns_get_real_chips():
         "Perfect — anything else you want to share today?": ("share", "find", "all"),
         "Your listing is live! Want to share another item?": ("share", "find", "all"),
         "Select Individual/Family or Organization for donor type.": ("individual", "organization"),
-        "Cool. Please attach a photo of the food — required before posting.": ("add", "upload", "already"),
+        "Cool. Please attach a photo of the food — required before posting.": ("attach", "photo", "adjuntar"),
         "Should I use Alameda Unified for the community?": ("alameda", "different", "profile"),
         "Claim #1 for you — sound good?": ("claim", "cancel", "thanks"),
         "Pick one of the options above (1, 2, or 3).": ("1", "2", "3"),

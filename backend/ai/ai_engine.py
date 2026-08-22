@@ -4023,20 +4023,25 @@ class ConversationEngine:
         communities: list[str] = []
         suggested: Optional[str] = None
         reply_l = (response_text or "").lower()
+        from backend.ai.conversation_flow import is_post_success_response
         needs_communities = (
-            should_load_active_communities(
-                response_text or "",
-                last_user_message=user_message or "",
-                user_context=None,
-            )
-            or _user_picked_different_community(user_message or "")
-            or (
-                ("?" in reply_l or "¿" in reply_l)
-                and any(
-                    k in reply_l
-                    for k in (
-                        "community", "school", "district", "comunidad", "escuela",
-                        "list under", "listed under", "post under",
+            not is_post_success_response(response_text or "")
+            and (
+                should_load_active_communities(
+                    response_text or "",
+                    last_user_message=user_message or "",
+                    user_context=None,
+                )
+                or _user_picked_different_community(user_message or "")
+                or (
+                    ("?" in reply_l or "¿" in reply_l)
+                    and any(
+                        k in reply_l
+                        for k in (
+                            "which community", "which school", "community should",
+                            "go under", "list under", "post under",
+                            "comunidad", "escuela", "bajo qué", "bajo que",
+                        )
                     )
                 )
             )
@@ -4362,12 +4367,13 @@ def generate_quick_replies(
     )
     if photo_ask and not any(k in t for k in (
         "photos received", "got your photo", "thanks for the photo", "with your photos",
-        "photo attached", "already have a photo",
+        "photo attached", "already have a photo", "ready to post", "shall i post",
+        "want me to post", "listo para publicar",
     )):
         if es:
-            add("Adjuntar foto", "Ya la subí")
+            add("Adjuntar foto")
         else:
-            add("I'll add one", "I already uploaded it")
+            add("Attach a photo")
         return out
 
     # Allergen ask early — same turn often also mentions a chosen best-by date.
@@ -4453,14 +4459,15 @@ def generate_quick_replies(
             add("5 apples", "2 loaves of bread", "Vegetables — 1 box", "Eggs — 1 dozen")
         return out
 
-    # Post / claim success → productive next steps (not Yes/No)
-    if any(k in t for k in (
+    # Post / claim success → productive next steps (not Yes/No / community)
+    from backend.ai.conversation_flow import is_post_success_response
+    if is_post_success_response(text) or any(k in t for k in (
         "are shared", "is shared", "posted!", "posted your", "listing is live",
         "listings are live", "successfully posted", "ya está publicado",
         "your listing is live", "is now live", "went live",
         "anything else you want to share", "anything else you'd like to share",
         "share another", "claimed successfully", "claim is confirmed",
-        "pickup is set", "you're all set",
+        "pickup is set", "you're all set", "awaiting admin approval",
     )):
         if es:
             add("Compartir otra cosa", "Buscar comida", "Eso es todo")
@@ -4625,22 +4632,31 @@ def generate_quick_replies(
         return out
 
     # Community confirm — suggested school + "Different one"
-    # Must not fall through to post-confirm when community is asked but
-    # no name list was passed (that produced "Yes, post it" under a
-    # community question).
     community_confirm_keys = (
         "list under", "list this under", "which community", "which school",
         "school should", "community should", "school district", "go under",
-        "listed under", "post under", "post this under", "should this go under",
+        "post under", "post this under", "should this go under",
         "should it go under", "under which", "should i use", "use alameda",
         "for the community", "community for",
         "comunidad", "escuela", "listar bajo", "bajo qué", "bajo que",
         "publicar bajo", "en qué comunidad", "en que comunidad", "bajo cuál",
     )
-    if any(k in t for k in community_confirm_keys) or (
-        suggested_community and suggested_community.lower() in t
-        and any(k in t for k in ("under", "community", "school", "comunidad", "escuela", "bajo", "use"))
-    ):
+    community_ask = (
+        ("?" in text or "¿" in text)
+        and (
+            any(k in t for k in community_confirm_keys)
+            or (
+                "listed under" in t
+                and any(k in t for k in ("should", "shall", "want me", "would you"))
+            )
+            or (
+                suggested_community
+                and suggested_community.lower() in t
+                and any(k in t for k in ("under", "community", "school", "comunidad", "escuela", "bajo", "use"))
+            )
+        )
+    )
+    if community_ask and not is_post_success_response(text):
         if suggested_community:
             if es:
                 add(suggested_community[:48], "Otra comunidad")
@@ -4859,11 +4875,14 @@ def generate_quick_replies(
 
     # Photo — required; never offer skip (also handled before ? gate)
     if "photo" in t or "picture" in t or "foto" in t or "imagen" in t:
-        if es:
-            add("Adjuntar foto", "Ya la subí")
-        else:
-            add("I'll add one", "I already uploaded it")
-        return out
+        if not any(k in t for k in (
+            "photos received", "got your photo", "ready to post", "shall i post",
+        )):
+            if es:
+                add("Adjuntar foto")
+            else:
+                add("Attach a photo")
+            return out
 
     # Pickup window / when
     if any(k in t for k in ("when can", "pick them up", "pickup window", "what time",
