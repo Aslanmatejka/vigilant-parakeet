@@ -4215,40 +4215,36 @@ def _is_allergen_ask(t: str) -> bool:
 def _is_expiry_ask(t: str) -> bool:
     """True when the assistant is asking for a good-until / best-by date.
 
-    Must not fire on allergen turns, or on acknowledgements that merely
-    repeat a date already chosen (\"Got it — best by tomorrow.\").
+    Must not fire on allergen turns, post success, or acknowledgements that
+    merely repeat a date already chosen (\"Got it — best by tomorrow.\").
     """
     t = (t or "").lower()
     if _is_allergen_ask(t):
         return False
+    try:
+        from backend.ai.conversation_flow import is_post_success_response
+        if is_post_success_response(t):
+            return False
+    except Exception:
+        pass
     if any(k in t for k in (
         "photo", "picture", "foto", "imagen", "community", "school",
         "ready to post", "post it", "publish",
-    )) and not any(k in t for k in ("best by", "good until", "expir", "how long")):
+    )) and not any(k in t for k in ("best by", "good until", "expir", "how long", "use by")):
         return False
 
     has_cue = any(k in t for k in (
-        "best by", "best-by", "good until", "good for", "use by", "use-by",
-        "when does it expire", "when will it expire", "how long is it good",
-        "how long will it keep", "how long will it stay", "stay fresh",
-        "expiration", "expiry date", "best before",
-        "caduc", "vence", "fecha de venc", "hasta cuándo es bueno",
-        "hasta cuando es bueno", "cuánto dura", "cuanto dura",
-    )) or (
-        any(k in t for k in ("expir", "vence", "caduc"))
-        and any(k in t for k in ("when", "date", "until", "cuándo", "cuando", "?"))
-    )
+        "best by", "best-by", "good until", "good-until", "good for",
+        "use by", "use-by",
+        "when does it expire", "when will it expire", "when is it good",
+        "how long is it good", "how long will it keep", "how long will it stay",
+        "stay fresh", "expiration", "expiry", "best before",
+        "what's the best", "what is the best", "need a date", "need the date",
+        "give me a date", "caduc", "vence", "fecha de venc",
+        "hasta cuándo es bueno", "hasta cuando es bueno",
+        "cuánto dura", "cuanto dura",
+    ))
     if not has_cue:
-        return False
-
-    asking = (
-        "?" in t or "¿" in t
-        or any(k in t for k in (
-            "when is", "when was", "how long", "what date", "tell me",
-            "best by or", "good until?", "or how long",
-        ))
-    )
-    if not asking:
         return False
 
     # Acknowledgement of a date already chosen — don't re-offer date chips
@@ -4261,8 +4257,8 @@ def _is_expiry_ask(t: str) -> bool:
     ))
     re_ask = any(k in t for k in (
         "change", "different date", "or different", "update the", "wrong date",
-        "another date", "new date", "when is", "how long", "still good",
-        "want a different", "prefer a different",
+        "another date", "new date", "when is", "when does", "how long",
+        "still good", "want a different", "prefer a different", "?", "¿",
     ))
     if ack and not re_ask:
         return False
@@ -4467,6 +4463,15 @@ def generate_quick_replies(
             add("5 manzanas", "2 panes", "Verduras — 1 caja", "Huevos — 1 docena")
         else:
             add("5 apples", "2 loaves of bread", "Vegetables — 1 box", "Eggs — 1 dozen")
+        return out
+
+    # Freshness / good-until — BEFORE the "?" gate. Models often ask
+    # "When does it expire" without a question mark; chips must still show.
+    if _is_expiry_ask(t):
+        if es:
+            add("Mañana", "En 2 días", "En 3 días", "En un mes")
+        else:
+            add("Tomorrow", "In 2 days", "In 3 days", "In a month")
         return out
 
     # Post / claim success → productive next steps (not Yes/No / community)

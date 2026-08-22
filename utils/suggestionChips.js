@@ -277,13 +277,12 @@ export function resolveInputChips(suggestions, language = 'en', role = null, { a
     /(how many|how much|cuántos|cuántas|cuánto)/.test(text)
     && !/(what food|what would you like to share|what are you sharing|best by|allerg|community|photo|ready to post|post this under|school)/.test(text)
   )
-  const expiryChip = /^(tomorrow|in 2 days|in 3 days|other date|mañana|en 2 d[ií]as|en 3 d[ií]as|otra fecha|good for 24)/i
+  const expiryChip = /^(tomorrow|in 2 days|in 3 days|in a month|other date|mañana|en 2 d[ií]as|en 3 d[ií]as|en un mes|otra fecha|good for 24)/i
   const onlyExpiry = filtered.length > 0
     && filtered.every((c) => expiryChip.test(chipLabel(c)))
   const allergenAsk = /(allerg|alérgen|alergia|dietary restriction|shellfish|frutos secos)/.test(text)
   const expiryAsk = (
-    /(best by|good until|good for|use by|expir|how long is it good|stay fresh|fecha de venc)/.test(text)
-    && /(\?|¿|when is|how long|what date)/.test(text)
+    /(best by|best-by|good until|good for|use by|expir|when does it expire|how long is it good|stay fresh|fecha de venc|best before)/.test(text)
     && !allergenAsk
     && !/(got it|noted|i'?ll use|listed as|confirmed).{0,40}(best by|good until|tomorrow)/.test(text)
   )

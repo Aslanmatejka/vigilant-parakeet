@@ -837,6 +837,23 @@ def _is_community_selection_turn(text: str) -> bool:
     except Exception:  # pragma: no cover
         pass
     full = (text or "").lower()
+    # Expiry/photo questions that mention the chosen school must not steal
+    # the chip rail ("I'll list under Alameda Unified. When does it expire?").
+    try:
+        from backend.ai.ai_engine import _is_allergen_ask, _is_expiry_ask
+        if _is_expiry_ask(full) or _is_allergen_ask(full):
+            if not any(k in full for k in (
+                "which community", "which school", "community should",
+                "qué comunidad", "cuál escuela", "cual escuela",
+            )):
+                return False
+    except Exception:
+        pass
+    if any(k in full for k in ("expire", "expiry", "best by", "good until", "use by")):
+        if not any(k in full for k in (
+            "which community", "which school", "community should",
+        )):
+            return False
     if "?" not in full and "¿" not in full:
         return False
     return (

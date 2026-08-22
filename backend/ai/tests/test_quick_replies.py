@@ -229,6 +229,22 @@ def test_good_until_chips_not_made_today():
     assert "Made yesterday" not in out
 
 
+def test_expiry_chips_without_question_mark():
+    out = generate_quick_replies("When does it expire")
+    assert "Tomorrow" in out
+    assert "In 2 days" in out
+    assert "In a month" in out
+
+
+def test_expiry_chips_when_school_also_mentioned():
+    out = generate_quick_replies(
+        "I'll list this under Alameda Unified School District. "
+        "When does it expire?"
+    )
+    assert "Tomorrow" in out
+    assert "Do it for me" not in out
+
+
 def test_allergen_ask_not_expiry_chips():
     """Allergen question must not keep showing best-by date chips."""
     out = generate_quick_replies(

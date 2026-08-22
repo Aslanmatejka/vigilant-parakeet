@@ -1951,6 +1951,10 @@ def build_assistance_mode_reminder(
                 "HANDS-ON MODE — SHARE FOOD:\n"
                 "User wants you to handle it in chat. Follow the normal "
                 "posting flow (ask only what's missing, then post_food_listing). "
+                "Parse every answer they type: any food name, any future "
+                "expiry (Tomorrow / In 2 days / '2 days' / '2 months' / "
+                "Aug 30), any catalog community. Once they give a best-by "
+                "date, SAVE it as expiration_date and NEVER ask again. "
                 "Do not open the Share Food page for UI coaching."
             )
         if goal == "request":
@@ -2308,7 +2312,7 @@ def posting_flow_state(message: str, history: list | None) -> dict:
     }
 
 
-def _extract_expiry_from_text(text: str) -> Optional[str]:
+def _extract_expiry_from_text(text: str, *, loose: bool = False) -> Optional[str]:
     """Parse YYYY-MM-DD or common spoken dates from chat text.
 
     Month-name forms ("24th July", "July 24th this year") are required —
@@ -2318,6 +2322,10 @@ def _extract_expiry_from_text(text: str) -> Optional[str]:
     "Made today/yesterday" are *bake dates*, not expiry — map them to a
     short remaining shelf life so posting does not use a past/today-midnight
     date that the server rejects.
+
+    ``loose`` is for a dedicated expiry answer turn ("2 days", "Friday",
+    "8-30"). It must stay off when scanning unrelated user turns or
+    quantity ranges like "5-10 boxes" get saved as dates.
     """
     if not text:
         return None
@@ -2331,11 +2339,18 @@ def _extract_expiry_from_text(text: str) -> Optional[str]:
     if m:
         from backend.tools import _normalize_expiry_date
         return _normalize_expiry_date(m.group(0))
-    slash = _parse_numeric_slash_date(text)
+    slash = _parse_numeric_slash_date(text, allow_hyphen_md=loose)
     if slash:
         return slash
 
     blob = text.lower()
+
+    # Whole-message duration ("2 days", "a month") — expiry answers, not
+    # "I have 2 days leftover rice" in a food title.
+    if loose or _looks_like_standalone_date_answer(text):
+        duration = _parse_bare_duration_expiry(blob)
+        if duration:
+            return duration
 
     # Shelf-life phrases first (good-until), before bare "today".
     shelf = _parse_shelf_life_expiry(blob)
@@ -2365,7 +2380,7 @@ def _extract_expiry_from_text(text: str) -> Optional[str]:
         from datetime import date
         return date.today().isoformat()
 
-    relative = _parse_relative_expiry_date(blob)
+    relative = _parse_relative_expiry_date(blob, allow_bare_weekday=loose)
     if relative:
         return relative
 
@@ -2439,43 +2454,63 @@ def _best_user_expiry_from_thread(
 ) -> Optional[str]:
     """Prefer the donor's own spoken/typed expiry over model-invented dates.
 
-    Scanning assistant lines picks up traps like 'July 24th, 2024 is in the
-    past' — those must never override 'july 24th this year' from the user.
+    Only treat a turn as an expiry answer when they were just asked, or
+    the message itself is a date/duration. Scanning every user line with
+    the greedy parser used to save "5-10 boxes" / stray weekdays as
+    best-by dates, then re-ask because the value looked wrong.
     """
-    exp = _extract_expiry_from_text(message or "")
+    last_asked = _assistant_last_asked_kind(history)
+    loose_now = last_asked == "expiry" or _looks_like_standalone_date_answer(message)
+    exp = _extract_expiry_from_text(message or "", loose=loose_now)
     if exp:
         return exp
-    for msg in reversed(history or []):
-        if msg.get("role") != "user":
-            continue
-        exp = _extract_expiry_from_text(msg.get("message") or "")
-        if exp:
-            return exp
-    # Donor said yes to a proposed date ("Best by 2026-07-10?").
+
     hist = list(history or [])
-    if _is_short_affirmative(message) and _assistant_last_asked_kind(hist) == "expiry":
-        for msg in reversed(hist):
-            if msg.get("role") != "assistant":
-                continue
-            exp = _extract_expiry_from_text(msg.get("message") or "")
-            if exp:
-                return exp
-            break
-    for i, msg in enumerate(hist):
+    # Newest expiry-question → user-reply pair.
+    for i in range(len(hist) - 1, -1, -1):
+        msg = hist[i]
         if msg.get("role") != "assistant":
             continue
         ask = (msg.get("message") or "").lower()
         if not any(k in ask for k in (
             "best by", "best-by", "expir", "good until", "use by", "vence",
+            "caduc", "how long", "how fresh", "good-until",
         )):
             continue
         nxt = hist[i + 1] if i + 1 < len(hist) else None
-        if not nxt or nxt.get("role") != "user":
+        if nxt and nxt.get("role") == "user":
+            reply = nxt.get("message") or ""
+            if _is_short_affirmative(reply) or _is_affirmative_post_confirm(reply):
+                exp = _extract_expiry_from_text(msg.get("message") or "", loose=True)
+                if exp:
+                    return exp
+            else:
+                exp = _extract_expiry_from_text(reply, loose=True)
+                if exp:
+                    return exp
+
+    if _is_short_affirmative(message) and last_asked == "expiry":
+        for msg in reversed(hist):
+            if msg.get("role") != "assistant":
+                continue
+            exp = _extract_expiry_from_text(msg.get("message") or "", loose=True)
+            if exp:
+                return exp
+            break
+
+    # Last resort: user turns that themselves look like dates (not food/qty).
+    for msg in reversed(hist):
+        if msg.get("role") != "user":
             continue
-        reply = nxt.get("message") or ""
-        if not (_is_short_affirmative(reply) or _is_affirmative_post_confirm(reply)):
+        raw = msg.get("message") or ""
+        if not _looks_like_standalone_date_answer(raw) and not any(
+            k in raw.lower() for k in (
+                "best by", "best-by", "expir", "good until", "use by",
+                "tomorrow", "mañana", "in 2 days", "in 3 days", "in a month",
+            )
+        ):
             continue
-        exp = _extract_expiry_from_text(msg.get("message") or "")
+        exp = _extract_expiry_from_text(raw, loose=True)
         if exp:
             return exp
     return None
@@ -2690,14 +2725,99 @@ def _calendar_date_is_past(iso: Optional[str]) -> bool:
     return d < date.today()
 
 
-def _parse_numeric_slash_date(text: str) -> Optional[str]:
-    """Parse '8/30', '08-30', '8/30/26' as the next upcoming calendar date."""
+def _looks_like_standalone_date_answer(text: str) -> bool:
+    """True when the whole message is a date / duration, not food or community."""
+    t = (text or "").strip().lower()
+    if not t or len(t) > 80:
+        return False
+    if re.match(r"^\s*image:", t):
+        return False
+    if t in {
+        "tomorrow", "today", "tonight", "mañana", "manana", "hoy",
+        "next week", "this weekend", "next month", "end of the week",
+        "end of the month", "a week", "a month", "a day",
+    }:
+        return True
+    if re.fullmatch(
+        rf"(?:in\s+|within\s+|en\s+)?"
+        rf"(?:a\s+|an\s+|{_WORD_OR_DIGIT_NUM}\s+)"
+        r"(?:of\s+)?(?:days?|weeks?|months?|días?|dias?|semanas?|meses?)"
+        r"(?:\s+from\s+now)?",
+        t,
+    ):
+        return True
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t):
+        return True
+    if re.fullmatch(r"\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?", t):
+        return True
+    if re.search(
+        r"\b(?:best by|best-by|good until|use by|expir|vence|caduc)\b",
+        t,
+    ):
+        return True
+    weekdays = "|".join(sorted(_WEEKDAY_TO_NUM.keys(), key=len, reverse=True))
+    if re.fullmatch(rf"(?:next|this|on|until|by|el)?\s*(?:{weekdays})", t):
+        return True
+    months = "|".join(sorted(_MONTH_NAME_TO_NUM.keys(), key=len, reverse=True))
+    if re.search(
+        rf"\b(?:{months})\s+\d{{1,2}}(?:st|nd|rd|th)?(?:\s*,?\s*\d{{4}})?"
+        rf"|\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:{months})\b",
+        t,
+    ):
+        return True
+    return False
+
+
+def _parse_bare_duration_expiry(blob: str) -> Optional[str]:
+    """Parse a whole-message '2 days' / 'two months' / 'a week' answer."""
+    from datetime import date, timedelta
+
+    t = (blob or "").strip().lower()
+    if not t:
+        return None
+    m = re.fullmatch(
+        rf"(?:in\s+|within\s+|en\s+)?"
+        rf"({_WORD_OR_DIGIT_NUM}|a|an)\s+(?:of\s+)?"
+        r"(days?|weeks?|months?|días?|dias?|semanas?|meses?)"
+        r"(?:\s+from\s+now)?",
+        t,
+    )
+    if not m:
+        return None
+    n = _word_or_digit_to_int(m.group(1))
+    if n is None or n <= 0:
+        return None
+    unit = m.group(2)
+    if unit.startswith(("day", "día", "dia")):
+        if n > 365:
+            return None
+        return (date.today() + timedelta(days=n)).isoformat()
+    if unit.startswith(("week", "semana")):
+        if n > 52:
+            return None
+        return (date.today() + timedelta(weeks=n)).isoformat()
+    if n > 36:
+        return None
+    return _add_calendar_months(date.today(), n).isoformat()
+
+
+def _parse_numeric_slash_date(text: str, *, allow_hyphen_md: bool = False) -> Optional[str]:
+    """Parse '8/30', '08-30', '8/30/26' as the next upcoming calendar date.
+
+    Hyphen month-day without a year is off by default so '5-10 boxes'
+    is not May 10.
+    """
     from calendar import monthrange
     from datetime import date
 
     if not text:
         return None
-    m = re.search(r"\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b", text)
+    if allow_hyphen_md:
+        m = re.search(r"\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b", text)
+    else:
+        m = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", text)
+        if not m:
+            m = re.search(r"\b(\d{1,2})-(\d{1,2})-(\d{2,4})\b", text)
     if not m:
         return None
     try:
@@ -2708,7 +2828,7 @@ def _parse_numeric_slash_date(text: str) -> Optional[str]:
     if not (1 <= month <= 12 and 1 <= day <= 31):
         return None
     today = date.today()
-    year_tok = m.group(3)
+    year_tok = m.group(3) if m.lastindex and m.lastindex >= 3 else None
     if year_tok:
         year = int(year_tok)
         if year < 100:
@@ -2778,8 +2898,8 @@ def _parse_month_horizon_expiry(blob: str) -> Optional[str]:
     return resolved.isoformat()
 
 
-def _parse_relative_expiry_date(blob: str) -> Optional[str]:
-    """Parse 'in 3 days', 'in two months', 'next friday', bare weekday names."""
+def _parse_relative_expiry_date(blob: str, *, allow_bare_weekday: bool = False) -> Optional[str]:
+    """Parse 'in 3 days', 'in two months', 'next friday', optional bare weekday."""
     from datetime import date, timedelta
 
     if not blob:
@@ -2855,7 +2975,16 @@ def _parse_relative_expiry_date(blob: str) -> Optional[str]:
         return (today + timedelta(days=delta)).isoformat()
 
     weekdays = "|".join(sorted(_WEEKDAY_TO_NUM.keys(), key=len, reverse=True))
-    m = re.search(rf"\b(?:next|this|on)?\s*({weekdays})\b", text)
+    prefixed = re.search(
+        rf"\b(?:next|this|on|until|by|el)\s+({weekdays})\b",
+        text,
+    )
+    bare = None
+    if allow_bare_weekday or _looks_like_standalone_date_answer(text):
+        bare = re.fullmatch(rf"({weekdays})", text.strip())
+        if not bare:
+            bare = re.search(rf"\b({weekdays})\b", text) if allow_bare_weekday else None
+    m = prefixed or bare
     if m:
         target = _WEEKDAY_TO_NUM.get(m.group(1).lower())
         if target is not None:
@@ -4730,16 +4859,17 @@ def build_posting_step_reminder(
             "today-or-later date and map it to expiration_date (YYYY-MM-DD). "
             "Accept any wording; chips are shortcuts only."
         )
-    if state["expiry_provided"] and last_asked == "expiry":
-        exp_hint = (
-            f" Use expiration_date={parsed_exp} — already provided in chat."
-            if parsed_exp else " Map the date they already gave."
+    if state["expiry_provided"]:
+        saved = (
+            f" SAVED expiration_date={parsed_exp}."
+            if parsed_exp else " The donor already gave a good-until date."
         )
-        return (
-            "Nudge: the donor already gave a best-by / expiry date."
-            f"{exp_hint} Do NOT ask again — move on to allergens, a short "
-            "description, or photo next (one question per turn)."
-        )
+        if last_asked == "expiry":
+            return (
+                "Nudge: the donor already gave a best-by / expiry date."
+                f"{saved} Do NOT ask again — move on to allergens, a short "
+                "description, or photo next (one question per turn)."
+            )
     if state["expiry_provided"] and not state.get("description_provided") and not ready:
         if not state.get("description_asked"):
             return (

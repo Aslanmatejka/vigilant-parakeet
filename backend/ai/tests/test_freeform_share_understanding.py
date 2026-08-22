@@ -98,6 +98,44 @@ class TestAnyFutureExpiry:
         assert reason is not None
         assert "past" in reason.lower()
 
+    def test_bare_duration_answer_is_saved(self):
+        history = [
+            {"role": "user", "message": "Do it for me"},
+            {"role": "assistant", "message": "What food do you want to share, and how much?"},
+            {"role": "user", "message": "100 boxes of vegetables"},
+            {"role": "assistant", "message": "Should this go under Alameda Unified?"},
+            {"role": "user", "message": "yes"},
+            {"role": "assistant", "message": "When does it expire"},
+        ]
+        for answer in ("2 days", "2 months", "a week", "Tomorrow", "In 2 days"):
+            state = posting_flow_state(answer, history)
+            assert state["expiry_provided"] is True, answer
+            assert state["expiry_is_past"] is False, answer
+            reminder = build_posting_step_reminder(answer, history, lang="en")
+            assert reminder is not None
+            assert "do not ask again" in reminder.lower() or "already gave" in reminder.lower()
+
+    def test_qty_range_is_not_an_expiry(self):
+        history = [
+            {"role": "user", "message": "share 5-10 boxes of vegetables"},
+            {"role": "assistant", "message": "Should this go under Do Good Warehouse?"},
+            {"role": "user", "message": "yes"},
+        ]
+        state = posting_flow_state("yes", history)
+        assert state["expiry_provided"] is False
+        assert _extract_expiry_from_text("5-10 boxes of vegetables") is None
+
+    def test_later_real_date_overrides_nothing_from_food_turn(self):
+        history = [
+            {"role": "user", "message": "share 5-10 boxes of vegetables"},
+            {"role": "assistant", "message": "When does it expire?"},
+        ]
+        state = posting_flow_state("tomorrow", history)
+        assert state["expiry_provided"] is True
+        assert _extract_expiry_from_text("tomorrow") == (
+            date.today() + timedelta(days=1)
+        ).isoformat()
+
 
 class TestAnyFoodTitle:
     def test_unknown_dish_with_unit(self):
