@@ -101,7 +101,7 @@ class TestPostingFlowReminder:
             {"role": "assistant", "message": "List under Alameda Unified?"},
             {"role": "user", "message": "yes"},
             {"role": "assistant", "message": "When does it expire or what's the best-by?"},
-            {"role": "user", "message": "2026-07-10"},
+            {"role": "user", "message": "2030-07-10"},
             {"role": "assistant", "message": "Want to snap a quick photo? It helps people choose."},
         ]
         reason = posting_tool_block_reason(
@@ -112,7 +112,7 @@ class TestPostingFlowReminder:
                 "qty": 5,
                 "community_name": "Alameda Unified",
                 "community_confirmed": True,
-                "expiration_date": "2026-07-10",
+                "expiration_date": "2030-07-10",
             },
         )
         assert reason is not None
@@ -123,7 +123,7 @@ class TestPostingFlowReminder:
             {"role": "user", "message": "share 5 apples"},
             {"role": "assistant", "message": "List under Alameda Unified?"},
             {"role": "user", "message": "yes"},
-            {"role": "assistant", "message": "Best by 2026-07-10?"},
+            {"role": "assistant", "message": "Best by 2030-07-10?"},
             {"role": "user", "message": "yes"},
             {"role": "assistant", "message": "Want to snap a quick photo?"},
         ]
@@ -139,7 +139,7 @@ class TestPostingFlowReminder:
         reason = posting_tool_block_reason(
             "5 apples",
             history,
-            {"title": "Apples", "qty": 5, "expiration_date": "2026-07-10"},
+            {"title": "Apples", "qty": 5, "expiration_date": "2030-07-10"},
         )
         assert reason is not None
         assert "community" in reason.lower()
@@ -193,14 +193,14 @@ class TestSinglePostConfirm:
             {"role": "assistant", "message": "List under Alameda Unified?"},
             {"role": "user", "message": "yes"},
             {"role": "assistant", "message": "When do they expire?"},
-            {"role": "user", "message": "2026-07-20"},
+            {"role": "user", "message": "2030-07-20"},
             {"role": "user", "message": "image: https://cdn.example.com/bread.jpg"},
             {"role": "user", "message": "image: https://cdn.example.com/apples.jpg"},
             {
                 "role": "assistant",
                 "message": (
                     "Got it — 3 bread + 5 apples under Alameda Unified, "
-                    "expiring 2026-07-20, with photos. Ready to post these?"
+                    "expiring 2030-07-20, with photos. Ready to post these?"
                 ),
             },
         ]
@@ -212,7 +212,7 @@ class TestSinglePostConfirm:
                 "qty": 3,
                 "community_name": "Alameda Unified",
                 "community_confirmed": True,
-                "expiration_date": "2026-07-20",
+                "expiration_date": "2030-07-20",
                 "images": ["https://cdn.example.com/bread.jpg"],
             },
         )
@@ -239,7 +239,7 @@ class TestSinglePostConfirm:
                 "qty": 1,
                 "community_name": "Alameda Unified",
                 "community_confirmed": True,
-                "expiration_date": "2026-07-18",
+                "expiration_date": "2030-07-18",
                 "images": ["https://cdn.example.com/o.jpg"],
             },
         )
@@ -251,17 +251,17 @@ class TestSinglePostConfirm:
             {"role": "assistant", "message": "List under Alameda Unified?"},
             {"role": "user", "message": "yes"},
             {"role": "assistant", "message": "Best by?"},
-            {"role": "user", "message": "2026-07-20"},
+            {"role": "user", "message": "2030-07-20"},
         ]
         reason = posting_tool_block_reason(
-            "2026-07-20",
+            "2030-07-20",
             history,
             {
                 "title": "bread",
                 "qty": 1,
                 "community_name": "Alameda Unified",
                 "community_confirmed": True,
-                "expiration_date": "2026-07-20",
+                "expiration_date": "2030-07-20",
                 "images": ["https://cdn.example.com/b.jpg"],
             },
         )

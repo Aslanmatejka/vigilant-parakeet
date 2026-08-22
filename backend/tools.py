@@ -5052,10 +5052,10 @@ async def _create_food_listing(
             "message": (
                 "Ask the donor when the food is good until (best-by / use-by). "
                 "Map their answer to expiry_date as YYYY-MM-DD before calling "
-                "post_food_listing. Prefer: Tomorrow, In 2 days, In 3 days, "
-                "or Other date. Do NOT use Made today/yesterday as the "
-                "expiry date — those are bake dates; convert them to a future "
-                "good-until date (made today → tomorrow)."
+                "post_food_listing. Accept any future date wording. Reject "
+                "dates already in the past. Do NOT use Made today/yesterday "
+                "as the expiry date — those are bake dates; convert them to "
+                "a future good-until date (made today → tomorrow)."
             ),
             "suggested_expiry_date": _suggested_expiry_for_category(cat),
         }

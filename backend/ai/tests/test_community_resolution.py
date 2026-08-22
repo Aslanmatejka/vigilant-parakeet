@@ -105,7 +105,7 @@ class TestBestCommunityNameMatch:
         assert hit is not None
         assert hit["id"] == "1"
 
-    def test_county_only_does_not_auto_confirm_without_catalog(self):
+    def test_county_answer_is_accepted_for_tool_resolve(self):
         history = [
             {"role": "user", "message": "share 100 boxes of vegetables"},
             {"role": "assistant", "message": "Which community should this go under?"},
@@ -115,7 +115,29 @@ class TestBestCommunityNameMatch:
             "Alameda County",
             history,
         )
-        assert out.get("community_confirmed") is not True
+        assert out.get("community_confirmed") is True
+        assert "alameda" in (out.get("community_name") or "").lower()
+
+    def test_county_maps_to_catalog_name_when_list_in_thread(self):
+        history = [
+            {"role": "assistant", "message": "Which community?", "metadata": {"actions": [{
+                "tool": "get_active_communities",
+                "communities": [
+                    {"id": "c1", "name": "Alameda Unified School District"},
+                    {"id": "c2", "name": "Do Good Warehouse"},
+                    {"id": "c3", "name": "Oakland Unified School District"},
+                ],
+            }]}},
+            {"role": "user", "message": "Alameda County"},
+        ]
+        out = enrich_post_food_listing_args(
+            {"title": "vegetables", "qty": 100},
+            "Alameda County",
+            history,
+        )
+        assert out.get("community_confirmed") is True
+        assert out.get("community_id") == "c1"
+        assert "Unified" in (out.get("community_name") or "")
 
     def test_county_maps_to_unified_school(self):
         rows = [

@@ -196,11 +196,23 @@ def _looks_like_multi_option_pick(message: str) -> bool:
     return False
 
 
+_QTY_UNIT_HINT_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s+"
+    r"(?:loaves?|trays?|boxes?|bags?|baskets?|sacks?|bunches?|pieces?|"
+    r"packs?|packets?|cartons?|cans?|jars?|containers?|bottles?|"
+    r"pounds?|lbs?|kg|kilos?|grams?|cups?|units?|portions?|"
+    r"servings?|slices?|dozen)\b",
+    re.I,
+)
+
+
 def _looks_like_food_quantity_spec(message: str) -> bool:
-    """True when user names foods with amounts, e.g. '10 potatoes, 3 tomatoes'."""
+    """True when user names foods with amounts, including unknown dishes."""
     if not re.search(r"\d+", message or ""):
         return False
-    return any(w in _FOOD_WORDS for w in _tokenize_words(message))
+    if any(w in _FOOD_WORDS for w in _tokenize_words(message)):
+        return True
+    return bool(_QTY_UNIT_HINT_RE.search(message or ""))
 
 
 def _hands_on_assistance_goal(
@@ -238,6 +250,7 @@ def is_posting_flow(message: str, history: list | None = None) -> bool:
             "snap a quick photo", "which school", "which community",
             "list under", "go under", "post it?", "ready to post",
             "best by", "best-by", "when does it expire", "expire",
+            "good until", "good-until", "use by", "use-by",
             "qué comida", "foto rápida", "comunidad", "escuela",
             "¿listo para publicar", "¿publico", "vence", "caduca",
         )):
@@ -2258,7 +2271,9 @@ def posting_flow_state(message: str, history: list | None) -> dict:
         "how long", "when was it made", "good until", "best before",
         "vence", "caduca", "fecha de vencimiento", "cuándo vence",
     ))
-    expiry_provided = bool(_best_user_expiry_from_thread(message, history))
+    raw_expiry = _best_user_expiry_from_thread(message, history)
+    expiry_is_past = bool(raw_expiry) and _calendar_date_is_past(raw_expiry)
+    expiry_provided = bool(raw_expiry) and not expiry_is_past
     description_asked = any(p in scoped_blob_l for p in (
         "description", "describe the food", "short note", "tell me more about",
         "descripción", "descripcion", "cuéntame más", "cuentame mas",
@@ -2287,6 +2302,7 @@ def posting_flow_state(message: str, history: list | None) -> dict:
         "post_summary_offered": post_summary_offered,
         "expiry_asked": expiry_asked,
         "expiry_provided": expiry_provided,
+        "expiry_is_past": expiry_is_past,
         "description_asked": description_asked,
         "description_provided": description_provided,
     }
@@ -2315,6 +2331,9 @@ def _extract_expiry_from_text(text: str) -> Optional[str]:
     if m:
         from backend.tools import _normalize_expiry_date
         return _normalize_expiry_date(m.group(0))
+    slash = _parse_numeric_slash_date(text)
+    if slash:
+        return slash
 
     blob = text.lower()
 
@@ -2353,6 +2372,10 @@ def _extract_expiry_from_text(text: str) -> Optional[str]:
     spoken = _parse_spoken_expiry_date(blob)
     if spoken:
         return spoken
+
+    month_horizon = _parse_month_horizon_expiry(blob)
+    if month_horizon:
+        return month_horizon
     return None
 
 
@@ -2366,13 +2389,13 @@ def _parse_shelf_life_expiry(blob: str) -> Optional[str]:
 
     m = re.search(
         r"\b(?:good\s+for|lasts?\s+|vence\s+en|válido\s+por|valido\s+por)\s+"
-        r"(\d{1,3})\s*(?:hours?|hrs?|h|horas?)\b",
+        rf"({_WORD_OR_DIGIT_NUM})\s*(?:hours?|hrs?|h|horas?)\b",
         text,
     )
     if m:
         try:
-            hours = int(m.group(1))
-            if 1 <= hours <= 72:
+            hours = _word_or_digit_to_int(m.group(1))
+            if hours is not None and 1 <= hours <= 72:
                 # Round up to whole days for date-only expiry.
                 days = max(1, (hours + 23) // 24)
                 return (date.today() + timedelta(days=days)).isoformat()
@@ -2380,25 +2403,27 @@ def _parse_shelf_life_expiry(blob: str) -> Optional[str]:
             pass
 
     m = re.search(
-        r"\b(?:good\s+for|lasts?\s+|in|within|vence\s+en)\s+(\d{1,3})\s+days?\b",
+        r"\b(?:good\s+for|lasts?\s+|in|within|vence\s+en)\s+"
+        rf"({_WORD_OR_DIGIT_NUM})\s+days?\b",
         text,
     )
     if m:
         try:
-            days = int(m.group(1))
-            if 0 < days <= 365:
+            days = _word_or_digit_to_int(m.group(1))
+            if days is not None and 0 < days <= 365:
                 return (date.today() + timedelta(days=days)).isoformat()
         except (TypeError, ValueError):
             pass
 
     m = re.search(
-        r"\b(?:good\s+for|lasts?\s+|in|within|vence\s+en)\s+(\d{1,2})\s+months?\b",
+        r"\b(?:good\s+for|lasts?\s+|in|within|vence\s+en)\s+"
+        rf"({_WORD_OR_DIGIT_NUM})\s+months?\b",
         text,
     )
     if m:
         try:
-            months = int(m.group(1))
-            if 0 < months <= 36:
+            months = _word_or_digit_to_int(m.group(1))
+            if months is not None and 0 < months <= 36:
                 return _add_calendar_months(date.today(), months).isoformat()
         except (TypeError, ValueError):
             pass
@@ -2487,7 +2512,7 @@ def normalize_expiration_date_for_post(
     from datetime import date, timedelta
 
     thread = _best_user_expiry_from_thread(message, history)
-    if thread:
+    if thread and not _calendar_date_is_past(thread):
         return thread
 
     if raw is None:
@@ -2627,8 +2652,134 @@ def _add_calendar_months(base, months: int):
     return date(year, month, day)
 
 
+_WORD_TO_INT: dict[str, int] = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "couple": 2, "few": 3, "several": 4,
+    "un": 1, "una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4,
+    "cinco": 5, "seis": 6,
+}
+_WORD_OR_DIGIT_NUM = (
+    r"(?:\d{1,3}|a|an|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|couple|few|several|un|una|uno|dos|tres|cuatro|cinco|seis)"
+)
+
+
+def _word_or_digit_to_int(token: str) -> Optional[int]:
+    t = (token or "").strip().lower()
+    if not t:
+        return None
+    if t.isdigit():
+        try:
+            return int(t)
+        except ValueError:
+            return None
+    return _WORD_TO_INT.get(t)
+
+
+def _calendar_date_is_past(iso: Optional[str]) -> bool:
+    """True when a YYYY-MM-DD (or ISO) value is a calendar day before today."""
+    from datetime import date
+
+    if not iso:
+        return False
+    try:
+        d = date.fromisoformat(str(iso).strip()[:10])
+    except ValueError:
+        return False
+    return d < date.today()
+
+
+def _parse_numeric_slash_date(text: str) -> Optional[str]:
+    """Parse '8/30', '08-30', '8/30/26' as the next upcoming calendar date."""
+    from calendar import monthrange
+    from datetime import date
+
+    if not text:
+        return None
+    m = re.search(r"\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b", text)
+    if not m:
+        return None
+    try:
+        month = int(m.group(1))
+        day = int(m.group(2))
+    except (TypeError, ValueError):
+        return None
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    today = date.today()
+    year_tok = m.group(3)
+    if year_tok:
+        year = int(year_tok)
+        if year < 100:
+            year += 2000
+    else:
+        year = today.year
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            return None
+        if candidate < today:
+            year += 1
+    try:
+        last = monthrange(year, month)[1]
+        if day > last:
+            return None
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
+def _parse_month_horizon_expiry(blob: str) -> Optional[str]:
+    """Parse 'end of September', 'in September', 'end of the month'."""
+    from calendar import monthrange
+    from datetime import date
+
+    if not blob:
+        return None
+    text = blob.lower()
+    today = date.today()
+    months = "|".join(sorted(_MONTH_NAME_TO_NUM.keys(), key=len, reverse=True))
+
+    if re.search(r"\bend\s+of\s+(?:the\s+)?month\b|\bfin\s+de\s+mes\b", text):
+        last = monthrange(today.year, today.month)[1]
+        resolved = date(today.year, today.month, last)
+        if resolved < today:
+            resolved = _add_calendar_months(date(today.year, today.month, 1), 1)
+            last = monthrange(resolved.year, resolved.month)[1]
+            resolved = date(resolved.year, resolved.month, last)
+        return resolved.isoformat()
+
+    m = re.search(
+        rf"\b(?:end\s+of|late|fin\s+de(?:l)?)\s+({months})\b",
+        text,
+        re.I,
+    )
+    if not m:
+        m = re.search(
+            rf"\b(?:in|this|next)\s+({months})\b",
+            text,
+            re.I,
+        )
+    if not m:
+        return None
+    month = _MONTH_NAME_TO_NUM.get(m.group(1).lower())
+    if not month:
+        return None
+    year = today.year
+    if "next" in text:
+        if month <= today.month:
+            year += 1
+    last = monthrange(year, month)[1]
+    resolved = date(year, month, last)
+    if resolved < today:
+        last = monthrange(year + 1, month)[1]
+        resolved = date(year + 1, month, last)
+    return resolved.isoformat()
+
+
 def _parse_relative_expiry_date(blob: str) -> Optional[str]:
-    """Parse 'in 3 days', 'in 2 months', 'next friday', bare weekday names."""
+    """Parse 'in 3 days', 'in two months', 'next friday', bare weekday names."""
     from datetime import date, timedelta
 
     if not blob:
@@ -2636,26 +2787,26 @@ def _parse_relative_expiry_date(blob: str) -> Optional[str]:
     text = blob.lower()
 
     m = re.search(
-        r"\b(?:in|within)\s+(\d{1,3})\s+days?\b",
+        rf"\b(?:in|within)\s+(?:a\s+)?({_WORD_OR_DIGIT_NUM})\s+(?:of\s+)?days?\b",
         text,
     )
     if m:
         try:
-            days = int(m.group(1))
-            if 0 < days <= 365:
+            days = _word_or_digit_to_int(m.group(1))
+            if days is not None and 0 < days <= 365:
                 return (date.today() + timedelta(days=days)).isoformat()
         except (TypeError, ValueError):
             pass
 
     for pat in (
-        r"\b(?:in|within)\s+(\d{1,2})\s+months?\b",
-        r"\b(\d{1,2})\s+months?\s+from\s+now\b",
+        rf"\b(?:in|within)\s+(?:a\s+)?({_WORD_OR_DIGIT_NUM})\s+(?:of\s+)?months?\b",
+        rf"\b({_WORD_OR_DIGIT_NUM})\s+months?\s+from\s+now\b",
     ):
         m = re.search(pat, text)
         if m:
             try:
-                months = int(m.group(1))
-                if 0 < months <= 36:
+                months = _word_or_digit_to_int(m.group(1))
+                if months is not None and 0 < months <= 36:
                     return _add_calendar_months(date.today(), months).isoformat()
             except (TypeError, ValueError):
                 pass
@@ -2668,19 +2819,40 @@ def _parse_relative_expiry_date(blob: str) -> Optional[str]:
         return _add_calendar_months(date.today(), 1).isoformat()
 
     m = re.search(
-        r"\b(?:in|within)\s+(\d{1,2})\s+weeks?\b|\b(\d{1,2})\s+weeks?\s+from\s+now\b",
+        rf"\b(?:in|within)\s+(?:a\s+)?({_WORD_OR_DIGIT_NUM})\s+(?:of\s+)?weeks?\b|"
+        rf"\b({_WORD_OR_DIGIT_NUM})\s+weeks?\s+from\s+now\b",
         text,
     )
     if m:
         try:
-            weeks = int(m.group(1) or m.group(2))
-            if 0 < weeks <= 52:
+            weeks = _word_or_digit_to_int(m.group(1) or m.group(2))
+            if weeks is not None and 0 < weeks <= 52:
                 return (date.today() + timedelta(weeks=weeks)).isoformat()
         except (TypeError, ValueError):
             pass
 
-    if re.search(r"\b(?:in|within)\s+a\s+week\b|\ba\s+week\s+from\s+now\b|\ben\s+una\s+semana\b", text):
+    if re.search(
+        r"\b(?:in|within)\s+a\s+week\b|\ba\s+week\s+from\s+now\b|"
+        r"\bnext\s+week\b|\ben\s+una\s+semana\b|\bla\s+pr[oó]xima\s+semana\b",
+        text,
+    ):
         return (date.today() + timedelta(weeks=1)).isoformat()
+
+    if re.search(r"\b(?:this\s+)?weekend\b|\beste\s+fin\s+de\s+semana\b", text):
+        today = date.today()
+        delta = (5 - today.weekday()) % 7
+        if delta == 0 and today.weekday() == 5:
+            delta = 0
+        elif delta == 0:
+            delta = 7
+        return (today + timedelta(days=delta)).isoformat()
+
+    if re.search(r"\bend\s+of\s+(?:the\s+)?week\b|\bfin\s+de\s+semana\b", text):
+        today = date.today()
+        delta = (5 - today.weekday()) % 7
+        if delta == 0 and today.weekday() != 5:
+            delta = 7
+        return (today + timedelta(days=delta)).isoformat()
 
     weekdays = "|".join(sorted(_WEEKDAY_TO_NUM.keys(), key=len, reverse=True))
     m = re.search(rf"\b(?:next|this|on)?\s*({weekdays})\b", text)
@@ -2795,7 +2967,8 @@ def _looks_like_community_name_answer(message: str) -> bool:
     ):
         return True
     if _is_county_only_community(u):
-        return False
+        # "Alameda County" is a real community answer; bare "county" is not.
+        return len(u.split()) >= 2
     if "/" in ul or "&" in ul:
         return True
     # Multi-word proper-ish names ("Ruby Bridges", "Oakland Tech").
@@ -3026,14 +3199,14 @@ def _match_community_in_catalog(
     if no_usd and no_usd not in q_variants:
         q_variants.append(no_usd)
 
-    best_row: dict | None = None
-    best_score = 0.0
+    scored: list[tuple[float, dict]] = []
     for row in catalog:
         name = str(row.get("name") or "").strip()
         if not name:
             continue
         n_lower = name.lower()
         n_tokens = set(re.findall(r"[a-z0-9]+", n_lower))
+        best_for_row = 0.0
         for variant in q_variants:
             q_tokens = set(re.findall(r"[a-z0-9]+", variant))
             if variant == n_lower:
@@ -3045,10 +3218,18 @@ def _match_community_in_catalog(
                 if q_tokens and n_tokens:
                     overlap = len(q_tokens & n_tokens) / max(len(q_tokens), len(n_tokens))
                     score = max(score, overlap * 0.98)
-            if score > best_score:
-                best_score = score
-                best_row = row
-    if best_row and best_score >= 0.48:
+            if score > best_for_row:
+                best_for_row = score
+        if best_for_row >= 0.48:
+            scored.append((best_for_row, row))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_row = scored[0]
+    second = scored[1][0] if len(scored) > 1 else 0.0
+    if len(scored) == 1:
+        return best_row
+    if best_score >= 0.99 or best_score - second >= 0.08:
         return best_row
     return None
 
@@ -3395,25 +3576,50 @@ def _extract_all_photo_urls_for_current_posting(
 
 _share_drafts_by_user: dict[str, list[dict]] = {}
 
-_SHARE_ITEM_RE = re.compile(
-    r"(?P<qty>\d{1,4}(?:\.\d+)?)\s+"
-    r"(?:(?P<unit>loaves?|trays?|boxes?|bags?|baskets?|sacks?|bunches?|pieces?|packs?|"
+_SHARE_UNIT_ALT = (
+    r"loaves?|trays?|boxes?|bags?|baskets?|sacks?|bunches?|pieces?|packs?|"
     r"packets?|cartons?|cans?|jars?|containers?|bottles?|"
     r"pounds?|lbs?|kg|kilos?|grams?|cups?|units?|portions?|"
-    r"servings?|slices?|dozen)\s+(?:of\s+)?)?"
-    r"(?P<title>[a-zA-Z][a-zA-Z'\-]*(?:\s+[a-zA-Z][a-zA-Z'\-]*){0,3})",
+    r"servings?|slices?|dozen"
+)
+
+_SHARE_TITLE_CHUNK = (
+    r"(?P<title>[a-zA-Z][a-zA-Z'\-]*"
+    r"(?:\s+(?!and\b|also\b|plus\b)[a-zA-Z][a-zA-Z'\-]*){0,5})"
+)
+
+_SHARE_ITEM_RE = re.compile(
+    r"(?P<qty>\d{1,4}(?:\.\d+)?)\s+"
+    rf"(?:(?P<unit>{_SHARE_UNIT_ALT})\s+(?:of\s+)?)?"
+    + _SHARE_TITLE_CHUNK,
     re.IGNORECASE,
 )
 
 _ALSO_FOOD_RE = re.compile(
     r"(?:also|and|plus|y)\s+"
     r"(?:some\s+|a\s+|an\s+)?"
-    r"(?:(?P<unit>loaves?|trays?|boxes?|bags?|baskets?|sacks?|bunches?|pieces?|packs?|"
-    r"packets?|cartons?|cans?|jars?|containers?|bottles?|"
-    r"pounds?|lbs?|dozen)\s+(?:of\s+)?)?"
-    r"(?P<title>[a-zA-Z][a-zA-Z'\-]+(?:\s+[a-zA-Z][a-zA-Z'\-]*){0,2})",
+    rf"(?:(?P<unit>{_SHARE_UNIT_ALT})\s+(?:of\s+)?)?"
+    + _SHARE_TITLE_CHUNK,
     re.IGNORECASE,
 )
+
+_BARE_SHARE_TITLE_RE = re.compile(
+    r"(?:share|donate|donating|sharing|giving\s+away|i\s+have|i've\s+got|"
+    r"i\s+got|got|quiero\s+compartir|tengo)\s+"
+    r"(?:some\s+|a\s+|an\s+|leftover\s+)?"
+    rf"(?:(?P<qty>\d{{1,4}}(?:\.\d+)?)\s+)?"
+    rf"(?:(?P<unit>{_SHARE_UNIT_ALT})\s+(?:of\s+)?)?"
+    + _SHARE_TITLE_CHUNK,
+    re.IGNORECASE,
+)
+
+_SHARE_TITLE_STOP = frozenset({
+    "and", "with", "some", "extra", "fresh", "my", "the", "a", "an",
+    "want", "share", "donate", "give", "away", "post", "listing",
+    "please", "thanks", "expire", "expires", "tomorrow", "today",
+    "friday", "monday", "under", "for", "to", "leftover", "homemade",
+    "cooked", "prepared",
+})
 
 
 def get_share_drafts(user_id: str) -> list[dict]:
@@ -3437,21 +3643,12 @@ def clear_share_drafts(user_id: str) -> None:
 def _normalize_share_title(raw: str) -> str:
     words = [
         w for w in re.findall(r"[a-zA-Z']+", (raw or "").lower())
-        if w not in _QTY_UNIT_WORDS
-        and w not in {
-            "and", "with", "some", "extra", "fresh", "my", "the", "a", "an",
-            "want", "share", "donate", "give", "away", "post", "listing",
-            "please", "thanks", "expire", "expires", "tomorrow", "today",
-            "friday", "monday", "under", "for", "to",
-        }
+        if w not in _QTY_UNIT_WORDS and w not in _SHARE_TITLE_STOP
     ]
     if not words:
         return (raw or "").strip()[:80]
-    # Prefer a known food word if present.
-    food = next((w for w in words if w in _FOOD_WORDS), None)
-    if food:
-        return food
-    return " ".join(words[:3])[:80]
+    # Keep the donor's phrase (any dish) — chips are not a closed food list.
+    return " ".join(words[:6])[:80]
 
 
 def _parse_share_items_from_text(text: str) -> list[dict]:
@@ -3472,10 +3669,16 @@ def _parse_share_items_from_text(text: str) -> list[dict]:
             continue
         # Require a food-ish signal to avoid "3 days" / "2 miles".
         title_tokens = set(re.findall(r"[a-zA-Z']+", title.lower()))
+        time_units = {
+            "days", "day", "miles", "mile", "hours", "hour",
+            "weeks", "week", "months", "month",
+        }
+        if title.lower() in time_units or (title_tokens & time_units and not m.group("unit")):
+            continue
         if not (title_tokens & _FOOD_WORDS) and title.lower() not in _FOOD_WORDS:
-            # Allow multi-word food phrases even if not in the small lexicon
-            # when unit is present (e.g. "3 loaves of sourdough bread").
-            if not m.group("unit"):
+            # Unit + any dish (biryani, empanadas, tikka masala) is enough.
+            # Bare "10 random" without a unit is not a share item.
+            if not m.group("unit") and len(title_tokens) < 2:
                 continue
         key = title.lower()
         if key in seen_titles:
@@ -3509,7 +3712,8 @@ def _parse_share_items_from_text(text: str) -> list[dict]:
             if title.lower() not in _FOOD_WORDS and not any(
                 w in _FOOD_WORDS for w in title.lower().split()
             ):
-                continue
+                if not m.group("unit"):
+                    continue
             seen_titles.add(title.lower())
             unit = (m.group("unit") or "items").lower().rstrip("s")
             if unit == "loave":
@@ -3530,7 +3734,95 @@ def _parse_share_items_from_text(text: str) -> list[dict]:
         if len(uniq) >= 2 and len(items) <= 1:
             items = [{"title": f, "qty": 1.0, "unit": "items"} for f in uniq[:6]]
 
+    if not items:
+        m = _BARE_SHARE_TITLE_RE.search(t)
+        if m:
+            title = _normalize_share_title(m.group("title") or "")
+            if title and title.lower() not in {
+                "food", "it", "this", "that", "some", "community", "photo",
+            }:
+                try:
+                    qty = float(m.group("qty") or 1)
+                except (TypeError, ValueError):
+                    qty = 1.0
+                unit = (m.group("unit") or "items").lower().rstrip("s")
+                if unit == "loave":
+                    unit = "loaf"
+                items.append({
+                    "title": title,
+                    "qty": qty if qty > 0 else 1.0,
+                    "unit": unit or "items",
+                })
+
     return items
+
+
+def _parse_freeform_food_answer(message: str, history: list | None) -> list[dict]:
+    """When Nouri asked what food, treat the whole reply as a title + qty."""
+    items = _parse_share_items_from_text(message or "")
+    if items:
+        return items
+    if _assistant_last_asked_kind(history) != "food_qty":
+        return []
+    t = (message or "").strip()
+    if not t or re.match(r"^\s*image:", t, re.I):
+        return []
+    lower = t.lower()
+    if any(k in lower for k in (
+        "photo", "expire", "community", "school", "post it", "skip",
+    )):
+        return []
+    m = re.match(
+        rf"^\s*(?:(?P<qty>\d{{1,4}}(?:\.\d+)?)\s+)?"
+        rf"(?:(?P<unit>{_SHARE_UNIT_ALT})\s+(?:of\s+)?)?"
+        r"(?P<title>.+?)\s*$",
+        t,
+        re.I,
+    )
+    if not m:
+        return []
+    title = _normalize_share_title(m.group("title") or "")
+    if not title or len(title) < 2:
+        return []
+    try:
+        qty = float(m.group("qty") or 1)
+    except (TypeError, ValueError):
+        qty = 1.0
+    unit_raw = (m.group("unit") or "").lower()
+    if not unit_raw:
+        unit = "items"
+    else:
+        unit = unit_raw.rstrip("s")
+        if unit == "loave":
+            unit = "loaf"
+        elif unit == "item":
+            unit = "items"
+    return [{"title": title, "qty": qty if qty > 0 else 1.0, "unit": unit or "items"}]
+
+
+def _share_title_qty_from_thread(
+    history: list | None,
+    message: str = "",
+) -> tuple[Optional[str], Optional[float], Optional[str]]:
+    """Best food title / qty already spoken in the current share."""
+    parts = [message or ""]
+    boundary = _current_posting_boundary_index(history)
+    scoped = (history or [])[boundary:]
+    for msg in reversed(scoped):
+        if msg.get("role") == "user":
+            parts.append(msg.get("message") or "")
+    for part in parts:
+        items = _parse_share_items_from_text(part) or _parse_freeform_food_answer(
+            part, history,
+        )
+        if items:
+            first = items[0]
+            return (
+                str(first.get("title") or "") or None,
+                first.get("qty"),
+                str(first.get("unit") or "") or None,
+            )
+    return None, None, None
 
 
 _FRESH_SHARE_INTENT = (
@@ -3681,6 +3973,8 @@ def upsert_share_drafts_from_message(
         return []
 
     parsed = _parse_share_items_from_text(message or "")
+    if not parsed:
+        parsed = _parse_freeform_food_answer(message or "", history)
     # Also scan recent user turns in the current posting segment for items
     # when the current message is short (qty/photo/confirm).
     if len(parsed) < 2 and history:
@@ -4083,28 +4377,29 @@ def enrich_post_food_listing_args(
     """Fill community_confirmed and community_name from thread context."""
     out = dict(args or {})
     state = posting_flow_state(message, history)
+    if not out.get("title"):
+        title, qty, unit = _share_title_qty_from_thread(history, message)
+        if title:
+            out["title"] = title
+        if qty is not None and out.get("qty") is None and out.get("quantity") is None:
+            out["qty"] = qty
+        if unit and not out.get("unit"):
+            out["unit"] = unit
     desc = str(out.get("description") or "")
     if not out.get("community_name"):
         m = re.search(r"Community:\s*([^\n\.,]+)", desc, re.IGNORECASE)
         if m:
             out["community_name"] = m.group(1).strip()
     out = _resolve_community_from_thread(history, message, out)
-    resolved_name = str(out.get("community_name") or "")
-    catalog_hit = bool(out.get("community_id")) or (
-        resolved_name and not _is_county_only_community(resolved_name)
-    )
     if state["community_confirmed"] or (
         _is_affirmative_post_confirm(message)
         and _assistant_last_asked_kind(history) in {"community", "post_confirm"}
     ):
-        if catalog_hit or not _is_county_only_community(message or ""):
-            out["community_confirmed"] = True
+        out["community_confirmed"] = True
     elif _extract_community_name_from_text(message or ""):
-        # County-only names are not catalog communities until resolved.
-        if catalog_hit and not _is_county_only_community(resolved_name):
-            out["community_confirmed"] = True
-        elif not _is_county_only_community(message or ""):
-            out["community_confirmed"] = True
+        # Any named school/hub/county the donor typed — the post tool still
+        # resolves against the live catalog and rejects invented names.
+        out["community_confirmed"] = True
 
     # Photo: ONLY attach URLs from the CURRENT posting flow. The model
     # often replays images[] from a prior listing in full chat context —
@@ -4204,16 +4499,24 @@ def posting_tool_block_reason(
             "and community_confirmed=true only after they confirm."
         )
 
-    has_expiry = bool(
+    raw_exp = (
         args.get("expiration_date")
         or args.get("expiry_date")
-        or state["expiry_provided"]
         or _best_user_expiry_from_thread(message, history)
     )
+    if raw_exp and _calendar_date_is_past(str(raw_exp)):
+        return (
+            f"The expiry date {raw_exp} is already in the past. Tell the donor "
+            "that date already passed and ask for a good-until date of today or "
+            "later. Accept any wording (relative, calendar, weekday) — do not "
+            "force chip options. Do NOT call post_food_listing yet."
+        )
+    has_expiry = bool(raw_exp) or state["expiry_provided"]
     if not has_expiry:
         return (
             "Ask when the food expires or its best-by date before posting. "
-            "Map their answer to expiration_date (YYYY-MM-DD). Do not guess silently."
+            "Accept any future date they type and map it to expiration_date "
+            "(YYYY-MM-DD). Do not guess silently."
         )
 
     # After "Shall I post? / yes", post immediately — but ONLY with a real photo.
@@ -4316,8 +4619,15 @@ def build_posting_step_reminder(
         if not state["community_confirmed"]:
             return (
                 "Sugerencia: pregunta bajo qué escuela o comunidad va el "
-                "listado y espera un 'sí' claro antes de seguir. Frase "
-                "libre, no un guion."
+                "listado. Acepta CUALQUIER nombre del catálogo activo "
+                "(o un condado que corresponda a una sola escuela). "
+                "Espera un sí o el nombre. Frase libre, no un guion."
+            )
+        if parsed_exp and state.get("expiry_is_past"):
+            return (
+                f"FECHA INCORRECTA: {parsed_exp} ya pasó. Diles que esa "
+                "fecha no sirve y pide una fecha de hoy o posterior. "
+                "Acepta cualquier redacción. NO publiques aún."
             )
         if not state["expiry_provided"]:
             if not state["expiry_asked"]:
@@ -4393,21 +4703,32 @@ def build_posting_step_reminder(
 
     if not state["community_confirmed"]:
         return (
-            "Nudge: ask which school or community this goes under, and "
-            "wait for a clear yes before moving on. Phrase it however "
-            "sounds natural — this is not a fixed script. If they already "
-            "named food/qty/expiry earlier, do NOT re-ask those — only "
-            "the community."
+            "Nudge: ask which school or community this goes under. Accept "
+            "ANY active catalog name they type (or a unique fuzzy match / "
+            "county that maps to one school). Call get_active_communities "
+            "if needed. Chips are shortcuts, not the only answers. If they "
+            "already named food/qty/expiry, do NOT re-ask those."
+        )
+    if parsed_exp and state.get("expiry_is_past"):
+        return (
+            f"WRONG TIME: {parsed_exp} is already in the past. Tell the "
+            "donor that date already passed and ask for a good-until date "
+            "of today or later. Accept any wording — do not force chip "
+            "options. Do NOT post yet."
         )
     if not state["expiry_provided"]:
         if not state["expiry_asked"]:
             return (
                 "Nudge: work an expiry / best-by question into your next "
-                "reply. Pass expiration_date as YYYY-MM-DD when posting."
+                "reply. Accept ANY future date they type (tomorrow, in two "
+                "months, Aug 30, next Friday, end of September). Reject "
+                "only dates already in the past. Pass expiration_date as "
+                "YYYY-MM-DD when posting."
             )
         return (
-            "Nudge: they haven't given the expiry yet — wait for it and "
-            "map it to expiration_date (YYYY-MM-DD)."
+            "Nudge: they haven't given a usable expiry yet — wait for a "
+            "today-or-later date and map it to expiration_date (YYYY-MM-DD). "
+            "Accept any wording; chips are shortcuts only."
         )
     if state["expiry_provided"] and last_asked == "expiry":
         exp_hint = (

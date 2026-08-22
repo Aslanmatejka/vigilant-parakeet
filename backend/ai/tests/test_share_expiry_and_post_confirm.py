@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from backend.ai.ai_engine import generate_quick_replies
 from backend.ai.conversation_flow import (
@@ -175,7 +175,7 @@ class TestEnrichPrefersUserExpiryOverModelPastYear:
                 "role": "assistant",
                 "message": "Looks like July 24th, 2024 is in the past",
             },
-            {"role": "user", "message": "july 24th this year"},
+            {"role": "user", "message": "july 24th next year"},
         ]
         out = enrich_post_food_listing_args(
             {
@@ -187,8 +187,8 @@ class TestEnrichPrefersUserExpiryOverModelPastYear:
             history,
         )
         today = date.today()
-        assert out["expiration_date"] == f"{today.year}-07-24"
-        assert out["expiry_date"] == f"{today.year}-07-24"
+        assert out["expiration_date"] == f"{today.year + 1}-07-24"
+        assert out["expiry_date"] == f"{today.year + 1}-07-24"
 
 
 class TestPostConfirmDoesNotReaskPhotos:
@@ -204,7 +204,7 @@ class TestPostConfirmDoesNotReaskPhotos:
                 "role": "assistant",
                 "message": "When do the tomatoes and carrots expire?",
             },
-            {"role": "user", "message": "july 24th this year"},
+            {"role": "user", "message": "in 3 days"},
             {
                 "role": "assistant",
                 "message": "Want to snap a quick photo of the tomatoes or carrots?",
@@ -235,7 +235,7 @@ class TestPostConfirmDoesNotReaskPhotos:
                 "qty": 1,
                 "community_name": "Do Good Warehouse",
                 "community_confirmed": True,
-                "expiration_date": "2026-07-24",
+                "expiration_date": f"{date.today().year + 1}-07-24",
             },
         )
         assert reason is None
@@ -305,7 +305,7 @@ class TestPostConfirmDoesNotReaskPhotos:
                 "qty": 5,
                 "community_name": "Do Good Warehouse",
                 "community_confirmed": True,
-                "expiration_date": "2026-07-25",
+                "expiration_date": (date.today() + timedelta(days=3)).isoformat(),
             },
         )
         assert reason is not None
