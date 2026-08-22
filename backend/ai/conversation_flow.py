@@ -2258,9 +2258,7 @@ def posting_flow_state(message: str, history: list | None) -> dict:
         "how long", "when was it made", "good until", "best before",
         "vence", "caduca", "fecha de vencimiento", "cuándo vence",
     ))
-    expiry_provided = bool(_best_user_expiry_from_thread(message, history)) or bool(
-        re.search(r"\d{4}-\d{2}-\d{2}", scoped_blob)
-    ) or bool(_extract_expiry_from_text(scoped_blob))
+    expiry_provided = bool(_best_user_expiry_from_thread(message, history))
     description_asked = any(p in scoped_blob_l for p in (
         "description", "describe the food", "short note", "tell me more about",
         "descripción", "descripcion", "cuéntame más", "cuentame mas",
@@ -2424,6 +2422,33 @@ def _best_user_expiry_from_thread(
         return exp
     for msg in reversed(history or []):
         if msg.get("role") != "user":
+            continue
+        exp = _extract_expiry_from_text(msg.get("message") or "")
+        if exp:
+            return exp
+    # Donor said yes to a proposed date ("Best by 2026-07-10?").
+    hist = list(history or [])
+    if _is_short_affirmative(message) and _assistant_last_asked_kind(hist) == "expiry":
+        for msg in reversed(hist):
+            if msg.get("role") != "assistant":
+                continue
+            exp = _extract_expiry_from_text(msg.get("message") or "")
+            if exp:
+                return exp
+            break
+    for i, msg in enumerate(hist):
+        if msg.get("role") != "assistant":
+            continue
+        ask = (msg.get("message") or "").lower()
+        if not any(k in ask for k in (
+            "best by", "best-by", "expir", "good until", "use by", "vence",
+        )):
+            continue
+        nxt = hist[i + 1] if i + 1 < len(hist) else None
+        if not nxt or nxt.get("role") != "user":
+            continue
+        reply = nxt.get("message") or ""
+        if not (_is_short_affirmative(reply) or _is_affirmative_post_confirm(reply)):
             continue
         exp = _extract_expiry_from_text(msg.get("message") or "")
         if exp:
@@ -2635,6 +2660,28 @@ def _parse_relative_expiry_date(blob: str) -> Optional[str]:
             except (TypeError, ValueError):
                 pass
 
+    if re.search(
+        r"\b(?:in|within)\s+a\s+month\b|\ba\s+month\s+from\s+now\b|"
+        r"\bnext\s+month\b|\ben\s+un\s+mes\b|\bel\s+pr[oó]ximo\s+mes\b",
+        text,
+    ):
+        return _add_calendar_months(date.today(), 1).isoformat()
+
+    m = re.search(
+        r"\b(?:in|within)\s+(\d{1,2})\s+weeks?\b|\b(\d{1,2})\s+weeks?\s+from\s+now\b",
+        text,
+    )
+    if m:
+        try:
+            weeks = int(m.group(1) or m.group(2))
+            if 0 < weeks <= 52:
+                return (date.today() + timedelta(weeks=weeks)).isoformat()
+        except (TypeError, ValueError):
+            pass
+
+    if re.search(r"\b(?:in|within)\s+a\s+week\b|\ba\s+week\s+from\s+now\b|\ben\s+una\s+semana\b", text):
+        return (date.today() + timedelta(weeks=1)).isoformat()
+
     weekdays = "|".join(sorted(_WEEKDAY_TO_NUM.keys(), key=len, reverse=True))
     m = re.search(rf"\b(?:next|this|on)?\s*({weekdays})\b", text)
     if m:
@@ -2747,12 +2794,24 @@ def _looks_like_community_name_answer(message: str) -> bool:
         ul,
     ):
         return True
+    if _is_county_only_community(u):
+        return False
     if "/" in ul or "&" in ul:
         return True
     # Multi-word proper-ish names ("Ruby Bridges", "Oakland Tech").
     if len(ul.split()) >= 2 and not ul.startswith(("http", "image:")):
         return True
     return False
+
+
+def _is_county_only_community(name: str) -> bool:
+    """True for 'Alameda County' — not a catalog school/hub name."""
+    t = re.sub(r"\s+", " ", (name or "").strip().lower())
+    if not t:
+        return False
+    if re.search(r"\b(school|unified|district|usd|hub|academy|college|center|warehouse)\b", t):
+        return False
+    return bool(re.search(r"\b(county|condado)\b", t))
 
 
 def _community_was_confirmed(history: list | None) -> bool:
@@ -4030,14 +4089,22 @@ def enrich_post_food_listing_args(
         if m:
             out["community_name"] = m.group(1).strip()
     out = _resolve_community_from_thread(history, message, out)
+    resolved_name = str(out.get("community_name") or "")
+    catalog_hit = bool(out.get("community_id")) or (
+        resolved_name and not _is_county_only_community(resolved_name)
+    )
     if state["community_confirmed"] or (
         _is_affirmative_post_confirm(message)
         and _assistant_last_asked_kind(history) in {"community", "post_confirm"}
     ):
-        out["community_confirmed"] = True
+        if catalog_hit or not _is_county_only_community(message or ""):
+            out["community_confirmed"] = True
     elif _extract_community_name_from_text(message or ""):
-        # Donor named a specific community this turn — treat as confirmed.
-        out["community_confirmed"] = True
+        # County-only names are not catalog communities until resolved.
+        if catalog_hit and not _is_county_only_community(resolved_name):
+            out["community_confirmed"] = True
+        elif not _is_county_only_community(message or ""):
+            out["community_confirmed"] = True
 
     # Photo: ONLY attach URLs from the CURRENT posting flow. The model
     # often replays images[] from a prior listing in full chat context —

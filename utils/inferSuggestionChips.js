@@ -167,6 +167,10 @@ export function inferChipsFromResponse(responseText, language = 'en') {
 
   // Post / claim confirms
   if (/ready to post|want me to post|shall i post|publish it|post it|say yes if|publish now/.test(t)) {
+    const photoEvidence = /photos received|got your photo|with your photos|photo attached|foto adjunta|fotos recibidas|con tus fotos|image:|https?:\/\//.test(t)
+    if (!photoEvidence) {
+      return es ? [chip('Adjuntar foto')] : [chip('Attach a photo')]
+    }
     return es
       ? [chip('Sí, publícalo'), chip('Espera, edítalo'), chip('Cancelar')]
       : [chip('Yes, post it'), chip('Wait, edit it'), chip('Cancel')]
@@ -287,8 +291,8 @@ export function inferChipsFromResponse(responseText, language = 'en') {
     && !(expiryAck && !expiryReAsk)
   ) {
     return es
-      ? [chip('Mañana'), chip('En 2 días'), chip('En 3 días'), chip('Otra fecha')]
-      : [chip('Tomorrow'), chip('In 2 days'), chip('In 3 days'), chip('Other date')]
+      ? [chip('Mañana'), chip('En 2 días'), chip('En 3 días'), chip('En un mes')]
+      : [chip('Tomorrow'), chip('In 2 days'), chip('In 3 days'), chip('In a month')]
   }
 
   // Remind

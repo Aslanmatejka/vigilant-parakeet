@@ -4270,6 +4270,7 @@ def generate_quick_replies(
     communities: Optional[list[str]] = None,
     suggested_community: Optional[str] = None,
     guide_state: Optional[dict] = None,
+    assistance_reminder: Optional[str] = None,
 ) -> list[str]:
     """Heuristic 'smart reply' / autofill chips for the chat UI.
 
@@ -4360,15 +4361,16 @@ def generate_quick_replies(
     photo_ask = any(k in t for k in ("photo", "picture", "foto", "imagen")) and any(
         k in t for k in (
             "required", "please", "need", "upload", "attach", "add a", "add one",
-            "before posting", "before we post", "mandar", "sube", "subir", "?", "¿",
+            "before posting", "before we post", "mandar", "sube", "subir",
             "photo of", "picture of", "snap", "send a photo", "send a picture",
             "send one", "so we can post", "para publicar",
         )
     )
     if photo_ask and not any(k in t for k in (
         "photos received", "got your photo", "thanks for the photo", "with your photos",
-        "photo attached", "already have a photo", "ready to post", "shall i post",
-        "want me to post", "listo para publicar",
+        "photo attached", "foto adjunta", "fotos recibidas", "already have a photo",
+        "ready to post", "shall i post", "want me to post", "listo para publicar",
+        "lo publico", "lo publicamos", "publicarlo",
     )):
         if es:
             add("Adjuntar foto")
@@ -4396,6 +4398,7 @@ def generate_quick_replies(
         from backend.agent.suggestion_chips import share_assistance_fork_chips
         fork = share_assistance_fork_chips(
             text, lang, user_message=user_message or "",
+            assistance_reminder=assistance_reminder or "",
             guide_state=guide_state,
         )
         if fork:
@@ -4690,6 +4693,7 @@ def generate_quick_replies(
     from backend.agent.suggestion_chips import share_assistance_fork_chips
     _fork = share_assistance_fork_chips(
         text, lang, user_message=user_message or "",
+        assistance_reminder=assistance_reminder or "",
         guide_state=guide_state,
     )
     if _fork:
@@ -4829,6 +4833,17 @@ def generate_quick_replies(
         ("look good" in t or "looks good" in t or "sound good" in t or "sounds good" in t)
         and any(k in t for k in ("post", "publish", "listing"))
     ):
+        photo_evidence = any(k in t for k in (
+            "photos received", "got your photo", "with your photos",
+            "photo attached", "already have a photo", "image:",
+            "foto adjunta", "fotos recibidas", "con tus fotos", "con su foto",
+        )) or "http" in t
+        if not photo_evidence:
+            if es:
+                add("Adjuntar foto")
+            else:
+                add("Attach a photo")
+            return out
         if es:
             add("Sí, publícalo", "Espera, edítalo", "Cancelar")
         else:
@@ -4877,6 +4892,8 @@ def generate_quick_replies(
     if "photo" in t or "picture" in t or "foto" in t or "imagen" in t:
         if not any(k in t for k in (
             "photos received", "got your photo", "ready to post", "shall i post",
+            "foto adjunta", "fotos recibidas", "lo publico", "lo publicamos",
+            "listo para publicar", "publicarlo",
         )):
             if es:
                 add("Adjuntar foto")
@@ -4896,9 +4913,9 @@ def generate_quick_replies(
     # Freshness / good-until — only when actively asking, never on ack + allergen.
     if _is_expiry_ask(t):
         if es:
-            add("Mañana", "En 2 días", "En 3 días", "Otra fecha")
+            add("Mañana", "En 2 días", "En 3 días", "En un mes")
         else:
-            add("Tomorrow", "In 2 days", "In 3 days", "Other date")
+            add("Tomorrow", "In 2 days", "In 3 days", "In a month")
         return out
 
     # Combined food + qty (hands-on "Do it for me") — before bare qty.

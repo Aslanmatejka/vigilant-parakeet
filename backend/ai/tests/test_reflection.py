@@ -193,6 +193,9 @@ class TestHallucinatedSuccess:
     def test_posted_with_matching_tool_ok(self):
         actions = [{"tool": "post_food_listing", "ok": True}]
         assert not detect_hallucinated_success("Posted!", actions)
+        assert not detect_hallucinated_success(
+            "Posted!", [{"tool": "post_food_listings", "ok": True}],
+        )
 
     def test_posted_with_failed_tool_still_flagged(self):
         # Tool ran but failed → claim is still a hallucination.

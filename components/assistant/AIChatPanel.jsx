@@ -1118,6 +1118,7 @@ function MessageBubble({
   onFeedback,
   language,
   onSuggestionClick,
+  onAttachPhoto,
   onConfirmAction,
   isLoading,
   currentUser,
@@ -1311,6 +1312,7 @@ function MessageBubble({
                   key={i}
                   action={action}
                   onSuggestionClick={onSuggestionClick}
+                  onAttachPhoto={onAttachPhoto}
                   disabled={isLoading}
                   compact={suggestionItems.length > 4}
                 />
@@ -1399,7 +1401,7 @@ function MessageBubble({
 }
 
 // ─── Suggested action button ───────────────────────────
-function SuggestedActionButton({ action, onSuggestionClick, disabled = false, compact = false }) {
+function SuggestedActionButton({ action, onSuggestionClick, onAttachPhoto, disabled = false, compact = false }) {
   const { executeUIAction } = useUIControl()
 
   const asObject = action && typeof action === 'object'
@@ -1417,6 +1419,11 @@ function SuggestedActionButton({ action, onSuggestionClick, disabled = false, co
     if (disabled) return
 
     const isOpenForm = /^(open the form|abrir el formulario)$/i.test(String(sendText || label || '').trim())
+    const isAttachPhoto = actionType === 'attach_photo' || /^(attach a photo|adjuntar foto)$/i.test(String(label || sendText || '').trim())
+    if (isAttachPhoto && onAttachPhoto) {
+      onAttachPhoto()
+      return
+    }
 
     if (actionType === 'navigate' && asObject && (action.target || action.href || action.path)) {
       const target = action.target || action.href || action.path
@@ -4392,6 +4399,7 @@ function AIChatPanel() {
                     onFeedback={submitFeedback}
                     language={language}
                     onSuggestionClick={handleQuickAction}
+                    onAttachPhoto={() => photoInputRef.current?.click()}
                     onConfirmAction={confirmPendingAction}
                     isLoading={isLoading}
                     currentUser={authUser}

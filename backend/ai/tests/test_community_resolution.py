@@ -105,6 +105,18 @@ class TestBestCommunityNameMatch:
         assert hit is not None
         assert hit["id"] == "1"
 
+    def test_county_only_does_not_auto_confirm_without_catalog(self):
+        history = [
+            {"role": "user", "message": "share 100 boxes of vegetables"},
+            {"role": "assistant", "message": "Which community should this go under?"},
+        ]
+        out = enrich_post_food_listing_args(
+            {"title": "vegetables", "qty": 100},
+            "Alameda County",
+            history,
+        )
+        assert out.get("community_confirmed") is not True
+
     def test_county_maps_to_unified_school(self):
         rows = [
             {"id": "1", "name": "Alameda Unified School District"},

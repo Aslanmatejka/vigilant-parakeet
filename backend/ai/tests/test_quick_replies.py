@@ -28,12 +28,12 @@ def test_open_wh_question_without_specific_branch_returns_empty():
 
 def test_post_confirm_variants():
     confirm_phrasings = [
-        "Quick check — 3 loaves of sourdough, pickup at 1423 Park St. Post it?",
-        "Sound good? Should I post it?",
-        "Ready to post?",
-        "All set — shall I publish it?",
-        "Looks good? Confirm and post?",
-        "Want me to post the listing?",
+        "Quick check — 3 loaves of sourdough, pickup at 1423 Park St, with your photos. Post it?",
+        "Sound good? Should I post it? Photos received.",
+        "Ready to post with your photos?",
+        "All set — shall I publish it? Photo attached.",
+        "Looks good? Confirm and post? Got your photo.",
+        "Want me to post the listing? Photos received.",
     ]
     for q in confirm_phrasings:
         out = generate_quick_replies(q)
@@ -47,7 +47,7 @@ def test_post_confirm_variants():
 
 
 def test_post_confirm_spanish():
-    out = generate_quick_replies("¿Lo publico?", lang="es")
+    out = generate_quick_replies("Foto adjunta. ¿Lo publico?", lang="es")
     assert out
     assert any("public" in s.lower() or "publí" in s.lower() for s in out)
 
@@ -151,11 +151,11 @@ def test_es_what_food_question_suggests_food_options():
 
 def test_es_post_confirm_variants():
     confirm_phrasings = [
-        "Resumen rápido — 3 panes, recogida en tu casa. ¿Lo publico?",
-        "¿Lo publicamos?",
-        "¿Listo para publicar?",
-        "¿Está bien así? ¿Publicarlo?",
-        "¿Confirmas y publico?",
+        "Resumen rápido — 3 panes, recogida en tu casa, foto adjunta. ¿Lo publico?",
+        "Fotos recibidas. ¿Lo publicamos?",
+        "¿Listo para publicar? Foto adjunta.",
+        "¿Está bien así? ¿Publicarlo? Foto adjunta.",
+        "¿Confirmas y publico? Foto adjunta.",
     ]
     for q in confirm_phrasings:
         out = generate_quick_replies(q, lang="es")
@@ -211,7 +211,7 @@ def test_es_freshness_question():
     assert out
     joined = " ".join(out).lower()
     assert "mañana" in joined or "días" in joined
-    assert "otra fecha" in joined
+    assert "en un mes" in joined
     assert "hecho hoy" not in joined
     assert "hecho ayer" not in joined
     assert "bueno 24" not in joined
@@ -223,7 +223,7 @@ def test_good_until_chips_not_made_today():
     )
     assert "Tomorrow" in out
     assert "In 2 days" in out
-    assert "Other date" in out
+    assert "In a month" in out
     assert "Good for 24 hours" not in out
     assert "Made today" not in out
     assert "Made yesterday" not in out

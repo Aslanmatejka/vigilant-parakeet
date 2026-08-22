@@ -88,6 +88,20 @@ class TestSpokenExpiryShelfLife:
             _add_calendar_months(date.today(), 2).isoformat()
         )
 
+    def test_in_a_month_and_weeks(self):
+        from datetime import timedelta
+        from backend.ai.conversation_flow import _add_calendar_months
+
+        assert _extract_expiry_from_text("in a month") == (
+            _add_calendar_months(date.today(), 1).isoformat()
+        )
+        assert _extract_expiry_from_text("next month") == (
+            _add_calendar_months(date.today(), 1).isoformat()
+        )
+        assert _extract_expiry_from_text("in 6 weeks") == (
+            (date.today() + timedelta(weeks=6)).isoformat()
+        )
+
     def test_normalize_bumps_date_only_today_to_tomorrow(self):
         from datetime import timedelta
         from backend.ai.conversation_flow import normalize_expiration_date_for_post
@@ -326,11 +340,20 @@ class TestNoPostChipsAfterShareSuccess:
 
     def test_shall_i_post_still_gets_confirm_chips(self):
         text = (
-            "Ready to post: 1 basket of tomatoes and 1 basket of carrots. "
-            "Shall I post these now?"
+            "Ready to post: 1 basket of tomatoes and 1 basket of carrots, "
+            "with your photos. Shall I post these now?"
         )
         out = generate_quick_replies(text)
         assert "Yes, post it" in out
+
+    def test_ready_to_post_without_photo_asks_for_photo(self):
+        text = (
+            "Ready to post: 100 boxes of vegetables under Alameda Unified. "
+            "Shall I post these now?"
+        )
+        out = generate_quick_replies(text)
+        assert "Attach a photo" in out
+        assert "Yes, post it" not in out
 
 
 class TestCustomExpiryHandsOnPath:

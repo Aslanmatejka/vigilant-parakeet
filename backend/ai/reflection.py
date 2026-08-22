@@ -294,7 +294,8 @@ def detect_hallucinated_success(
         if isinstance(a, dict) and a.get("ok")
     }
     write_tools = {
-        "post_food_listing", "claim_listing", "cancel_claim",
+        "post_food_listing", "post_food_listings", "create_food_listing",
+        "claim_listing", "claim_listings", "cancel_claim",
         "delete_listing", "deactivate_listing", "update_food_listing",
         "post_food_request", "update_food_request",
         "attach_photos_to_listing",

@@ -57,6 +57,6 @@ def test_claim_lock_in_no_longer_offered():
 
 def test_post_confirm_still_has_edit_chip():
     out = generate_quick_replies(
-        "I'll post 3 loaves at 1423 Park St — ready to post?"
+        "I'll post 3 loaves at 1423 Park St, with your photos — ready to post?"
     )
     assert "Wait, edit it" in out or "Yes, post it" in out

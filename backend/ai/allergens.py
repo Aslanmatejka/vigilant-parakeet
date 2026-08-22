@@ -482,7 +482,7 @@ def build_allergen_reminder(
         if not is_posting_flow(message, history):
             return None
         state = posting_flow_state(message, history)
-        if not state.get("expiry_provided"):
+        if not state.get("expiry_provided") and not state.get("expiry_asked"):
             return None
     except Exception:  # pragma: no cover
         pass

@@ -1234,6 +1234,8 @@ def build_turn_suggestions(
             user_message=last_user_message or "",
             communities=(user_context or {}).get("active_communities") or None,
             suggested_community=(user_context or {}).get("suggested_community"),
+            assistance_reminder=assistance_reminder,
+            guide_state=user_context if isinstance(user_context, dict) else None,
         ):
             add(chip)
 

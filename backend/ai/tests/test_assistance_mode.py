@@ -148,16 +148,31 @@ def test_hands_on_find_enters_finding_flow():
 
 def test_quick_replies_hands_on_ack_not_fork():
     """Hands-on acknowledgments must not re-show Open / Do it / Guide chips."""
-    from backend.agent.suggestion_chips import share_assistance_fork_chips
+    from backend.agent.suggestion_chips import share_assistance_fork_chips, build_turn_suggestions
 
+    reminder = (
+        "HANDS-ON MODE — SHARE FOOD:\nUser wants you to handle it in chat."
+    )
     assert share_assistance_fork_chips(
         "Got it — I'll handle everything for you in chat. "
         "What food are you sharing and how much?",
         user_message="Do it for me",
-        assistance_reminder=(
-            "HANDS-ON MODE — SHARE FOOD:\nUser wants you to handle it in chat."
-        ),
+        assistance_reminder=reminder,
     ) == []
+
+    leak = "How would you like to proceed — handle everything here in chat or guide me?"
+    chips = build_turn_suggestions(
+        leak,
+        "en",
+        tool_results=[],
+        last_user_message="100 boxes of vegetables",
+        assistance_reminder=reminder,
+        min_chips=0,
+    )
+    labels = [c if isinstance(c, str) else c.get("label") for c in chips]
+    assert "Do it for me" not in labels
+    assert "Guide me step by step" not in labels
+    assert "Open the form" not in labels
 
 
 def test_reminder_guided_share():
