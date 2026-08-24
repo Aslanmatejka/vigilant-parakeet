@@ -1222,6 +1222,9 @@ def resolve_hands_on_share_chip_step(
         )
         from backend.ai.conversation_flow import _is_description_ask
 
+        # Description before allergen — acks like "no allergens" must not steal chips.
+        if _is_description_ask(response_text) or last_asked == "description":
+            return "description"
         if _is_allergen_ask(response_text) or last_asked == "allergen":
             return "allergen"
         if _is_post_confirm_ask(response_text) or last_asked == "post_confirm":
@@ -1237,8 +1240,6 @@ def resolve_hands_on_share_chip_step(
             return "post_confirm"
         if _is_expiry_ask(response_text) or last_asked == "expiry":
             return "expiry"
-        if _is_description_ask(response_text) or last_asked == "description":
-            return "description"
         if last_asked == "photo":
             return "photo"
         photo_ask = any(k in (response_text or "").lower() for k in (

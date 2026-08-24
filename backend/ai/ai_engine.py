@@ -4267,6 +4267,20 @@ def _is_allergen_ask(t: str) -> bool:
     t = (t or "").lower()
     if _is_post_confirm_ask(t):
         return False
+    # "Perfect, no allergens. Could you describe…?" is a description ask.
+    try:
+        from backend.ai.conversation_flow import _is_description_ask
+        if _is_description_ask(t):
+            allergen_question = any(k in t for k in (
+                "any allerg", "allergens?", "allergen?",
+                "does this contain", "do these contain",
+                "should i note", "should i flag", "any dietary",
+                "dietary restriction", "contain nuts", "contain dairy",
+            ))
+            if not allergen_question:
+                return False
+    except Exception:
+        pass
     if any(k in t for k in (
         "allerg", "alérgen", "alergen", "alergia", "alergias",
         "dietary restriction", "restricciones diet", "restricción diet",
@@ -4277,6 +4291,15 @@ def _is_allergen_ask(t: str) -> bool:
             "?", "¿",
         ))
         if not asking:
+            return False
+        # Bare "?" from a different question + "no allergens" ack ≠ allergen ask.
+        if any(k in t for k in (
+            "no allergen", "no allergens", "without allergen", "allergens noted",
+            "sin alérgen", "sin alergen",
+        )) and not any(k in t for k in (
+            "any allerg", "contain", "does this", "do these",
+            "should i", "flag", "dietary",
+        )):
             return False
         return True
     # Common hands-on phrasing lists major allergens without the word itself.

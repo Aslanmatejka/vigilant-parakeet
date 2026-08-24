@@ -3158,12 +3158,13 @@ def _assistant_last_asked_kind(history: list | None) -> str | None:
             "listo para reclamar", "reclamar estos", "reclamo estos",
         )):
             return "claim_confirm"
+        # Description before allergen — "Perfect, no allergens. Describe…?" is description.
+        if _is_description_ask(text):
+            return "description"
         if any(k in text for k in (
             "allerg", "alérgen", "alergen", "alergia", "dietary restriction",
         )):
             return "allergen"
-        if _is_description_ask(text):
-            return "description"
         if any(k in text for k in (
             "expire", "expiry", "best by", "best-by", "use by", "how fresh",
             "how long", "when was it made", "good until", "vence", "caduca",

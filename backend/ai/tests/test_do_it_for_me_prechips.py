@@ -304,3 +304,42 @@ def test_expiry_ask_wins_when_community_not_yet_confirmed():
     assert "tomorrow" in joined
     assert "different community" not in joined
     assert "alameda" not in joined
+
+
+def test_description_ask_wins_over_allergen_ack():
+    """'Perfect, no allergens. Describe…?' must show description chips, not allergen."""
+    history = _hands_on_history(
+        {"role": "assistant", "message": "What food and how much?"},
+        {"role": "user", "message": "5 apples"},
+        {"role": "assistant", "message": "List under Do Good Warehouse?"},
+        {"role": "user", "message": "Yes, list under Do Good Warehouse"},
+        {"role": "assistant", "message": "When does it expire?"},
+        {"role": "user", "message": "Tomorrow"},
+        {"role": "assistant", "message": "Any allergens?"},
+        {"role": "user", "message": "No allergens"},
+    )
+    text = (
+        "Perfect, no allergens. Could you give me one short sentence to describe "
+        "the apples? (For example: how fresh they are, if they're bagged or loose, "
+        "anything special about them.)"
+    )
+    step = resolve_hands_on_share_chip_step(
+        "No allergens",
+        history,
+        assistance_reminder="hands-on share posting",
+        response_text=text,
+    )
+    assert step == "description"
+    chips = build_turn_suggestions(
+        text,
+        "en",
+        tool_results=[],
+        min_chips=0,
+        last_user_message="No allergens",
+        assistance_reminder="hands-on share posting",
+        history=history,
+    )
+    joined = _joined(chips)
+    assert "sealed" in joined or "homemade" in joined
+    assert "no allergens" not in joined
+    assert "gluten" not in joined
