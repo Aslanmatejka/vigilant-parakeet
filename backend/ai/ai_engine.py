@@ -4367,16 +4367,6 @@ def generate_quick_replies(
             add("Done", "What's next?", "Need help")
         return out
 
-    # Description ask — before photo/expiry so Nouri's "short description"
-    # turn gets description chips, not community or attach-photo.
-    from backend.ai.conversation_flow import _is_description_ask
-    if _is_description_ask(t) and not _is_allergen_ask(t):
-        if es:
-            add("Fresco de hoy", "Sin alérgenos", "Listo para recoger")
-        else:
-            add("Fresh today", "No allergens", "Ready for pickup")
-        return out
-
     # Photo required — often no "?" ("Please upload a photo — required…").
     # Never offer skip. Run before the question-only gate.
     photo_ask = any(k in t for k in ("photo", "picture", "foto", "imagen")) and any(
@@ -4464,7 +4454,15 @@ def generate_quick_replies(
             add("Fresh bread", "Vegetable box", "Prepared meals")
         return out
 
-    # Description handled earlier via _is_description_ask (before photo).
+    # Description — after photo/allergen/fork so those turns keep their chips.
+    # Before expiry/community so a school name in the same message doesn't steal.
+    from backend.ai.conversation_flow import _is_description_ask
+    if _is_description_ask(t) and not _is_allergen_ask(t):
+        if es:
+            add("Sigue sellado", "Casero, refrigerado", "Sobras variadas")
+        else:
+            add("Still sealed", "Homemade, refrigerated", "Assorted leftovers")
+        return out
 
     # Combined food + amount (no "?") — also "What food … and how much?"
     if _is_combined_food_qty_ask(t):
@@ -4591,8 +4589,8 @@ def generate_quick_replies(
     ))
     claim_qty_context = any(k in t for k in (
         "nice choice", "good pick", "great choice", "from that",
-        "of those", "of the", "loaves", "units", "available",
-        "listing", "claimed", "claim", "they have", "there are",
+        "of those", "of the", "available",
+        "claimed", "claim", "they have", "there are",
         "of it", "from this", "from the",
     ))
     if (
@@ -4856,8 +4854,10 @@ def generate_quick_replies(
     ):
         photo_evidence = any(k in t for k in (
             "photos received", "got your photo", "with your photos",
+            "with photo", "with a photo", "has a photo",
             "photo attached", "already have a photo", "image:",
             "foto adjunta", "fotos recibidas", "con tus fotos", "con su foto",
+            "con foto", "con una foto",
         )) or "http" in t
         if not photo_evidence:
             if es:

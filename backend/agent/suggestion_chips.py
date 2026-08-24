@@ -799,6 +799,9 @@ def _looks_like_community_name(name: str) -> bool:
         return False
 
     words = cleaned.split()
+    exclude = {w.lower() for w in _COMMUNITY_NAME_EXCLUDE}
+    if words and all(w.lower() in exclude for w in words):
+        return False
     if len(words) == 1 and words[0] in _COMMUNITY_NAME_EXCLUDE:
         return False
     if words[-1].lower() in _STREET_SUFFIXES:

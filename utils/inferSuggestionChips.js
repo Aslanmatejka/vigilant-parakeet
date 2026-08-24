@@ -270,13 +270,14 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   }
 
   // Description — before photo/expiry so "add a short description" gets
-  // description chips even without a question mark.
+  // description chips even without a question mark. Do not use allergen
+  // or best-by chips here — those collide with other Do-it-for-me steps.
   if (
-    /short description|add a description|describe the food|describe it|description for recipients|one-sentence description|one sentence about|few words about|tell me more about the food|tell me a bit about|how would you describe|descripci[oó]n corta|una descripci[oó]n|describe la comida/.test(t)
+    /short description|add a description|describe the food|describe it|description for recipients|one-sentence description|one sentence about|few words about|tell me more about the food|tell me a bit about|tell me a bit more about|how would you describe|descripci[oó]n corta|descripci[oó]n para|describe la comida/.test(t)
   ) {
     return es
-      ? [chip('Fresco de hoy'), chip('Sin alérgenos'), chip('Listo para recoger')]
-      : [chip('Fresh today'), chip('No allergens'), chip('Ready for pickup')]
+      ? [chip('Sigue sellado'), chip('Casero, refrigerado'), chip('Sobras variadas')]
+      : [chip('Still sealed'), chip('Homemade, refrigerated'), chip('Assorted leftovers')]
   }
 
   // Pickup window

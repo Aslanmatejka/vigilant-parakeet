@@ -3012,13 +3012,12 @@ _DESCRIPTION_ASK_CUES: tuple[str, ...] = (
     "one-sentence description", "one sentence description",
     "one sentence about", "few words about", "a short note",
     "tell me more about the food", "tell me a bit about",
-    "how would you describe", "what's included", "what does it include",
+    "tell me a bit more about", "how would you describe",
     "condition or packaging", "condition, packaging",
     "write a description", "need a description", "need the description",
     "give me a description", "please describe",
     "descripción corta", "descripcion corta", "describe la comida",
     "cuéntame más sobre", "cuentame mas sobre",
-    "una descripción", "una descripcion",
     "descripción para", "descripcion para",
 )
 
@@ -3038,6 +3037,19 @@ def _is_description_ask(text: str) -> bool:
     except Exception:
         pass
     if any(k in t for k in _DESCRIPTION_ASK_CUES):
+        # Photo/expiry turns that mention the description field are not this ask.
+        if any(k in t for k in (
+            "attach a photo", "upload a photo", "please attach",
+            "photo — required", "photo - required", "required before",
+        )):
+            return False
+        if any(k in t for k in (
+            "when does it expire", "best by", "good until", "use by",
+        )) and not any(k in t for k in (
+            "short description", "describe the food", "describe it",
+            "one sentence",
+        )):
+            return False
         return True
     if not any(k in t for k in (
         "description", "descripción", "descripcion", "describe",

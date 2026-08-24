@@ -155,7 +155,20 @@ class TestDescriptionChips:
             user_message="share leftover lasagna",
         )
         joined = " ".join(out).lower()
-        assert "fresh" in joined
+        assert "sealed" in joined or "homemade" in joined or "leftover" in joined
+        assert "fresh today" not in joined
+        assert "no allergens" not in joined
         assert out[:3] != ["Yes", "No", "Later"]
         assert "Attach a photo" not in out
         assert "Tomorrow" not in out
+
+    def test_tell_me_a_bit_more_gets_description_chips(self):
+        out = generate_quick_replies(
+            "Can you tell me a bit more about the food so people know "
+            "what they are getting?",
+            user_message="Do it for me",
+        )
+        joined = " ".join(out).lower()
+        assert "sealed" in joined or "homemade" in joined
+        assert "Tomorrow" not in out
+        assert "Do it for me" not in out

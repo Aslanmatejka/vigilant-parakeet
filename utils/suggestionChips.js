@@ -208,7 +208,7 @@ export function filterChipsAgainstResponse(responseText, chips) {
   }
 
   // Hands-on share/find step — never keep mode-fork chips (Open form / Do it / Guide).
-  const handsOnStep = /(what food|how much do you have|how many .+ sharing|best by|stay fresh|allerg|ready to post|post this under|which community|upload .+ photo|add a photo)/.test(text)
+  const handsOnStep = /(what food|how much do you have|how many .+ sharing|best by|stay fresh|expir|allerg|short description|describe the food|one sentence about|ready to post|post this under|which community|upload .+ photo|add a photo|attach a photo)/.test(text)
   const forkChip = /^(open the form|open find food|open request food|abrir el formulario|abrir buscar|abrir solicitar|do it for me|hazlo por m[ií]|guide me|gu[ií]ame)/i
 
   // Combined food+qty ask — bare 1/3/5/10 is wrong; drop so infer can refill.
@@ -286,8 +286,17 @@ export function resolveInputChips(suggestions, language = 'en', role = null, { a
     && !allergenAsk
     && !/(got it|noted|i'?ll use|listed as|confirmed).{0,40}(best by|good until|tomorrow)/.test(text)
   )
+  const descriptionAsk = /(short description|add a description|describe the food|describe it|one sentence about|tell me a bit about|how would you describe)/.test(text)
+  const descriptionChip = /^(still sealed|homemade|assorted leftovers|sigue sellado|casero|sobras variadas)/i
+  const onlyDescription = filtered.length > 0
+    && filtered.every((c) => descriptionChip.test(chipLabel(c)))
   // Stale qty/expiry chips on the wrong turn (common mid hands-on) → prefer infer.
-  const staleForTurn = (onlyBareQty && !qtyOnlyAsk) || (onlyExpiry && !expiryAsk)
+  const staleForTurn = (
+    (onlyBareQty && !qtyOnlyAsk)
+    || (onlyExpiry && !expiryAsk)
+    || (onlyDescription && !descriptionAsk)
+    || (onlyExpiry && descriptionAsk)
+  )
   if (filtered.length > 0 && !staleForTurn) {
     return filtered.slice(0, 40)
   }

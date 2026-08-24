@@ -74,6 +74,8 @@ def test_quantity_question_gets_numbers():
     out = generate_quick_replies("How many loaves?")
     assert out
     assert any(s.isdigit() for s in out)
+    assert "All of them" not in out
+    assert out == ["1", "3", "5", "10"] or set(out) >= {"1", "3", "5"}
 
 
 def test_allergen_question():
@@ -604,7 +606,7 @@ def test_rephrased_share_turns_get_real_chips():
     cases = {
         "Got it. Tell me the food name and roughly how much you have.": ("apple", "bread", "vegetable", "egg"),
         "What should we call this listing?": ("bread", "vegetable", "meal", "fresh"),
-        "Please add a short description for recipients.": ("fresh", "allergen", "pickup", "ready"),
+        "Please add a short description for recipients.": ("sealed", "homemade", "leftover", "refrigerat"),
         "Where should people pick this up?": ("address", "saved", "different"),
         "Perfect — anything else you want to share today?": ("share", "find", "all"),
         "Your listing is live! Want to share another item?": ("share", "find", "all"),
@@ -614,6 +616,9 @@ def test_rephrased_share_turns_get_real_chips():
         "Claim #1 for you — sound good?": ("claim", "cancel", "thanks"),
         "Pick one of the options above (1, 2, or 3).": ("1", "2", "3"),
         "Say yes if you want me to publish now.": ("post", "edit", "cancel"),
+        "Ready to post 3 loaves under Alameda Unified, with photo. Shall I post it?": (
+            "post", "edit", "cancel",
+        ),
     }
     for text, needles in cases.items():
         out = generate_quick_replies(text, user_message="share food")
@@ -621,4 +626,81 @@ def test_rephrased_share_turns_get_real_chips():
         joined = " ".join(out).lower()
         assert out[:3] != ["Yes", "No", "Later"], text
         assert any(n in joined for n in needles), f"{text!r} -> {out}"
+        if "shall i post" in text.lower() or "publish now" in text.lower():
+            assert "Attach a photo" not in out, text
+
+
+def test_do_it_for_me_prechips_match_each_step():
+    """Hands-on share chips must match the current question, not a prior step."""
+    from backend.agent.suggestion_chips import build_turn_suggestions
+
+    food = generate_quick_replies(
+        "You got it! What food do you want to share, and how much do you have?",
+        user_message="Do it for me",
+    )
+    assert "5 apples" in food
+    assert "Tomorrow" not in food
+    assert "Do it for me" not in food
+
+    qty = generate_quick_replies("How many loaves?", user_message="bread")
+    assert "All of them" not in qty
+    assert any(s.isdigit() for s in qty)
+
+    community = generate_quick_replies(
+        "Should I post this under Alameda Unified School District, "
+        "since that is your community?",
+        suggested_community="Alameda Unified School District",
+        user_message="Do it for me",
+    )
+    joined = " ".join(community).lower()
+    assert "alameda" in joined or "different" in joined
+    assert "School District" not in community
+
+    extracted = build_turn_suggestions(
+        "Should I post this under Alameda Unified School District, "
+        "since that is your community?",
+        "en",
+        tool_results=[],
+        min_chips=0,
+        last_user_message="Do it for me",
+    )
+    labels = [c if isinstance(c, str) else c.get("label") for c in extracted]
+    assert "School District" not in labels
+    assert any(
+        l and ("alameda" in (l or "").lower() or "different" in (l or "").lower())
+        for l in labels
+    )
+
+    expiry = generate_quick_replies(
+        "I'll list this under Alameda Unified. When does it expire?",
+        user_message="Do it for me",
+    )
+    assert "Tomorrow" in expiry
+    assert "Still sealed" not in expiry
+    assert "Do it for me" not in expiry
+
+    desc = generate_quick_replies(
+        "Please add a short description for recipients.",
+        user_message="Do it for me",
+    )
+    assert "Still sealed" in desc
+    assert "No allergens" not in desc
+    assert "Tomorrow" not in desc
+    assert "Attach a photo" not in desc
+
+    photo = generate_quick_replies(
+        "Please attach a photo of the food — required before I can post.",
+        user_message="Do it for me",
+    )
+    assert "Attach a photo" in photo
+    assert "Still sealed" not in photo
+    assert "Yes, post it" not in photo
+
+    confirm = generate_quick_replies(
+        "Ready to post 3 loaves under Alameda Unified, with photo. Shall I post it?",
+        user_message="Do it for me",
+    )
+    assert "Yes, post it" in confirm
+    assert "Attach a photo" not in confirm
+    assert "Tomorrow" not in confirm
 
