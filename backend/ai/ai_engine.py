@@ -4329,8 +4329,14 @@ def _is_expiry_ask(t: str) -> bool:
     if _is_allergen_ask(t):
         return False
     try:
-        from backend.ai.conversation_flow import is_post_success_response
+        from backend.ai.conversation_flow import (
+            _is_description_ask,
+            is_post_success_response,
+        )
         if is_post_success_response(t):
+            return False
+        # "Got it, good for a month. Write one short sentence…?" is description.
+        if _is_description_ask(t):
             return False
     except Exception:
         pass
@@ -4365,8 +4371,10 @@ def _is_expiry_ask(t: str) -> bool:
     re_ask = any(k in t for k in (
         "change", "different date", "or different", "update the", "wrong date",
         "another date", "new date", "when is", "when does", "how long",
-        "still good", "want a different", "prefer a different", "?", "¿",
+        "still good", "want a different", "prefer a different",
     ))
+    # Bare "?" alone is not a re-ask — it often belongs to the next question
+    # ("Got it — good for a month. Could you describe…?").
     if ack and not re_ask:
         return False
     return True

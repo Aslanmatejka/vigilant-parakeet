@@ -3010,7 +3010,9 @@ _DESCRIPTION_ASK_CUES: tuple[str, ...] = (
     "short description", "add a description", "add a short description",
     "describe the food", "describe it", "description for recipients",
     "one-sentence description", "one sentence description",
-    "one sentence about", "few words about", "a short note",
+    "one sentence about", "one short sentence", "short sentence about",
+    "write one short sentence", "write a short sentence", "sentence about these",
+    "sentence about the", "few words about", "a short note",
     "tell me more about the food", "tell me a bit about",
     "tell me a bit more about", "how would you describe",
     "condition or packaging", "condition, packaging",
@@ -3070,6 +3072,7 @@ def _is_description_ask(text: str) -> bool:
         return True
     if not any(k in t for k in (
         "description", "descripción", "descripcion", "describe",
+        "short sentence", "one sentence", "sentence about",
     )):
         return False
     # Assistant narrating where text will go — not asking the donor.

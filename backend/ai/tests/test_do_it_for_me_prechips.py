@@ -385,3 +385,40 @@ def test_different_community_ask_shows_school_list_not_food():
     assert "do good warehouse" in joined or "ruby bridges" in joined
     assert "5 apples" not in joined
     assert "loaves" not in joined
+
+
+def test_description_ask_wins_over_expiry_ack():
+    """'Got it, good for a month. Write one short sentence…?' → description chips."""
+    history = _hands_on_history(
+        {"role": "assistant", "message": "What food and how much?"},
+        {"role": "user", "message": "1 dozen eggs"},
+        {"role": "assistant", "message": "List under Do Good Warehouse?"},
+        {"role": "user", "message": "Yes, list under Do Good Warehouse"},
+        {"role": "assistant", "message": "When does it expire?"},
+        {"role": "user", "message": "In a month"},
+    )
+    text = (
+        "Got it, eggs are good for about a month. Could you write one short sentence "
+        "about these eggs? For example, let me know if they're fresh, in a carton, "
+        "or anything else you'd like to share."
+    )
+    step = resolve_hands_on_share_chip_step(
+        "In a month",
+        history,
+        assistance_reminder="hands-on share posting",
+        response_text=text,
+    )
+    assert step == "description"
+    chips = build_turn_suggestions(
+        text,
+        "en",
+        tool_results=[],
+        min_chips=0,
+        last_user_message="In a month",
+        assistance_reminder="hands-on share posting",
+        history=history,
+    )
+    joined = _joined(chips)
+    assert "sealed" in joined or "homemade" in joined
+    assert "tomorrow" not in joined
+    assert "in a month" not in joined
