@@ -437,3 +437,70 @@ class TestDoItForMeFullFlowChips:
         first = self._chips(text)
         second = self._chips(text)
         assert first == second
+
+    # ── Regression: prod transcripts (2026-08-25) where "no allergens" in
+    # an ack / summary triggered allergen chips on unrelated turns.
+    def test_ack_no_allergens_then_description_ask(self):
+        text = (
+            "Perfect, no allergens. Please write one short sentence "
+            "describing the veggies—like what's inside or how they're packed."
+        )
+        out = self._chips(text)
+        assert "Still sealed" in out, out
+        assert "No allergens" not in out, out
+
+    def test_post_confirm_recap_with_no_allergens(self):
+        text = (
+            "Photo received! Here's your post: 1 box of assorted leftover "
+            "vegetables (not packed), no allergens, under Alameda Unified "
+            "School District, pickup at 1423 Park St, good for about a month. "
+            "Ready to post?"
+        )
+        out = self._chips(text)
+        assert "Yes, post it" in out, out
+        for bad in ("No allergens", "Attach a photo", "Tomorrow", "Still sealed"):
+            assert bad not in out, f"{bad} leaked into {out}"
+
+    def test_description_ask_after_expiry_ack_with_no_allergens_context(self):
+        text = (
+            "Got it — your food is good for another month. Could you tell me "
+            "one short sentence describing the food? For example, what's "
+            "included, its condition, or how it's packaged?"
+        )
+        out = self._chips(text)
+        assert "Still sealed" in out, out
+        for bad in ("No allergens", "Tomorrow", "In 2 days", "Yes, post it"):
+            assert bad not in out, f"{bad} leaked into {out}"
+
+    def test_post_confirm_recap_with_photo_and_no_allergens(self):
+        text = (
+            "Perfect, thanks for the photo! Here's what I have: 5 apples "
+            "(not sealed), no allergens, good for another month, pickup at "
+            "1423 Park St, for Do Good Warehouse. Ready to post this?"
+        )
+        out = self._chips(text)
+        assert "Yes, post it" in out, out
+        for bad in ("No allergens", "Attach a photo", "Tomorrow", "Still sealed"):
+            assert bad not in out, f"{bad} leaked into {out}"
+
+    def test_food_description_ask_after_allergen_ack(self):
+        text = (
+            "Great, thanks for letting me know! Please tell me in one "
+            "sentence what you're sharing — like what it is, how many, and "
+            "how it's packaged."
+        )
+        out = self._chips(text)
+        assert any("apples" in c for c in out), out
+        for bad in ("No allergens", "Still sealed", "Tomorrow", "Yes, post it"):
+            assert bad not in out, f"{bad} leaked into {out}"
+
+    def test_actual_allergen_ask_still_fires(self):
+        text = (
+            "Perfect, thank you! Are there any allergens in the food, like "
+            "peanuts, tree nuts, dairy, eggs, wheat/gluten, soy, fish, "
+            "shellfish, or sesame? If not, just say none."
+        )
+        out = self._chips(text)
+        assert "No allergens" in out, out
+        for bad in ("Still sealed", "Yes, post it", "Attach a photo"):
+            assert bad not in out, f"{bad} leaked into {out}"

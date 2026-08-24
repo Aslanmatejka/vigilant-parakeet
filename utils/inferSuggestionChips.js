@@ -201,7 +201,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   if (/ready to post|want me to post|shall i post|publish it|post it|say yes if|publish now|sound good to post|looks? right|does this look|go ahead and share|shall i go ahead/.test(t)
     && !(/your community|list under|linked to|use that one|for the community/.test(t)
       && !/ready to post|shall i post|looks? right|sound good to post|go ahead and share/.test(t))) {
-    const photoEvidence = /photos received|got your photo|with your photos|with photo|with a photo|photo attached|foto adjunta|fotos recibidas|con tus fotos|image:|https?:\/\//.test(t)
+    const photoEvidence = /photos? received|got (your|the) photo|received (your|the) photo|with your photos|with photo|with a photo|photo attached|thanks for the photos?|thanks,? photo received|foto (adjunta|recibida)|fotos recibidas|con tus fotos|con (su|una) foto|gracias por la foto|image:|https?:\/\//.test(t)
     const photoNudge = !photoEvidence
       && /ready to post|ready to publish|shall i post|should i post|want me to post/.test(t)
       && !/looks? right|does this look|sound good|go ahead and share|your community|list under|linked to/.test(t)
@@ -223,9 +223,19 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Yes, claim it'), chip('No thanks'), chip('Cancel')]
   }
 
-  // Allergens — before food/qty/expiry so mixed "best by… any allergens?" wins.
-  if (
-    /allerg|alérgen|alergia|dietary restriction|restricciones diet/.test(t)
+  // Allergens — only on a real ASK, never on acks / post-confirm summaries /
+  // description asks that merely recap "no allergens".
+  const allergenAckOrRecap = (
+    /^\s*(perfect|great|got it|understood|thanks|thank you|awesome|nice)?[,\s—-]*no allergens/.test(t)
+    || /ready to post|ready to publish|shall i post|should i post|want me to post|post these|publish these|look right|looks right|does this look|does that look|sound good to post|go ahead and share|here'?s your post|here'?s what i have|photo received|listo para publicar/.test(t)
+    || (
+      /no allergens/.test(t)
+      && /describing|description|one short sentence|one sentence|attach a photo|upload a photo|photo — required|pickup at|pickup is|when can/.test(t)
+    )
+  )
+  const allergenAskCue = (
+    (/allerg|alérgen|alergia|dietary restriction|restricciones diet/.test(t)
+      && /any allerg|are there|does this|do these|contain|should i|flag|note|mention|know about|hay al[eé]rg|contiene|\?|¿/.test(t))
     || (
       (t.match(/\b(nuts|dairy|eggs|wheat|soy|shellfish|gluten|peanut|sesame|fish|frutos secos|l[aá]cteos|huevos|trigo)\b/g) || []).length >= 2
       && /(any |contain|should i|note|know about|does this|do these|dietary|allerg|\?|¿)/.test(t)
@@ -234,7 +244,8 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       /(nuts|dairy|eggs|wheat|soy|shellfish|gluten|frutos secos|lácteos)/.test(t)
       && /(any |contain|should i|note|know about|dietary|allerg)/.test(t)
     )
-  ) {
+  )
+  if (allergenAskCue && !allergenAckOrRecap) {
     return es
       ? [chip('Sin alérgenos'), chip('Solo gluten'), chip('Lácteos'), chip('Frutos secos')]
       : [chip('No allergens'), chip('Just gluten'), chip('Dairy'), chip('Nuts')]
@@ -242,11 +253,11 @@ export function inferChipsFromResponse(responseText, language = 'en') {
 
   // Food ask / looking for — BEFORE bare qty so hands-on
   // "What food … and how much?" gets food+qty examples, not 1/3/5/10.
-  const foodAsk = /what food|food name|what would you like to share|what would you like to donate|what are you sharing|what are you donating|what do you have|tell me what you have|tell me what you've got|what kind of food|tell me the food|qué comida|qué quieres compartir|qué vas a (donar|compartir)/.test(t)
+  const foodAsk = /what food|food name|what would you like to share|what would you like to donate|what are you sharing|what you'?re sharing|what you are sharing|what are you donating|what do you have|tell me what you have|tell me what you've got|what kind of food|tell me the food|qué comida|qué quieres compartir|qué vas a (donar|compartir)/.test(t)
   const qtyAsk = /how much|how many|cuántos|cuántas|cuánto|cuánta/.test(t)
   const combinedFoodQty = (
     (foodAsk && qtyAsk)
-    || /food name and|roughly how much|food and how much|tell me what you have|tell me what you've got|qué y cuánto|qué comida y cuánto/.test(t)
+    || /food name and|roughly how much|food and how much|tell me what you have|tell me what you've got|in one sentence what you'?re sharing|in one sentence what you are sharing|tell me in one sentence what|what it is,? and how many|what it is,? how many|qué y cuánto|qué comida y cuánto/.test(t)
   )
   if (combinedFoodQty) {
     return es

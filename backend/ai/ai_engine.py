@@ -4180,6 +4180,10 @@ def _is_combined_food_qty_ask(t: str) -> bool:
         "what food and how much", "food and how much", "food name and",
         "name and roughly how much", "what and how much",
         "tell me what you have", "tell me what you've got",
+        "in one sentence what you're sharing", "in one sentence what you are sharing",
+        "one sentence what you're sharing", "one sentence what you are sharing",
+        "tell me in one sentence what",
+        "what it is, how many", "what it is and how many",
         "qué y cuánto", "que y cuanto", "comida y cantidad",
         "qué comida y cuánto", "que comida y cuanto",
         "qué comida y cuánta", "que comida y cuanta",
@@ -4187,7 +4191,8 @@ def _is_combined_food_qty_ask(t: str) -> bool:
         return True
     food_ask = any(k in t for k in (
         "what food", "what would you like to share", "what would you like to donate",
-        "what are you sharing", "what are you donating", "what do you have",
+        "what are you sharing", "what you're sharing", "what you are sharing",
+        "what are you donating", "what do you have",
         "tell me what you have", "what kind of food", "food name", "tell me the food",
         "qué comida", "que comida",
         "qué quieres compartir", "que quieres compartir",
@@ -4211,13 +4216,77 @@ _ALLERGEN_WORDS: tuple[str, ...] = (
 
 
 def _is_allergen_ask(t: str) -> bool:
-    """True when the assistant is asking about allergens / dietary flags."""
+    """True when the assistant is asking about allergens / dietary flags.
+
+    Must NOT fire on:
+      * post-success summaries
+      * post-confirm summaries that recap "no allergens" ("Ready to post?")
+      * description asks that acknowledge "no allergens"
+      * photo-received recaps
+      * acks that start with "no allergens" / "perfect, no allergens".
+    """
     t = (t or "").lower()
+
+    try:
+        from backend.ai.conversation_flow import (
+            is_post_success_response,
+            _is_description_ask,
+        )
+        if is_post_success_response(t):
+            return False
+        if _is_description_ask(t):
+            return False
+    except Exception:
+        pass
+
+    # Post / final-confirm summaries never re-ask about allergens even when
+    # the copy says "no allergens".
+    if any(k in t for k in (
+        "ready to post", "ready to publish", "shall i post", "should i post",
+        "want me to post", "post these", "publish these",
+        "look right", "looks right", "does this look", "does that look",
+        "sound good to post", "sounds good to post",
+        "go ahead and share", "shall i go ahead",
+        "here's your post", "here's what i have", "photo received",
+        "listo para publicar", "¿lo publico",
+    )):
+        return False
+
+    # Ack: assistant just confirmed there are no allergens, then asks
+    # something else (description, expiry, pickup, community, photo).
+    stripped = t.lstrip()
+    ack_prefixes = (
+        "no allergens", "great, no allergens", "great — no allergens",
+        "perfect, no allergens", "perfect — no allergens",
+        "got it, no allergens", "got it — no allergens",
+        "understood, no allergens", "thanks, no allergens",
+        "thanks for letting me know", "thanks for the info",
+        "sin alérgenos", "perfecto, sin alérgenos",
+    )
+    if any(stripped.startswith(p) for p in ack_prefixes):
+        return False
+    # "no allergens" inline inside a recap that also asks for something else.
+    if "no allergens" in t and any(k in t for k in (
+        "describing", "description", "one short sentence", "one sentence",
+        "attach a photo", "upload a photo", "photo — required",
+        "pickup at", "pickup is", "when can",
+    )):
+        return False
+
     if any(k in t for k in (
         "allerg", "alérgen", "alergen", "alergia", "alergias",
         "dietary restriction", "restricciones diet", "restricción diet",
     )):
+        # Even the word "allerg" isn't enough — require an actual ASK cue.
+        asking_cue = any(k in t for k in (
+            "any allerg", "are there", "does this", "do these", "contain",
+            "should i", "flag", "note", "mention", "know about",
+            "any allerg", "hay alérg", "contiene", "?", "¿",
+        ))
+        if not asking_cue:
+            return False
         return True
+
     # Common hands-on phrasing lists major allergens without the word itself.
     hits = sum(1 for w in _ALLERGEN_WORDS if w in t)
     asking = any(k in t for k in (
@@ -4931,11 +5000,15 @@ def generate_quick_replies(
         and any(k in t for k in ("post", "publish", "listing"))
     ):
         photo_evidence = any(k in t for k in (
-            "photos received", "got your photo", "with your photos",
-            "with photo", "with a photo", "has a photo",
+            "photos received", "photo received", "got your photo", "got the photo",
+            "received the photo", "received your photo",
+            "with your photos", "with photo", "with a photo", "has a photo",
             "photo attached", "already have a photo", "image:",
-            "foto adjunta", "fotos recibidas", "con tus fotos", "con su foto",
-            "con foto", "con una foto",
+            "thanks for the photo", "thanks, photo received",
+            "thanks for the photos",
+            "foto adjunta", "fotos recibidas", "foto recibida",
+            "con tus fotos", "con su foto",
+            "con foto", "con una foto", "gracias por la foto",
         )) or "http" in t
         # Only nudge for a photo on the classic "Ready to post / Shall I post"
         # recap that never mentions one. Recap confirms ("look right",
