@@ -84,12 +84,12 @@ export function inferChipsFromResponse(responseText, language = 'en') {
     (
       (
         /do it for me|handle everything|handle the whole|hazlo por|here in chat/.test(t)
-        && /guide (me|you)|walk (me|you) through|step by step|paso a paso|gu[ií]ame|open the form|open find food|open request food/.test(t)
+        && /guide me|walk you through|paso a paso|gu[ií]ame|open the form|open find food|open request food/.test(t)
       )
       || (/would you like me to handle|would you rather|how would you like|like to proceed/.test(t)
         && /shar|donat|find food|request|search|nearby|posting/.test(t))
     )
-    && /(or |want me|would you|prefer|options|three|which)/.test(t)
+    && /(or |want me|would you|prefer|options|three)/.test(t)
   ) && !/(say done|let me know when|when you see|next step together|i see the form)/.test(t)
   if (forkAsk) {
     let path = typeof window !== 'undefined' ? String(window.location?.pathname || '') : ''
@@ -201,7 +201,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   if (/ready to post|want me to post|shall i post|publish it|post it|say yes if|publish now|sound good to post|looks? right|does this look|go ahead and share|shall i go ahead/.test(t)
     && !(/your community|list under|linked to|use that one|for the community/.test(t)
       && !/ready to post|shall i post|looks? right|sound good to post|go ahead and share/.test(t))) {
-    const photoEvidence = /photos? received|got (your|the) photo|received (your|the) photo|with your photos|with photo|with a photo|photo attached|thanks for the photos?|thanks,? photo received|foto (adjunta|recibida)|fotos recibidas|con tus fotos|con (su|una) foto|gracias por la foto|image:|https?:\/\//.test(t)
+    const photoEvidence = /photos received|got your photo|with your photos|with photo|with a photo|photo attached|foto adjunta|fotos recibidas|con tus fotos|image:|https?:\/\//.test(t)
     const photoNudge = !photoEvidence
       && /ready to post|ready to publish|shall i post|should i post|want me to post/.test(t)
       && !/looks? right|does this look|sound good|go ahead and share|your community|list under|linked to/.test(t)
@@ -223,19 +223,9 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Yes, claim it'), chip('No thanks'), chip('Cancel')]
   }
 
-  // Allergens — only on a real ASK, never on acks / post-confirm summaries /
-  // description asks that merely recap "no allergens".
-  const allergenAckOrRecap = (
-    /^\s*(perfect|great|got it|understood|thanks|thank you|awesome|nice)?[,\s—-]*no allergens/.test(t)
-    || /ready to post|ready to publish|shall i post|should i post|want me to post|post these|publish these|look right|looks right|does this look|does that look|sound good to post|go ahead and share|here'?s your post|here'?s what i have|photo received|listo para publicar/.test(t)
-    || (
-      /no allergens/.test(t)
-      && /describing|description|one short sentence|one sentence|attach a photo|upload a photo|photo — required|pickup at|pickup is|when can/.test(t)
-    )
-  )
-  const allergenAskCue = (
-    (/allerg|alérgen|alergia|dietary restriction|restricciones diet/.test(t)
-      && /any allerg|are there|does this|do these|contain|should i|flag|note|mention|know about|hay al[eé]rg|contiene|\?|¿/.test(t))
+  // Allergens — before food/qty/expiry so mixed "best by… any allergens?" wins.
+  if (
+    /allerg|alérgen|alergia|dietary restriction|restricciones diet/.test(t)
     || (
       (t.match(/\b(nuts|dairy|eggs|wheat|soy|shellfish|gluten|peanut|sesame|fish|frutos secos|l[aá]cteos|huevos|trigo)\b/g) || []).length >= 2
       && /(any |contain|should i|note|know about|does this|do these|dietary|allerg|\?|¿)/.test(t)
@@ -244,8 +234,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       /(nuts|dairy|eggs|wheat|soy|shellfish|gluten|frutos secos|lácteos)/.test(t)
       && /(any |contain|should i|note|know about|dietary|allerg)/.test(t)
     )
-  )
-  if (allergenAskCue && !allergenAckOrRecap) {
+  ) {
     return es
       ? [chip('Sin alérgenos'), chip('Solo gluten'), chip('Lácteos'), chip('Frutos secos')]
       : [chip('No allergens'), chip('Just gluten'), chip('Dairy'), chip('Nuts')]
@@ -253,11 +242,11 @@ export function inferChipsFromResponse(responseText, language = 'en') {
 
   // Food ask / looking for — BEFORE bare qty so hands-on
   // "What food … and how much?" gets food+qty examples, not 1/3/5/10.
-  const foodAsk = /what food|food name|what would you like to share|what would you like to donate|what are you sharing|what you'?re sharing|what you are sharing|what are you donating|what do you have|tell me what you have|tell me what you've got|what kind of food|tell me the food|qué comida|qué quieres compartir|qué vas a (donar|compartir)/.test(t)
+  const foodAsk = /what food|food name|what would you like to share|what would you like to donate|what are you sharing|what are you donating|what do you have|tell me what you have|tell me what you've got|what kind of food|tell me the food|qué comida|qué quieres compartir|qué vas a (donar|compartir)/.test(t)
   const qtyAsk = /how much|how many|cuántos|cuántas|cuánto|cuánta/.test(t)
   const combinedFoodQty = (
     (foodAsk && qtyAsk)
-    || /food name and|roughly how much|food and how much|tell me what you have|tell me what you've got|in one sentence what you'?re sharing|in one sentence what you are sharing|tell me in one sentence what|what it is,? and how many|what it is,? how many|qué y cuánto|qué comida y cuánto/.test(t)
+    || /food name and|roughly how much|food and how much|tell me what you have|tell me what you've got|qué y cuánto|qué comida y cuánto/.test(t)
   )
   if (combinedFoodQty) {
     return es
@@ -295,17 +284,12 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Find free food'), chip('Share extra food'), chip('Request food')]
   }
 
-  // Description — after photo/allergen/community/post-confirm/claim so those
-  // turns keep their chips even when they mention the word 'description'.
-  const isPostConfirmOrClaim = /ready to post|ready to publish|shall i post|should i post|want me to post|post these|publish these|sound good to post|looks? right|does this look|does that look|go ahead and share|shall i go ahead|shall i claim|want me to claim|claim this listing|claim it for you|claim #|which community|which school|list under|listed under|post (this |it )?(under|to)|your community|profile is linked|use that one/.test(t)
-  // Narration: only exclude when the assistant is clearly narrating placement
-  // ("I'll put pickup in the description"), NOT ordinary questions like
-  // "What should I put as the description?".
-  const isNarratingDescription = /i'?ll (put|include|add|note|save|mark|write)|i will (put|include|add|note|save|mark|write)|putting (that|it|this) in|description saved|description is saved|include your description on/.test(t)
+  // Description — before photo/expiry so "add a short description" gets
+  // description chips even without a question mark. Do not use allergen
+  // or best-by chips here — those collide with other Do-it-for-me steps.
   if (
-    !isPostConfirmOrClaim
-    && !isNarratingDescription
-    && /short description|add a description|describe the food|describe it|describing the|one short sentence|write one short sentence|description for recipients|one-sentence description|one sentence description|one sentence about|few words about|tell me more about the food|tell me a bit about|tell me a bit more about|how would you describe|should know about the food|people should know|anything else about the food|note for recipients|listing description|put as the description|what should (the|i put).{0,20}description|what should the listing|listing say about|say about (this|the) food|sentence about the food|sentence for the (post|listing|description)|short blurb|jot a description|how is it packaged|how it'?s packed|\bdescription\??\s*$|descripci[oó]n corta|descripci[oó]n para|describe la comida/.test(t)
+    /short description|add a description|describe the food|describe it|description for recipients|one-sentence description|one sentence description|one sentence about|few words about|tell me more about the food|tell me a bit about|tell me a bit more about|how would you describe|should know about the food|people should know|anything else about the food|note for recipients|listing description|put as the description|what should (the|i put).{0,20}description|what should the listing|listing say about|say about (this|the) food|sentence about the food|sentence for the (post|listing|description)|short blurb|jot a description|how is it packaged|what'?s included|whats included|say a little about|what'?s the food like|mention on the listing|details for the listing|help me with a listing description|describe what'?s in|\bdescription\??\s*$|descripci[oó]n corta|descripci[oó]n para|describe la comida/.test(t)
+    && !/i'?ll put|in the description|into the description|to the description/.test(t)
   ) {
     return es
       ? [chip('Sigue sellado'), chip('Casero, refrigerado'), chip('Sobras variadas')]
@@ -322,16 +306,12 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   // Good-until / expiry — only when actively asking, never on allergen turns
   // or acknowledgements that merely repeat a chosen date.
   const allergenAsk = /allerg|alérgen|alergia|dietary restriction/.test(t)
-  const descriptionAsk = /short description|add a description|describe the food|describe it|describing the|one short sentence|write one short sentence|one sentence about|how would you describe|people should know|listing description|\bdescription\b|how it'?s packed|what kind|anything special/.test(t)
-  const postConfirmAsk = /ready to post|ready to publish|shall i post|should i post|want me to post|post these|sound good to post|looks? right|does this look|go ahead and share/.test(t)
   const expiryCue = /best by|best-by|good until|good for|use by|expir|vence|caduc|how long is it good|how long will it (keep|stay)|stay fresh|fecha de venc|when does it expire|best before/.test(t)
-  const expiryAck = /got it|noted|i'?ll use|i will mark|set to|set as|confirmed|listed as|using tomorrow|anotado/.test(t)
-  const expiryReAsk = /change|different date|another date|update the|wrong date|want a different|when does|when is|how long|what'?s the (best|good|use|expir)|what is the (best|good|use|expir)|need a date|give me a date/.test(t)
+  const expiryAck = /got it|noted|i'?ll use|set to|set as|confirmed|listed as|using tomorrow|anotado/.test(t)
+  const expiryReAsk = /change|different date|another date|update the|wrong date|want a different|\?|¿|when does|when is|how long/.test(t)
   if (
     expiryCue
     && !allergenAsk
-    && !descriptionAsk
-    && !postConfirmAsk
     && !/what food|donating|sharing|fresh apples|fresh bread/.test(t)
     && !(expiryAck && !expiryReAsk)
   ) {

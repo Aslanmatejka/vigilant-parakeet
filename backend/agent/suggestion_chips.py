@@ -888,19 +888,6 @@ def _extract_community_names_from_text(text: str) -> List[str]:
         key = cleaned.lower()
         if key in seen:
             return
-        # Drop near-duplicates: if this name is a prefix / substring of a
-        # longer name already kept (or vice versa), keep only the longest form.
-        for i, existing in enumerate(names):
-            ex_low = existing.lower()
-            if key == ex_low:
-                return
-            if key in ex_low or ex_low in key:
-                # Keep the longer, more specific label.
-                if len(cleaned) > len(existing):
-                    names[i] = cleaned
-                    seen.discard(ex_low)
-                    seen.add(key)
-                return
         seen.add(key)
         names.append(cleaned)
 
@@ -1142,7 +1129,7 @@ def _chips_for_community_selection(
         })
     else:
         chips.append({
-            "label": "Different one",
+            "label": "Different community",
             "message": "Use a different community",
         })
 
