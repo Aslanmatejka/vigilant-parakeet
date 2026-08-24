@@ -3033,6 +3033,11 @@ _DESCRIPTION_ASK_CUES: tuple[str, ...] = (
     "packaging, whats included", "one sentence for the",
     "listing say about", "what should the listing",
     "say about this food", "say about the food",
+    "one short sentence describing", "short sentence describing",
+    "write one short sentence", "sentence describing",
+    "describing the bread", "describing the food", "describing it",
+    "how it's packed", "how it is packed", "how its packed",
+    "what kind", "anything special",
     "descripción corta", "descripcion corta", "describe la comida",
     "cuéntame más sobre", "cuentame mas sobre",
     "descripción para", "descripcion para",
@@ -3061,15 +3066,16 @@ def _is_description_ask(text: str) -> bool:
         )):
             return False
         if any(k in t for k in (
-            "when does it expire", "best by", "good until", "use by",
+            "when does it expire", "best by", "good until", "good for", "use by",
         )) and not any(k in t for k in (
             "short description", "describe the food", "describe it",
-            "one sentence", "description",
+            "describing the", "one sentence", "one short sentence",
+            "write one short", "description",
         )):
             return False
         return True
     if not any(k in t for k in (
-        "description", "descripción", "descripcion", "describe",
+        "description", "descripción", "descripcion", "describe", "describing",
     )):
         return False
     # Assistant narrating where text will go — not asking the donor.

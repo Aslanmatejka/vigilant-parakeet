@@ -288,7 +288,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   // description chips even without a question mark. Do not use allergen
   // or best-by chips here — those collide with other Do-it-for-me steps.
   if (
-    /short description|add a description|describe the food|describe it|description for recipients|one-sentence description|one sentence description|one sentence about|few words about|tell me more about the food|tell me a bit about|tell me a bit more about|how would you describe|should know about the food|people should know|anything else about the food|note for recipients|listing description|put as the description|what should (the|i put).{0,20}description|what should the listing|listing say about|say about (this|the) food|sentence about the food|sentence for the (post|listing|description)|short blurb|jot a description|how is it packaged|what'?s included|whats included|say a little about|what'?s the food like|mention on the listing|details for the listing|help me with a listing description|describe what'?s in|\bdescription\??\s*$|descripci[oó]n corta|descripci[oó]n para|describe la comida/.test(t)
+    /short description|add a description|describe the food|describe it|describing the|one short sentence|write one short sentence|description for recipients|one-sentence description|one sentence description|one sentence about|few words about|tell me more about the food|tell me a bit about|tell me a bit more about|how would you describe|should know about the food|people should know|anything else about the food|note for recipients|listing description|put as the description|what should (the|i put).{0,20}description|what should the listing|listing say about|say about (this|the) food|sentence about the food|sentence for the (post|listing|description)|short blurb|jot a description|how is it packaged|how it'?s packed|what kind|anything special|\bdescription\??\s*$|descripci[oó]n corta|descripci[oó]n para|describe la comida/.test(t)
     && !/i'?ll put|in the description|into the description|to the description/.test(t)
   ) {
     return es
@@ -306,13 +306,15 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   // Good-until / expiry — only when actively asking, never on allergen turns
   // or acknowledgements that merely repeat a chosen date.
   const allergenAsk = /allerg|alérgen|alergia|dietary restriction/.test(t)
+  const descriptionAsk = /short description|add a description|describe the food|describe it|describing the|one short sentence|write one short sentence|one sentence about|how would you describe|people should know|listing description|\bdescription\b|how it'?s packed|what kind|anything special/.test(t)
   const postConfirmAsk = /ready to post|ready to publish|shall i post|should i post|want me to post|post these|sound good to post|looks? right|does this look|go ahead and share/.test(t)
   const expiryCue = /best by|best-by|good until|good for|use by|expir|vence|caduc|how long is it good|how long will it (keep|stay)|stay fresh|fecha de venc|when does it expire|best before/.test(t)
-  const expiryAck = /got it|noted|i'?ll use|set to|set as|confirmed|listed as|using tomorrow|anotado/.test(t)
-  const expiryReAsk = /change|different date|another date|update the|wrong date|want a different|\?|¿|when does|when is|how long/.test(t)
+  const expiryAck = /got it|noted|i'?ll use|i will mark|set to|set as|confirmed|listed as|using tomorrow|anotado/.test(t)
+  const expiryReAsk = /change|different date|another date|update the|wrong date|want a different|when does|when is|how long/.test(t)
   if (
     expiryCue
     && !allergenAsk
+    && !descriptionAsk
     && !postConfirmAsk
     && !/what food|donating|sharing|fresh apples|fresh bread/.test(t)
     && !(expiryAck && !expiryReAsk)

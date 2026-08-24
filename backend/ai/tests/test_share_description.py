@@ -212,3 +212,18 @@ class TestDescriptionChips:
         )
         assert "Attach a photo" in out
         assert "Still sealed" not in out
+
+    def test_expiry_ack_plus_describing_ask_gets_description_chips(self):
+        text = (
+            "Got it, I'll mark the bread as good for 3 more days. "
+            "Can you write one short sentence describing the bread "
+            "(like what kind, how it's packed, or anything special)?"
+        )
+        assert _is_description_ask(text)
+        from backend.ai.ai_engine import _is_expiry_ask
+        assert not _is_expiry_ask(text.lower())
+        out = generate_quick_replies(text, user_message="Do it for me")
+        assert "Still sealed" in out or "Homemade, refrigerated" in out
+        assert "Tomorrow" not in out
+        assert "In 2 days" not in out
+        assert "Attach a photo" not in out

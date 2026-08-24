@@ -4247,8 +4247,11 @@ def _is_expiry_ask(t: str) -> bool:
     if _is_allergen_ask(t):
         return False
     try:
-        from backend.ai.conversation_flow import is_post_success_response
+        from backend.ai.conversation_flow import is_post_success_response, _is_description_ask
         if is_post_success_response(t):
+            return False
+        # Expiry ack + description ask in one turn → description chips win.
+        if _is_description_ask(t):
             return False
     except Exception:
         pass

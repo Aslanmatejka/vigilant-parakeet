@@ -282,13 +282,14 @@ export function resolveInputChips(suggestions, language = 'en', role = null, { a
     && filtered.every((c) => expiryChip.test(chipLabel(c)))
   const allergenAsk = /(allerg|alérgen|alergia|dietary restriction|shellfish|frutos secos)/.test(text)
   const postConfirmAsk = /(ready to post|ready to publish|shall i post|should i post|want me to post|post these|sound good to post|looks? right|does this look|go ahead and share)/.test(text)
+  const descriptionAsk = /(short description|add a description|describe the food|describe it|describing the|one short sentence|write one short sentence|one sentence about|tell me a bit about|tell me more about|how would you describe|people should know|should know about|note for recipients|condition or packaging|how is it packaged|how it'?s packed|what kind|anything special|short blurb|sentence about the food|put as the description|listing description|descripci[oó]n|\bdescription\b)/.test(text)
   const expiryAsk = (
     /(best by|best-by|good until|good for|use by|expir|when does it expire|how long is it good|stay fresh|fecha de venc|best before)/.test(text)
     && !allergenAsk
+    && !descriptionAsk
     && !postConfirmAsk
-    && !/(got it|noted|i'?ll use|listed as|confirmed).{0,40}(best by|good until|tomorrow)/.test(text)
+    && !/(got it|noted|i'?ll use|i will mark|listed as|confirmed).{0,80}(best by|good until|good for|tomorrow)/.test(text)
   )
-  const descriptionAsk = /(short description|add a description|describe the food|describe it|description for recipients|listing description|one[- ]sentence|one sentence about|tell me a bit about|tell me more about|how would you describe|people should know|should know about|note for recipients|condition or packaging|how is it packaged|what'?s included|short blurb|sentence about the food|put as the description|descripci[oó]n|\bdescription\b)/.test(text)
   const descriptionChip = /^(still sealed|homemade|assorted leftovers|sigue sellado|casero|sobras variadas)/i
   const onlyDescription = filtered.length > 0
     && filtered.every((c) => descriptionChip.test(chipLabel(c)))
