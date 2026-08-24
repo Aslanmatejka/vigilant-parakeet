@@ -56,6 +56,28 @@ _SEARCH_TOOLS = frozenset({
     "find_food",
 })
 
+# Genuine mode-choice asks need BOTH hands-on and guide cues (or an
+# assistance-mode reminder). Keep cues broad enough for find/share forks,
+# but never treat a single mid-flow ack phrase as a fork by itself.
+_FORK_HANDS_CUES = (
+    "do it for me", "handle everything", "handle the whole",
+    "handle the search", "handle search", "want me to handle",
+    "me to handle", "shall i handle", "prefer i handle",
+    "handle it for you", "handle it in", "handle it,",
+    "do this for you", "do everything for you", "fill everything",
+    "hazlo por", "here in chat", "in chat for you", "aquí en el chat",
+    "aqui en el chat", "lo haga", "todo por ti", "por ti aquí", "por ti aqui",
+    "would you like me to handle",
+)
+_FORK_GUIDE_CUES = (
+    "guide me", "walk you through", "step by step", "paso a paso",
+    "guíame", "guiame", "te guío", "te guio", "yo te guio",
+    "open the form", "open find food", "open request food",
+    "on the share food page", "on the find food page",
+    "on the request food page", "or guide you", "or walk you",
+    "prefer i walk", "the form yourself", "yourself?",
+)
+
 
 def _normalize_chip_text(text: str) -> str:
     """Normalize hyphens/spacing so 'step-by-step' matches 'step by step'."""
@@ -140,24 +162,13 @@ def share_assistance_fork_chips(
     reply = _normalize_chip_text(response_text or "")
     um = _normalize_chip_text(user_message or "")
 
-    explicit_fork = any(
-        k in reply for k in (
-            "do it for me", "handle everything", "handle the whole",
-            "guide me step by step", "walk you through", "step by step",
-            "do everything for you", "yourself on the", "on the pages",
-            "on the form", "share food page", "find food page", "request food page",
-            "hazlo por", "paso a paso", "yo te guio", "todo por ti", "te guio",
-            "shall i handle", "prefer i handle", "or guide me",
-            "or walk you", "do it myself",
-            "handle it for you", "do this for you", "or would you rather",
-            "open the form", "open find food", "open request food",
-            "three options", "handle everything for you",
-            "in chat for you", "in chat or", "here in chat",
-            "handle the search", "search for you", "find it for you",
-            "guide you on", "guide you through", "or guide you",
-            "step by step help", "help on the share", "help on the find",
-        )
-    )
+    # Real mode-choice only: both hands-on AND guide cues, or assistance
+    # reminder, or vague "how would you like to proceed" with share context.
+    # Single cues like "handle everything" / "here in chat" alone must NOT
+    # steal mid-flow food/expiry chips after the user already chose hands-on.
+    hands = any(k in reply for k in _FORK_HANDS_CUES)
+    guide = any(k in reply for k in _FORK_GUIDE_CUES)
+    explicit_fork = hands and guide
     share_ctx = any(k in f"{reply} {um} {rem_l}" for k in (
         "share", "sharing", "donate", "donating", "post ", "posting", "listing",
         "find food", "request food", "finding food", "requesting",
@@ -681,12 +692,12 @@ def _filter_chips_to_match_response(
             "yes", "no", "sí",
         })
 
-    # Assistance fork → only mode chips.
-    if any(k in text for k in (
-        "do it for me", "guide me step by step", "walk you through",
-        "handle everything", "do everything for you",
-        "hazlo por mí", "hazlo por mi", "paso a paso", "yo te guío", "yo te guio",
-    )):
+    # Assistance fork → only mode chips when this is a REAL mode-choice ask
+    # (both hands-on and guide cues). Mid-flow "I'll handle everything…" acks
+    # must not collapse food/expiry chips to fork labels.
+    hands = any(k in text for k in _FORK_HANDS_CUES)
+    guide = any(k in text for k in _FORK_GUIDE_CUES)
+    if hands and guide:
         keep = {
             "do it for me", "guide me step by step", "open the form",
             "open find food", "open request food",
@@ -776,10 +787,8 @@ _DIFFERENT_COMMUNITY_USER_CUES = (
 
 _OPEN_COMMUNITY_PICK_KEYS = (
     "tell me the name", "name of the school", "name of the group",
-    "name of the community", "school or community",
     "which community should", "what community", "pick a community",
-    "choose a community", "select a community",
-    "list your community", "list your school",
+    "choose a community", "select a community", "list your",
     "dime el nombre", "nombre de la escuela", "nombre del grupo",
 )
 
@@ -1138,306 +1147,6 @@ def _chips_for_community_selection(
     return chips
 
 
-def is_hands_on_share_active(
-    message: str = "",
-    history: Optional[List[Dict[str, Any]]] = None,
-    assistance_reminder: str = "",
-) -> bool:
-    """True when the donor is mid hands-on share (not guided form)."""
-    if _user_chose_hands_on(message or "", assistance_reminder or ""):
-        return True
-    from backend.ai.conversation_flow import (
-        _assistance_mode_from_history,
-        _hands_on_assistance_goal,
-        is_posting_flow,
-    )
-    if _assistance_mode_from_history(history) != "hands_on":
-        return False
-    goal = _hands_on_assistance_goal(message or "", history)
-    return goal == "share" or is_posting_flow(message or "", history)
-
-
-def _has_explicit_quantity_in_thread(message: str, history: Optional[list]) -> bool:
-    """True when the donor already gave a numeric quantity in this share."""
-    from backend.ai.conversation_flow import (
-        _current_posting_boundary_index,
-        _parse_share_items_from_text,
-    )
-    boundary = _current_posting_boundary_index(history)
-    scoped = (history or [])[boundary:]
-    parts = [message or ""]
-    for msg in reversed(scoped):
-        if msg.get("role") == "user":
-            parts.append(msg.get("message") or "")
-    for part in parts:
-        text = (part or "").strip()
-        if not text:
-            continue
-        if re.fullmatch(r"\d+", text):
-            return True
-        if _parse_share_items_from_text(text) and re.search(r"\d", text):
-            return True
-        if re.match(r"^\s*\d+\s+", text):
-            return True
-    return False
-
-
-def resolve_hands_on_share_chip_step(
-    message: str = "",
-    history: Optional[List[Dict[str, Any]]] = None,
-    *,
-    assistance_reminder: str = "",
-    response_text: str = "",
-) -> Optional[str]:
-    """Fixed step label for hands-on share chips (state-driven, not reply heuristics)."""
-    if not is_hands_on_share_active(message, history, assistance_reminder):
-        return None
-
-    from backend.ai.conversation_flow import (
-        _assistant_last_asked_kind,
-        _is_different_community_choice,
-        _share_title_qty_from_thread,
-        is_post_success_response,
-        posting_flow_state,
-    )
-
-    if is_post_success_response(response_text or ""):
-        return "success"
-
-    extended = list(history or [])
-    if response_text:
-        extended.append({"role": "assistant", "message": response_text})
-    last_asked = _assistant_last_asked_kind(extended)
-
-    if last_asked == "claim_confirm":
-        return None
-
-    # Prefer what Nouri is asking THIS turn over incomplete checklist flags.
-    # Common bug: assistant says "I'll list under X. When is it best by?"
-    # before the donor tapped a community chip → community_confirmed is still
-    # false, but expiry chips must win.
-    if response_text:
-        from backend.ai.ai_engine import (
-            _is_allergen_ask,
-            _is_expiry_ask,
-            _is_post_confirm_ask,
-        )
-        from backend.ai.conversation_flow import _is_description_ask
-
-        # Description before allergen — acks like "no allergens" must not steal chips.
-        if _is_description_ask(response_text) or last_asked == "description":
-            return "description"
-        if _is_allergen_ask(response_text) or last_asked == "allergen":
-            return "allergen"
-        if _is_post_confirm_ask(response_text) or last_asked == "post_confirm":
-            # Ready-to-post without a photo → attach nudge, not Yes/post.
-            state_early = posting_flow_state(message, history)
-            reply_l = (response_text or "").lower()
-            photo_evidence = bool(state_early.get("has_photo")) or any(k in reply_l for k in (
-                "with photo", "with a photo", "photo attached", "photos received",
-                "got your photo", "image:", "con foto", "foto adjunta",
-            ))
-            if not photo_evidence:
-                return "photo"
-            return "post_confirm"
-        if _is_expiry_ask(response_text) or (
-            last_asked == "expiry" and not _is_description_ask(response_text)
-        ):
-            return "expiry"
-        if last_asked == "photo":
-            return "photo"
-        photo_ask = any(k in (response_text or "").lower() for k in (
-            "photo", "picture", "foto", "imagen",
-        )) and any(k in (response_text or "").lower() for k in (
-            "attach", "upload", "add a", "required", "please", "snap", "sube",
-        ))
-        if photo_ask and not _is_post_confirm_ask(response_text):
-            return "photo"
-
-    # Open community catalog / "different community" BEFORE food_qty fallback.
-    # Otherwise a missing title shows apple/bread chips under school-name asks.
-    if (
-        _is_different_community_choice(message)
-        or _user_chose_different_community(message)
-        or _is_open_community_pick(response_text or "")
-        or _is_community_list_pick_turn(response_text or "", message)
-    ):
-        return "community_pick"
-
-    if response_text and (
-        last_asked == "community" or _is_community_selection_turn(response_text)
-    ):
-        return "community"
-
-    title, _, _ = _share_title_qty_from_thread(history, message)
-    if not title:
-        return "food_qty"
-    if not _has_explicit_quantity_in_thread(message, history):
-        return "qty"
-
-    state = posting_flow_state(message, history)
-    if not state.get("community_confirmed"):
-        return "community"
-    if not state.get("expiry_provided"):
-        return "expiry"
-    if not state.get("description_provided"):
-        return "description"
-    if not state.get("has_photo"):
-        return "photo"
-    if state.get("post_summary_offered") or last_asked == "post_confirm":
-        return "post_confirm"
-    return "post_confirm"
-
-
-def _hands_on_chip(label: str, message: str, step: str) -> Chip:
-    return {
-        "label": label,
-        "message": message,
-        "kind": "hands_on_step",
-        "step": step,
-    }
-
-
-def build_labeled_hands_on_share_chips(
-    step: str,
-    language: str = "en",
-    *,
-    user_context: Optional[Dict[str, Any]] = None,
-    message: str = "",
-    history: Optional[List[Dict[str, Any]]] = None,
-) -> List[Chip]:
-    """Fixed chip sets per hands-on share step — independent of AI wording."""
-    es = language == "es"
-    ctx = user_context or {}
-    suggested = str(ctx.get("suggested_community") or "").strip()
-    communities = list(ctx.get("active_communities") or [])
-
-    if step == "food_qty":
-        if es:
-            return [
-                _hands_on_chip("5 manzanas", "5 manzanas", step),
-                _hands_on_chip("2 panes", "2 panes", step),
-                _hands_on_chip("Verduras — 1 caja", "Verduras — 1 caja", step),
-                _hands_on_chip("Huevos — 1 docena", "Huevos — 1 docena", step),
-            ]
-        return [
-            _hands_on_chip("5 apples", "5 apples", step),
-            _hands_on_chip("2 loaves of bread", "2 loaves of bread", step),
-            _hands_on_chip("Vegetables — 1 box", "Vegetables — 1 box", step),
-            _hands_on_chip("Eggs — 1 dozen", "Eggs — 1 dozen", step),
-        ]
-
-    if step == "qty":
-        return [
-            _hands_on_chip("1", "1", step),
-            _hands_on_chip("3", "3", step),
-            _hands_on_chip("5", "5", step),
-            _hands_on_chip("10", "10", step),
-        ]
-
-    if step == "community":
-        chips: List[Chip] = []
-        name = suggested or (communities[0] if communities else "")
-        if name:
-            if es:
-                chips.append(_hands_on_chip(name, f"Sí, publicar en {name}", step))
-            else:
-                chips.append(_hands_on_chip(name, f"Yes, list under {name}", step))
-        if es:
-            chips.append(_hands_on_chip("Otra comunidad", "Usar otra comunidad", step))
-        else:
-            chips.append(_hands_on_chip("Different community", "Use a different community", step))
-        return chips[:_MAX_COMMUNITY_CHIPS]
-
-    if step == "community_pick":
-        pick_from = communities
-        if suggested:
-            pick_from = [c for c in communities if c.lower() != suggested.lower()] or communities
-        chips = []
-        for name in pick_from[:_MAX_COMMUNITY_CHIPS]:
-            if es:
-                chips.append(_hands_on_chip(name, f"Sí, publicar en {name}", step))
-            else:
-                chips.append(_hands_on_chip(name, f"Yes, list under {name}", step))
-        return chips
-
-    if step == "expiry":
-        if es:
-            return [
-                _hands_on_chip("Mañana", "Mañana", step),
-                _hands_on_chip("En 2 días", "En 2 días", step),
-                _hands_on_chip("En 3 días", "En 3 días", step),
-                _hands_on_chip("En un mes", "En un mes", step),
-            ]
-        return [
-            _hands_on_chip("Tomorrow", "Tomorrow", step),
-            _hands_on_chip("In 2 days", "In 2 days", step),
-            _hands_on_chip("In 3 days", "In 3 days", step),
-            _hands_on_chip("In a month", "In a month", step),
-        ]
-
-    if step == "description":
-        if es:
-            return [
-                _hands_on_chip("Sigue sellado", "Sigue sellado", step),
-                _hands_on_chip("Casero, refrigerado", "Casero, refrigerado", step),
-                _hands_on_chip("Sobras variadas", "Sobras variadas", step),
-            ]
-        return [
-            _hands_on_chip("Still sealed", "Still sealed", step),
-            _hands_on_chip("Homemade, refrigerated", "Homemade, refrigerated", step),
-            _hands_on_chip("Assorted leftovers", "Assorted leftovers", step),
-        ]
-
-    if step == "photo":
-        if es:
-            return [_hands_on_chip("Adjuntar foto", "Adjuntar foto", step)]
-        return [_hands_on_chip("Attach a photo", "Attach a photo", step)]
-
-    if step == "post_confirm":
-        if es:
-            return [
-                _hands_on_chip("Sí, publícalo", "Sí, publícalo", step),
-                _hands_on_chip("Espera, edítalo", "Espera, edítalo", step),
-                _hands_on_chip("Cancelar", "Cancelar", step),
-            ]
-        return [
-            _hands_on_chip("Yes, post it", "Yes, post it", step),
-            _hands_on_chip("Wait, edit it", "Wait, edit it", step),
-            _hands_on_chip("Cancel", "Cancel", step),
-        ]
-
-    if step == "allergen":
-        if es:
-            return [
-                _hands_on_chip("Sin alérgenos", "Sin alérgenos", step),
-                _hands_on_chip("Solo gluten", "Solo gluten", step),
-                _hands_on_chip("Lácteos", "Lácteos", step),
-                _hands_on_chip("Frutos secos", "Frutos secos", step),
-            ]
-        return [
-            _hands_on_chip("No allergens", "No allergens", step),
-            _hands_on_chip("Just gluten", "Just gluten", step),
-            _hands_on_chip("Dairy", "Dairy", step),
-            _hands_on_chip("Nuts", "Nuts", step),
-        ]
-
-    if step == "success":
-        if es:
-            return [
-                _hands_on_chip("Compartir algo más", "Compartir algo más", step),
-                _hands_on_chip("Buscar comida cerca", "Buscar comida cerca", step),
-                _hands_on_chip("Eso es todo por ahora", "Eso es todo por ahora", step),
-            ]
-        return [
-            _hands_on_chip("Share something else", "Share something else", step),
-            _hands_on_chip("Find food near me", "Find food near me", step),
-            _hands_on_chip("That's all for now", "That's all for now", step),
-        ]
-
-    return []
-
-
 def build_turn_suggestions(
     response_text: str,
     language: str = "en",
@@ -1450,7 +1159,6 @@ def build_turn_suggestions(
     *,
     min_chips: int = 4,
     assistance_reminder: Optional[str] = None,
-    history: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Chip]:
     """Build up to six tappable chips for the chat UI.
 
@@ -1502,27 +1210,6 @@ def build_turn_suggestions(
     )
     if fork:
         return fork[:_MAX_CHIPS]
-
-    # 1b) Hands-on share — fixed chips per flow step (not reply-text heuristics).
-    if is_hands_on_share_active(
-        last_user_message or "", history, assistance_reminder or "",
-    ):
-        step = resolve_hands_on_share_chip_step(
-            last_user_message or "",
-            history,
-            assistance_reminder=assistance_reminder or "",
-            response_text=response_text or "",
-        )
-        if step:
-            labeled = build_labeled_hands_on_share_chips(
-                step,
-                language,
-                user_context=user_context,
-                message=last_user_message or "",
-                history=history,
-            )
-            if labeled:
-                return labeled[:_MAX_CHIPS if step != "community_pick" else _MAX_COMMUNITY_CHIPS]
 
     # 2) GUIDED UI coaching — exclusive.
     guided_chips = _chips_for_guided_response(response_text or "", language)

@@ -3010,12 +3010,9 @@ _DESCRIPTION_ASK_CUES: tuple[str, ...] = (
     "short description", "add a description", "add a short description",
     "describe the food", "describe it", "description for recipients",
     "one-sentence description", "one sentence description",
-    "one sentence about", "one short sentence", "short sentence about",
-    "write one short sentence", "write a short sentence", "sentence about these",
-    "sentence about the", "few words about", "a short note",
+    "one sentence about", "few words about", "a short note",
     "tell me more about the food", "tell me a bit about",
-    "tell me a bit more about", "tell me a little about", "a little about the",
-    "how would you describe", "their condition", "condition or if",
+    "tell me a bit more about", "how would you describe",
     "condition or packaging", "condition, packaging",
     "write a description", "need a description", "need the description",
     "give me a description", "please describe",
@@ -3073,7 +3070,6 @@ def _is_description_ask(text: str) -> bool:
         return True
     if not any(k in t for k in (
         "description", "descripción", "descripcion", "describe",
-        "short sentence", "one sentence", "sentence about",
     )):
         return False
     # Assistant narrating where text will go — not asking the donor.
@@ -3162,30 +3158,17 @@ def _assistant_last_asked_kind(history: list | None) -> str | None:
             "listo para reclamar", "reclamar estos", "reclamo estos",
         )):
             return "claim_confirm"
-        # Description before allergen — "Perfect, no allergens. Describe…?" is description.
-        if _is_description_ask(text):
-            return "description"
         if any(k in text for k in (
             "allerg", "alérgen", "alergen", "alergia", "dietary restriction",
         )):
             return "allergen"
+        if _is_description_ask(text):
+            return "description"
         if any(k in text for k in (
             "expire", "expiry", "best by", "best-by", "use by", "how fresh",
             "how long", "when was it made", "good until", "vence", "caduca",
         )):
-            # "Got it — best-by August 30. Tell me about…?" is not an expiry ask.
-            ack = any(k in text for k in (
-                "got it", "noted", "i'll use", "i will use", "locked in",
-                "confirmed", "anotado", "perfecto", "listo —",
-            ))
-            still_asking_date = any(k in text for k in (
-                "when does", "when is it", "when will", "how long",
-                "need a date", "need the date", "what's the best",
-                "what is the best", "expire?", "expiry?", "best by?",
-                "good until?", "cuándo vence", "cuando vence",
-            ))
-            if not (ack and not still_asking_date):
-                return "expiry"
+            return "expiry"
         if any(k in text for k in (
             "photo", "picture", "snap a", "upload a", "attach a", "foto", "imagen",
         )):
@@ -3193,8 +3176,6 @@ def _assistant_last_asked_kind(history: list | None) -> str | None:
         if any(k in text for k in (
             "which community", "which school", "community should", "go under",
             "comunidad", "escuela", "list under",
-            "name of the school", "name of the community", "tell me the name",
-            "school or community", "share your food under", "share with",
         )):
             return "community"
         if any(k in text for k in (

@@ -2789,19 +2789,45 @@ function AIChatPanel() {
   // Conversation start: role-aware starter chips.
   // Mid-conversation: mirror the same backend chips as the bubble (no lazy
   // fallbacks — empty rail is better than mismatched "Find food" chips).
+  // Never fall back to a previous successful turn after an error — that
+  // shows chips for the wrong response.
   const railChips = useMemo(() => {
     if (isLoading || pendingUpload || voiceMode || pendingChatPhotos.length > 0) return []
     if (messages.length <= 1) {
       return resolveInputChips([], language, communityRole, { allowLazy: true })
     }
-    let lastAssistant = null
+    // Newest message is an error assistant → clear rail (do not reuse prior chips).
+    const newest = messages[messages.length - 1]
+    if (newest?.role === 'assistant' && newest?.isError) return []
+
+    // After a failed turn the last item may be user + error; only show chips
+    // when the latest non-welcome assistant is also the newest non-error reply
+    // after the latest user message.
+    let lastUserIdx = -1
+    let lastOkAssistantIdx = -1
+    let lastErrorAfterUser = false
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
-      if (m.role === 'assistant' && !m.isError && m.id !== 'welcome') {
-        lastAssistant = m
-        break
+      if (lastUserIdx < 0 && m.role === 'user') lastUserIdx = i
+      if (
+        lastOkAssistantIdx < 0
+        && m.role === 'assistant'
+        && !m.isError
+        && m.id !== 'welcome'
+      ) {
+        lastOkAssistantIdx = i
       }
     }
+    if (lastUserIdx >= 0 && lastOkAssistantIdx >= 0 && lastOkAssistantIdx < lastUserIdx) {
+      // User spoke after the last good assistant — waiting for a new reply
+      // (or only errors followed). Do not show previous chips.
+      for (let i = lastUserIdx + 1; i < messages.length; i++) {
+        if (messages[i].role === 'assistant' && messages[i].isError) lastErrorAfterUser = true
+      }
+      if (lastErrorAfterUser || lastOkAssistantIdx < lastUserIdx) return []
+    }
+
+    const lastAssistant = lastOkAssistantIdx >= 0 ? messages[lastOkAssistantIdx] : null
     if (!lastAssistant || lastAssistant.requiresConfirmation) return []
     const backendSuggestions = Array.isArray(lastAssistant.suggestions) ? lastAssistant.suggestions : []
     const responseText = String(lastAssistant.message || lastAssistant.text || '')

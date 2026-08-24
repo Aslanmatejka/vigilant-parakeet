@@ -568,8 +568,9 @@ def _build_action_policy() -> str:
         "Description: ALWAYS ask for one short sentence about the food "
         "(condition, packaging, what's included). Do NOT invent it. "
         "Pass their words as `description` on post_food_listing. "
-        "Ask after expiry, before the photo. One question per turn keeps "
-        "suggestion chips aligned with what you asked.\n"
+        "Ask after expiry, before the photo. One question per turn so "
+        "suggestion chips match what you asked — never bundle "
+        "description+photo or expiry+allergen in one ask.\n"
         "\n"
         "Food title: accept ANY dish or item they name (leftover lasagna, "
         "biryani, canned chickpeas, 100 boxes of vegetables). Do not "
@@ -1576,7 +1577,6 @@ class ConversationEngine:
             user_message=user_message,
             user_id=str(user_id),
             actions=[action_entry],
-            history=history,
         )
         conversation_id = await self._persist_conversation(
             user_id,
@@ -2198,7 +2198,6 @@ class ConversationEngine:
                     user_message=message,
                     user_id=str(user_id),
                     actions=[],
-                    history=history,
                 )
                 conversation_id = await self._persist_conversation(
                     user_id,
@@ -2786,7 +2785,6 @@ class ConversationEngine:
             actions=actions,
             assistance_reminder=assist_reminder,
             guide_state=guide_state,
-            history=history,
         )
 
         conversation_id = await self._persist_conversation(
@@ -3992,7 +3990,6 @@ class ConversationEngine:
         pending_suggestions: Optional[list] = None,
         assistance_reminder: Optional[str] = None,
         guide_state: Optional[dict] = None,
-        history: Optional[list] = None,
     ) -> list:
         """Contextual pre-chips for the assistant bubble.
 
@@ -4008,8 +4005,6 @@ class ConversationEngine:
             _looks_like_guided_tutorial,
             _user_chose_guided,
             _user_chose_hands_on,
-            is_hands_on_share_active,
-            resolve_hands_on_share_chip_step,
         )
 
         # When we just asked the do-it-for-me vs guide fork,
@@ -4026,37 +4021,22 @@ class ConversationEngine:
                 return _serialize_suggestion_chips(guided)
 
         if not _user_chose_hands_on(user_message or "", assistance_reminder or ""):
-            if not is_hands_on_share_active(
-                user_message or "", history, assistance_reminder or "",
-            ):
-                forced = share_assistance_fork_chips(
-                    response_text or "",
-                    lang or "en",
-                    user_message=user_message or "",
-                    assistance_reminder=assistance_reminder,
-                    guide_state=guide_state,
-                )
-                if forced:
-                    return _serialize_suggestion_chips(forced)
-
-        hands_on_step = None
-        if is_hands_on_share_active(
-            user_message or "", history, assistance_reminder or "",
-        ):
-            hands_on_step = resolve_hands_on_share_chip_step(
-                user_message or "",
-                history,
-                assistance_reminder=assistance_reminder or "",
-                response_text=response_text or "",
+            forced = share_assistance_fork_chips(
+                response_text or "",
+                lang or "en",
+                user_message=user_message or "",
+                assistance_reminder=assistance_reminder,
+                guide_state=guide_state,
             )
+            if forced:
+                return _serialize_suggestion_chips(forced)
 
         communities: list[str] = []
         suggested: Optional[str] = None
         reply_l = (response_text or "").lower()
         from backend.ai.conversation_flow import is_post_success_response
         needs_communities = (
-            hands_on_step in ("community", "community_pick")
-            or not is_post_success_response(response_text or "")
+            not is_post_success_response(response_text or "")
             and (
                 should_load_active_communities(
                     response_text or "",
@@ -4098,7 +4078,6 @@ class ConversationEngine:
                 user_context=user_context,
                 min_chips=0,
                 assistance_reminder=assistance_reminder,
-                history=history,
             )
         except Exception as exc:
             logger.warning("suggestion chips failed (non-fatal): %s", exc)
@@ -4139,8 +4118,6 @@ def _serialize_suggestion_chips(chips: list) -> list:
         item: dict = {"label": label[:60], "message": message or label}
         if chip.get("kind"):
             item["kind"] = chip["kind"]
-        if chip.get("step"):
-            item["step"] = chip["step"]
         if chip.get("href") or chip.get("target") or chip.get("path") or chip.get("action") == "navigate":
             item["action"] = "navigate"
             if chip.get("path") or (isinstance(chip.get("href"), str) and str(chip.get("href")).startswith("/")):
@@ -4231,35 +4208,8 @@ _ALLERGEN_WORDS: tuple[str, ...] = (
 
 def _is_post_confirm_ask(t: str) -> bool:
     """True when the assistant is asking the donor to greenlight posting."""
-    t = (t or "").lower()
-    community_intent = any(k in t for k in (
-        "which community", "which school", "list under", "listed under",
-        "your community", "linked to", "use that one", "for the community",
-        "community should", "post this under", "post it to", "post under",
-        "comunidad", "escuela",
-    ))
-    recap = any(k in t for k in (
-        "ready to post", "look right", "looks right", "does this look",
-        "does that look", "sound good to post", "with photo", "good until",
-        "expires ", "expiry",
-    ))
-    if community_intent and not recap:
-        return False
-    if ("should i post" in t or "shall i post" in t) and " under " in t and not recap:
-        return False
-    if any(k in t for k in (
-        "ready to post", "ready to publish", "shall i post", "should i post",
-        "want me to post", "good to post", "good to publish",
-        "look right", "looks right", "does this look", "does that look",
-        "sound good to post", "sounds good to post",
-        "go ahead and share", "shall i go ahead", "should i go ahead",
-        "confirm and post", "before i post",
-        "listo para publicar", "¿lo publico", "¿lo publicamos",
-    )):
-        return True
-    if any(k in t for k in ("look good", "looks good", "sound good", "sounds good")):
-        return any(k in t for k in ("post", "publish", "listing", "share"))
-    return False
+    from backend.ai.chip_turn import _is_post_confirm_turn
+    return _is_post_confirm_turn((t or "").lower())
 
 
 def _is_allergen_ask(t: str) -> bool:
@@ -4267,20 +4217,6 @@ def _is_allergen_ask(t: str) -> bool:
     t = (t or "").lower()
     if _is_post_confirm_ask(t):
         return False
-    # "Perfect, no allergens. Could you describe…?" is a description ask.
-    try:
-        from backend.ai.conversation_flow import _is_description_ask
-        if _is_description_ask(t):
-            allergen_question = any(k in t for k in (
-                "any allerg", "allergens?", "allergen?",
-                "does this contain", "do these contain",
-                "should i note", "should i flag", "any dietary",
-                "dietary restriction", "contain nuts", "contain dairy",
-            ))
-            if not allergen_question:
-                return False
-    except Exception:
-        pass
     if any(k in t for k in (
         "allerg", "alérgen", "alergen", "alergia", "alergias",
         "dietary restriction", "restricciones diet", "restricción diet",
@@ -4291,15 +4227,6 @@ def _is_allergen_ask(t: str) -> bool:
             "?", "¿",
         ))
         if not asking:
-            return False
-        # Bare "?" from a different question + "no allergens" ack ≠ allergen ask.
-        if any(k in t for k in (
-            "no allergen", "no allergens", "without allergen", "allergens noted",
-            "sin alérgen", "sin alergen",
-        )) and not any(k in t for k in (
-            "any allerg", "contain", "does this", "do these",
-            "should i", "flag", "dietary",
-        )):
             return False
         return True
     # Common hands-on phrasing lists major allergens without the word itself.
@@ -4329,14 +4256,8 @@ def _is_expiry_ask(t: str) -> bool:
     if _is_allergen_ask(t):
         return False
     try:
-        from backend.ai.conversation_flow import (
-            _is_description_ask,
-            is_post_success_response,
-        )
+        from backend.ai.conversation_flow import is_post_success_response
         if is_post_success_response(t):
-            return False
-        # "Got it, good for a month. Write one short sentence…?" is description.
-        if _is_description_ask(t):
             return False
     except Exception:
         pass
@@ -4371,10 +4292,8 @@ def _is_expiry_ask(t: str) -> bool:
     re_ask = any(k in t for k in (
         "change", "different date", "or different", "update the", "wrong date",
         "another date", "new date", "when is", "when does", "how long",
-        "still good", "want a different", "prefer a different",
+        "still good", "want a different", "prefer a different", "?", "¿",
     ))
-    # Bare "?" alone is not a re-ask — it often belongs to the next question
-    # ("Got it — good for a month. Could you describe…?").
     if ack and not re_ask:
         return False
     return True
@@ -4474,6 +4393,43 @@ def generate_quick_replies(
             add("Done", "What's next?", "Need help")
         return out
 
+    # Classify the turn once — emit only that step's chips.
+    from backend.ai.chip_turn import classify_share_chip_turn, chips_for_turn_class
+    turn = classify_share_chip_turn(
+        text,
+        user_message=user_message or "",
+        assistance_reminder=assistance_reminder or "",
+    )
+    if turn == "fork":
+        from backend.agent.suggestion_chips import share_assistance_fork_chips
+        fork = share_assistance_fork_chips(
+            text, lang, user_message=user_message or "",
+            assistance_reminder=assistance_reminder or "",
+            guide_state=guide_state,
+        )
+        if fork:
+            for chip in fork:
+                label = chip.get("label") if isinstance(chip, dict) else str(chip or "")
+                if label:
+                    add(label)
+            return out
+    if turn in (
+        "post_confirm", "photo", "description", "community", "allergen",
+        "expiry", "food_qty", "food", "qty", "address", "success", "edit",
+    ):
+        classified = chips_for_turn_class(
+            turn,
+            lang=lang,
+            text=text,
+            suggested_community=suggested_community,
+            communities=communities,
+        )
+        if classified:
+            add(*classified)
+            return out
+
+    # ---- Legacy / claim / search / help paths below (non-share or unmatched) ----
+
     # Photo required — often no "?" ("Please upload a photo — required…").
     # Never offer skip. Run before the question-only gate.
     photo_ask = any(k in t for k in ("photo", "picture", "foto", "imagen")) and any(
@@ -4491,6 +4447,7 @@ def generate_quick_replies(
         "already have a photo", "look right", "looks right", "does this look",
         "ready to post", "shall i post", "want me to post", "listo para publicar",
         "lo publico", "lo publicamos", "publicarlo",
+        "short description", "add a description", "describe the food", "description for",
     )):
         if es:
             add("Adjuntar foto")

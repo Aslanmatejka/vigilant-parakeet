@@ -83,15 +83,11 @@ describe('Do-it-for-me prechips match each AI response', () => {
     )
   })
 
-  test('resolveInputChips keeps hands-on labeled chips without re-inferring', () => {
-    const backend = [
-      { label: 'Tomorrow', message: 'Tomorrow', kind: 'hands_on_step', step: 'expiry' },
-      { label: 'In 2 days', message: 'In 2 days', kind: 'hands_on_step', step: 'expiry' },
-      { label: 'In 3 days', message: 'In 3 days', kind: 'hands_on_step', step: 'expiry' },
-    ]
-    const resolved = resolveInputChips(backend, 'en', null, {
+  test('resolveInputChips replaces stale qty chips on expiry turn', () => {
+    const stale = [{ label: '1', message: '1' }, { label: '3', message: '3' }, { label: '5', message: '5' }]
+    const resolved = resolveInputChips(stale, 'en', null, {
       allowLazy: false,
-      responseText: 'Totally different wording — how long is it good for?',
+      responseText: 'When does it expire?',
     })
     expect(labels(resolved).some((l) => /tomorrow/i.test(l))).toBe(true)
     expect(labels(resolved).every((l) => /^[135]|10$/.test(l))).toBe(false)
@@ -99,14 +95,96 @@ describe('Do-it-for-me prechips match each AI response', () => {
 
   test('resolveInputChips keeps description chips on description ask', () => {
     const backend = [
-      { label: 'Still sealed', message: 'Still sealed', kind: 'hands_on_step', step: 'description' },
-      { label: 'Homemade, refrigerated', message: 'Homemade, refrigerated', kind: 'hands_on_step', step: 'description' },
-      { label: 'Assorted leftovers', message: 'Assorted leftovers', kind: 'hands_on_step', step: 'description' },
+      { label: 'Still sealed', message: 'Still sealed' },
+      { label: 'Homemade, refrigerated', message: 'Homemade, refrigerated' },
+      { label: 'Assorted leftovers', message: 'Assorted leftovers' },
     ]
     const resolved = resolveInputChips(backend, 'en', null, {
       allowLazy: false,
       responseText: 'Description?',
     })
     expect(labels(resolved).some((l) => /sealed|homemade/i.test(l))).toBe(true)
+  })
+
+  test('description before photo narration', () => {
+    expectChips(
+      'Please add a short description for recipients. After that I will need a photo.',
+      ['Still sealed'],
+      ['Attach a photo'],
+    )
+  })
+
+  test('description beats how many in same sentence', () => {
+    expectChips(
+      'Please add a short description — no need to say how many portions.',
+      ['Still sealed'],
+      ['1', '3', '5'],
+    )
+  })
+
+  test('stale allergen chips replaced on expiry turn', () => {
+    const stale = [
+      { label: 'No allergens', message: 'No allergens' },
+      { label: 'Dairy', message: 'Dairy' },
+      { label: 'Nuts', message: 'Nuts' },
+    ]
+    const resolved = resolveInputChips(stale, 'en', null, {
+      allowLazy: false,
+      responseText: 'When does it expire?',
+    })
+    expect(labels(resolved).some((l) => /tomorrow/i.test(l))).toBe(true)
+    expect(labels(resolved).some((l) => /allergen|dairy|nuts/i.test(l))).toBe(false)
+  })
+
+  test('stale food chips replaced on allergen turn', () => {
+    const stale = [
+      { label: '5 apples', message: '5 apples' },
+      { label: '2 loaves of bread', message: '2 loaves of bread' },
+    ]
+    const resolved = resolveInputChips(stale, 'en', null, {
+      allowLazy: false,
+      responseText: 'Does this contain nuts, dairy, eggs, soy, or wheat?',
+    })
+    expect(labels(resolved).some((l) => /allergen|gluten|dairy|nuts/i.test(l))).toBe(true)
+    expect(labels(resolved).some((l) => /apples|loaves/i.test(l))).toBe(false)
+  })
+
+  test('stale post chips replaced on food ask', () => {
+    const stale = [
+      { label: 'Yes, post it', message: 'Yes, post it' },
+      { label: 'Wait, edit it', message: 'Wait, edit it' },
+      { label: 'Cancel', message: 'Cancel' },
+    ]
+    const resolved = resolveInputChips(stale, 'en', null, {
+      allowLazy: false,
+      responseText: 'What food do you want to share, and how much do you have?',
+    })
+    expect(labels(resolved).some((l) => /apples|bread|vegetable/i.test(l))).toBe(true)
+    expect(labels(resolved).some((l) => /yes, post it/i.test(l))).toBe(false)
+  })
+
+  test('stale fork chips stripped on qty ask', () => {
+    const stale = [
+      { label: 'Open the form', message: 'Open the form' },
+      { label: 'Do it for me', message: 'Do it for me' },
+      { label: 'Guide me step by step', message: 'Guide me step by step' },
+    ]
+    const resolved = resolveInputChips(stale, 'en', null, {
+      allowLazy: false,
+      responseText: 'How many would you like to share?',
+    })
+    expect(labels(resolved).some((l) => /^(1|2|3|5|10)$/.test(l))).toBe(true)
+    expect(labels(resolved).some((l) => /do it for me|open the form/i.test(l))).toBe(false)
+  })
+
+  test('address look good is not post confirm', () => {
+    const infer = inferChipsFromResponse(
+      'Should I use your profile address 1423 Park St? Does that look good?',
+    )
+    const j = joined(infer)
+    expect(j).not.toContain('yes, post it')
+    expect(
+      /saved address|different address|don'?t have|use that/i.test(j),
+    ).toBe(true)
   })
 })

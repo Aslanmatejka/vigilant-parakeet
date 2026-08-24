@@ -129,16 +129,6 @@ export function inferChipsFromResponse(responseText, language = 'en') {
     return [open, ...mode]
   }
 
-  // Photo — required; never offer skip / later / without.
-  // Skip when the turn is really a post confirm or success summary.
-  if (/photo|picture|foto|imagen/.test(t)
-    && /required|please|need|upload|attach|add a|send a photo|before post|so we can post|snap|skip the photo|without a photo/.test(t)
-    && !/ready to post|shall i post|want me to post|photos received|got your photo|with your photos|with photo|look right|looks right|does this look/.test(t)) {
-    return es
-      ? [chip('Adjuntar foto')]
-      : [chip('Attach a photo')]
-  }
-
   // Success / anything else — before community / post chips
   if (isPostSuccessResponse(raw)) {
     return es
@@ -165,16 +155,36 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Use my profile name'), chip("It's an organization")]
   }
 
+  // Description — BEFORE photo/qty so "add a short description… then photo"
+  // and "description — how many portions" stay description chips.
+  const descriptionAsk = (
+    /short description|add a description|describe the food|describe it|description for recipients|one-sentence description|one sentence description|one sentence about|few words about|tell me more about the food|tell me a bit about|tell me a bit more about|how would you describe|should know about the food|people should know|anything else about the food|note for recipients|listing description|put as the description|what should (the|i put).{0,20}description|what should the listing|listing say about|say about (this|the) food|sentence about the food|sentence for the (post|listing|description)|short blurb|jot a description|how is it packaged|what'?s included|whats included|say a little about|what'?s the food like|mention on the listing|details for the listing|help me with a listing description|describe what'?s in|\bdescription\??\s*$|descripci[oó]n corta|descripci[oó]n para|describe la comida/.test(t)
+    && !/i'?ll put|in the description|into the description|to the description/.test(t)
+  )
+  if (descriptionAsk) {
+    return es
+      ? [chip('Sigue sellado'), chip('Casero, refrigerado'), chip('Sobras variadas')]
+      : [chip('Still sealed'), chip('Homemade, refrigerated'), chip('Assorted leftovers')]
+  }
+
+  // Photo — required; never offer skip. Skip description-first and post-confirm.
+  if (/photo|picture|foto|imagen/.test(t)
+    && /required|please|need|upload|attach|add a|send a photo|before post|so we can post|snap|skip the photo|without a photo/.test(t)
+    && !/ready to post|shall i post|want me to post|photos received|got your photo|with your photos|with photo|look right|looks right|does this look|short description|add a description|describe the food|description for/.test(t)) {
+    return es
+      ? [chip('Adjuntar foto')]
+      : [chip('Attach a photo')]
+  }
+
   // Address / where pickup — before community / post confirm.
-  if (/where should|what address|profile address|does that look good|pickup address|dirección/.test(t)) {
+  if (/where should|what address|profile address|does that look good|pickup address|dirección/.test(t)
+    && !/ready to post|shall i post|with photo|community|list under/.test(t)) {
     return es
       ? [chip('Usar mi dirección guardada'), chip('Es otra dirección'), chip('No tengo una')]
       : [chip('Use my saved address'), chip('Use a different address'), chip("I don't have one saved")]
   }
 
-  // Community confirm / pick — BEFORE post confirm so
-  // "want me to post this to your community" is not treated as publish.
-  // Require a real community cue so address / look-right recaps do not match.
+  // Community confirm / pick — BEFORE post confirm
   if (!isPostSuccessResponse(raw)
     && /community|school|warehouse|linked to|list under|listed under|use that one|comunidad|escuela|district/.test(t)
     && /which community|which school|list under|listed under|community should|for the community|post (this |it )?(under|to)|go under|school district|your community|use that one|linked to|profile is linked|profile is connected|profile is set|comunidad|escuela|publicar bajo|bajo qu[eé]/.test(t)
@@ -201,6 +211,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   const postConfirm = /ready to post|want me to post|shall i post|publish it|post it|say yes if|publish now|sound good to post|looks? right|does this look|go ahead and share|shall i go ahead/.test(t)
     && !(/your community|list under|linked to|use that one|for the community/.test(t)
       && !/ready to post|shall i post|looks? right|sound good to post|go ahead and share/.test(t))
+    && !/profile address|what address|pickup address/.test(t)
   if (postConfirm) {
     const photoEvidence = /photos received|got your photo|with your photos|with photo|with a photo|photo attached|foto adjunta|fotos recibidas|con tus fotos|image:|https?:\/\//.test(t)
     const photoNudge = !photoEvidence
@@ -224,7 +235,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Yes, claim it'), chip('No thanks'), chip('Cancel')]
   }
 
-  // Allergens — before food/qty/expiry; skip post-confirm recaps that merely mention allergens.
+  // Allergens
   const postConfirmRecap = /ready to post|look right|looks right|does this look|sound good to post|go ahead and share|shall i post/.test(t)
   if (
     !postConfirmRecap
@@ -245,8 +256,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('No allergens'), chip('Just gluten'), chip('Dairy'), chip('Nuts')]
   }
 
-  // Food ask / looking for — BEFORE bare qty so hands-on
-  // "What food … and how much?" gets food+qty examples, not 1/3/5/10.
+  // Food ask / looking for — BEFORE bare qty
   const foodAsk = /what food|food name|what would you like to share|what would you like to donate|what are you sharing|what are you donating|what do you have|tell me what you have|tell me what you've got|what kind of food|tell me the food|qué comida|qué quieres compartir|qué vas a (donar|compartir)/.test(t)
   const qtyAsk = /how much|how many|cuántos|cuántas|cuánto|cuánta/.test(t)
   const combinedFoodQty = (
@@ -264,7 +274,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Bread'), chip('Fruit'), chip('Vegetables'), chip('Prepared meal')]
   }
 
-  // Qty (after food is known — e.g. "How many slices are you sharing?")
+  // Qty (after food is known)
   if (/how many of the|how many would you like|how many do you want/.test(t)) {
     return es
       ? [chip('1'), chip('2'), chip('3'), chip('Todos')]
@@ -289,18 +299,6 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Find free food'), chip('Share extra food'), chip('Request food')]
   }
 
-  // Description — before photo/expiry so "add a short description" gets
-  // description chips even without a question mark. Do not use allergen
-  // or best-by chips here — those collide with other Do-it-for-me steps.
-  if (
-    /short description|add a description|describe the food|describe it|description for recipients|one-sentence description|one sentence description|one sentence about|one short sentence|short sentence about|write one short sentence|write a short sentence|sentence about these|few words about|tell me more about the food|tell me a bit about|tell me a bit more about|tell me a little about|a little about the|how would you describe|their condition|condition or if|should know about the food|people should know|anything else about the food|note for recipients|listing description|put as the description|what should (the|i put).{0,20}description|what should the listing|listing say about|say about (this|the) food|sentence about the food|sentence for the (post|listing|description)|short blurb|jot a description|how is it packaged|what'?s included|whats included|say a little about|what'?s the food like|mention on the listing|details for the listing|help me with a listing description|describe what'?s in|\bdescription\??\s*$|descripci[oó]n corta|descripci[oó]n para|describe la comida/.test(t)
-    && !/i'?ll put|in the description|into the description|to the description/.test(t)
-  ) {
-    return es
-      ? [chip('Sigue sellado'), chip('Casero, refrigerado'), chip('Sobras variadas')]
-      : [chip('Still sealed'), chip('Homemade, refrigerated'), chip('Assorted leftovers')]
-  }
-
   // Pickup window
   if (/when can|pickup window|what time|cuándo pueden/.test(t)) {
     return es
@@ -308,8 +306,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Today 5–8pm'), chip('Tomorrow morning'), chip('Next 24h'), chip('Whenever')]
   }
 
-  // Good-until / expiry — only when actively asking, never on allergen turns
-  // or acknowledgements that merely repeat a chosen date.
+  // Good-until / expiry
   const allergenAsk = /allerg|alérgen|alergia|dietary restriction/.test(t)
   const expiryCue = /best by|best-by|good until|good for|use by|expir|vence|caduc|how long is it good|how long will it (keep|stay)|stay fresh|fecha de venc|when does it expire|best before/.test(t)
   const expiryAck = /got it|noted|i'?ll use|set to|set as|confirmed|listed as|using tomorrow|anotado/.test(t)

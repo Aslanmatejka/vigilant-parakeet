@@ -666,19 +666,7 @@ def test_do_it_for_me_prechips_match_each_step():
         "en",
         tool_results=[],
         min_chips=0,
-        last_user_message="3 loaves of bread",
-        assistance_reminder="hands-on share posting",
-        history=[
-            {"role": "user", "message": "I want to share food"},
-            {"role": "assistant", "message": "How would you like to proceed?"},
-            {"role": "user", "message": "Do it for me"},
-            {"role": "assistant", "message": "What food and how much?"},
-            {"role": "user", "message": "3 loaves of bread"},
-        ],
-        user_context={
-            "suggested_community": "Alameda Unified School District",
-            "active_communities": ["Alameda Unified School District"],
-        },
+        last_user_message="Do it for me",
     )
     labels = [c if isinstance(c, str) else c.get("label") for c in extracted]
     assert "School District" not in labels
@@ -761,19 +749,7 @@ def test_do_it_for_me_prechips_match_each_step():
         "en",
         tool_results=[],
         min_chips=0,
-        last_user_message="3 loaves of bread",
-        assistance_reminder="hands-on share posting",
-        history=[
-            {"role": "user", "message": "I want to share food"},
-            {"role": "assistant", "message": "How would you like to proceed?"},
-            {"role": "user", "message": "Do it for me"},
-            {"role": "assistant", "message": "What food and how much?"},
-            {"role": "user", "message": "3 loaves of bread"},
-        ],
-        user_context={
-            "suggested_community": "Ruby Bridges Elementary CC",
-            "active_communities": ["Ruby Bridges Elementary CC"],
-        },
+        last_user_message="Do it for me",
     )
     ruby_labels = [c if isinstance(c, str) else c.get("label") for c in ruby_built]
     assert any(l and "ruby bridges" in (l or "").lower() for l in ruby_labels)

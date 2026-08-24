@@ -208,7 +208,7 @@ export function filterChipsAgainstResponse(responseText, chips) {
   }
 
   // Hands-on share/find step — never keep mode-fork chips (Open form / Do it / Guide).
-  const handsOnStep = /(what food|how much do you have|how many .+ sharing|best by|stay fresh|expir|allerg|short description|describe the food|one sentence about|\bdescription\b|listing description|people should know|ready to post|post this under|which community|upload .+ photo|add a photo|attach a photo)/.test(text)
+  const handsOnStep = /(what food|how much|how many|best by|stay fresh|expir|allerg|short description|describe the food|one sentence about|\bdescription\b|listing description|people should know|ready to post|post this under|which community|upload .+ photo|add a photo|attach a photo)/.test(text)
   const forkChip = /^(open the form|open find food|open request food|abrir el formulario|abrir buscar|abrir solicitar|do it for me|hazlo por m[ií]|guide me|gu[ií]ame)/i
 
   // Combined food+qty ask — bare 1/3/5/10 is wrong; drop so infer can refill.
@@ -224,6 +224,8 @@ export function filterChipsAgainstResponse(responseText, chips) {
     '5 manzanas', 'pan y huevos', 'verduras — 2 cajas', 'usa mi dirección guardada',
     '2 loaves of bread', 'vegetables — 1 box', 'eggs — 1 dozen',
     '2 panes', 'verduras — 1 caja', 'huevos — 1 docena',
+    'bread', 'fruit', 'vegetables', 'prepared meal',
+    'pan', 'frutas', 'verduras', 'comida preparada',
   ])
 
   return rawChips
@@ -261,52 +263,83 @@ export function resolveInputChips(suggestions, language = 'en', role = null, { a
         if (chip.path) item.path = chip.path
         if (chip.href) item.href = chip.href
         if (chip.target) item.target = chip.target
-        if (chip.kind) item.kind = chip.kind
-        if (chip.step) item.step = chip.step
         return item
       }
       return null
     })
     .filter(Boolean)
 
-  // Hands-on share: backend sends fixed step-labeled chips — trust them, don't re-infer.
-  const handsOnLabeled = normalized.some((c) => c.kind === 'hands_on_step')
-  if (handsOnLabeled) {
-    return filterChipsAgainstResponse(responseText, normalized).slice(0, 40)
-  }
-
   // Always run conflict filter — injects goal-aware open chips on forks
   // even when the backend returned food examples or nothing.
   const filtered = filterChipsAgainstResponse(responseText, normalized)
   const text = String(responseText || '').toLowerCase().replace(/[-_/]+/g, ' ').replace(/\s+/g, ' ')
+
+  // Classify chip family of backend set vs turn ask — drop when mismatched.
+  const familyOf = (chips) => {
+    if (!chips.length) return 'none'
+    const labels = chips.map((c) => chipLabel(c).toLowerCase())
+    if (labels.every((l) => /^(1|2|3|5|10)$/.test(l))) return 'qty'
+    if (labels.every((l) => /^(tomorrow|in 2 days|in 3 days|in a month|mañana|en 2|en 3|en un mes)/i.test(l))) return 'expiry'
+    if (labels.every((l) => /^(still sealed|homemade|assorted leftovers|sigue sellado|casero|sobras)/i.test(l))) return 'description'
+    if (labels.some((l) => /^(attach a photo|adjuntar foto|i'll add a photo)/i.test(l)) && labels.length <= 2) return 'photo'
+    if (labels.some((l) => /^(yes, post it|sí, publícalo|wait, edit)/i.test(l))) return 'post'
+    if (labels.some((l) => /^(no allergens|sin alérgenos|just gluten|dairy|nuts|lácteos|frutos)/i.test(l))) return 'allergen'
+    if (labels.some((l) => /^(do it for me|hazlo por|guide me|guíame|open the form|open find)/i.test(l))) return 'fork'
+    if (labels.some((l) => /^(5 apples|2 loaves|vegetables —|eggs —|5 manzanas|2 panes)/i.test(l))) return 'food_qty'
+    if (labels.some((l) => /^(bread|fruit|vegetables|prepared meal|pan|frutas|comida preparada)$/i.test(l))) return 'food'
+    if (labels.some((l) => /different community|otra comunidad|use my profile community/i.test(l))) return 'community'
+    if (labels.some((l) => /address|dirección|use that one|usa esa/i.test(l))) return 'address'
+    return 'other'
+  }
+  const turnFamily = (() => {
+    if (/(do it for me|handle everything).{0,80}(guide me|paso a paso|open the form)/.test(text)
+      || /(how would you like|like to proceed).{0,40}(shar|donat)/.test(text)) return 'fork'
+    if (/ready to post|shall i post|sound good to post|looks? right|does this look|go ahead and share/.test(text)
+      && !/your community|list under|linked to|profile address/.test(text)) return 'post'
+    if (/short description|add a description|describe the food|\bdescription\b|people should know|how is it packaged/.test(text)
+      && !/i'?ll put|into the description/.test(text)) return 'description'
+    if (/photo|picture|foto/.test(text) && /attach|upload|required|please/.test(text)
+      && !/short description|add a description|describe the food|with photo|ready to post/.test(text)) return 'photo'
+    if (/which community|list under|your community|linked to|use that one|for the community/.test(text)
+      && !/ready to post|looks? right/.test(text)) return 'community'
+    if (/profile address|what address|where should|does that look good|pickup address/.test(text)
+      && !/ready to post|community/.test(text)) return 'address'
+    if (/allerg|contain nuts|dietary restriction/.test(text) && !/ready to post|looks? right/.test(text)) return 'allergen'
+    if (/when does it expire|best by|good until|how long is it good|stay fresh/.test(text)
+      && !/allerg|short description|describe/.test(text)) return 'expiry'
+    if (/(what food|tell me what you have).{0,40}(how much|how many)|food and how much|food name and/.test(text)) return 'food_qty'
+    if (/what food|what would you like to share|what are you sharing|tell me the food/.test(text)) return 'food'
+    if (/how many|how much|cuántos|cuántas/.test(text) && !/what food|description/.test(text)) return 'qty'
+    return 'other'
+  })()
+
   const onlyBareQty = filtered.length > 0
     && filtered.every((c) => /^(1|2|3|5|10)$/.test(chipLabel(c)))
-  const qtyOnlyAsk = (
-    /(how many|how much|cuántos|cuántas|cuánto)/.test(text)
-    && !/(what food|what would you like to share|what are you sharing|best by|allerg|community|photo|ready to post|post this under|school)/.test(text)
-  )
+  const qtyOnlyAsk = turnFamily === 'qty'
   const expiryChip = /^(tomorrow|in 2 days|in 3 days|in a month|other date|mañana|en 2 d[ií]as|en 3 d[ií]as|en un mes|otra fecha|good for 24)/i
   const onlyExpiry = filtered.length > 0
     && filtered.every((c) => expiryChip.test(chipLabel(c)))
-  const allergenAsk = /(allerg|alérgen|alergia|dietary restriction|shellfish|frutos secos)/.test(text)
-    && !/(ready to post|look right|looks right|does this look|sound good to post|no allergens noted|allergens noted)/.test(text)
-  const expiryAsk = (
-    /(best by|best-by|good until|good for|use by|expir|when does it expire|how long is it good|stay fresh|fecha de venc|best before)/.test(text)
-    && !allergenAsk
-    && !/(got it|noted|i'?ll use|listed as|confirmed).{0,40}(best by|good until|tomorrow)/.test(text)
-  )
-  const descriptionAsk = /(short description|add a description|describe the food|describe it|description for recipients|listing description|one[- ]sentence|one sentence about|one short sentence|tell me a bit about|tell me a little about|a little about the|tell me more about|how would you describe|people should know|should know about|note for recipients|their condition|condition or if|condition or packaging|how is it packaged|what'?s included|short blurb|sentence about the food|put as the description|descripci[oó]n|\bdescription\b)/.test(text)
+  const expiryAsk = turnFamily === 'expiry'
+  const descriptionAsk = turnFamily === 'description'
   const descriptionChip = /^(still sealed|homemade|assorted leftovers|sigue sellado|casero|sobras variadas)/i
   const onlyDescription = filtered.length > 0
     && filtered.every((c) => descriptionChip.test(chipLabel(c)))
-  // Stale qty/expiry chips on the wrong turn (common mid hands-on) → prefer infer.
-  // Keep backend description chips whenever the reply is clearly a description ask
-  // (including bare "Description?" / "Listing description?").
+
+  const backendFamily = familyOf(filtered)
+  const familyMismatch = (
+    filtered.length > 0
+    && turnFamily !== 'other'
+    && backendFamily !== 'none'
+    && backendFamily !== 'other'
+    && backendFamily !== turnFamily
+  )
+
   const staleForTurn = (
     (onlyBareQty && !qtyOnlyAsk)
     || (onlyExpiry && !expiryAsk)
     || (onlyDescription && !descriptionAsk)
     || (onlyExpiry && descriptionAsk)
+    || familyMismatch
   )
   if (filtered.length > 0 && !staleForTurn) {
     return filtered.slice(0, 40)
