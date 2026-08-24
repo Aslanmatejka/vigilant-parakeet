@@ -261,11 +261,19 @@ export function resolveInputChips(suggestions, language = 'en', role = null, { a
         if (chip.path) item.path = chip.path
         if (chip.href) item.href = chip.href
         if (chip.target) item.target = chip.target
+        if (chip.kind) item.kind = chip.kind
+        if (chip.step) item.step = chip.step
         return item
       }
       return null
     })
     .filter(Boolean)
+
+  // Hands-on share: backend sends fixed step-labeled chips — trust them, don't re-infer.
+  const handsOnLabeled = normalized.some((c) => c.kind === 'hands_on_step')
+  if (handsOnLabeled) {
+    return filterChipsAgainstResponse(responseText, normalized).slice(0, 40)
+  }
 
   // Always run conflict filter — injects goal-aware open chips on forks
   // even when the backend returned food examples or nothing.

@@ -1,11 +1,14 @@
-"""Do-it-for-me suggestion chips must match each assistant question."""
+"""Do-it-for-me suggestion chips — fixed per flow step, not reply heuristics."""
 
 from __future__ import annotations
 
 import pytest
 
-from backend.agent.suggestion_chips import build_turn_suggestions
-from backend.ai.ai_engine import generate_quick_replies
+from backend.agent.suggestion_chips import (
+    build_labeled_hands_on_share_chips,
+    build_turn_suggestions,
+    resolve_hands_on_share_chip_step,
+)
 
 
 def _labels(chips) -> list[str]:
@@ -16,104 +19,249 @@ def _joined(chips) -> str:
     return " ".join(_labels(chips)).lower()
 
 
+def _hands_on_history(*extra) -> list[dict]:
+    base = [
+        {"role": "user", "message": "I want to share food"},
+        {"role": "assistant", "message": "How would you like to proceed with sharing?"},
+        {"role": "user", "message": "Do it for me"},
+    ]
+    return base + list(extra)
+
+
+def _chips_for_step(step: str, response_text: str, history: list, user_message: str = "Do it for me"):
+    return build_turn_suggestions(
+        response_text,
+        "en",
+        tool_results=[],
+        min_chips=0,
+        last_user_message=user_message,
+        assistance_reminder="hands-on share posting",
+        history=history,
+        user_context={
+            "suggested_community": "Ruby Bridges Elementary CC",
+            "active_communities": [
+                "Ruby Bridges Elementary CC",
+                "Do Good Warehouse",
+                "Alameda Unified",
+            ],
+        },
+    )
+
+
 @pytest.mark.parametrize(
-    "text,need,forbid,user_message",
+    "step,response_text,history_extra,user_message,need,forbid",
     [
         (
-            "How would you like to proceed with sharing?",
-            ("Do it for me", "Open the form", "Guide"),
-            ("5 apples",),
-            "I want to share food",
-        ),
-        (
+            "food_qty",
             "What food do you want to share, and how much do you have?",
+            [],
+            "Do it for me",
             ("apple", "bread"),
             ("Tomorrow", "Still sealed", "Yes, post it"),
-            "Do it for me",
         ),
         (
+            "qty",
             "How many loaves?",
-            ("just 1", "3 of them"),
-            ("All of them", "Still sealed"),
+            [
+                {"role": "assistant", "message": "What food and how much?"},
+                {"role": "user", "message": "bread"},
+            ],
             "bread",
+            ("1", "3", "5"),
+            ("Still sealed", "All of them"),
         ),
         (
-            "List under Do Good Warehouse?",
-            ("warehouse", "different school"),
-            ("alameda", "Yes, post it"),
-            "Do it for me",
+            "community",
+            "Your profile is linked to Ruby Bridges Elementary CC. Use that one?",
+            [
+                {"role": "assistant", "message": "What food and how much?"},
+                {"role": "user", "message": "3 loaves of bread"},
+            ],
+            "3 loaves of bread",
+            ("Ruby", "Different community"),
+            ("Yes, post it", "alameda"),
         ),
         (
+            "expiry",
             "When does it expire?",
+            [
+                {"role": "assistant", "message": "What food and how much?"},
+                {"role": "user", "message": "3 loaves of bread"},
+                {"role": "assistant", "message": "List under Ruby Bridges?"},
+                {"role": "user", "message": "Yes, list under Ruby Bridges Elementary CC"},
+            ],
+            "Yes, list under Ruby Bridges Elementary CC",
             ("Tomorrow",),
             ("Still sealed", "Yes, post it"),
-            "Do it for me",
         ),
         (
+            "description",
             "Please add a short description for recipients.",
+            [
+                {"role": "assistant", "message": "What food and how much?"},
+                {"role": "user", "message": "3 loaves of bread"},
+                {"role": "assistant", "message": "List under Ruby Bridges?"},
+                {"role": "user", "message": "Yes, list under Ruby Bridges Elementary CC"},
+                {"role": "assistant", "message": "When does it expire?"},
+                {"role": "user", "message": "Tomorrow"},
+            ],
+            "Tomorrow",
             ("sealed", "homemade", "leftover"),
             ("Tomorrow", "Attach a photo", "No allergens"),
-            "Do it for me",
         ),
         (
+            "description",
             "Description?",
+            [
+                {"role": "assistant", "message": "What food and how much?"},
+                {"role": "user", "message": "3 loaves of bread"},
+                {"role": "assistant", "message": "List under Ruby Bridges?"},
+                {"role": "user", "message": "Yes, list under Ruby Bridges Elementary CC"},
+                {"role": "assistant", "message": "When does it expire?"},
+                {"role": "user", "message": "Tomorrow"},
+            ],
+            "Tomorrow",
             ("sealed", "homemade"),
             ("Tomorrow", "Yes, post it"),
-            "Do it for me",
         ),
         (
-            "Got it — best by tomorrow. Please add a short description for recipients.",
-            ("sealed", "homemade"),
-            ("Tomorrow", "Attach a photo"),
-            "Do it for me",
-        ),
-        (
+            "photo",
             "Please attach a photo of the food — required before I can post.",
+            [
+                {"role": "assistant", "message": "What food and how much?"},
+                {"role": "user", "message": "3 loaves of bread"},
+                {"role": "assistant", "message": "List under Ruby Bridges?"},
+                {"role": "user", "message": "Yes, list under Ruby Bridges Elementary CC"},
+                {"role": "assistant", "message": "When does it expire?"},
+                {"role": "user", "message": "Tomorrow"},
+                {"role": "assistant", "message": "Please add a short description."},
+                {"role": "user", "message": "Still sealed"},
+            ],
+            "Still sealed",
             ("Attach a photo",),
             ("Still sealed", "Yes, post it", "skip"),
-            "Do it for me",
         ),
         (
+            "post_confirm",
             "Ready to post 3 loaves under Alameda Unified, with photo. Shall I post it?",
+            [
+                {"role": "assistant", "message": "What food and how much?"},
+                {"role": "user", "message": "3 loaves of bread"},
+                {"role": "assistant", "message": "List under Ruby Bridges?"},
+                {"role": "user", "message": "Yes, list under Ruby Bridges Elementary CC"},
+                {"role": "assistant", "message": "When does it expire?"},
+                {"role": "user", "message": "Tomorrow"},
+                {"role": "assistant", "message": "Please add a short description."},
+                {"role": "user", "message": "Still sealed"},
+                {"role": "user", "message": "image: https://example.com/food.jpg"},
+            ],
+            "image: https://example.com/food.jpg",
             ("Yes, post it",),
-            ("Attach a photo", "Still sealed", "No allergen"),
-            "Do it for me",
+            ("Attach a photo", "No allergen"),
         ),
         (
+            "post_confirm",
             "Ready to post — no allergens noted. Does this look right?",
+            [
+                {"role": "assistant", "message": "What food and how much?"},
+                {"role": "user", "message": "3 loaves of bread"},
+                {"role": "assistant", "message": "List under Ruby Bridges?"},
+                {"role": "user", "message": "Yes, list under Ruby Bridges Elementary CC"},
+                {"role": "assistant", "message": "When does it expire?"},
+                {"role": "user", "message": "Tomorrow"},
+                {"role": "assistant", "message": "Please add a short description."},
+                {"role": "user", "message": "Still sealed"},
+                {"role": "user", "message": "image: https://example.com/food.jpg"},
+            ],
+            "image: https://example.com/food.jpg",
             ("Yes, post it",),
             ("No allergen", "Still sealed", "Tomorrow"),
-            "Do it for me",
         ),
         (
+            "photo",
             "Ready to post: 100 boxes under Alameda Unified. Shall I post these now?",
+            [
+                {"role": "assistant", "message": "What food and how much?"},
+                {"role": "user", "message": "100 boxes"},
+                {"role": "assistant", "message": "List under Alameda Unified?"},
+                {"role": "user", "message": "Yes, list under Alameda Unified"},
+                {"role": "assistant", "message": "When does it expire?"},
+                {"role": "user", "message": "Tomorrow"},
+                {"role": "assistant", "message": "Please add a short description."},
+                {"role": "user", "message": "Still sealed"},
+            ],
+            "Still sealed",
             ("Attach a photo",),
             ("Yes, post it",),
-            "Do it for me",
         ),
         (
+            "allergen",
             "Does this contain nuts, dairy, eggs, soy, or wheat?",
-            ("allergen", "gluten", "dairy"),
+            [
+                {"role": "assistant", "message": "What food and how much?"},
+                {"role": "user", "message": "3 loaves of bread"},
+                {"role": "assistant", "message": "List under Ruby Bridges?"},
+                {"role": "user", "message": "Yes, list under Ruby Bridges Elementary CC"},
+                {"role": "assistant", "message": "When does it expire?"},
+                {"role": "user", "message": "Tomorrow"},
+            ],
+            "Tomorrow",
+            ("No allergens", "gluten", "dairy"),
             ("Still sealed", "Yes, post it"),
-            "Do it for me",
         ),
         (
+            "success",
             "Your listing is live! Anything else you want to share?",
+            [],
+            "Do it for me",
             ("Share something else", "Find food"),
             ("Yes, post it", "Still sealed"),
-            "Do it for me",
         ),
     ],
 )
-def test_do_it_for_me_chips_match_question(text, need, forbid, user_message):
-    for fn_name, chips in (
-        ("quick", generate_quick_replies(text, user_message=user_message, suggested_community="Alameda Unified")),
-        ("built", build_turn_suggestions(
-            text, "en", tool_results=[], min_chips=0, last_user_message=user_message,
-        )),
-    ):
-        joined = _joined(chips)
-        assert chips, f"{fn_name}: empty for {text!r}"
-        assert any(n.lower() in joined for n in need), f"{fn_name}: {text!r} -> {_labels(chips)}"
-        for bad in forbid:
-            assert bad.lower() not in joined, f"{fn_name}: {text!r} got forbidden {bad!r} in {_labels(chips)}"
+def test_labeled_hands_on_chips_match_step(
+    step, response_text, history_extra, user_message, need, forbid,
+):
+    history = _hands_on_history(*history_extra)
+    resolved = resolve_hands_on_share_chip_step(
+        user_message,
+        history,
+        assistance_reminder="hands-on share posting",
+        response_text=response_text,
+    )
+    assert resolved == step, f"expected step {step!r}, got {resolved!r}"
+
+    chips = _chips_for_step(step, response_text, history, user_message)
+    joined = _joined(chips)
+    assert chips, f"empty chips for step {step!r}"
+    assert all(
+        isinstance(c, dict) and c.get("kind") == "hands_on_step" for c in chips
+    ), f"chips must be hands_on_step labeled: {_labels(chips)}"
+    assert any(n.lower() in joined for n in need), f"{step!r} -> {_labels(chips)}"
+    for bad in forbid:
+        assert bad.lower() not in joined, f"{step!r} got forbidden {bad!r} in {_labels(chips)}"
+
+
+def test_labeled_chips_stable_across_rephrasing():
+    """Step labels stay the same even when Nouri rephrases the question."""
+    history = _hands_on_history(
+        {"role": "assistant", "message": "What food and how much?"},
+        {"role": "user", "message": "3 loaves of bread"},
+        {"role": "assistant", "message": "List under Ruby Bridges?"},
+        {"role": "user", "message": "Yes, list under Ruby Bridges Elementary CC"},
+    )
+    variants = [
+        "When does it expire?",
+        "How long will it stay good?",
+        "What's the best-by date for these loaves?",
+    ]
+    for text in variants:
+        step = resolve_hands_on_share_chip_step(
+            "Yes, list under Ruby Bridges Elementary CC",
+            history,
+            assistance_reminder="hands-on share posting",
+            response_text=text,
+        )
+        assert step == "expiry"
+        chips = build_labeled_hands_on_share_chips(step, "en")
+        assert "Tomorrow" in _labels(chips)

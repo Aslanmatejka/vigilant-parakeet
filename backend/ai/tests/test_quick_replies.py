@@ -16,7 +16,7 @@ def test_open_what_food_question_suggests_food_options():
     assert len(out) >= 2
     # Plausible food chips
     joined = " ".join(out).lower()
-    assert any(x in joined for x in ("apple", "bread", "vegetable", "egg"))
+    assert any(x in joined for x in ("bread", "fruit", "vegetable", "meal"))
 
 
 def test_open_wh_question_without_specific_branch_returns_empty():
@@ -71,17 +71,15 @@ def test_address_confirm_gets_address_chips():
     assert "address" in joined or "use that one" in joined or "saved" in joined
     assert "Alameda Unified" not in out
     assert "Different community" not in out
-    assert "Use a different school" not in out
     assert "Yes, post it" not in out
 
 
 def test_quantity_question_gets_numbers():
     out = generate_quick_replies("How many loaves?")
     assert out
-    joined = " ".join(out).lower()
-    assert any(c.isdigit() for c in joined)
+    assert any(s.isdigit() for s in out)
     assert "All of them" not in out
-    assert "Just 1" in out or "1" in joined
+    assert out == ["1", "3", "5", "10"] or set(out) >= {"1", "3", "5"}
 
 
 def test_allergen_question():
@@ -154,7 +152,7 @@ def test_es_what_food_question_suggests_food_options():
             f"fell through to yes/no on: {q!r}"
         )
         joined = " ".join(out).lower()
-        assert any(x in joined for x in ("manzana", "pan", "verdur", "huevo", "manzanas"))
+        assert any(x in joined for x in ("pan", "frut", "verdur", "comida"))
 
 
 def test_es_post_confirm_variants():
@@ -195,8 +193,7 @@ def test_es_address_confirm():
 def test_es_quantity_question():
     out = generate_quick_replies("¿Cuántos panes?", lang="es")
     assert out
-    joined = " ".join(out).lower()
-    assert any(c.isdigit() for c in joined)
+    assert any(s.isdigit() for s in out)
 
 
 def test_es_allergen_question():
@@ -260,8 +257,7 @@ def test_allergen_ask_not_expiry_chips():
         "Got it — best by tomorrow. Any allergens in the pizza, "
         "like nuts, dairy, eggs, wheat, soy, or shellfish?",
     )
-    joined = " ".join(out).lower()
-    assert "no allergen" in joined or "contains gluten" in joined
+    assert "No allergens" in out
     assert "Tomorrow" not in out
     assert "In 2 days" not in out
     assert "Other date" not in out
@@ -340,8 +336,7 @@ def test_hands_on_qty_after_food_known():
         "Yum, pizza! How many slices or whole pizzas are you sharing?",
         user_message="pizza",
     )
-    joined = " ".join(out).lower()
-    assert "just 1" in joined or "3 of them" in joined or "1" in joined
+    assert out == ["1", "3", "5", "10"] or set(out) >= {"1", "3", "5"}
 
 
 def test_hands_on_community_confirm_and_pick():
@@ -349,9 +344,8 @@ def test_hands_on_community_confirm_and_pick():
         "Should I post this under Alameda Unified School District, since that is your community?",
         suggested_community="Alameda Unified School District",
     )
-    joined = " ".join(out).lower()
-    assert "alameda unified school district" in joined
-    assert "different school" in joined
+    assert "Alameda Unified School District" in out
+    assert "Different community" in out
 
     pick = generate_quick_replies(
         "Got it, you want to post your pizza in a different community. Which community should I use?",
@@ -367,9 +361,8 @@ def test_community_confirm_shows_suggested_and_different():
         "Which school should this go under — Alameda Unified School District?",
         suggested_community="Alameda Unified School District",
     )
-    joined = " ".join(out).lower()
-    assert "alameda unified school district" in joined
-    assert "different school" in joined
+    assert "Alameda Unified School District" in out
+    assert "Different community" in out
 
 
 def test_community_confirm_spanish():
@@ -378,9 +371,8 @@ def test_community_confirm_spanish():
         lang="es",
         suggested_community="Distrito Escolar de Alameda",
     )
-    joined = " ".join(out).lower()
-    assert "distrito escolar de alameda" in joined
-    assert "otra escuela" in joined
+    assert "Distrito Escolar de Alameda" in out
+    assert "Otra comunidad" in out
 
 
 def test_different_one_shows_other_communities():
@@ -656,7 +648,7 @@ def test_do_it_for_me_prechips_match_each_step():
 
     qty = generate_quick_replies("How many loaves?", user_message="bread")
     assert "All of them" not in qty
-    assert any(c.isdigit() for c in " ".join(qty))
+    assert any(s.isdigit() for s in qty)
 
     community = generate_quick_replies(
         "Should I post this under Alameda Unified School District, "
@@ -666,6 +658,7 @@ def test_do_it_for_me_prechips_match_each_step():
     )
     joined = " ".join(community).lower()
     assert "alameda" in joined or "different" in joined
+    assert "School District" not in community
 
     extracted = build_turn_suggestions(
         "Should I post this under Alameda Unified School District, "
@@ -673,9 +666,22 @@ def test_do_it_for_me_prechips_match_each_step():
         "en",
         tool_results=[],
         min_chips=0,
-        last_user_message="Do it for me",
+        last_user_message="3 loaves of bread",
+        assistance_reminder="hands-on share posting",
+        history=[
+            {"role": "user", "message": "I want to share food"},
+            {"role": "assistant", "message": "How would you like to proceed?"},
+            {"role": "user", "message": "Do it for me"},
+            {"role": "assistant", "message": "What food and how much?"},
+            {"role": "user", "message": "3 loaves of bread"},
+        ],
+        user_context={
+            "suggested_community": "Alameda Unified School District",
+            "active_communities": ["Alameda Unified School District"],
+        },
     )
     labels = [c if isinstance(c, str) else c.get("label") for c in extracted]
+    assert "School District" not in labels
     assert any(
         l and ("alameda" in (l or "").lower() or "different" in (l or "").lower())
         for l in labels
@@ -686,26 +692,24 @@ def test_do_it_for_me_prechips_match_each_step():
         user_message="Do it for me",
     )
     assert "Tomorrow" in expiry
-    assert "sealed" not in " ".join(expiry).lower()
+    assert "Still sealed" not in expiry
     assert "Do it for me" not in expiry
 
     desc = generate_quick_replies(
         "Please add a short description for recipients.",
         user_message="Do it for me",
     )
-    joined_desc = " ".join(desc).lower()
-    assert "sealed" in joined_desc or "homemade" in joined_desc
-    assert "allergen" not in joined_desc
+    assert "Still sealed" in desc
+    assert "No allergens" not in desc
     assert "Tomorrow" not in desc
-    assert "Attach a photo" not in " ".join(desc)
+    assert "Attach a photo" not in desc
 
     photo = generate_quick_replies(
         "Please attach a photo of the food — required before I can post.",
         user_message="Do it for me",
     )
-    joined_photo = " ".join(photo).lower()
-    assert "attach" in joined_photo and "photo" in joined_photo
-    assert "sealed" not in joined_photo
+    assert "Attach a photo" in photo
+    assert "Still sealed" not in photo
     assert "Yes, post it" not in photo
 
     confirm = generate_quick_replies(
@@ -720,7 +724,7 @@ def test_do_it_for_me_prechips_match_each_step():
         "Perfect. Tell me what you have.",
         user_message="Do it for me",
     )
-    assert "5 apples" in food_open or any("bread" in s.lower() for s in food_open)
+    assert "5 apples" in food_open or "Bread" in food_open
     assert "Yes, post it" not in food_open
     assert "Attach a photo" not in food_open
 
@@ -732,7 +736,7 @@ def test_do_it_for_me_prechips_match_each_step():
     joined_wh = " ".join(warehouse).lower()
     assert "do good warehouse" in joined_wh
     assert "alameda" not in joined_wh
-    assert "different school" in joined_wh
+    assert "Different community" in warehouse
 
     community_post = generate_quick_replies(
         "Want me to post this to your community, Alameda Unified?",
@@ -740,9 +744,8 @@ def test_do_it_for_me_prechips_match_each_step():
         user_message="Do it for me",
     )
     assert "Yes, post it" not in community_post
-    assert "Attach a photo" not in " ".join(community_post)
-    joined_cp = " ".join(community_post).lower()
-    assert "alameda unified" in joined_cp or "different school" in joined_cp
+    assert "Attach a photo" not in community_post
+    assert "Alameda Unified" in community_post or "Different community" in community_post
 
     ruby = generate_quick_replies(
         "Your profile is linked to Ruby Bridges Elementary CC. Use that one?",
@@ -750,7 +753,7 @@ def test_do_it_for_me_prechips_match_each_step():
     )
     joined_ruby = " ".join(ruby).lower()
     assert "ruby bridges" in joined_ruby
-    assert "different school" in joined_ruby
+    assert "Different community" in ruby
     assert "Attach a photo" not in ruby
 
     ruby_built = build_turn_suggestions(
@@ -758,7 +761,19 @@ def test_do_it_for_me_prechips_match_each_step():
         "en",
         tool_results=[],
         min_chips=0,
-        last_user_message="Do it for me",
+        last_user_message="3 loaves of bread",
+        assistance_reminder="hands-on share posting",
+        history=[
+            {"role": "user", "message": "I want to share food"},
+            {"role": "assistant", "message": "How would you like to proceed?"},
+            {"role": "user", "message": "Do it for me"},
+            {"role": "assistant", "message": "What food and how much?"},
+            {"role": "user", "message": "3 loaves of bread"},
+        ],
+        user_context={
+            "suggested_community": "Ruby Bridges Elementary CC",
+            "active_communities": ["Ruby Bridges Elementary CC"],
+        },
     )
     ruby_labels = [c if isinstance(c, str) else c.get("label") for c in ruby_built]
     assert any(l and "ruby bridges" in (l or "").lower() for l in ruby_labels)
@@ -767,9 +782,8 @@ def test_do_it_for_me_prechips_match_each_step():
         "Does this contain nuts, dairy, eggs, soy, or wheat?",
         user_message="Do it for me",
     )
-    joined_allergen = " ".join(allergen).lower()
-    assert "allergen" in joined_allergen or "gluten" in joined_allergen
-    assert "sealed" not in joined_allergen
+    assert "No allergens" in allergen
+    assert "Still sealed" not in allergen
 
     look_right = generate_quick_replies(
         "Does this look right? 3 loaves under Alameda Unified, with photo.",
@@ -798,9 +812,8 @@ def test_do_it_for_me_prechips_match_each_step():
         "Anything else people should know about the food?",
         user_message="Do it for me",
     )
-    joined_desc_alt = " ".join(desc_alt).lower()
-    assert "sealed" in joined_desc_alt or "homemade" in joined_desc_alt
-    assert "allergen" not in joined_desc_alt
+    assert "Still sealed" in desc_alt
+    assert "No allergens" not in desc_alt
     assert "Share something else" not in desc_alt
 
     ready_no_photo = generate_quick_replies(
@@ -808,8 +821,7 @@ def test_do_it_for_me_prechips_match_each_step():
         "Shall I post these now?",
         user_message="Do it for me",
     )
-    joined_ready = " ".join(ready_no_photo).lower()
-    assert "attach" in joined_ready and "photo" in joined_ready
+    assert "Attach a photo" in ready_no_photo
     assert "Yes, post it" not in ready_no_photo
 
     claim_sound = generate_quick_replies(

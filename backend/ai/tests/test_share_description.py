@@ -210,5 +210,5 @@ class TestDescriptionChips:
             "— required before I can post.",
             user_message="Do it for me",
         )
-        assert "Attach a photo" in out or "Attach a photo now" in out
-        assert "Still sealed" not in out and "sealed in" not in " ".join(out).lower()
+        assert "Attach a photo" in out
+        assert "Still sealed" not in out

@@ -153,33 +153,14 @@ class TestQuickReplyChips:
             "Should I list this under Alameda Unified, or a different community?"
         )
         chips = generate_quick_replies(reply, "en")
-        joined = " ".join(chips).lower()
-        assert (
-            "alameda unified" in joined
-            or "that community" in joined
-            or "list under" in joined
-        )
-        assert (
-            "different school" in joined
-            or "different community" in joined
-            or "other" in joined
-        )
+        assert "Yes, that community" in chips
+        assert "Different community" in chips
         assert "Yes, post it" not in chips
 
     def test_community_confirm_spanish(self):
         reply = "¿Para qué comunidad debo publicarlo — Alameda Unified u otra?"
         chips = generate_quick_replies(reply, "es")
-        joined = " ".join(chips).lower()
-        assert (
-            "alameda unified" in joined
-            or "publicar en" in joined
-            or "esa comunidad" in joined
-        )
-        assert (
-            "otra escuela" in joined
-            or "otra comunidad" in joined
-            or "es otra" in joined
-        )
+        assert "Sí, esa comunidad" in chips
 
     def test_view_photo_not_add_photo_chips(self):
         reply = "Can I see the photo first before posting?"

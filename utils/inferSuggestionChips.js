@@ -135,8 +135,8 @@ export function inferChipsFromResponse(responseText, language = 'en') {
     && /required|please|need|upload|attach|add a|send a photo|before post|so we can post|snap|skip the photo|without a photo/.test(t)
     && !/ready to post|shall i post|want me to post|photos received|got your photo|with your photos|with photo|look right|looks right|does this look/.test(t)) {
     return es
-      ? [chip('Adjuntar una foto ahora')]
-      : [chip('Attach a photo now')]
+      ? [chip('Adjuntar foto')]
+      : [chip('Attach a photo')]
   }
 
   // Success / anything else — before community / post chips
@@ -188,14 +188,13 @@ export function inferChipsFromResponse(responseText, language = 'en') {
     )
     const suggested = ((nameMatch && nameMatch[1]) || (endMatch && endMatch[1]) || '').trim()
     if (suggested && !/^(the|this|that|your|a|an)$/i.test(suggested)) {
-      const short = suggested.slice(0, 48)
       return es
-        ? [chip(`Sí, publicar en ${short}`, `Sí, publicar en ${suggested}`), chip('Usar otra escuela', 'Usar otra comunidad')]
-        : [chip(`Yes, list under ${short}`, `Yes, list under ${suggested}`), chip('Use a different school', 'Use a different community')]
+        ? [chip(suggested.slice(0, 48)), chip('Otra comunidad')]
+        : [chip(suggested.slice(0, 48)), chip('Different community')]
     }
     return es
-      ? [chip('Usar la comunidad de mi perfil'), chip('Usar otra escuela', 'Usar otra comunidad')]
-      : [chip('Use my profile community'), chip('Use a different school', 'Use a different community')]
+      ? [chip('Usar la de mi perfil'), chip('Otra comunidad')]
+      : [chip('Use my profile community'), chip('Different community')]
   }
 
   // Post confirm — before allergens so recaps mentioning "no allergens" stay Yes/Edit/Cancel.
@@ -208,7 +207,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       && /ready to post|ready to publish|shall i post|should i post|want me to post/.test(t)
       && !/looks? right|does this look|sound good|go ahead and share|your community|list under|linked to/.test(t)
     if (photoNudge) {
-      return es ? [chip('Adjuntar una foto ahora')] : [chip('Attach a photo now')]
+      return es ? [chip('Adjuntar foto')] : [chip('Attach a photo')]
     }
     return es
       ? [chip('Sí, publícalo'), chip('Espera, edítalo'), chip('Cancelar')]
@@ -242,8 +241,8 @@ export function inferChipsFromResponse(responseText, language = 'en') {
     )
   ) {
     return es
-      ? [chip('Sin alérgenos que señalar'), chip('Contiene gluten'), chip('Contiene lácteos'), chip('Contiene frutos secos')]
-      : [chip('No allergens to flag'), chip('Contains gluten'), chip('Contains dairy'), chip('Contains nuts')]
+      ? [chip('Sin alérgenos'), chip('Solo gluten'), chip('Lácteos'), chip('Frutos secos')]
+      : [chip('No allergens'), chip('Just gluten'), chip('Dairy'), chip('Nuts')]
   }
 
   // Food ask / looking for — BEFORE bare qty so hands-on
@@ -261,8 +260,8 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   }
   if (foodAsk || /what are you looking for|what do you need|qué buscas|qué necesitas/.test(t)) {
     return es
-      ? [chip('5 manzanas'), chip('2 panes'), chip('Verduras — 1 caja'), chip('Huevos — 1 docena')]
-      : [chip('5 apples'), chip('2 loaves of bread'), chip('Vegetables — 1 box'), chip('Eggs — 1 dozen')]
+      ? [chip('Pan'), chip('Frutas'), chip('Verduras'), chip('Comida preparada')]
+      : [chip('Bread'), chip('Fruit'), chip('Vegetables'), chip('Prepared meal')]
   }
 
   // Qty (after food is known — e.g. "How many slices are you sharing?")
@@ -272,9 +271,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('1'), chip('2'), chip('3'), chip('All of them')]
   }
   if (qtyAsk) {
-    return es
-      ? [chip('Solo 1'), chip('3 en total'), chip('5 en total'), chip('10 en total')]
-      : [chip('Just 1'), chip('3 of them'), chip('5 of them'), chip('10 of them')]
+    return [chip('1'), chip('3'), chip('5'), chip('10')]
   }
 
   // Search pick
@@ -300,8 +297,8 @@ export function inferChipsFromResponse(responseText, language = 'en') {
     && !/i'?ll put|in the description|into the description|to the description/.test(t)
   ) {
     return es
-      ? [chip('Sigue sellado en el envase original'), chip('Casero y mantenido refrigerado'), chip('Sobras variadas en recipientes')]
-      : [chip('Still sealed in the original packaging'), chip('Homemade and kept refrigerated'), chip('Assorted leftovers in containers')]
+      ? [chip('Sigue sellado'), chip('Casero, refrigerado'), chip('Sobras variadas')]
+      : [chip('Still sealed'), chip('Homemade, refrigerated'), chip('Assorted leftovers')]
   }
 
   // Pickup window

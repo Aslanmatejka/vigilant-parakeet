@@ -57,70 +57,6 @@ _SEARCH_TOOLS = frozenset({
 })
 
 
-def obvious_food_qty_chips(language: str = "en") -> List[str]:
-    """Concrete food+amount examples for Do-it-for-me (not generic categories)."""
-    if language == "es":
-        return ["5 manzanas", "2 panes", "Verduras — 1 caja", "Huevos — 1 docena"]
-    return ["5 apples", "2 loaves of bread", "Vegetables — 1 box", "Eggs — 1 dozen"]
-
-
-def obvious_qty_chips(language: str = "en") -> List[str]:
-    """Quantity chips that read like a natural reply."""
-    if language == "es":
-        return ["Solo 1", "3 en total", "5 en total", "10 en total"]
-    return ["Just 1", "3 of them", "5 of them", "10 of them"]
-
-
-def obvious_description_chips(language: str = "en") -> List[str]:
-    """Full-sentence description examples for listing text."""
-    if language == "es":
-        return [
-            "Sigue sellado en el envase original",
-            "Casero y mantenido refrigerado",
-            "Sobras variadas en recipientes",
-        ]
-    return [
-        "Still sealed in the original packaging",
-        "Homemade and kept refrigerated",
-        "Assorted leftovers in containers",
-    ]
-
-
-def obvious_allergen_chips(language: str = "en") -> List[str]:
-    if language == "es":
-        return [
-            "Sin alérgenos que señalar",
-            "Contiene gluten",
-            "Contiene lácteos",
-            "Contiene frutos secos",
-        ]
-    return [
-        "No allergens to flag",
-        "Contains gluten",
-        "Contains dairy",
-        "Contains nuts",
-    ]
-
-
-def obvious_photo_chip(language: str = "en") -> str:
-    return "Adjuntar una foto ahora" if language == "es" else "Attach a photo now"
-
-
-def obvious_community_confirm_chips(pick: str, language: str = "en") -> List[str]:
-    short = (pick or "").strip()[:48]
-    if not short:
-        return obvious_community_fallback_chips(language)
-    if language == "es":
-        return [f"Sí, publicar en {short}", "Usar otra escuela"]
-    return [f"Yes, list under {short}", "Use a different school"]
-
-
-def obvious_community_fallback_chips(language: str = "en") -> List[str]:
-    if language == "es":
-        return ["Usar la comunidad de mi perfil", "Usar otra escuela"]
-    return ["Use my profile community", "Use a different school"]
-
-
 def _normalize_chip_text(text: str) -> str:
     """Normalize hyphens/spacing so 'step-by-step' matches 'step by step'."""
     t = (text or "").lower()
@@ -650,7 +586,10 @@ def _chips_for_guided_response(
         "what kind of food", "qué tipo de comida", "que tipo de comida",
         "looking for", "buscas", "what food", "qué alimento",
     )):
-        chips.extend(obvious_food_qty_chips("es" if es else "en"))
+        if es:
+            chips.extend(["Pan", "Frutas", "Verduras", "Comida preparada"])
+        else:
+            chips.extend(["Bread", "Fruit", "Vegetables", "Prepared meal"])
     elif any(k in low for k in (
         "open the share", "open share", "open the find", "open find",
         "open the request", "open request", "tap share food", "tap find food",
@@ -1172,30 +1111,285 @@ def _chips_for_community_selection(
 
     chips: List[Chip] = []
     for name in names[:3]:
-        short = name[:48]
         if es:
             chips.append({
-                "label": f"Sí, {short}",
+                "label": name,
                 "message": f"Sí, publicar en {name}",
             })
         else:
             chips.append({
-                "label": f"Yes, {short}",
+                "label": name,
                 "message": f"Yes, list under {name}",
             })
 
     if es:
         chips.append({
-            "label": "Usar otra escuela",
+            "label": "Otra comunidad",
             "message": "Usar otra comunidad",
         })
     else:
         chips.append({
-            "label": "Use a different school",
+            "label": "Different community",
             "message": "Use a different community",
         })
 
     return chips
+
+
+def is_hands_on_share_active(
+    message: str = "",
+    history: Optional[List[Dict[str, Any]]] = None,
+    assistance_reminder: str = "",
+) -> bool:
+    """True when the donor is mid hands-on share (not guided form)."""
+    if _user_chose_hands_on(message or "", assistance_reminder or ""):
+        return True
+    from backend.ai.conversation_flow import (
+        _assistance_mode_from_history,
+        _hands_on_assistance_goal,
+        is_posting_flow,
+    )
+    if _assistance_mode_from_history(history) != "hands_on":
+        return False
+    goal = _hands_on_assistance_goal(message or "", history)
+    return goal == "share" or is_posting_flow(message or "", history)
+
+
+def _has_explicit_quantity_in_thread(message: str, history: Optional[list]) -> bool:
+    """True when the donor already gave a numeric quantity in this share."""
+    from backend.ai.conversation_flow import (
+        _current_posting_boundary_index,
+        _parse_share_items_from_text,
+    )
+    boundary = _current_posting_boundary_index(history)
+    scoped = (history or [])[boundary:]
+    parts = [message or ""]
+    for msg in reversed(scoped):
+        if msg.get("role") == "user":
+            parts.append(msg.get("message") or "")
+    for part in parts:
+        text = (part or "").strip()
+        if not text:
+            continue
+        if re.fullmatch(r"\d+", text):
+            return True
+        if _parse_share_items_from_text(text) and re.search(r"\d", text):
+            return True
+        if re.match(r"^\s*\d+\s+", text):
+            return True
+    return False
+
+
+def resolve_hands_on_share_chip_step(
+    message: str = "",
+    history: Optional[List[Dict[str, Any]]] = None,
+    *,
+    assistance_reminder: str = "",
+    response_text: str = "",
+) -> Optional[str]:
+    """Fixed step label for hands-on share chips (state-driven, not reply heuristics)."""
+    if not is_hands_on_share_active(message, history, assistance_reminder):
+        return None
+
+    from backend.ai.conversation_flow import (
+        _assistant_last_asked_kind,
+        _is_different_community_choice,
+        _share_title_qty_from_thread,
+        is_post_success_response,
+        posting_flow_state,
+    )
+
+    if is_post_success_response(response_text or ""):
+        return "success"
+
+    extended = list(history or [])
+    if response_text:
+        extended.append({"role": "assistant", "message": response_text})
+    last_asked = _assistant_last_asked_kind(extended)
+
+    if response_text:
+        from backend.ai.ai_engine import _is_allergen_ask
+        if _is_allergen_ask(response_text):
+            return "allergen"
+
+    if last_asked == "claim_confirm":
+        return None
+
+    title, _, _ = _share_title_qty_from_thread(history, message)
+    if not title:
+        return "food_qty"
+    if not _has_explicit_quantity_in_thread(message, history):
+        return "qty"
+
+    if _is_different_community_choice(message) or _user_chose_different_community(message):
+        return "community_pick"
+
+    state = posting_flow_state(message, history)
+    if not state.get("community_confirmed"):
+        return "community"
+    if not state.get("expiry_provided"):
+        return "expiry"
+    if not state.get("description_provided"):
+        return "description"
+    if not state.get("has_photo"):
+        return "photo"
+
+    if response_text:
+        from backend.ai.ai_engine import _is_post_confirm_ask
+        if _is_post_confirm_ask(response_text):
+            return "post_confirm"
+    if last_asked == "post_confirm" or state.get("post_summary_offered"):
+        return "post_confirm"
+    return "post_confirm"
+
+
+def _hands_on_chip(label: str, message: str, step: str) -> Chip:
+    return {
+        "label": label,
+        "message": message,
+        "kind": "hands_on_step",
+        "step": step,
+    }
+
+
+def build_labeled_hands_on_share_chips(
+    step: str,
+    language: str = "en",
+    *,
+    user_context: Optional[Dict[str, Any]] = None,
+    message: str = "",
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> List[Chip]:
+    """Fixed chip sets per hands-on share step — independent of AI wording."""
+    es = language == "es"
+    ctx = user_context or {}
+    suggested = str(ctx.get("suggested_community") or "").strip()
+    communities = list(ctx.get("active_communities") or [])
+
+    if step == "food_qty":
+        if es:
+            return [
+                _hands_on_chip("5 manzanas", "5 manzanas", step),
+                _hands_on_chip("2 panes", "2 panes", step),
+                _hands_on_chip("Verduras — 1 caja", "Verduras — 1 caja", step),
+                _hands_on_chip("Huevos — 1 docena", "Huevos — 1 docena", step),
+            ]
+        return [
+            _hands_on_chip("5 apples", "5 apples", step),
+            _hands_on_chip("2 loaves of bread", "2 loaves of bread", step),
+            _hands_on_chip("Vegetables — 1 box", "Vegetables — 1 box", step),
+            _hands_on_chip("Eggs — 1 dozen", "Eggs — 1 dozen", step),
+        ]
+
+    if step == "qty":
+        return [
+            _hands_on_chip("1", "1", step),
+            _hands_on_chip("3", "3", step),
+            _hands_on_chip("5", "5", step),
+            _hands_on_chip("10", "10", step),
+        ]
+
+    if step == "community":
+        chips: List[Chip] = []
+        name = suggested or (communities[0] if communities else "")
+        if name:
+            if es:
+                chips.append(_hands_on_chip(name, f"Sí, publicar en {name}", step))
+            else:
+                chips.append(_hands_on_chip(name, f"Yes, list under {name}", step))
+        if es:
+            chips.append(_hands_on_chip("Otra comunidad", "Usar otra comunidad", step))
+        else:
+            chips.append(_hands_on_chip("Different community", "Use a different community", step))
+        return chips[:_MAX_COMMUNITY_CHIPS]
+
+    if step == "community_pick":
+        pick_from = communities
+        if suggested:
+            pick_from = [c for c in communities if c.lower() != suggested.lower()] or communities
+        chips = []
+        for name in pick_from[:_MAX_COMMUNITY_CHIPS]:
+            if es:
+                chips.append(_hands_on_chip(name, f"Sí, publicar en {name}", step))
+            else:
+                chips.append(_hands_on_chip(name, f"Yes, list under {name}", step))
+        return chips
+
+    if step == "expiry":
+        if es:
+            return [
+                _hands_on_chip("Mañana", "Mañana", step),
+                _hands_on_chip("En 2 días", "En 2 días", step),
+                _hands_on_chip("En 3 días", "En 3 días", step),
+                _hands_on_chip("En un mes", "En un mes", step),
+            ]
+        return [
+            _hands_on_chip("Tomorrow", "Tomorrow", step),
+            _hands_on_chip("In 2 days", "In 2 days", step),
+            _hands_on_chip("In 3 days", "In 3 days", step),
+            _hands_on_chip("In a month", "In a month", step),
+        ]
+
+    if step == "description":
+        if es:
+            return [
+                _hands_on_chip("Sigue sellado", "Sigue sellado", step),
+                _hands_on_chip("Casero, refrigerado", "Casero, refrigerado", step),
+                _hands_on_chip("Sobras variadas", "Sobras variadas", step),
+            ]
+        return [
+            _hands_on_chip("Still sealed", "Still sealed", step),
+            _hands_on_chip("Homemade, refrigerated", "Homemade, refrigerated", step),
+            _hands_on_chip("Assorted leftovers", "Assorted leftovers", step),
+        ]
+
+    if step == "photo":
+        if es:
+            return [_hands_on_chip("Adjuntar foto", "Adjuntar foto", step)]
+        return [_hands_on_chip("Attach a photo", "Attach a photo", step)]
+
+    if step == "post_confirm":
+        if es:
+            return [
+                _hands_on_chip("Sí, publícalo", "Sí, publícalo", step),
+                _hands_on_chip("Espera, edítalo", "Espera, edítalo", step),
+                _hands_on_chip("Cancelar", "Cancelar", step),
+            ]
+        return [
+            _hands_on_chip("Yes, post it", "Yes, post it", step),
+            _hands_on_chip("Wait, edit it", "Wait, edit it", step),
+            _hands_on_chip("Cancel", "Cancel", step),
+        ]
+
+    if step == "allergen":
+        if es:
+            return [
+                _hands_on_chip("Sin alérgenos", "Sin alérgenos", step),
+                _hands_on_chip("Solo gluten", "Solo gluten", step),
+                _hands_on_chip("Lácteos", "Lácteos", step),
+                _hands_on_chip("Frutos secos", "Frutos secos", step),
+            ]
+        return [
+            _hands_on_chip("No allergens", "No allergens", step),
+            _hands_on_chip("Just gluten", "Just gluten", step),
+            _hands_on_chip("Dairy", "Dairy", step),
+            _hands_on_chip("Nuts", "Nuts", step),
+        ]
+
+    if step == "success":
+        if es:
+            return [
+                _hands_on_chip("Compartir algo más", "Compartir algo más", step),
+                _hands_on_chip("Buscar comida cerca", "Buscar comida cerca", step),
+                _hands_on_chip("Eso es todo por ahora", "Eso es todo por ahora", step),
+            ]
+        return [
+            _hands_on_chip("Share something else", "Share something else", step),
+            _hands_on_chip("Find food near me", "Find food near me", step),
+            _hands_on_chip("That's all for now", "That's all for now", step),
+        ]
+
+    return []
 
 
 def build_turn_suggestions(
@@ -1210,6 +1404,7 @@ def build_turn_suggestions(
     *,
     min_chips: int = 4,
     assistance_reminder: Optional[str] = None,
+    history: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Chip]:
     """Build up to six tappable chips for the chat UI.
 
@@ -1261,6 +1456,27 @@ def build_turn_suggestions(
     )
     if fork:
         return fork[:_MAX_CHIPS]
+
+    # 1b) Hands-on share — fixed chips per flow step (not reply-text heuristics).
+    if is_hands_on_share_active(
+        last_user_message or "", history, assistance_reminder or "",
+    ):
+        step = resolve_hands_on_share_chip_step(
+            last_user_message or "",
+            history,
+            assistance_reminder=assistance_reminder or "",
+            response_text=response_text or "",
+        )
+        if step:
+            labeled = build_labeled_hands_on_share_chips(
+                step,
+                language,
+                user_context=user_context,
+                message=last_user_message or "",
+                history=history,
+            )
+            if labeled:
+                return labeled[:_MAX_CHIPS if step != "community_pick" else _MAX_COMMUNITY_CHIPS]
 
     # 2) GUIDED UI coaching — exclusive.
     guided_chips = _chips_for_guided_response(response_text or "", language)
