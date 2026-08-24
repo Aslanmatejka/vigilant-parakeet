@@ -343,3 +343,45 @@ def test_description_ask_wins_over_allergen_ack():
     assert "sealed" in joined or "homemade" in joined
     assert "no allergens" not in joined
     assert "gluten" not in joined
+
+
+def test_different_community_ask_shows_school_list_not_food():
+    """After 'Different community', ask for school name → community chips, not food."""
+    history = _hands_on_history(
+        {"role": "assistant", "message": "What food and how much?"},
+        {"role": "user", "message": "5 apples"},
+        {"role": "assistant", "message": "List under Alameda Unified?"},
+        {"role": "user", "message": "Different community"},
+    )
+    text = (
+        "Got it, you want a different community. Could you please tell me the name "
+        "of the school or community you want to share your food under?"
+    )
+    step = resolve_hands_on_share_chip_step(
+        "Different community",
+        history,
+        assistance_reminder="hands-on share posting",
+        response_text=text,
+    )
+    assert step == "community_pick"
+    chips = build_turn_suggestions(
+        text,
+        "en",
+        tool_results=[],
+        min_chips=0,
+        last_user_message="Different community",
+        assistance_reminder="hands-on share posting",
+        history=history,
+        user_context={
+            "suggested_community": "Alameda Unified School District",
+            "active_communities": [
+                "Do Good Warehouse",
+                "Ruby Bridges Elementary CC",
+                "Alameda Unified School District",
+            ],
+        },
+    )
+    joined = _joined(chips)
+    assert "do good warehouse" in joined or "ruby bridges" in joined
+    assert "5 apples" not in joined
+    assert "loaves" not in joined

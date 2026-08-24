@@ -3177,6 +3177,8 @@ def _assistant_last_asked_kind(history: list | None) -> str | None:
         if any(k in text for k in (
             "which community", "which school", "community should", "go under",
             "comunidad", "escuela", "list under",
+            "name of the school", "name of the community", "tell me the name",
+            "school or community", "share your food under", "share with",
         )):
             return "community"
         if any(k in text for k in (

@@ -776,8 +776,10 @@ _DIFFERENT_COMMUNITY_USER_CUES = (
 
 _OPEN_COMMUNITY_PICK_KEYS = (
     "tell me the name", "name of the school", "name of the group",
+    "name of the community", "school or community",
     "which community should", "what community", "pick a community",
-    "choose a community", "select a community", "list your",
+    "choose a community", "select a community",
+    "list your community", "list your school",
     "dime el nombre", "nombre de la escuela", "nombre del grupo",
 )
 
@@ -1249,17 +1251,27 @@ def resolve_hands_on_share_chip_step(
         ))
         if photo_ask and not _is_post_confirm_ask(response_text):
             return "photo"
-        if last_asked == "community":
-            return "community"
+
+    # Open community catalog / "different community" BEFORE food_qty fallback.
+    # Otherwise a missing title shows apple/bread chips under school-name asks.
+    if (
+        _is_different_community_choice(message)
+        or _user_chose_different_community(message)
+        or _is_open_community_pick(response_text or "")
+        or _is_community_list_pick_turn(response_text or "", message)
+    ):
+        return "community_pick"
+
+    if response_text and (
+        last_asked == "community" or _is_community_selection_turn(response_text)
+    ):
+        return "community"
 
     title, _, _ = _share_title_qty_from_thread(history, message)
     if not title:
         return "food_qty"
     if not _has_explicit_quantity_in_thread(message, history):
         return "qty"
-
-    if _is_different_community_choice(message) or _user_chose_different_community(message):
-        return "community_pick"
 
     state = posting_flow_state(message, history)
     if not state.get("community_confirmed"):
