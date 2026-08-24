@@ -306,12 +306,14 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   // Good-until / expiry — only when actively asking, never on allergen turns
   // or acknowledgements that merely repeat a chosen date.
   const allergenAsk = /allerg|alérgen|alergia|dietary restriction/.test(t)
+  const postConfirmAsk = /ready to post|ready to publish|shall i post|should i post|want me to post|post these|sound good to post|looks? right|does this look|go ahead and share/.test(t)
   const expiryCue = /best by|best-by|good until|good for|use by|expir|vence|caduc|how long is it good|how long will it (keep|stay)|stay fresh|fecha de venc|when does it expire|best before/.test(t)
   const expiryAck = /got it|noted|i'?ll use|set to|set as|confirmed|listed as|using tomorrow|anotado/.test(t)
   const expiryReAsk = /change|different date|another date|update the|wrong date|want a different|\?|¿|when does|when is|how long/.test(t)
   if (
     expiryCue
     && !allergenAsk
+    && !postConfirmAsk
     && !/what food|donating|sharing|fresh apples|fresh bread/.test(t)
     && !(expiryAck && !expiryReAsk)
   ) {

@@ -4240,6 +4240,8 @@ def _is_expiry_ask(t: str) -> bool:
 
     Must not fire on allergen turns, post success, or acknowledgements that
     merely repeat a date already chosen (\"Got it — best by tomorrow.\").
+    Must not fire on ready-to-post / confirm summaries that mention a date
+    already chosen (\"…good until Aug 30… Ready to post these?\").
     """
     t = (t or "").lower()
     if _is_allergen_ask(t):
@@ -4250,9 +4252,19 @@ def _is_expiry_ask(t: str) -> bool:
             return False
     except Exception:
         pass
+    # Final share confirm / publish ask — never date chips, even when the
+    # summary restates "good until <date>".
+    if any(k in t for k in (
+        "ready to post", "ready to publish", "shall i post", "should i post",
+        "want me to post", "post these", "publish these", "post it?",
+        "look right", "looks right", "does this look", "does that look",
+        "sound good to post", "go ahead and share", "shall i go ahead",
+        "listo para publicar", "¿lo publico", "lo publico",
+    )):
+        return False
     if any(k in t for k in (
         "photo", "picture", "foto", "imagen", "community", "school",
-        "ready to post", "post it", "publish",
+        "publish",
     )) and not any(k in t for k in ("best by", "good until", "expir", "how long", "use by")):
         return False
 

@@ -800,6 +800,17 @@ def test_do_it_for_me_prechips_match_each_step():
     assert "Attach a photo" in ready_no_photo
     assert "Yes, post it" not in ready_no_photo
 
+    # Summary that restates good-until must NOT steal with date chips.
+    ready_with_date = generate_quick_replies(
+        "Thanks for that! You've got 2 loaves of bread and 1 freshly made "
+        "piece, both good until August 30, at Do Good Warehouse with pickup "
+        "at your place. Ready to post these?",
+        user_message="Do it for me",
+    )
+    assert "Tomorrow" not in ready_with_date
+    assert "In 2 days" not in ready_with_date
+    assert "Yes, post it" in ready_with_date or "Attach a photo" in ready_with_date
+
     claim_sound = generate_quick_replies(
         "Claim #1 for you — sound good?",
         user_message="claim it",
