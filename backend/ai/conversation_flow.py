@@ -3014,7 +3014,8 @@ _DESCRIPTION_ASK_CUES: tuple[str, ...] = (
     "write one short sentence", "write a short sentence", "sentence about these",
     "sentence about the", "few words about", "a short note",
     "tell me more about the food", "tell me a bit about",
-    "tell me a bit more about", "how would you describe",
+    "tell me a bit more about", "tell me a little about", "a little about the",
+    "how would you describe", "their condition", "condition or if",
     "condition or packaging", "condition, packaging",
     "write a description", "need a description", "need the description",
     "give me a description", "please describe",
@@ -3172,7 +3173,19 @@ def _assistant_last_asked_kind(history: list | None) -> str | None:
             "expire", "expiry", "best by", "best-by", "use by", "how fresh",
             "how long", "when was it made", "good until", "vence", "caduca",
         )):
-            return "expiry"
+            # "Got it — best-by August 30. Tell me about…?" is not an expiry ask.
+            ack = any(k in text for k in (
+                "got it", "noted", "i'll use", "i will use", "locked in",
+                "confirmed", "anotado", "perfecto", "listo —",
+            ))
+            still_asking_date = any(k in text for k in (
+                "when does", "when is it", "when will", "how long",
+                "need a date", "need the date", "what's the best",
+                "what is the best", "expire?", "expiry?", "best by?",
+                "good until?", "cuándo vence", "cuando vence",
+            ))
+            if not (ack and not still_asking_date):
+                return "expiry"
         if any(k in text for k in (
             "photo", "picture", "snap a", "upload a", "attach a", "foto", "imagen",
         )):

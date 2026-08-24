@@ -422,3 +422,38 @@ def test_description_ask_wins_over_expiry_ack():
     assert "sealed" in joined or "homemade" in joined
     assert "tomorrow" not in joined
     assert "in a month" not in joined
+
+
+def test_description_ask_wins_over_best_by_ack():
+    """'Got it — best-by Aug 30. Tell me a little about…?' → description, not dates."""
+    history = _hands_on_history(
+        {"role": "assistant", "message": "What food and how much?"},
+        {"role": "user", "message": "5 apples"},
+        {"role": "assistant", "message": "List under Do Good Warehouse?"},
+        {"role": "user", "message": "Yes, list under Do Good Warehouse"},
+        {"role": "assistant", "message": "When does it expire?"},
+        {"role": "user", "message": "August 30"},
+    )
+    text = (
+        "Thanks! Got it — best-by August 30. Can you tell me a little about the apples? "
+        "For example, their condition or if they're in a bag."
+    )
+    step = resolve_hands_on_share_chip_step(
+        "August 30",
+        history,
+        assistance_reminder="hands-on share posting",
+        response_text=text,
+    )
+    assert step == "description"
+    chips = build_turn_suggestions(
+        text,
+        "en",
+        tool_results=[],
+        min_chips=0,
+        last_user_message="August 30",
+        assistance_reminder="hands-on share posting",
+        history=history,
+    )
+    joined = _joined(chips)
+    assert "sealed" in joined or "homemade" in joined
+    assert "tomorrow" not in joined

@@ -1240,7 +1240,9 @@ def resolve_hands_on_share_chip_step(
             if not photo_evidence:
                 return "photo"
             return "post_confirm"
-        if _is_expiry_ask(response_text) or last_asked == "expiry":
+        if _is_expiry_ask(response_text) or (
+            last_asked == "expiry" and not _is_description_ask(response_text)
+        ):
             return "expiry"
         if last_asked == "photo":
             return "photo"
