@@ -4265,6 +4265,12 @@ def _is_expiry_ask(t: str) -> bool:
         "listo para publicar", "¿lo publico", "lo publico",
     )):
         return False
+    # Pickup-window ask ("when can people pick it up?") in the same turn as
+    # an expiry ack must NOT re-offer date chips — defer to pickup window.
+    if any(k in t for k in (
+        "when can", "pick them up", "pick it up", "pickup window", "what time",
+    )) and any(k in t for k in ("pick", "recog", "cuando pueden", "cuándo pueden")):
+        return False
     if any(k in t for k in (
         "photo", "picture", "foto", "imagen", "community", "school",
         "publish",

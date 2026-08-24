@@ -3035,9 +3035,9 @@ _DESCRIPTION_ASK_CUES: tuple[str, ...] = (
     "say about this food", "say about the food",
     "one short sentence describing", "short sentence describing",
     "write one short sentence", "sentence describing",
-    "describing the bread", "describing the food", "describing it",
+    "describing the bread", "describing the food",
+    "describing the food", "describing this",
     "how it's packed", "how it is packed", "how its packed",
-    "what kind", "anything special",
     "descripción corta", "descripcion corta", "describe la comida",
     "cuéntame más sobre", "cuentame mas sobre",
     "descripción para", "descripcion para",
@@ -3047,8 +3047,10 @@ _DESCRIPTION_ASK_CUES: tuple[str, ...] = (
 def _is_description_ask(text: str) -> bool:
     """True when the assistant is asking the donor to describe the food.
 
-    Must not fire on 'I'll put pickup in the description' or page copy
-    that merely mentions the description field.
+    Must NOT fire on:
+      - narrations ('I'll put pickup in the description')
+      - photo / expiry / community / post-confirm / claim / success turns
+        that merely mention the word 'description'.
     """
     t = (text or "").lower()
     if not t:
@@ -3058,13 +3060,33 @@ def _is_description_ask(text: str) -> bool:
             return False
     except Exception:
         pass
-    if any(k in t for k in _DESCRIPTION_ASK_CUES):
-        # Photo/expiry turns that mention the description field are not this ask.
-        if any(k in t for k in (
+
+    # Higher-priority turns win over description even if they include the word.
+    post_confirm_or_claim = any(k in t for k in (
+        "ready to post", "ready to publish", "shall i post", "should i post",
+        "want me to post", "post these", "publish these",
+        "sound good to post", "sounds good to post",
+        "look right", "looks right", "does this look", "does that look",
+        "go ahead and share", "shall i go ahead",
+        "shall i claim", "want me to claim", "claim this listing",
+        "claim it for you", "claim this for you", "claim #",
+        "which community", "which school", "list under", "list this under",
+        "post it under", "post this under", "post this to your community",
+        "share with", "community should", "your community",
+        "profile is linked", "profile is set", "use that one",
+    ))
+    photo_required = (
+        any(k in t for k in ("photo", "picture", "foto", "imagen"))
+        and any(k in t for k in (
             "attach a photo", "upload a photo", "please attach",
             "photo — required", "photo - required", "required before",
-        )):
-            return False
+            "before i can post", "before posting",
+        ))
+    )
+    if post_confirm_or_claim or photo_required:
+        return False
+
+    if any(k in t for k in _DESCRIPTION_ASK_CUES):
         if any(k in t for k in (
             "when does it expire", "best by", "good until", "good for", "use by",
         )) and not any(k in t for k in (
@@ -3074,16 +3096,28 @@ def _is_description_ask(text: str) -> bool:
         )):
             return False
         return True
+
     if not any(k in t for k in (
         "description", "descripción", "descripcion", "describe", "describing",
     )):
         return False
+
     # Assistant narrating where text will go — not asking the donor.
+    # Only exclude clear narrations; do NOT exclude ordinary questions like
+    # "What should I put as the description?".
     if any(k in t for k in (
-        "in the description", "to the description", "into the description",
-        "i'll put", "i will put", "putting that in",
+        "i'll put", "i will put", "i'll include", "i will include",
+        "i'll add", "i will add", "i'll note", "i will note",
+        "i'll save", "i will save", "i'll mark", "i will mark",
+        "i'll write", "i will write",
+        "putting that in", "putting it in", "putting this in",
+        "description saved", "description is saved",
+        "include your description on",
     )):
         return False
+    # A food-search question ("what kind of food are you looking for") mentions
+    # neither description nor describe, so we're safe by the earlier guard.
+
     return any(k in t for k in (
         "please", "add a", "need a", "need the", "can you", "could you",
         "would you", "tell me", "write", "give me", "share a", "include a",

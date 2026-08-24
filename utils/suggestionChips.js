@@ -282,7 +282,11 @@ export function resolveInputChips(suggestions, language = 'en', role = null, { a
     && filtered.every((c) => expiryChip.test(chipLabel(c)))
   const allergenAsk = /(allerg|alérgen|alergia|dietary restriction|shellfish|frutos secos)/.test(text)
   const postConfirmAsk = /(ready to post|ready to publish|shall i post|should i post|want me to post|post these|sound good to post|looks? right|does this look|go ahead and share)/.test(text)
-  const descriptionAsk = /(short description|add a description|describe the food|describe it|describing the|one short sentence|write one short sentence|one sentence about|tell me a bit about|tell me more about|how would you describe|people should know|should know about|note for recipients|condition or packaging|how is it packaged|how it'?s packed|what kind|anything special|short blurb|sentence about the food|put as the description|listing description|descripci[oó]n|\bdescription\b)/.test(text)
+  const descriptionAsk = (
+    /(short description|add a description|describe the food|describe it|describing the|one short sentence|write one short sentence|one sentence about|tell me a bit about|tell me more about|how would you describe|people should know|should know about|note for recipients|condition or packaging|how is it packaged|how it'?s packed|short blurb|sentence about the food|put as the description|listing description|descripci[oó]n)/.test(text)
+    && !/ready to post|ready to publish|shall i post|should i post|want me to post|post these|publish these|sound good to post|looks? right|does this look|does that look|go ahead and share|shall i go ahead|shall i claim|want me to claim|claim this listing|claim it for you|claim #|which community|which school|list under|listed under|post (this |it )?(under|to)|your community|profile is linked|use that one/.test(text)
+    && !/i'?ll (put|include|add|note|save|mark|write)|i will (put|include|add|note|save|mark|write)|putting (that|it|this) in|description saved|description is saved|include your description on/.test(text)
+  )
   const expiryAsk = (
     /(best by|best-by|good until|good for|use by|expir|when does it expire|how long is it good|stay fresh|fecha de venc|best before)/.test(text)
     && !allergenAsk

@@ -138,7 +138,7 @@ class TestBuildTurnSuggestions:
         chips = build_turn_suggestions(text, "en", tool_results=[])
         labels = [c if isinstance(c, str) else c.get("label") for c in chips]
         assert "Alameda Unified" in labels
-        assert "Different community" in labels
+        assert "Different one" in labels
         assert not any("Yes, post it" == (l or "") for l in labels)
 
     def test_community_chips_from_tool_suggestion(self):
@@ -206,6 +206,7 @@ class TestBuildTurnSuggestions:
         assert "Oakland USD" in labels
         assert "Alameda Unified" not in labels
         assert "Different community" not in labels
+        assert "Different one" not in labels
         assert "Thanks" not in labels
 
     def test_community_list_from_get_active_communities_tool(self):
