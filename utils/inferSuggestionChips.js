@@ -269,6 +269,16 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Find free food'), chip('Share extra food'), chip('Request food')]
   }
 
+  // Description — before photo/expiry so "add a short description" gets
+  // description chips even without a question mark.
+  if (
+    /short description|add a description|describe the food|describe it|description for recipients|one-sentence description|one sentence about|few words about|tell me more about the food|tell me a bit about|how would you describe|descripci[oó]n corta|una descripci[oó]n|describe la comida/.test(t)
+  ) {
+    return es
+      ? [chip('Fresco de hoy'), chip('Sin alérgenos'), chip('Listo para recoger')]
+      : [chip('Fresh today'), chip('No allergens'), chip('Ready for pickup')]
+  }
+
   // Pickup window
   if (/when can|pickup window|what time|cuándo pueden/.test(t)) {
     return es

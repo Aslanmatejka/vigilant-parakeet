@@ -1931,7 +1931,9 @@ def build_assistance_mode_reminder(
                     "MODO MANOS A LA OBRA — COMPARTIR:\n"
                     "El usuario quiere que lo hagas tú en el chat. Sigue el "
                     "flujo normal de publicación (preguntar solo lo que falte, "
-                    "luego post_food_listing). No abras la página Share Food."
+                    "luego post_food_listing). SIEMPRE pide una descripción "
+                    "corta de la comida — no la inventes; pasa SUS palabras "
+                    "como description. No abras la página Share Food."
                 )
             if goal == "request":
                 return (
@@ -1955,7 +1957,11 @@ def build_assistance_mode_reminder(
                 "expiry (Tomorrow / In 2 days / '2 days' / '2 months' / "
                 "Aug 30), any catalog community. Once they give a best-by "
                 "date, SAVE it as expiration_date and NEVER ask again. "
-                "Do not open the Share Food page for UI coaching."
+                "ALWAYS ask the donor for a short description of the food "
+                "(condition, packaging, what's included) — do NOT invent "
+                "or auto-write one. Pass THEIR words as description on "
+                "post_food_listing. Do not open the Share Food page for "
+                "UI coaching."
             )
         if goal == "request":
             return (
@@ -2278,22 +2284,15 @@ def posting_flow_state(message: str, history: list | None) -> dict:
     raw_expiry = _best_user_expiry_from_thread(message, history)
     expiry_is_past = bool(raw_expiry) and _calendar_date_is_past(raw_expiry)
     expiry_provided = bool(raw_expiry) and not expiry_is_past
-    description_asked = any(p in scoped_blob_l for p in (
-        "description", "describe the food", "short note", "tell me more about",
-        "descripción", "descripcion", "cuéntame más", "cuentame mas",
-    ))
-    description_provided = bool(re.search(
-        r"\b(?:description|descripci[oó]n)\s*[:=]\s*\S",
-        scoped_blob,
-        re.I,
-    )) or any(
-        len((msg.get("message") or "").strip()) >= 24
-        and msg.get("role") == "user"
-        and any(k in (msg.get("message") or "").lower() for k in (
-            "fresh", "organic", "boxed", "packaged", "includes", "contains",
-            "variety", "assorted", "mixed", "leftover", "surplus",
-        ))
+    # Only count a real ASK on an assistant turn — the word "description"
+    # in "I'll put pickup in the description" must not skip the question.
+    description_asked = any(
+        msg.get("role") == "assistant"
+        and _is_description_ask(msg.get("message") or "")
         for msg in scoped_hist
+    )
+    description_provided = bool(
+        _best_user_description_from_thread(message, history)
     )
     awaiting_photo = photo_asked and not has_photo
     return {
@@ -2460,10 +2459,15 @@ def _best_user_expiry_from_thread(
     best-by dates, then re-ask because the value looked wrong.
     """
     last_asked = _assistant_last_asked_kind(history)
-    loose_now = last_asked == "expiry" or _looks_like_standalone_date_answer(message)
-    exp = _extract_expiry_from_text(message or "", loose=loose_now)
-    if exp:
-        return exp
+    # A description-answer turn ("Fresh today") must not steal the saved
+    # best-by date or get stored as expiration_date.
+    if last_asked != "description":
+        loose_now = last_asked == "expiry" or _looks_like_standalone_date_answer(
+            message,
+        )
+        exp = _extract_expiry_from_text(message or "", loose=loose_now)
+        if exp:
+            return exp
 
     hist = list(history or [])
     # Newest expiry-question → user-reply pair.
@@ -3002,6 +3006,111 @@ def _parse_relative_expiry_date(blob: str, *, allow_bare_weekday: bool = False) 
     return None
 
 
+_DESCRIPTION_ASK_CUES: tuple[str, ...] = (
+    "short description", "add a description", "add a short description",
+    "describe the food", "describe it", "description for recipients",
+    "one-sentence description", "one sentence description",
+    "one sentence about", "few words about", "a short note",
+    "tell me more about the food", "tell me a bit about",
+    "how would you describe", "what's included", "what does it include",
+    "condition or packaging", "condition, packaging",
+    "write a description", "need a description", "need the description",
+    "give me a description", "please describe",
+    "descripción corta", "descripcion corta", "describe la comida",
+    "cuéntame más sobre", "cuentame mas sobre",
+    "una descripción", "una descripcion",
+    "descripción para", "descripcion para",
+)
+
+
+def _is_description_ask(text: str) -> bool:
+    """True when the assistant is asking the donor to describe the food.
+
+    Must not fire on 'I'll put pickup in the description' or page copy
+    that merely mentions the description field.
+    """
+    t = (text or "").lower()
+    if not t:
+        return False
+    try:
+        if is_post_success_response(t):
+            return False
+    except Exception:
+        pass
+    if any(k in t for k in _DESCRIPTION_ASK_CUES):
+        return True
+    if not any(k in t for k in (
+        "description", "descripción", "descripcion", "describe",
+    )):
+        return False
+    if any(k in t for k in (
+        "in the description", "to the description", "into the description",
+        "as the description", "the description field",
+    )):
+        return False
+    return any(k in t for k in (
+        "please", "add a", "need a", "need the", "can you", "could you",
+        "would you", "tell me", "write", "give me", "share a", "include a",
+        "?", "¿",
+    ))
+
+
+def _text_is_usable_description(text: str) -> bool:
+    """True when a user reply can be stored as the listing description."""
+    t = (text or "").strip()
+    if not t or len(t) < 4:
+        return False
+    if re.match(r"^\s*image:", t, re.I):
+        return False
+    if _is_short_affirmative(t) or _is_affirmative_post_confirm(t):
+        return False
+    if _looks_like_standalone_date_answer(t):
+        return False
+    if _is_different_community_choice(t):
+        return False
+    low = t.lower().rstrip(".!")
+    if low in {
+        "skip", "none", "n/a", "na", "idk", "don't know", "dont know",
+        "no idea", "not sure", "pass", "later",
+        "omitir", "ninguna", "no sé", "no se",
+    }:
+        return False
+    return True
+
+
+def _best_user_description_from_thread(
+    message: str,
+    history: list | None,
+) -> Optional[str]:
+    """The donor's own description — never an invented assistant draft."""
+    last_asked = _assistant_last_asked_kind(history)
+    if last_asked == "description" and _text_is_usable_description(message):
+        return (message or "").strip()
+
+    prefixed = re.search(
+        r"(?:description|descripci[oó]n)\s*[:=]\s*(.+)",
+        message or "",
+        re.I,
+    )
+    if prefixed and _text_is_usable_description(prefixed.group(1)):
+        return prefixed.group(1).strip()
+
+    hist = list(history or [])
+    for i in range(len(hist) - 1, -1, -1):
+        msg = hist[i]
+        if msg.get("role") != "assistant":
+            continue
+        if not _is_description_ask(msg.get("message") or ""):
+            continue
+        nxt = hist[i + 1] if i + 1 < len(hist) else None
+        if nxt and nxt.get("role") == "user":
+            reply = nxt.get("message") or ""
+            if _text_is_usable_description(reply):
+                return reply.strip()
+        break
+    return None
+
+
 def _assistant_last_asked_kind(history: list | None) -> str | None:
     """What the most recent assistant turn was asking about."""
     if not history:
@@ -3022,10 +3131,7 @@ def _assistant_last_asked_kind(history: list | None) -> str | None:
             "allerg", "alérgen", "alergen", "alergia", "dietary restriction",
         )):
             return "allergen"
-        if any(k in text for k in (
-            "description", "describe", "tell me more about", "short note",
-            "descripción", "descripcion", "cuéntame más", "cuentame mas",
-        )):
+        if _is_description_ask(text):
             return "description"
         if any(k in text for k in (
             "expire", "expiry", "best by", "best-by", "use by", "how fresh",
@@ -3899,6 +4005,7 @@ def _parse_freeform_food_answer(message: str, history: list | None) -> list[dict
     lower = t.lower()
     if any(k in lower for k in (
         "photo", "expire", "community", "school", "post it", "skip",
+        "description",
     )):
         return []
     m = re.match(
@@ -4422,6 +4529,17 @@ def enrich_post_food_listings_args(
                 item["expiration_date"] = thread_exp
                 item["expiry_date"] = thread_exp
 
+    thread_desc = _best_user_description_from_thread(message, history)
+    if thread_desc:
+        for item in out.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            existing = str(item.get("description") or "").strip()
+            if not existing or existing.lower().rstrip(".!") in {
+                "pickup only", "n/a", "none",
+            }:
+                item["description"] = thread_desc
+
     return out
 
 
@@ -4514,7 +4632,14 @@ def enrich_post_food_listing_args(
             out["qty"] = qty
         if unit and not out.get("unit"):
             out["unit"] = unit
-    desc = str(out.get("description") or "")
+    desc = str(out.get("description") or "").strip()
+    user_desc = _best_user_description_from_thread(message, history)
+    if user_desc:
+        placeholder = not desc or desc.lower().rstrip(".!") in {
+            "pickup only", "n/a", "none", "na",
+        }
+        if placeholder or user_desc.lower() not in desc.lower():
+            out["description"] = user_desc
     if not out.get("community_name"):
         m = re.search(r"Community:\s*([^\n\.,]+)", desc, re.IGNORECASE)
         if m:
@@ -4659,6 +4784,27 @@ def posting_tool_block_reason(
             "Refuse and ask them to attach a photo in chat. Never offer to "
             "post without a photo. Do NOT call post_food_listing yet."
         )
+
+    user_desc = (
+        str(args.get("description") or "").strip()
+        or _best_user_description_from_thread(message, history)
+    )
+    awaiting_photo_answer = (
+        last_asked == "photo"
+        and not state["has_photo"]
+        and not has_photo_arg
+    )
+    if (
+        not user_desc
+        and not state.get("description_provided")
+        and not awaiting_photo_answer
+    ):
+        return (
+            "Ask the donor for a one-sentence description of the food "
+            "(condition, packaging, what's included). Do not invent one. "
+            "Wait for their words and pass them as description. "
+            "Do NOT call post_food_listing yet."
+        )
     if ready:
         if not state["has_photo"] and not has_photo_arg:
             return (
@@ -4774,17 +4920,29 @@ def build_posting_step_reminder(
                 f" Usa expiration_date={parsed_exp} — ya la dieron en el chat."
                 if parsed_exp else " Usa la fecha que ya dieron."
             )
+            if not state.get("description_provided"):
+                return (
+                    "Sugerencia: el donante ya dio la fecha de vencimiento."
+                    f"{exp_hint} No la vuelvas a pedir — AHORA pide una "
+                    "descripción corta (estado, empaque, qué incluye). "
+                    "NO la inventes. Espera su respuesta. Pásala como "
+                    "description al publicar. Todavía no pidas foto."
+                )
             return (
                 "Sugerencia: el donante ya dio la fecha de vencimiento."
-                f"{exp_hint} No la vuelvas a pedir — sigue con alérgenos, "
-                "descripción corta o foto."
+                f"{exp_hint} No la vuelvas a pedir — sigue con foto."
             )
         if state["expiry_provided"] and not state.get("description_provided") and not ready:
-            if not state.get("description_asked"):
+            if last_asked == "description":
                 return (
-                    "Sugerencia: pide una descripción corta (estado, empaque, "
-                    "qué incluye). Pásala como description al publicar."
+                    "Sugerencia: espera la descripción corta del donante. "
+                    "No la inventes ni pases a foto todavía."
                 )
+            return (
+                "Sugerencia: pide una descripción corta (estado, empaque, "
+                "qué incluye). NO la inventes — espera su respuesta. "
+                "Pásala como description al publicar."
+            )
         if ready and state["has_photo"]:
             exp_hint = (
                 f" Usa expiration_date={parsed_exp} exactamente."
@@ -4865,19 +5023,32 @@ def build_posting_step_reminder(
             if parsed_exp else " The donor already gave a good-until date."
         )
         if last_asked == "expiry":
+            if not state.get("description_provided"):
+                return (
+                    "Nudge: the donor already gave a best-by / expiry date."
+                    f"{saved} Do NOT ask again — now ask for a one-sentence "
+                    "description of the food (condition, packaging, what's "
+                    "included). Do NOT invent one — wait for THEIR words. "
+                    "Pass it as description when posting. Do not ask for "
+                    "a photo yet."
+                )
             return (
                 "Nudge: the donor already gave a best-by / expiry date."
-                f"{saved} Do NOT ask again — move on to allergens, a short "
-                "description, or photo next (one question per turn)."
+                f"{saved} Do NOT ask again — move on to photo next."
             )
     if state["expiry_provided"] and not state.get("description_provided") and not ready:
-        if not state.get("description_asked"):
+        if last_asked == "description":
             return (
-                "Nudge: ask for a one-sentence description of the food "
-                "(condition, packaging, what's included). Pass it as "
-                "description when posting. One question — then continue "
-                "with allergens or photo."
+                "Nudge: wait for the donor's one-sentence description. "
+                "Do NOT invent one or skip to photo yet."
             )
+        return (
+            "Nudge: ask for a one-sentence description of the food "
+            "(condition, packaging, what's included). Do NOT invent "
+            "or auto-write it — wait for THEIR words. Pass it as "
+            "description when posting. One question — then continue "
+            "with photo."
+        )
     if ready and state["has_photo"]:
         exp_hint = (
             f" Use expiration_date={parsed_exp} exactly — do not invent another year."

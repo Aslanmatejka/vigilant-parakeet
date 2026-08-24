@@ -360,6 +360,11 @@ class TestPostingEnrichment:
             {"role": "user", "message": "Do Good Warehouse"},
             {"role": "assistant", "message": "When does it expire?"},
             {"role": "user", "message": "expiry 2030-01-01"},
+            {
+                "role": "assistant",
+                "message": "Please add a short description for recipients.",
+            },
+            {"role": "user", "message": "Ripe, still in the bunch."},
         ]
         reason = posting_tool_block_reason("Yes, post it", history)
         assert reason is not None

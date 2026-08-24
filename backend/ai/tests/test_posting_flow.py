@@ -83,7 +83,7 @@ class TestIsPostingFlow:
 
 
 class TestPostingFlowReminder:
-    def test_asks_photo_when_missing(self):
+    def test_asks_description_when_expiry_given(self):
         history = [
             {"role": "user", "message": "I want to share 3 loaves of bread"},
             {"role": "assistant", "message": "Which community should this go under?"},
@@ -92,6 +92,24 @@ class TestPostingFlowReminder:
             {"role": "user", "message": "expiry 2030-01-01"},
         ]
         reminder = posting_flow_reminder("yes that one", history, lang="en")
+        assert reminder is not None
+        assert "description" in reminder.lower()
+        assert "photo" not in reminder.lower() or "do not ask for a photo" in reminder.lower()
+
+    def test_asks_photo_after_description(self):
+        history = [
+            {"role": "user", "message": "I want to share 3 loaves of bread"},
+            {"role": "assistant", "message": "Which community should this go under?"},
+            {"role": "user", "message": "Alameda High"},
+            {"role": "assistant", "message": "When does it expire?"},
+            {"role": "user", "message": "expiry 2030-01-01"},
+            {
+                "role": "assistant",
+                "message": "Please add a short description for recipients.",
+            },
+            {"role": "user", "message": "Fresh today, still sealed."},
+        ]
+        reminder = posting_flow_reminder("Fresh today, still sealed.", history, lang="en")
         assert reminder is not None
         assert "photo" in reminder.lower()
 
@@ -102,6 +120,11 @@ class TestPostingFlowReminder:
             {"role": "user", "message": "yes"},
             {"role": "assistant", "message": "When does it expire or what's the best-by?"},
             {"role": "user", "message": "2030-07-10"},
+            {
+                "role": "assistant",
+                "message": "Please add a short description for recipients.",
+            },
+            {"role": "user", "message": "Fresh today, still sealed."},
             {"role": "assistant", "message": "Want to snap a quick photo? It helps people choose."},
         ]
         reason = posting_tool_block_reason(
@@ -125,6 +148,11 @@ class TestPostingFlowReminder:
             {"role": "user", "message": "yes"},
             {"role": "assistant", "message": "Best by 2030-07-10?"},
             {"role": "user", "message": "yes"},
+            {
+                "role": "assistant",
+                "message": "Please add a short description for recipients.",
+            },
+            {"role": "user", "message": "Ready for pickup."},
             {"role": "assistant", "message": "Want to snap a quick photo?"},
         ]
         reminder = build_posting_step_reminder("yes", history, lang="en")
@@ -176,6 +204,11 @@ class TestPostingFlowReminder:
             {"role": "user", "message": "yes"},
             {"role": "assistant", "message": "Best by tomorrow?"},
             {"role": "user", "message": "tomorrow"},
+            {
+                "role": "assistant",
+                "message": "Please add a short description for recipients.",
+            },
+            {"role": "user", "message": "Still sealed, leftover mix."},
             {"role": "user", "message": "image: /uploads/ai/abc.jpg"},
         ]
         reminder = posting_flow_reminder("yes post it", history, lang="en")
@@ -194,6 +227,11 @@ class TestSinglePostConfirm:
             {"role": "user", "message": "yes"},
             {"role": "assistant", "message": "When do they expire?"},
             {"role": "user", "message": "2030-07-20"},
+            {
+                "role": "assistant",
+                "message": "Please add a short description for recipients.",
+            },
+            {"role": "user", "message": "Fresh today, boxed and ready."},
             {"role": "user", "message": "image: https://cdn.example.com/bread.jpg"},
             {"role": "user", "message": "image: https://cdn.example.com/apples.jpg"},
             {
@@ -225,6 +263,11 @@ class TestSinglePostConfirm:
             {"role": "user", "message": "yes"},
             {"role": "assistant", "message": "Best by?"},
             {"role": "user", "message": "Friday"},
+            {
+                "role": "assistant",
+                "message": "Please add a short description for recipients.",
+            },
+            {"role": "user", "message": "Ripe and ready for pickup."},
             {"role": "user", "message": "image: https://cdn.example.com/o.jpg"},
             {
                 "role": "assistant",
@@ -252,9 +295,14 @@ class TestSinglePostConfirm:
             {"role": "user", "message": "yes"},
             {"role": "assistant", "message": "Best by?"},
             {"role": "user", "message": "2030-07-20"},
+            {
+                "role": "assistant",
+                "message": "Please add a short description for recipients.",
+            },
+            {"role": "user", "message": "A few loaves left, still fresh."},
         ]
         reason = posting_tool_block_reason(
-            "2030-07-20",
+            "A few loaves left, still fresh.",
             history,
             {
                 "title": "bread",
@@ -263,6 +311,7 @@ class TestSinglePostConfirm:
                 "community_confirmed": True,
                 "expiration_date": "2030-07-20",
                 "images": ["https://cdn.example.com/b.jpg"],
+                "description": "A few loaves left, still fresh.",
             },
         )
         assert reason is not None

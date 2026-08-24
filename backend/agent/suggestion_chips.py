@@ -841,7 +841,12 @@ def _is_community_selection_turn(text: str) -> bool:
     # the chip rail ("I'll list under Alameda Unified. When does it expire?").
     try:
         from backend.ai.ai_engine import _is_allergen_ask, _is_expiry_ask
-        if _is_expiry_ask(full) or _is_allergen_ask(full):
+        from backend.ai.conversation_flow import _is_description_ask
+        if (
+            _is_expiry_ask(full)
+            or _is_allergen_ask(full)
+            or _is_description_ask(full)
+        ):
             if not any(k in full for k in (
                 "which community", "which school", "community should",
                 "qué comunidad", "cuál escuela", "cual escuela",

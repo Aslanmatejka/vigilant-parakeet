@@ -207,6 +207,11 @@ class TestPostConfirmDoesNotReaskPhotos:
             {"role": "user", "message": "in 3 days"},
             {
                 "role": "assistant",
+                "message": "Please add a short description for recipients.",
+            },
+            {"role": "user", "message": "Fresh garden mix, still cool."},
+            {
+                "role": "assistant",
                 "message": "Want to snap a quick photo of the tomatoes or carrots?",
             },
             {"role": "user", "message": "image: https://cdn.example.com/veggies.jpg"},
@@ -381,6 +386,11 @@ class TestCustomExpiryHandsOnPath:
 
     def test_cannot_post_without_photo_url(self):
         history = self._history([
+            {
+                "role": "assistant",
+                "message": "Please add a short description for recipients.",
+            },
+            {"role": "user", "message": "Assorted leftover vegetables, boxed."},
             {"role": "assistant", "message": "Please attach a photo — required before I can post."},
             {"role": "user", "message": "I already uploaded it"},
             {

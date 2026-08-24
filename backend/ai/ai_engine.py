@@ -513,8 +513,10 @@ def _build_action_policy() -> str:
         "## Sharing feels like texting a neighbor (donor flow)\n"
         "Aim for 3–5 turns total. Required to post: title, quantity, "
         "an address (donor profile counts), the community/school it "
-        "belongs to (CONFIRMED by the donor), an expiration date, and "
+        "belongs to (CONFIRMED by the donor), an expiration date, "
+        "a donor-written description (always ask — never invent), and "
         "at least one photo (REQUIRED — never post without images[]). "
+        "Ask for the description after expiry, before the photo. "
         "The order of asking is "
         "flexible — parse everything the donor gives you up front, "
         "then ask only what's still missing, in the most natural order. "
@@ -548,8 +550,9 @@ def _build_action_policy() -> str:
         "food. Keep title, quantity, allergens, and expiry already given; "
         "only ask which community they want (offer get_active_communities "
         "choices — include the full list). After they name the school, "
-        "acknowledge it and continue to the next missing field (usually "
-        "photo) — do not restart the share from 'what food'.\n"
+        "acknowledge it and continue to the next missing field "
+        "(expiry, then description, then photo) — do not restart "
+        "the share from 'what food'.\n"
         "EXCEPTION — fulfilling a community food request: if the donor "
         "is sharing food for a specific open request (from Community "
         "Requests / dispatch queue), pass fulfilling_request_id with "
@@ -567,6 +570,11 @@ def _build_action_policy() -> str:
         "remaining good-until date (made today → tomorrow). Never pass "
         "expiration_date=today (midnight fails as already past). Map to an "
         "ISO date of today or later. Never silently invent one.\n"
+        "\n"
+        "Description: ALWAYS ask for one short sentence about the food "
+        "(condition, packaging, what's included). Do NOT invent it. "
+        "Pass their words as `description` on post_food_listing. "
+        "Ask after expiry, before the photo.\n"
         "\n"
         "Food title: accept ANY dish or item they name (leftover lasagna, "
         "biryani, canned chickpeas, 100 boxes of vegetables). Do not "
@@ -4359,6 +4367,16 @@ def generate_quick_replies(
             add("Done", "What's next?", "Need help")
         return out
 
+    # Description ask — before photo/expiry so Nouri's "short description"
+    # turn gets description chips, not community or attach-photo.
+    from backend.ai.conversation_flow import _is_description_ask
+    if _is_description_ask(t) and not _is_allergen_ask(t):
+        if es:
+            add("Fresco de hoy", "Sin alérgenos", "Listo para recoger")
+        else:
+            add("Fresh today", "No allergens", "Ready for pickup")
+        return out
+
     # Photo required — often no "?" ("Please upload a photo — required…").
     # Never offer skip. Run before the question-only gate.
     photo_ask = any(k in t for k in ("photo", "picture", "foto", "imagen")) and any(
@@ -4446,16 +4464,7 @@ def generate_quick_replies(
             add("Fresh bread", "Vegetable box", "Prepared meals")
         return out
 
-    # Description
-    if any(k in t for k in (
-        "short description", "add a description", "describe the food",
-        "description for recipients", "descripción", "descripcion",
-    )):
-        if es:
-            add("Fresco de hoy", "Sin alérgenos", "Listo para recoger")
-        else:
-            add("Fresh today", "No allergens", "Ready for pickup")
-        return out
+    # Description handled earlier via _is_description_ask (before photo).
 
     # Combined food + amount (no "?") — also "What food … and how much?"
     if _is_combined_food_qty_ask(t):
