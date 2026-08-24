@@ -4179,6 +4179,7 @@ def _is_combined_food_qty_ask(t: str) -> bool:
     if any(k in t for k in (
         "what food and how much", "food and how much", "food name and",
         "name and roughly how much", "what and how much",
+        "tell me what you have", "tell me what you've got",
         "qué y cuánto", "que y cuanto", "comida y cantidad",
         "qué comida y cuánto", "que comida y cuanto",
         "qué comida y cuánta", "que comida y cuanta",
@@ -4187,7 +4188,7 @@ def _is_combined_food_qty_ask(t: str) -> bool:
     food_ask = any(k in t for k in (
         "what food", "what would you like to share", "what would you like to donate",
         "what are you sharing", "what are you donating", "what do you have",
-        "what kind of food", "food name", "tell me the food",
+        "tell me what you have", "what kind of food", "food name", "tell me the food",
         "qué comida", "que comida",
         "qué quieres compartir", "que quieres compartir",
         "qué te gustaría compartir", "que te gustaria compartir",
@@ -4202,6 +4203,13 @@ def _is_combined_food_qty_ask(t: str) -> bool:
     return food_ask and qty_ask
 
 
+_ALLERGEN_WORDS: tuple[str, ...] = (
+    "nuts", "dairy", "eggs", "wheat", "soy", "shellfish", "gluten",
+    "peanut", "sesame", "fish", "frutos secos", "lácteos", "lacteos",
+    "huevos", "trigo",
+)
+
+
 def _is_allergen_ask(t: str) -> bool:
     """True when the assistant is asking about allergens / dietary flags."""
     t = (t or "").lower()
@@ -4211,6 +4219,13 @@ def _is_allergen_ask(t: str) -> bool:
     )):
         return True
     # Common hands-on phrasing lists major allergens without the word itself.
+    hits = sum(1 for w in _ALLERGEN_WORDS if w in t)
+    asking = any(k in t for k in (
+        "contain", "any ", "should i", "flag", "note", "mention",
+        "know about", "does this", "do these", "?", "¿",
+    ))
+    if hits >= 2 and asking:
+        return True
     if any(k in t for k in ("shellfish", "frutos secos", "gluten", "lácteos", "lacteos")):
         if any(k in t for k in (
             "nuts", "dairy", "eggs", "wheat", "soy", "any ", "note",
@@ -4375,11 +4390,13 @@ def generate_quick_replies(
             "before posting", "before we post", "mandar", "sube", "subir",
             "photo of", "picture of", "snap", "send a photo", "send a picture",
             "send one", "so we can post", "para publicar",
+            "without a photo", "without photo", "skip the photo",
         )
     )
     if photo_ask and not any(k in t for k in (
         "photos received", "got your photo", "thanks for the photo", "with your photos",
-        "photo attached", "foto adjunta", "fotos recibidas", "already have a photo",
+        "with photo", "with a photo", "photo attached", "foto adjunta", "fotos recibidas",
+        "already have a photo", "look right", "looks right", "does this look",
         "ready to post", "shall i post", "want me to post", "listo para publicar",
         "lo publico", "lo publicamos", "publicarlo",
     )):
@@ -4653,45 +4670,75 @@ def generate_quick_replies(
             add("Yes, confirm", "Wait, edit it", "Cancel")
         return out
 
-    # Community confirm — suggested school + "Different one"
+    # Community confirm — suggested school + "Different one".
+    # Do not steal address confirms, look-right recaps, or "ready to post".
     community_confirm_keys = (
         "list under", "list this under", "which community", "which school",
-        "school should", "community should", "school district", "go under",
-        "post under", "post this under", "should this go under",
-        "should it go under", "under which", "should i use", "use alameda",
+        "school should", "community should", "go under",
+        "post under", "post this under", "post this to", "post it to",
+        "should this go under", "should it go under", "under which",
         "for the community", "community for",
+        "your community", "use that one", "linked to", "profile is linked",
+        "profile is connected", "profile is set",
         "comunidad", "escuela", "listar bajo", "bajo qué", "bajo que",
         "publicar bajo", "en qué comunidad", "en que comunidad", "bajo cuál",
     )
+    address_turn = any(c in t for c in (
+        "address", "street", "profile address", "what address", "which address",
+        "pickup address", "dirección", "direccion", "calle",
+    )) and not any(k in t for k in (
+        "community", "school", "comunidad", "escuela", "list under",
+        "warehouse",
+    ))
+    post_recap = any(k in t for k in (
+        "ready to post", "ready to publish", "shall i post", "should i post",
+        "look right", "looks right", "does this look", "does that look",
+        "sound good to post", "go ahead and share",
+    ))
+    community_intent = any(k in t for k in community_confirm_keys) or (
+        "listed under" in t
+        and any(k in t for k in ("should", "shall", "want me", "would you"))
+    )
     community_ask = (
         ("?" in text or "¿" in text)
-        and (
-            any(k in t for k in community_confirm_keys)
-            or (
-                "listed under" in t
-                and any(k in t for k in ("should", "shall", "want me", "would you"))
-            )
-            or (
-                suggested_community
-                and suggested_community.lower() in t
-                and any(k in t for k in ("under", "community", "school", "comunidad", "escuela", "bajo", "use"))
-            )
-        )
+        and community_intent
+        and not address_turn
     )
+    # Recap confirms that mention a school ("look right … under Alameda")
+    # must not become community chips.
+    if community_ask and post_recap and not any(k in t for k in (
+        "your community", "which community", "which school", "list under",
+        "list this under", "for the community", "linked to", "use that one",
+        "community should", "post this to", "post it to", "post this under",
+        "post under", "comunidad", "escuela",
+    )):
+        community_ask = False
     if community_ask and not is_post_success_response(text):
-        if suggested_community:
+        from backend.agent.suggestion_chips import _extract_community_names_from_text
+        named = [
+            n for n in _extract_community_names_from_text(text)
+            if n.lower() not in {"school district", "community", "your community"}
+        ]
+        # Prefer the school named in this reply over a stale profile default.
+        pick = None
+        if suggested_community and suggested_community.lower() in t:
+            pick = suggested_community
+        elif named:
+            pick = named[0]
+        if pick:
             if es:
-                add(suggested_community[:48], "Otra comunidad")
+                add(pick[:48], "Otra comunidad")
             else:
-                add(suggested_community[:48], "Different one")
+                add(pick[:48], "Different one")
             return out
         if communities:
             add(*communities[:4])
             return out
-        # Extract a Proper Name before "?" / "—" if present.
+        # Extract a Proper Name after under / to / linked to.
         import re as _re
         m = _re.search(
-            r"(?:use|under|—|-)\s*([A-Z][A-Za-z0-9 &.'-]{2,40}?)(?:\s+for\s+the\s+community)?\s*\??\s*$",
+            r"(?:linked to|connected to|use|under|to|—|-)\s*"
+            r"([A-Z][A-Za-z0-9 &.'/-]{2,48}?)(?:\s+for\s+the\s+community)?(?:\s*\?|\s*$|[.!,])",
             text.strip(),
         )
         if m:
@@ -4702,6 +4749,12 @@ def generate_quick_replies(
                 else:
                     add(name[:48], "Different one")
                 return out
+        if suggested_community:
+            if es:
+                add(suggested_community[:48], "Otra comunidad")
+            else:
+                add(suggested_community[:48], "Different one")
+            return out
         if es:
             add("Usar la de mi perfil", "Otra comunidad")
         else:
@@ -4734,13 +4787,14 @@ def generate_quick_replies(
             add("Yes, claim these", "Change amounts", "Cancel")
         return out
 
-    # Single-claim confirmation.
+    # Single-claim confirmation. Require a real claim verb — "sound good to post"
+    # must never become claim chips.
     if any(k in t for k in (
             "shall i claim", "want me to claim", "claim this listing",
             "claim it for you", "claim this for you", "claim that listing",
-            "claim #1", "claim #2", "claim #3", "sound good",
+            "claim #1", "claim #2", "claim #3",
             "reclamar este", "reclamarlo", "quieres que lo reclame",
-    )) and any(k in t for k in ("claim", "reclamar", "sound good", "for you")):
+    )) and any(k in t for k in ("claim", "reclamar")):
         if es:
             add("Sí, reclámalo", "No, gracias", "Cancelar")
         else:
@@ -4842,6 +4896,9 @@ def generate_quick_replies(
         "ready to post", "ready to publish", "go ahead and post",
         "good to post", "good to publish", "confirm and post",
         "shall i go ahead", "should i go ahead", "before i post",
+        "look right", "looks right", "does this look", "does that look",
+        "sound good to post", "sounds good to post",
+        "go ahead and share",
         # Spanish
         "publicarlo", "publicar la", "publicar el", "publico la", "publico el",
         "lo publique", "que lo publique", "quieres que lo publique",
@@ -4859,7 +4916,22 @@ def generate_quick_replies(
             "foto adjunta", "fotos recibidas", "con tus fotos", "con su foto",
             "con foto", "con una foto",
         )) or "http" in t
-        if not photo_evidence:
+        # Only nudge for a photo on the classic "Ready to post / Shall I post"
+        # recap that never mentions one. Recap confirms ("look right",
+        # "sound good to post", "share this") are Yes/Edit/Cancel.
+        photo_nudge = (
+            not photo_evidence
+            and any(k in t for k in (
+                "ready to post", "ready to publish",
+                "shall i post", "should i post", "want me to post",
+            ))
+            and not any(k in t for k in (
+                "look right", "looks right", "does this look", "does that look",
+                "sound good", "sounds good",
+                "go ahead and share",
+            ))
+        )
+        if photo_nudge:
             if es:
                 add("Adjuntar foto")
             else:
@@ -4909,13 +4981,22 @@ def generate_quick_replies(
             add("No allergens", "Just gluten", "Dairy", "Nuts")
         return out
 
-    # Photo — required; never offer skip (also handled before ? gate)
+    # Photo — required; never offer skip (also handled before ? gate).
+    # A recap that merely mentions "with photo" is a post confirm, not a photo ask.
     if "photo" in t or "picture" in t or "foto" in t or "imagen" in t:
-        if not any(k in t for k in (
+        photo_summary = any(k in t for k in (
             "photos received", "got your photo", "ready to post", "shall i post",
+            "with photo", "with a photo", "look right", "looks right",
+            "does this look", "sound good", "go ahead and share",
             "foto adjunta", "fotos recibidas", "lo publico", "lo publicamos",
             "listo para publicar", "publicarlo",
-        )):
+        ))
+        photo_ask_now = any(k in t for k in (
+            "required", "please", "need", "upload", "attach", "add a",
+            "send a photo", "snap", "skip the photo", "without a photo",
+            "without photo", "before i can post", "before posting",
+        ))
+        if photo_ask_now and not photo_summary:
             if es:
                 add("Adjuntar foto")
             else:
@@ -4961,7 +5042,8 @@ def generate_quick_replies(
     if any(k in t for k in (
             "what food", "what would you like to share", "what would you like to donate",
             "what are you sharing", "what are you donating", "what is it", "what's the food",
-            "what do you have", "what kind of food", "food name", "tell me the food",
+            "what do you have", "tell me what you have", "tell me what you've got",
+            "what kind of food", "food name", "tell me the food",
             # Spanish
             "qué comida", "que comida",
             "qué quieres compartir", "que quieres compartir",

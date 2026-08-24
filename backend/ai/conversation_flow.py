@@ -3016,6 +3016,8 @@ _DESCRIPTION_ASK_CUES: tuple[str, ...] = (
     "condition or packaging", "condition, packaging",
     "write a description", "need a description", "need the description",
     "give me a description", "please describe",
+    "should know about the food", "people should know",
+    "anything else about the food", "note for recipients",
     "descripción corta", "descripcion corta", "describe la comida",
     "cuéntame más sobre", "cuentame mas sobre",
     "descripción para", "descripcion para",

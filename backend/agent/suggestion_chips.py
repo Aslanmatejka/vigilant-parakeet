@@ -725,16 +725,18 @@ def _filter_chips_to_match_response(
 
 
 _COMMUNITY_CUES = (
-    "community", "school", "district", "neighborhood", "comunidad",
-    "escuela", "distrito",
+    "community", "school", "district", "neighborhood", "warehouse",
+    "elementary", "unified", "academy",
+    "comunidad", "escuela", "distrito",
 )
 
 _COMMUNITY_PROMPT_KEYS = (
     "which community", "what community", "community is this", "community should",
-    "post to", "share with", "listed under", "list this under", "list under",
-    "for which community", "profile community", "your community",
+    "list under", "list this under", "listed under",
+    "post to", "share with", "for which community", "profile community", "your community",
     "confirm the community", "is this for", "different community",
-    "profile is set", "profile is connected", "post it there",
+    "profile is set", "profile is connected", "profile is linked",
+    "linked to", "use that one", "post it there", "post this to",
     "qué comunidad", "que comunidad", "cuál comunidad", "cual comunidad",
     "para qué comunidad", "a qué comunidad", "tu comunidad",
     "comunidad de tu perfil", "bajo qué comunidad", "otra comunidad",
@@ -895,7 +897,7 @@ def _extract_community_names_from_text(text: str) -> List[str]:
 
     for match in re.finditer(
         r"(?:linked to|connected to|set to|list(?:ed)? under|list this under|"
-        r"post (?:it )?(?:to|under)|profile is(?:\s+set to|\s+linked to|\s+connected to)?)\s+"
+        r"post (?:it |this )?(?:to|under)|profile is(?:\s+set to|\s+linked to|\s+connected to)?)\s+"
         r"([A-Za-z][\w\s\-]{2,48}?)(?:[\?\.,!—\-]|$|\s+(?:should|or|and|—))",
         segment,
         re.I,

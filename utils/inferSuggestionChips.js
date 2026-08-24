@@ -133,7 +133,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   // Skip when the turn is really a post confirm or success summary.
   if (/photo|picture|foto|imagen/.test(t)
     && /required|please|need|upload|attach|add a|send a photo|before post|so we can post|snap|skip the photo|without a photo/.test(t)
-    && !/ready to post|shall i post|want me to post|photos received|got your photo|with your photos/.test(t)) {
+    && !/ready to post|shall i post|want me to post|photos received|got your photo|with your photos|with photo|look right|looks right|does this look/.test(t)) {
     return es
       ? [chip('Adjuntar foto')]
       : [chip('Attach a photo')]
@@ -165,10 +165,47 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Use my profile name'), chip("It's an organization")]
   }
 
+  // Address / where pickup — before community / post confirm.
+  if (/where should|what address|profile address|does that look good|pickup address|dirección/.test(t)) {
+    return es
+      ? [chip('Usar mi dirección guardada'), chip('Es otra dirección'), chip('No tengo una')]
+      : [chip('Use my saved address'), chip('Use a different address'), chip("I don't have one saved")]
+  }
+
+  // Community confirm / pick — BEFORE post confirm so
+  // "want me to post this to your community" is not treated as publish.
+  // Require a real community cue so address / look-right recaps do not match.
+  if (!isPostSuccessResponse(raw)
+    && /community|school|warehouse|linked to|list under|listed under|use that one|comunidad|escuela|district/.test(t)
+    && /which community|which school|list under|listed under|community should|for the community|post (this |it )?(under|to)|go under|school district|your community|use that one|linked to|profile is linked|profile is connected|profile is set|comunidad|escuela|publicar bajo|bajo qu[eé]/.test(t)
+    && (/(\?|¿|should|shall|want me|would you|use that one)/.test(t))
+    && !/ready to post|shall i post|looks? right|does this look|sound good to post|go ahead and share/.test(t)) {
+    const nameMatch = String(responseText || '').match(
+      /(?:linked to|connected to|listed under|list under|use|under|—|-)\s*([A-Z][A-Za-z0-9 &.'/-]{2,48}?)(?:\s+for\s+the\s+community)?(?:\s*,|\s*\?|\s*$|[.!,])/,
+    )
+    const endMatch = String(responseText || '').match(
+      /,\s*([A-Z][A-Za-z][A-Za-z0-9 &.'/-]{1,48}?)\s*\?\s*$/,
+    )
+    const suggested = ((nameMatch && nameMatch[1]) || (endMatch && endMatch[1]) || '').trim()
+    if (suggested && !/^(the|this|that|your|a|an)$/i.test(suggested)) {
+      return es
+        ? [chip(suggested.slice(0, 48)), chip('Otra comunidad')]
+        : [chip(suggested.slice(0, 48)), chip('Different one')]
+    }
+    return es
+      ? [chip('Usar la de mi perfil'), chip('Otra comunidad')]
+      : [chip('Use my profile community'), chip('Different one')]
+  }
+
   // Post / claim confirms
-  if (/ready to post|want me to post|shall i post|publish it|post it|say yes if|publish now/.test(t)) {
-    const photoEvidence = /photos received|got your photo|with your photos|photo attached|foto adjunta|fotos recibidas|con tus fotos|image:|https?:\/\//.test(t)
-    if (!photoEvidence) {
+  if (/ready to post|want me to post|shall i post|publish it|post it|say yes if|publish now|sound good to post|looks? right|does this look|go ahead and share|shall i go ahead/.test(t)
+    && !(/your community|list under|linked to|use that one|for the community/.test(t)
+      && !/ready to post|shall i post|looks? right|sound good to post|go ahead and share/.test(t))) {
+    const photoEvidence = /photos received|got your photo|with your photos|with photo|with a photo|photo attached|foto adjunta|fotos recibidas|con tus fotos|image:|https?:\/\//.test(t)
+    const photoNudge = !photoEvidence
+      && /ready to post|ready to publish|shall i post|should i post|want me to post/.test(t)
+      && !/looks? right|does this look|sound good|go ahead and share|your community|list under|linked to/.test(t)
+    if (photoNudge) {
       return es ? [chip('Adjuntar foto')] : [chip('Attach a photo')]
     }
     return es
@@ -186,35 +223,13 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Yes, claim it'), chip('No thanks'), chip('Cancel')]
   }
 
-  // Community confirm / pick (hands-on share) — only when actively asking
-  if (!isPostSuccessResponse(raw)
-    && /which community|which school|list under|listed under|should i use|community should|post (this |it )?under|go under|school district|your community|comunidad|escuela|publicar bajo|bajo qu[eé]/.test(t)
-    && (/(\?|¿|should|shall|want me|would you)/.test(t))) {
-    // Try to surface the suggested school name from the reply when present.
-    const nameMatch = String(responseText || '').match(
-      /(?:under|—|-)\s*([A-Z][A-Za-z0-9 &.'/-]{2,48}?)(?:\s*,|\s*\?|\s*$)/,
-    )
-    const suggested = nameMatch ? nameMatch[1].trim() : ''
-    if (suggested && !/^(the|this|that|your|a|an)$/i.test(suggested)) {
-      return es
-        ? [chip(suggested.slice(0, 48)), chip('Otra comunidad')]
-        : [chip(suggested.slice(0, 48)), chip('Different one')]
-    }
-    return es
-      ? [chip('Usar la de mi perfil'), chip('Otra comunidad')]
-      : [chip('Use my profile community'), chip('Different one')]
-  }
-
-  // Address / where pickup
-  if (/where should|what address|profile address|does that look good|pickup address|dirección/.test(t)) {
-    return es
-      ? [chip('Usar mi dirección guardada'), chip('Es otra dirección'), chip('No tengo una')]
-      : [chip('Use my saved address'), chip('Use a different address'), chip("I don't have one saved")]
-  }
-
   // Allergens — before food/qty/expiry so mixed "best by… any allergens?" wins.
   if (
     /allerg|alérgen|alergia|dietary restriction|restricciones diet/.test(t)
+    || (
+      (t.match(/\b(nuts|dairy|eggs|wheat|soy|shellfish|gluten|peanut|sesame|fish|frutos secos|l[aá]cteos|huevos|trigo)\b/g) || []).length >= 2
+      && /(any |contain|should i|note|know about|does this|do these|dietary|allerg|\?|¿)/.test(t)
+    )
     || (
       /(nuts|dairy|eggs|wheat|soy|shellfish|gluten|frutos secos|lácteos)/.test(t)
       && /(any |contain|should i|note|know about|dietary|allerg)/.test(t)
@@ -227,11 +242,11 @@ export function inferChipsFromResponse(responseText, language = 'en') {
 
   // Food ask / looking for — BEFORE bare qty so hands-on
   // "What food … and how much?" gets food+qty examples, not 1/3/5/10.
-  const foodAsk = /what food|food name|what would you like to share|what would you like to donate|what are you sharing|what are you donating|what do you have|what kind of food|tell me the food|qué comida|qué quieres compartir|qué vas a (donar|compartir)/.test(t)
+  const foodAsk = /what food|food name|what would you like to share|what would you like to donate|what are you sharing|what are you donating|what do you have|tell me what you have|tell me what you've got|what kind of food|tell me the food|qué comida|qué quieres compartir|qué vas a (donar|compartir)/.test(t)
   const qtyAsk = /how much|how many|cuántos|cuántas|cuánto|cuánta/.test(t)
   const combinedFoodQty = (
     (foodAsk && qtyAsk)
-    || /food name and|roughly how much|food and how much|qué y cuánto|qué comida y cuánto/.test(t)
+    || /food name and|roughly how much|food and how much|tell me what you have|tell me what you've got|qué y cuánto|qué comida y cuánto/.test(t)
   )
   if (combinedFoodQty) {
     return es
@@ -273,7 +288,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   // description chips even without a question mark. Do not use allergen
   // or best-by chips here — those collide with other Do-it-for-me steps.
   if (
-    /short description|add a description|describe the food|describe it|description for recipients|one-sentence description|one sentence about|few words about|tell me more about the food|tell me a bit about|tell me a bit more about|how would you describe|descripci[oó]n corta|descripci[oó]n para|describe la comida/.test(t)
+    /short description|add a description|describe the food|describe it|description for recipients|one-sentence description|one sentence about|few words about|tell me more about the food|tell me a bit about|tell me a bit more about|how would you describe|should know about the food|people should know|anything else about the food|note for recipients|descripci[oó]n corta|descripci[oó]n para|describe la comida/.test(t)
   ) {
     return es
       ? [chip('Sigue sellado'), chip('Casero, refrigerado'), chip('Sobras variadas')]

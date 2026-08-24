@@ -63,11 +63,15 @@ def test_handoff_question_gets_handoff_chips():
 
 def test_address_confirm_gets_address_chips():
     out = generate_quick_replies(
-        "Should I use your profile address 1423 Park St for the pickup spot?"
+        "Should I use your profile address 1423 Park St for the pickup spot?",
+        suggested_community="Alameda Unified",
     )
     assert out
     joined = " ".join(out).lower()
-    assert "address" in joined or "profile" in joined or "use that" in joined
+    assert "address" in joined or "use that one" in joined or "saved" in joined
+    assert "Alameda Unified" not in out
+    assert "Different one" not in out
+    assert "Yes, post it" not in out
 
 
 def test_quantity_question_gets_numbers():
@@ -703,4 +707,103 @@ def test_do_it_for_me_prechips_match_each_step():
     assert "Yes, post it" in confirm
     assert "Attach a photo" not in confirm
     assert "Tomorrow" not in confirm
+
+    food_open = generate_quick_replies(
+        "Perfect. Tell me what you have.",
+        user_message="Do it for me",
+    )
+    assert "5 apples" in food_open or "Bread" in food_open
+    assert "Yes, post it" not in food_open
+    assert "Attach a photo" not in food_open
+
+    warehouse = generate_quick_replies(
+        "List under Do Good Warehouse?",
+        suggested_community="Alameda Unified",
+        user_message="Do it for me",
+    )
+    joined_wh = " ".join(warehouse).lower()
+    assert "do good warehouse" in joined_wh
+    assert "alameda" not in joined_wh
+    assert "Different one" in warehouse
+
+    community_post = generate_quick_replies(
+        "Want me to post this to your community, Alameda Unified?",
+        suggested_community="Alameda Unified",
+        user_message="Do it for me",
+    )
+    assert "Yes, post it" not in community_post
+    assert "Attach a photo" not in community_post
+    assert "Alameda Unified" in community_post or "Different one" in community_post
+
+    ruby = generate_quick_replies(
+        "Your profile is linked to Ruby Bridges Elementary CC. Use that one?",
+        user_message="Do it for me",
+    )
+    joined_ruby = " ".join(ruby).lower()
+    assert "ruby bridges" in joined_ruby
+    assert "Different one" in ruby
+    assert "Attach a photo" not in ruby
+
+    ruby_built = build_turn_suggestions(
+        "Your profile is linked to Ruby Bridges Elementary CC. Use that one?",
+        "en",
+        tool_results=[],
+        min_chips=0,
+        last_user_message="Do it for me",
+    )
+    ruby_labels = [c if isinstance(c, str) else c.get("label") for c in ruby_built]
+    assert any(l and "ruby bridges" in (l or "").lower() for l in ruby_labels)
+
+    allergen = generate_quick_replies(
+        "Does this contain nuts, dairy, eggs, soy, or wheat?",
+        user_message="Do it for me",
+    )
+    assert "No allergens" in allergen
+    assert "Still sealed" not in allergen
+
+    look_right = generate_quick_replies(
+        "Does this look right? 3 loaves under Alameda Unified, with photo.",
+        user_message="Do it for me",
+    )
+    assert "Yes, post it" in look_right
+    assert "Attach a photo" not in look_right
+    assert "Yes, claim it" not in look_right
+
+    sound_post = generate_quick_replies(
+        "Sound good to post?",
+        user_message="Do it for me",
+    )
+    assert "Yes, post it" in sound_post
+    assert "Yes, claim it" not in sound_post
+    assert "Attach a photo" not in sound_post
+
+    share_confirm = generate_quick_replies(
+        "Shall I go ahead and share this?",
+        user_message="Do it for me",
+    )
+    assert "Yes, post it" in share_confirm
+    assert "Attach a photo" not in share_confirm
+
+    desc_alt = generate_quick_replies(
+        "Anything else people should know about the food?",
+        user_message="Do it for me",
+    )
+    assert "Still sealed" in desc_alt
+    assert "No allergens" not in desc_alt
+    assert "Share something else" not in desc_alt
+
+    ready_no_photo = generate_quick_replies(
+        "Ready to post: 100 boxes of vegetables under Alameda Unified. "
+        "Shall I post these now?",
+        user_message="Do it for me",
+    )
+    assert "Attach a photo" in ready_no_photo
+    assert "Yes, post it" not in ready_no_photo
+
+    claim_sound = generate_quick_replies(
+        "Claim #1 for you — sound good?",
+        user_message="claim it",
+    )
+    assert "Yes, claim it" in claim_sound
+    assert "Yes, post it" not in claim_sound
 
