@@ -172,3 +172,43 @@ class TestDescriptionChips:
         assert "sealed" in joined or "homemade" in joined
         assert "Tomorrow" not in out
         assert "Do it for me" not in out
+
+    def test_common_description_rephrases_get_matching_chips(self):
+        phrases = [
+            "What should I put as the description?",
+            "Listing description?",
+            "Description?",
+            "Got it — expires tomorrow. What's a short description I can put on the listing?",
+            "How is it packaged / what's included?",
+            "Help me with a listing description — one sentence is enough.",
+            "Give me a sentence about the food.",
+            "I need a short blurb about the food.",
+            "What should the listing say about this food?",
+            "Anything I should mention on the listing?",
+            "One sentence for the post?",
+            "A sentence for the description field?",
+        ]
+        for text in phrases:
+            assert _is_description_ask(text), text
+            out = generate_quick_replies(text, user_message="Do it for me")
+            assert out, f"empty chips for: {text!r}"
+            joined = " ".join(out).lower()
+            assert any(n in joined for n in ("sealed", "homemade", "leftover")), (
+                f"{text!r} -> {out}"
+            )
+            assert "Attach a photo" not in out, text
+            assert "Tomorrow" not in out, text
+            assert "Yes, post it" not in out, text
+            assert "No allergens" not in out, text
+
+    def test_narrating_description_field_still_not_an_ask(self):
+        assert not _is_description_ask(
+            "I'll put pickup only in the description. Please attach a photo."
+        )
+        out = generate_quick_replies(
+            "I'll put pickup only in the description. Please attach a photo "
+            "— required before I can post.",
+            user_message="Do it for me",
+        )
+        assert "Attach a photo" in out
+        assert "Still sealed" not in out

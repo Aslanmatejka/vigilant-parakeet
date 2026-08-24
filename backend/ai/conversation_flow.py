@@ -3018,6 +3018,21 @@ _DESCRIPTION_ASK_CUES: tuple[str, ...] = (
     "give me a description", "please describe",
     "should know about the food", "people should know",
     "anything else about the food", "note for recipients",
+    "listing description", "description for the listing",
+    "put as the description", "put on the listing",
+    "what should the description", "what should i put as",
+    "sentence about the food", "sentence for the description",
+    "sentence for the post", "sentence for the listing",
+    "short blurb", "jot a description", "jot a short",
+    "how is it packaged", "what's included", "whats included",
+    "what is included", "say a little about",
+    "what's the food like", "whats the food like",
+    "mention on the listing", "details for the listing",
+    "help me with a listing description", "describe what's in",
+    "describe whats in", "packaging, what's included",
+    "packaging, whats included", "one sentence for the",
+    "listing say about", "what should the listing",
+    "say about this food", "say about the food",
     "descripción corta", "descripcion corta", "describe la comida",
     "cuéntame más sobre", "cuentame mas sobre",
     "descripción para", "descripcion para",
@@ -3049,7 +3064,7 @@ def _is_description_ask(text: str) -> bool:
             "when does it expire", "best by", "good until", "use by",
         )) and not any(k in t for k in (
             "short description", "describe the food", "describe it",
-            "one sentence",
+            "one sentence", "description",
         )):
             return False
         return True
@@ -3057,14 +3072,16 @@ def _is_description_ask(text: str) -> bool:
         "description", "descripción", "descripcion", "describe",
     )):
         return False
+    # Assistant narrating where text will go — not asking the donor.
     if any(k in t for k in (
         "in the description", "to the description", "into the description",
-        "as the description", "the description field",
+        "i'll put", "i will put", "putting that in",
     )):
         return False
     return any(k in t for k in (
         "please", "add a", "need a", "need the", "can you", "could you",
         "would you", "tell me", "write", "give me", "share a", "include a",
+        "what should", "what's a", "whats a", "got a", "have a",
         "?", "¿",
     ))
 
