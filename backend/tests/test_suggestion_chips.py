@@ -137,8 +137,8 @@ class TestBuildTurnSuggestions:
         )
         chips = build_turn_suggestions(text, "en", tool_results=[])
         labels = [c if isinstance(c, str) else c.get("label") for c in chips]
-        assert "Alameda Unified" in labels
-        assert "Different community" in labels
+        assert any("Alameda Unified" in (l or "") for l in labels)
+        assert any("different school" in (l or "").lower() for l in labels)
         assert not any("Yes, post it" == (l or "") for l in labels)
 
     def test_community_chips_from_tool_suggestion(self):
@@ -155,7 +155,7 @@ class TestBuildTurnSuggestions:
             user_context={"last_intent_entities": {"community_name": "Oakland USD"}},
         )
         labels = [c if isinstance(c, str) else c.get("label") for c in chips]
-        assert "Oakland USD" in labels
+        assert any("Oakland USD" in (l or "") for l in labels)
 
     def test_community_chip_message_is_confirming(self):
         text = (
@@ -163,7 +163,10 @@ class TestBuildTurnSuggestions:
             "Your profile is connected to Alameda Unified — should I post there?"
         )
         chips = build_turn_suggestions(text, "en", tool_results=[])
-        named = next(c for c in chips if isinstance(c, dict) and c.get("label") == "Alameda Unified")
+        named = next(
+            c for c in chips
+            if isinstance(c, dict) and "Alameda Unified" in (c.get("label") or "")
+        )
         assert "Alameda Unified" in named.get("message", "")
 
     def test_community_chips_filter_address_and_greeting_noise(self):
@@ -175,7 +178,7 @@ class TestBuildTurnSuggestions:
         )
         chips = build_turn_suggestions(text, "en", tool_results=[])
         labels = [c if isinstance(c, str) else c.get("label") for c in chips]
-        assert "Alameda Unified" in labels
+        assert any("Alameda Unified" in (l or "") for l in labels)
         assert "Perfect" not in labels
         assert "Park St" not in labels
         assert "linked to Alameda Unified" not in labels
@@ -306,7 +309,7 @@ class TestBuildTurnSuggestions:
         )
         chips = build_turn_suggestions(text, "en", tool_results=[], min_chips=0)
         labels = [c if isinstance(c, str) else c.get("label") for c in chips]
-        assert "Alameda Unified" in labels
+        assert any("Alameda Unified" in (l or "") for l in labels)
         assert "Yes, post it" not in labels
 
     def test_photo_required_no_question_gets_upload_chips(self):

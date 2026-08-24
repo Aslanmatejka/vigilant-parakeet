@@ -57,6 +57,70 @@ _SEARCH_TOOLS = frozenset({
 })
 
 
+def obvious_food_qty_chips(language: str = "en") -> List[str]:
+    """Concrete food+amount examples for Do-it-for-me (not generic categories)."""
+    if language == "es":
+        return ["5 manzanas", "2 panes", "Verduras — 1 caja", "Huevos — 1 docena"]
+    return ["5 apples", "2 loaves of bread", "Vegetables — 1 box", "Eggs — 1 dozen"]
+
+
+def obvious_qty_chips(language: str = "en") -> List[str]:
+    """Quantity chips that read like a natural reply."""
+    if language == "es":
+        return ["Solo 1", "3 en total", "5 en total", "10 en total"]
+    return ["Just 1", "3 of them", "5 of them", "10 of them"]
+
+
+def obvious_description_chips(language: str = "en") -> List[str]:
+    """Full-sentence description examples for listing text."""
+    if language == "es":
+        return [
+            "Sigue sellado en el envase original",
+            "Casero y mantenido refrigerado",
+            "Sobras variadas en recipientes",
+        ]
+    return [
+        "Still sealed in the original packaging",
+        "Homemade and kept refrigerated",
+        "Assorted leftovers in containers",
+    ]
+
+
+def obvious_allergen_chips(language: str = "en") -> List[str]:
+    if language == "es":
+        return [
+            "Sin alérgenos que señalar",
+            "Contiene gluten",
+            "Contiene lácteos",
+            "Contiene frutos secos",
+        ]
+    return [
+        "No allergens to flag",
+        "Contains gluten",
+        "Contains dairy",
+        "Contains nuts",
+    ]
+
+
+def obvious_photo_chip(language: str = "en") -> str:
+    return "Adjuntar una foto ahora" if language == "es" else "Attach a photo now"
+
+
+def obvious_community_confirm_chips(pick: str, language: str = "en") -> List[str]:
+    short = (pick or "").strip()[:48]
+    if not short:
+        return obvious_community_fallback_chips(language)
+    if language == "es":
+        return [f"Sí, publicar en {short}", "Usar otra escuela"]
+    return [f"Yes, list under {short}", "Use a different school"]
+
+
+def obvious_community_fallback_chips(language: str = "en") -> List[str]:
+    if language == "es":
+        return ["Usar la comunidad de mi perfil", "Usar otra escuela"]
+    return ["Use my profile community", "Use a different school"]
+
+
 def _normalize_chip_text(text: str) -> str:
     """Normalize hyphens/spacing so 'step-by-step' matches 'step by step'."""
     t = (text or "").lower()
@@ -586,10 +650,7 @@ def _chips_for_guided_response(
         "what kind of food", "qué tipo de comida", "que tipo de comida",
         "looking for", "buscas", "what food", "qué alimento",
     )):
-        if es:
-            chips.extend(["Pan", "Frutas", "Verduras", "Comida preparada"])
-        else:
-            chips.extend(["Bread", "Fruit", "Vegetables", "Prepared meal"])
+        chips.extend(obvious_food_qty_chips("es" if es else "en"))
     elif any(k in low for k in (
         "open the share", "open share", "open the find", "open find",
         "open the request", "open request", "tap share food", "tap find food",
@@ -1111,25 +1172,26 @@ def _chips_for_community_selection(
 
     chips: List[Chip] = []
     for name in names[:3]:
+        short = name[:48]
         if es:
             chips.append({
-                "label": name,
+                "label": f"Sí, {short}",
                 "message": f"Sí, publicar en {name}",
             })
         else:
             chips.append({
-                "label": name,
+                "label": f"Yes, {short}",
                 "message": f"Yes, list under {name}",
             })
 
     if es:
         chips.append({
-            "label": "Otra comunidad",
+            "label": "Usar otra escuela",
             "message": "Usar otra comunidad",
         })
     else:
         chips.append({
-            "label": "Different community",
+            "label": "Use a different school",
             "message": "Use a different community",
         })
 

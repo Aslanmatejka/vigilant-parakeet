@@ -27,13 +27,13 @@ describe('Do-it-for-me prechips match each AI response', () => {
   })
 
   test('quantity', () => {
-    expectChips('How many loaves?', ['1', '3', '5'], ['Still sealed'])
+    expectChips('How many loaves?', ['Just 1', '3 of them'], ['Still sealed'])
   })
 
   test('community', () => {
     expectChips(
       'Your profile is linked to Ruby Bridges Elementary CC. Use that one?',
-      ['Ruby', 'Different community'],
+      ['Ruby', 'different school'],
       ['Yes, post it'],
     )
   })
@@ -45,17 +45,17 @@ describe('Do-it-for-me prechips match each AI response', () => {
   test('description', () => {
     expectChips(
       'Please add a short description for recipients.',
-      ['Still sealed'],
+      ['sealed'],
       ['Tomorrow', 'Attach a photo'],
     )
-    expectChips('Description?', ['Still sealed'], ['Tomorrow'])
+    expectChips('Description?', ['sealed'], ['Tomorrow'])
   })
 
   test('photo', () => {
     expectChips(
       'Please attach a photo of the food — required before I can post.',
-      ['Attach a photo'],
-      ['Still sealed', 'skip'],
+      ['attach a photo'],
+      ['sealed', 'skip'],
     )
   })
 
@@ -95,9 +95,9 @@ describe('Do-it-for-me prechips match each AI response', () => {
 
   test('resolveInputChips keeps description chips on description ask', () => {
     const backend = [
-      { label: 'Still sealed', message: 'Still sealed' },
-      { label: 'Homemade, refrigerated', message: 'Homemade, refrigerated' },
-      { label: 'Assorted leftovers', message: 'Assorted leftovers' },
+      { label: 'Still sealed in the original packaging', message: 'Still sealed in the original packaging' },
+      { label: 'Homemade and kept refrigerated', message: 'Homemade and kept refrigerated' },
+      { label: 'Assorted leftovers in containers', message: 'Assorted leftovers in containers' },
     ]
     const resolved = resolveInputChips(backend, 'en', null, {
       allowLazy: false,

@@ -496,7 +496,7 @@ def _build_action_policy() -> str:
         "previous target and resolve the new one. Do NOT keep saying a "
         "claim is in progress for a listing they just abandoned. One "
         "short 'switching to the apples' ack, then continue from the "
-        "new pick. During SHARE community confirm, 'Different community' means "
+        "new pick. During SHARE community confirm, 'Use a different school' means "
         "a different school — never a different food item.\n"
         "\n"
         "If the user says they have NO claim / 'we haven't talked about "
@@ -545,7 +545,7 @@ def _build_action_policy() -> str:
         "If it is ambiguous or not in the catalog, call "
         "get_active_communities and show the real matching names. The "
         "server REJECTS invented names that do not resolve.\n"
-        "'Different community' = another school/hub, never different food. "
+        "'Use a different school' = another school/hub, never different food. "
         "Keep prior answers; continue expiry → description → photo.\n"
         "EXCEPTION — fulfilling a community food request: if the donor "
         "is sharing food for a specific open request (from Community "
@@ -572,8 +572,9 @@ def _build_action_policy() -> str:
         "suggestion chips aligned with what you asked.\n"
         "\n"
         "Food title: accept ANY dish or item they name (leftover lasagna, "
-        "biryani, canned chickpeas, 100 boxes of vegetables). Do not "
-        "restrict them to Bread/Fruit/Vegetables chips.\n"
+        "biryani, canned chickpeas, 100 boxes of vegetables). Suggestion chips "
+        "should use concrete examples (e.g. '5 apples', '2 loaves of bread'), "
+        "not generic categories like Bread/Fruit/Vegetables.\n"
         "\n"
         "Address: default to the donor's profile address; confirm in "
         "the summary sentence rather than in a separate question. Only "
@@ -4137,6 +4138,7 @@ def _user_picked_different_community(user_message: str) -> bool:
         "different one", "different community", "other community", "another school",
         "other school", "another community", "pick a different", "choose another",
         "otra comunidad", "una diferente", "different school", "otra escuela",
+        "use a different school", "usar otra escuela",
     ))
 
 
@@ -4368,6 +4370,16 @@ def generate_quick_replies(
     es = lang == "es"
     out: list[str] = []
 
+    from backend.agent.suggestion_chips import (
+        obvious_allergen_chips,
+        obvious_community_confirm_chips,
+        obvious_community_fallback_chips,
+        obvious_description_chips,
+        obvious_food_qty_chips,
+        obvious_photo_chip,
+        obvious_qty_chips,
+    )
+
     def add(*items: str) -> None:
         for it in items:
             if it and it not in out and len(out) < 40:
@@ -4438,9 +4450,9 @@ def generate_quick_replies(
         "lo publico", "lo publicamos", "publicarlo",
     )):
         if es:
-            add("Adjuntar foto")
+            add(obvious_photo_chip("es"))
         else:
-            add("Attach a photo")
+            add(obvious_photo_chip("en"))
         return out
 
     # Post confirm recaps often mention allergens/expiry/photo in the summary.
@@ -4465,10 +4477,7 @@ def generate_quick_replies(
             ))
         )
         if photo_nudge:
-            if es:
-                add("Adjuntar foto")
-            else:
-                add("Attach a photo")
+            add(obvious_photo_chip("es" if es else "en"))
             return out
         if es:
             add("Sí, publícalo", "Espera, edítalo", "Cancelar")
@@ -4478,10 +4487,7 @@ def generate_quick_replies(
 
     # Allergen ask early — same turn often also mentions a chosen best-by date.
     if _is_allergen_ask(t):
-        if es:
-            add("Sin alérgenos", "Solo gluten", "Lácteos", "Frutos secos")
-        else:
-            add("No allergens", "Just gluten", "Dairy", "Nuts")
+        add(*obvious_allergen_chips("es" if es else "en"))
         return out
 
     # Assistance fork — shared matcher (find/share/request).
@@ -4545,18 +4551,12 @@ def generate_quick_replies(
     # Before expiry/community so a school name in the same message doesn't steal.
     from backend.ai.conversation_flow import _is_description_ask
     if _is_description_ask(t) and not _is_allergen_ask(t):
-        if es:
-            add("Sigue sellado", "Casero, refrigerado", "Sobras variadas")
-        else:
-            add("Still sealed", "Homemade, refrigerated", "Assorted leftovers")
+        add(*obvious_description_chips("es" if es else "en"))
         return out
 
     # Combined food + amount (no "?") — also "What food … and how much?"
     if _is_combined_food_qty_ask(t):
-        if es:
-            add("5 manzanas", "2 panes", "Verduras — 1 caja", "Huevos — 1 docena")
-        else:
-            add("5 apples", "2 loaves of bread", "Vegetables — 1 box", "Eggs — 1 dozen")
+        add(*obvious_food_qty_chips("es" if es else "en"))
         return out
 
     # Freshness / good-until — BEFORE the "?" gate. Models often ask
@@ -4740,7 +4740,7 @@ def generate_quick_replies(
             add("Yes, confirm", "Wait, edit it", "Cancel")
         return out
 
-    # Community confirm — suggested school + "Different community".
+    # Community confirm — suggested school + obvious yes/different chips.
     # Do not steal address confirms, look-right recaps, or "ready to post".
     community_confirm_keys = (
         "list under", "list this under", "which community", "which school",
@@ -4796,10 +4796,7 @@ def generate_quick_replies(
         elif named:
             pick = named[0]
         if pick:
-            if es:
-                add(pick[:48], "Otra comunidad")
-            else:
-                add(pick[:48], "Different community")
+            add(*obvious_community_confirm_chips(pick, "es" if es else "en"))
             return out
         if communities:
             add(*communities[:4])
@@ -4814,21 +4811,12 @@ def generate_quick_replies(
         if m:
             name = m.group(1).strip(" —-?")
             if len(name) >= 3 and name.lower() not in {"the", "this", "that", "your"}:
-                if es:
-                    add(name[:48], "Otra comunidad")
-                else:
-                    add(name[:48], "Different community")
+                add(*obvious_community_confirm_chips(name, "es" if es else "en"))
                 return out
         if suggested_community:
-            if es:
-                add(suggested_community[:48], "Otra comunidad")
-            else:
-                add(suggested_community[:48], "Different community")
+            add(*obvious_community_confirm_chips(suggested_community, "es" if es else "en"))
             return out
-        if es:
-            add("Usar la de mi perfil", "Otra comunidad")
-        else:
-            add("Use my profile community", "Different community")
+        add(*obvious_community_fallback_chips("es" if es else "en"))
         return out
 
     # Assistance mode fork — goal-aware (Find ≠ "Open the form").
@@ -5002,10 +4990,7 @@ def generate_quick_replies(
             ))
         )
         if photo_nudge:
-            if es:
-                add("Adjuntar foto")
-            else:
-                add("Attach a photo")
+            add(obvious_photo_chip("es" if es else "en"))
             return out
         if es:
             add("Sí, publícalo", "Espera, edítalo", "Cancelar")
@@ -5045,10 +5030,7 @@ def generate_quick_replies(
 
     # Allergens (also handled early before ? gate)
     if _is_allergen_ask(t):
-        if es:
-            add("Sin alérgenos", "Solo gluten", "Lácteos", "Frutos secos")
-        else:
-            add("No allergens", "Just gluten", "Dairy", "Nuts")
+        add(*obvious_allergen_chips("es" if es else "en"))
         return out
 
     # Photo — required; never offer skip (also handled before ? gate).
@@ -5067,10 +5049,7 @@ def generate_quick_replies(
             "without photo", "before i can post", "before posting",
         ))
         if photo_ask_now and not photo_summary:
-            if es:
-                add("Adjuntar foto")
-            else:
-                add("Attach a photo")
+            add(obvious_photo_chip("es" if es else "en"))
             return out
 
     # Pickup window / when
@@ -5093,19 +5072,13 @@ def generate_quick_replies(
     # Combined food + qty (hands-on "Do it for me") — before bare qty.
     # "What food do you want to share, and how much?" must NOT become 1/3/5/10.
     if _is_combined_food_qty_ask(t):
-        if es:
-            add("5 manzanas", "2 panes", "Verduras — 1 caja", "Huevos — 1 docena")
-        else:
-            add("5 apples", "2 loaves of bread", "Vegetables — 1 box", "Eggs — 1 dozen")
+        add(*obvious_food_qty_chips("es" if es else "en"))
         return out
 
     # Quantity prompt ("how many", "three what?") — after food is known
     if any(k in t for k in ("how many", "how much", "what unit", "three what",
                             "cuántos", "cuántas", "qué unidad")):
-        if es:
-            add("1", "3", "5", "10")
-        else:
-            add("1", "3", "5", "10")
+        add(*obvious_qty_chips("es" if es else "en"))
         return out
 
     # "What food / what would you like to share / what is it / what are you donating"
@@ -5125,10 +5098,7 @@ def generate_quick_replies(
             "qué tipo de comida", "que tipo de comida",
             "qué vas a compartir", "que vas a compartir",
     )):
-        if es:
-            add("Pan", "Frutas", "Verduras", "Comida preparada")
-        else:
-            add("Bread", "Fruit", "Vegetables", "Prepared meal")
+        add(*obvious_food_qty_chips("es" if es else "en"))
         return out
 
     # "What are you looking for" (recipient side)
@@ -5139,10 +5109,7 @@ def generate_quick_replies(
             "qué te hace falta", "que te hace falta",
             "qué estás buscando", "que estas buscando",
     )):
-        if es:
-            add("Pan", "Frutas", "Verduras", "Comida preparada")
-        else:
-            add("Bread", "Fruit", "Vegetables", "Prepared meal")
+        add(*obvious_food_qty_chips("es" if es else "en"))
         return out
 
     # ---- Fallbacks --------------------------------------------------

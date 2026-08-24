@@ -33,13 +33,13 @@ def _joined(chips) -> str:
         ),
         (
             "How many loaves?",
-            ("1", "3", "5"),
+            ("just 1", "3 of them"),
             ("All of them", "Still sealed"),
             "bread",
         ),
         (
             "List under Do Good Warehouse?",
-            ("warehouse", "different community"),
+            ("warehouse", "different school"),
             ("alameda", "Yes, post it"),
             "Do it for me",
         ),
@@ -93,7 +93,7 @@ def _joined(chips) -> str:
         ),
         (
             "Does this contain nuts, dairy, eggs, soy, or wheat?",
-            ("No allergens", "gluten", "dairy"),
+            ("allergen", "gluten", "dairy"),
             ("Still sealed", "Yes, post it"),
             "Do it for me",
         ),
