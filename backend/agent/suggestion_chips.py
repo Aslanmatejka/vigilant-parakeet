@@ -1207,13 +1207,49 @@ def resolve_hands_on_share_chip_step(
         extended.append({"role": "assistant", "message": response_text})
     last_asked = _assistant_last_asked_kind(extended)
 
-    if response_text:
-        from backend.ai.ai_engine import _is_allergen_ask
-        if _is_allergen_ask(response_text):
-            return "allergen"
-
     if last_asked == "claim_confirm":
         return None
+
+    # Prefer what Nouri is asking THIS turn over incomplete checklist flags.
+    # Common bug: assistant says "I'll list under X. When is it best by?"
+    # before the donor tapped a community chip → community_confirmed is still
+    # false, but expiry chips must win.
+    if response_text:
+        from backend.ai.ai_engine import (
+            _is_allergen_ask,
+            _is_expiry_ask,
+            _is_post_confirm_ask,
+        )
+        from backend.ai.conversation_flow import _is_description_ask
+
+        if _is_allergen_ask(response_text) or last_asked == "allergen":
+            return "allergen"
+        if _is_post_confirm_ask(response_text) or last_asked == "post_confirm":
+            # Ready-to-post without a photo → attach nudge, not Yes/post.
+            state_early = posting_flow_state(message, history)
+            reply_l = (response_text or "").lower()
+            photo_evidence = bool(state_early.get("has_photo")) or any(k in reply_l for k in (
+                "with photo", "with a photo", "photo attached", "photos received",
+                "got your photo", "image:", "con foto", "foto adjunta",
+            ))
+            if not photo_evidence:
+                return "photo"
+            return "post_confirm"
+        if _is_expiry_ask(response_text) or last_asked == "expiry":
+            return "expiry"
+        if _is_description_ask(response_text) or last_asked == "description":
+            return "description"
+        if last_asked == "photo":
+            return "photo"
+        photo_ask = any(k in (response_text or "").lower() for k in (
+            "photo", "picture", "foto", "imagen",
+        )) and any(k in (response_text or "").lower() for k in (
+            "attach", "upload", "add a", "required", "please", "snap", "sube",
+        ))
+        if photo_ask and not _is_post_confirm_ask(response_text):
+            return "photo"
+        if last_asked == "community":
+            return "community"
 
     title, _, _ = _share_title_qty_from_thread(history, message)
     if not title:
@@ -1233,12 +1269,7 @@ def resolve_hands_on_share_chip_step(
         return "description"
     if not state.get("has_photo"):
         return "photo"
-
-    if response_text:
-        from backend.ai.ai_engine import _is_post_confirm_ask
-        if _is_post_confirm_ask(response_text):
-            return "post_confirm"
-    if last_asked == "post_confirm" or state.get("post_summary_offered"):
+    if state.get("post_summary_offered") or last_asked == "post_confirm":
         return "post_confirm"
     return "post_confirm"
 

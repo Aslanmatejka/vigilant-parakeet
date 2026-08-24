@@ -265,3 +265,42 @@ def test_labeled_chips_stable_across_rephrasing():
         assert step == "expiry"
         chips = build_labeled_hands_on_share_chips(step, "en")
         assert "Tomorrow" in _labels(chips)
+
+
+def test_expiry_ask_wins_when_community_not_yet_confirmed():
+    """Nouri may acknowledge a school and ask expiry before the donor taps confirm."""
+    history = _hands_on_history(
+        {"role": "assistant", "message": "What food and how much?"},
+        {"role": "user", "message": "bread"},
+    )
+    text = (
+        "Perfect, I'll list your bread under Do Good Warehouse. "
+        "When is the bread best by, or how long is it good for?"
+    )
+    step = resolve_hands_on_share_chip_step(
+        "bread",
+        history,
+        assistance_reminder="hands-on share posting",
+        response_text=text,
+    )
+    assert step == "expiry"
+    chips = build_turn_suggestions(
+        text,
+        "en",
+        tool_results=[],
+        min_chips=0,
+        last_user_message="bread",
+        assistance_reminder="hands-on share posting",
+        history=history,
+        user_context={
+            "suggested_community": "Alameda Unified School District",
+            "active_communities": [
+                "Alameda Unified School District",
+                "Do Good Warehouse",
+            ],
+        },
+    )
+    joined = _joined(chips)
+    assert "tomorrow" in joined
+    assert "different community" not in joined
+    assert "alameda" not in joined
