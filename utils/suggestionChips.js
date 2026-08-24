@@ -281,6 +281,7 @@ export function resolveInputChips(suggestions, language = 'en', role = null, { a
   const onlyExpiry = filtered.length > 0
     && filtered.every((c) => expiryChip.test(chipLabel(c)))
   const allergenAsk = /(allerg|alérgen|alergia|dietary restriction|shellfish|frutos secos)/.test(text)
+    && !/(ready to post|look right|looks right|does this look|sound good to post|no allergens noted|allergens noted)/.test(text)
   const expiryAsk = (
     /(best by|best-by|good until|good for|use by|expir|when does it expire|how long is it good|stay fresh|fecha de venc|best before)/.test(text)
     && !allergenAsk

@@ -70,7 +70,7 @@ def test_address_confirm_gets_address_chips():
     joined = " ".join(out).lower()
     assert "address" in joined or "use that one" in joined or "saved" in joined
     assert "Alameda Unified" not in out
-    assert "Different one" not in out
+    assert "Different community" not in out
     assert "Yes, post it" not in out
 
 
@@ -345,7 +345,7 @@ def test_hands_on_community_confirm_and_pick():
         suggested_community="Alameda Unified School District",
     )
     assert "Alameda Unified School District" in out
-    assert "Different one" in out
+    assert "Different community" in out
 
     pick = generate_quick_replies(
         "Got it, you want to post your pizza in a different community. Which community should I use?",
@@ -362,7 +362,7 @@ def test_community_confirm_shows_suggested_and_different():
         suggested_community="Alameda Unified School District",
     )
     assert "Alameda Unified School District" in out
-    assert "Different one" in out
+    assert "Different community" in out
 
 
 def test_community_confirm_spanish():
@@ -724,7 +724,7 @@ def test_do_it_for_me_prechips_match_each_step():
     joined_wh = " ".join(warehouse).lower()
     assert "do good warehouse" in joined_wh
     assert "alameda" not in joined_wh
-    assert "Different one" in warehouse
+    assert "Different community" in warehouse
 
     community_post = generate_quick_replies(
         "Want me to post this to your community, Alameda Unified?",
@@ -733,7 +733,7 @@ def test_do_it_for_me_prechips_match_each_step():
     )
     assert "Yes, post it" not in community_post
     assert "Attach a photo" not in community_post
-    assert "Alameda Unified" in community_post or "Different one" in community_post
+    assert "Alameda Unified" in community_post or "Different community" in community_post
 
     ruby = generate_quick_replies(
         "Your profile is linked to Ruby Bridges Elementary CC. Use that one?",
@@ -741,7 +741,7 @@ def test_do_it_for_me_prechips_match_each_step():
     )
     joined_ruby = " ".join(ruby).lower()
     assert "ruby bridges" in joined_ruby
-    assert "Different one" in ruby
+    assert "Different community" in ruby
     assert "Attach a photo" not in ruby
 
     ruby_built = build_turn_suggestions(

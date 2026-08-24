@@ -190,17 +190,18 @@ export function inferChipsFromResponse(responseText, language = 'en') {
     if (suggested && !/^(the|this|that|your|a|an)$/i.test(suggested)) {
       return es
         ? [chip(suggested.slice(0, 48)), chip('Otra comunidad')]
-        : [chip(suggested.slice(0, 48)), chip('Different one')]
+        : [chip(suggested.slice(0, 48)), chip('Different community')]
     }
     return es
       ? [chip('Usar la de mi perfil'), chip('Otra comunidad')]
-      : [chip('Use my profile community'), chip('Different one')]
+      : [chip('Use my profile community'), chip('Different community')]
   }
 
-  // Post / claim confirms
-  if (/ready to post|want me to post|shall i post|publish it|post it|say yes if|publish now|sound good to post|looks? right|does this look|go ahead and share|shall i go ahead/.test(t)
+  // Post confirm — before allergens so recaps mentioning "no allergens" stay Yes/Edit/Cancel.
+  const postConfirm = /ready to post|want me to post|shall i post|publish it|post it|say yes if|publish now|sound good to post|looks? right|does this look|go ahead and share|shall i go ahead/.test(t)
     && !(/your community|list under|linked to|use that one|for the community/.test(t)
-      && !/ready to post|shall i post|looks? right|sound good to post|go ahead and share/.test(t))) {
+      && !/ready to post|shall i post|looks? right|sound good to post|go ahead and share/.test(t))
+  if (postConfirm) {
     const photoEvidence = /photos received|got your photo|with your photos|with photo|with a photo|photo attached|foto adjunta|fotos recibidas|con tus fotos|image:|https?:\/\//.test(t)
     const photoNudge = !photoEvidence
       && /ready to post|ready to publish|shall i post|should i post|want me to post/.test(t)
@@ -223,16 +224,20 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       : [chip('Yes, claim it'), chip('No thanks'), chip('Cancel')]
   }
 
-  // Allergens — before food/qty/expiry so mixed "best by… any allergens?" wins.
+  // Allergens — before food/qty/expiry; skip post-confirm recaps that merely mention allergens.
+  const postConfirmRecap = /ready to post|look right|looks right|does this look|sound good to post|go ahead and share|shall i post/.test(t)
   if (
-    /allerg|alérgen|alergia|dietary restriction|restricciones diet/.test(t)
-    || (
-      (t.match(/\b(nuts|dairy|eggs|wheat|soy|shellfish|gluten|peanut|sesame|fish|frutos secos|l[aá]cteos|huevos|trigo)\b/g) || []).length >= 2
-      && /(any |contain|should i|note|know about|does this|do these|dietary|allerg|\?|¿)/.test(t)
-    )
-    || (
-      /(nuts|dairy|eggs|wheat|soy|shellfish|gluten|frutos secos|lácteos)/.test(t)
-      && /(any |contain|should i|note|know about|dietary|allerg)/.test(t)
+    !postConfirmRecap
+    && (
+      /allerg|alérgen|alergia|dietary restriction|restricciones diet/.test(t)
+      || (
+        (t.match(/\b(nuts|dairy|eggs|wheat|soy|shellfish|gluten|peanut|sesame|fish|frutos secos|l[aá]cteos|huevos|trigo)\b/g) || []).length >= 2
+        && /(any |contain|should i|note|know about|does this|do these|dietary|allerg|\?|¿)/.test(t)
+      )
+      || (
+        /(nuts|dairy|eggs|wheat|soy|shellfish|gluten|frutos secos|lácteos)/.test(t)
+        && /(any |contain|should i|note|know about|dietary|allerg)/.test(t)
+      )
     )
   ) {
     return es

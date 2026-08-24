@@ -496,7 +496,7 @@ def _build_action_policy() -> str:
         "previous target and resolve the new one. Do NOT keep saying a "
         "claim is in progress for a listing they just abandoned. One "
         "short 'switching to the apples' ack, then continue from the "
-        "new pick. During SHARE community confirm, 'Different one' means "
+        "new pick. During SHARE community confirm, 'Different community' means "
         "a different school — never a different food item.\n"
         "\n"
         "If the user says they have NO claim / 'we haven't talked about "
@@ -545,14 +545,8 @@ def _build_action_policy() -> str:
         "If it is ambiguous or not in the catalog, call "
         "get_active_communities and show the real matching names. The "
         "server REJECTS invented names that do not resolve.\n"
-        "CRITICAL — chip 'Different one' / 'Different community' during "
-        "community confirm means a DIFFERENT SCHOOL/HUB, NEVER different "
-        "food. Keep title, quantity, allergens, and expiry already given; "
-        "only ask which community they want (offer get_active_communities "
-        "choices — include the full list). After they name the school, "
-        "acknowledge it and continue to the next missing field "
-        "(expiry, then description, then photo) — do not restart "
-        "the share from 'what food'.\n"
+        "'Different community' = another school/hub, never different food. "
+        "Keep prior answers; continue expiry → description → photo.\n"
         "EXCEPTION — fulfilling a community food request: if the donor "
         "is sharing food for a specific open request (from Community "
         "Requests / dispatch queue), pass fulfilling_request_id with "
@@ -574,7 +568,8 @@ def _build_action_policy() -> str:
         "Description: ALWAYS ask for one short sentence about the food "
         "(condition, packaging, what's included). Do NOT invent it. "
         "Pass their words as `description` on post_food_listing. "
-        "Ask after expiry, before the photo.\n"
+        "Ask after expiry, before the photo. One question per turn keeps "
+        "suggestion chips aligned with what you asked.\n"
         "\n"
         "Food title: accept ANY dish or item they name (leftover lasagna, "
         "biryani, canned chickpeas, 100 boxes of vegetables). Do not "
@@ -4210,13 +4205,55 @@ _ALLERGEN_WORDS: tuple[str, ...] = (
 )
 
 
+def _is_post_confirm_ask(t: str) -> bool:
+    """True when the assistant is asking the donor to greenlight posting."""
+    t = (t or "").lower()
+    community_intent = any(k in t for k in (
+        "which community", "which school", "list under", "listed under",
+        "your community", "linked to", "use that one", "for the community",
+        "community should", "post this under", "post it to", "post under",
+        "comunidad", "escuela",
+    ))
+    recap = any(k in t for k in (
+        "ready to post", "look right", "looks right", "does this look",
+        "does that look", "sound good to post", "with photo", "good until",
+        "expires ", "expiry",
+    ))
+    if community_intent and not recap:
+        return False
+    if ("should i post" in t or "shall i post" in t) and " under " in t and not recap:
+        return False
+    if any(k in t for k in (
+        "ready to post", "ready to publish", "shall i post", "should i post",
+        "want me to post", "good to post", "good to publish",
+        "look right", "looks right", "does this look", "does that look",
+        "sound good to post", "sounds good to post",
+        "go ahead and share", "shall i go ahead", "should i go ahead",
+        "confirm and post", "before i post",
+        "listo para publicar", "¿lo publico", "¿lo publicamos",
+    )):
+        return True
+    if any(k in t for k in ("look good", "looks good", "sound good", "sounds good")):
+        return any(k in t for k in ("post", "publish", "listing", "share"))
+    return False
+
+
 def _is_allergen_ask(t: str) -> bool:
     """True when the assistant is asking about allergens / dietary flags."""
     t = (t or "").lower()
+    if _is_post_confirm_ask(t):
+        return False
     if any(k in t for k in (
         "allerg", "alérgen", "alergen", "alergia", "alergias",
         "dietary restriction", "restricciones diet", "restricción diet",
     )):
+        asking = any(k in t for k in (
+            "should i", "any allerg", "any dietary", "contain", "flag",
+            "does this", "do these", "would you", "can you", "know about",
+            "?", "¿",
+        ))
+        if not asking:
+            return False
         return True
     # Common hands-on phrasing lists major allergens without the word itself.
     hits = sum(1 for w in _ALLERGEN_WORDS if w in t)
@@ -4404,6 +4441,39 @@ def generate_quick_replies(
             add("Adjuntar foto")
         else:
             add("Attach a photo")
+        return out
+
+    # Post confirm recaps often mention allergens/expiry/photo in the summary.
+    # Handle before allergen/description/expiry so chips stay Yes/Edit/Cancel.
+    if _is_post_confirm_ask(t):
+        photo_evidence = any(k in t for k in (
+            "photos received", "got your photo", "with your photos",
+            "with photo", "with a photo", "has a photo",
+            "photo attached", "already have a photo", "image:",
+            "foto adjunta", "fotos recibidas", "con tus fotos", "con su foto",
+            "con foto", "con una foto",
+        )) or "http" in t
+        photo_nudge = (
+            not photo_evidence
+            and any(k in t for k in (
+                "ready to post", "ready to publish",
+                "shall i post", "should i post", "want me to post",
+            ))
+            and not any(k in t for k in (
+                "look right", "looks right", "does this look", "does that look",
+                "sound good", "sounds good", "go ahead and share",
+            ))
+        )
+        if photo_nudge:
+            if es:
+                add("Adjuntar foto")
+            else:
+                add("Attach a photo")
+            return out
+        if es:
+            add("Sí, publícalo", "Espera, edítalo", "Cancelar")
+        else:
+            add("Yes, post it", "Wait, edit it", "Cancel")
         return out
 
     # Allergen ask early — same turn often also mentions a chosen best-by date.
@@ -4670,7 +4740,7 @@ def generate_quick_replies(
             add("Yes, confirm", "Wait, edit it", "Cancel")
         return out
 
-    # Community confirm — suggested school + "Different one".
+    # Community confirm — suggested school + "Different community".
     # Do not steal address confirms, look-right recaps, or "ready to post".
     community_confirm_keys = (
         "list under", "list this under", "which community", "which school",
@@ -4729,7 +4799,7 @@ def generate_quick_replies(
             if es:
                 add(pick[:48], "Otra comunidad")
             else:
-                add(pick[:48], "Different one")
+                add(pick[:48], "Different community")
             return out
         if communities:
             add(*communities[:4])
@@ -4747,18 +4817,18 @@ def generate_quick_replies(
                 if es:
                     add(name[:48], "Otra comunidad")
                 else:
-                    add(name[:48], "Different one")
+                    add(name[:48], "Different community")
                 return out
         if suggested_community:
             if es:
                 add(suggested_community[:48], "Otra comunidad")
             else:
-                add(suggested_community[:48], "Different one")
+                add(suggested_community[:48], "Different community")
             return out
         if es:
             add("Usar la de mi perfil", "Otra comunidad")
         else:
-            add("Use my profile community", "Different one")
+            add("Use my profile community", "Different community")
         return out
 
     # Assistance mode fork — goal-aware (Find ≠ "Open the form").
