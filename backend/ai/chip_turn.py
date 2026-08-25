@@ -42,6 +42,17 @@ def _norm(text: str) -> str:
     return (text or "").lower()
 
 
+PHOTO_EVIDENCE_CUES = (
+    "photos received", "got your photo", "got the photo", "got a photo",
+    "got the picture", "got your picture", "got a picture",
+    "thanks for the photo", "thanks for the picture", "photo, thanks",
+    "picture, thanks", "with your photos", "with photo", "with a photo",
+    "has a photo", "photo attached", "already have a photo", "image:",
+    "foto adjunta", "fotos recibidas", "con tus fotos", "con foto",
+    "tengo la foto", "gracias por la foto",
+)
+
+
 def _is_address_turn(t: str) -> bool:
     has_addr = any(c in t for c in (
         "address", "street", " st ", " st.", " ave", "avenue", " rd", " road",
@@ -131,9 +142,7 @@ def _is_photo_ask(t: str) -> bool:
     if not ask:
         return False
     # Post-confirm / summary phrasing
-    if any(k in t for k in (
-        "photos received", "got your photo", "thanks for the photo", "with your photos",
-        "with photo", "with a photo", "photo attached", "already have a photo",
+    if any(k in t for k in PHOTO_EVIDENCE_CUES) or any(k in t for k in (
         "look right", "looks right", "does this look",
         "ready to post", "shall i post", "want me to post",
         "listo para publicar", "lo publico", "lo publicamos", "publicarlo",
@@ -375,12 +384,7 @@ def chips_for_turn_class(
 
     if turn == "post_confirm":
         t = _norm(text)
-        photo_evidence = any(k in t for k in (
-            "photos received", "got your photo", "with your photos",
-            "with photo", "with a photo", "has a photo",
-            "photo attached", "already have a photo", "image:",
-            "foto adjunta", "fotos recibidas", "con tus fotos", "con foto",
-        )) or "http" in t
+        photo_evidence = any(k in t for k in PHOTO_EVIDENCE_CUES) or "http" in t
         photo_nudge = (
             not photo_evidence
             and any(k in t for k in (

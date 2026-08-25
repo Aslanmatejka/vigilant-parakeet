@@ -245,3 +245,35 @@ class TestChipTurnRegression:
         assert "sealed" in joined
         assert "claim" not in joined
 
+    def test_best_by_ack_then_description_ask_not_expiry_chips(self):
+        text = (
+            "Perfect, I'll set the best-by date as one month from now. "
+            "Can you give me one short sentence describing the bread? "
+            "For example, how fresh it is or how it's packed."
+        )
+        out = generate_quick_replies(
+            text,
+            user_message="In a month",
+            assistance_reminder="HANDS-ON MODE — SHARE FOOD",
+        )
+        joined = " ".join(out).lower()
+        assert "sealed" in joined or "homemade" in joined
+        assert "tomorrow" not in joined
+        assert "in 2 days" not in joined
+        assert "in a month" not in joined
+
+    def test_got_the_photo_ready_to_post_not_attach_chip(self):
+        text = (
+            "Got the photo, thanks! Here's what I have: 2 loaves of good bread "
+            "from the bakery, best by September 25, pickup at your place under "
+            "Do Good Warehouse. Ready to post this?"
+        )
+        out = generate_quick_replies(
+            text,
+            user_message="image: https://example.com/bread.jpg",
+            assistance_reminder="HANDS-ON MODE — SHARE FOOD",
+        )
+        joined = " ".join(out).lower()
+        assert "yes, post it" in joined
+        assert "attach a photo" not in joined
+

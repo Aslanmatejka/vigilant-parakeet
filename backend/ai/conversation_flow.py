@@ -3033,6 +3033,9 @@ _DESCRIPTION_ASK_CUES: tuple[str, ...] = (
     "packaging, whats included", "one sentence for the",
     "listing say about", "what should the listing",
     "say about this food", "say about the food",
+    "one short sentence", "describing the", "describing this",
+    "how fresh", "how it's packed", "how it is packed", "how its packed",
+    "give me one short", "sentence describing",
     "descripción corta", "descripcion corta", "describe la comida",
     "cuéntame más sobre", "cuentame mas sobre",
     "descripción para", "descripcion para",
@@ -3061,10 +3064,12 @@ def _is_description_ask(text: str) -> bool:
         )):
             return False
         if any(k in t for k in (
-            "when does it expire", "best by", "good until", "use by",
+            "when does it expire", "best by", "best-by", "good until", "use by",
         )) and not any(k in t for k in (
             "short description", "describe the food", "describe it",
-            "one sentence", "description",
+            "describing the", "describing this", "one sentence",
+            "one short sentence", "description", "how fresh",
+            "how it's packed", "how it is packed",
         )):
             return False
         return True

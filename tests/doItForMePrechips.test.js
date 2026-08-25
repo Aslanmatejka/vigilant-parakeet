@@ -263,4 +263,42 @@ describe('Do-it-for-me prechips match each AI response', () => {
     ]
     expect(liveAssistantIndex(messages)).toBe(-1)
   })
+
+  test('best-by ack then describing the bread is description not expiry', () => {
+    const text = (
+      "Perfect, I'll set the best-by date as one month from now. "
+      + "Can you give me one short sentence describing the bread? "
+      + "For example, how fresh it is or how it's packed."
+    )
+    expectChips(text, ['Still sealed'], ['Tomorrow', 'In a month'])
+    const staleExpiry = [
+      { label: 'Tomorrow', message: 'Tomorrow' },
+      { label: 'In 2 days', message: 'In 2 days' },
+      { label: 'In 3 days', message: 'In 3 days' },
+      { label: 'In a month', message: 'In a month' },
+    ]
+    const resolved = resolveInputChips(staleExpiry, 'en', null, {
+      allowLazy: false,
+      responseText: text,
+    })
+    expect(labels(resolved).some((l) => /sealed|homemade/i.test(l))).toBe(true)
+    expect(labels(resolved).some((l) => /tomorrow|in 2 days|in a month/i.test(l))).toBe(false)
+  })
+
+  test('got the photo ready to post is Yes post it not Attach a photo', () => {
+    const text = (
+      "Got the photo, thanks! Here's what I have: 2 loaves of good bread "
+      + "from the bakery, best by September 25, pickup at your place under "
+      + "Do Good Warehouse. Ready to post this?"
+    )
+    expectChips(text, ['Yes, post it'], ['Attach a photo'])
+    const resolved = resolveInputChips(
+      [{ label: 'Attach a photo', message: 'Attach a photo' }],
+      'en',
+      null,
+      { allowLazy: false, responseText: text },
+    )
+    expect(labels(resolved).some((l) => /yes, post it/i.test(l))).toBe(true)
+    expect(labels(resolved).some((l) => /attach a photo/i.test(l))).toBe(false)
+  })
 })

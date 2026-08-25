@@ -158,7 +158,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
   // Description — BEFORE photo/qty so "add a short description… then photo"
   // and "description — how many portions" stay description chips.
   const descriptionAsk = (
-    /short description|add a description|describe the food|describe it|description for recipients|one-sentence description|one sentence description|one sentence about|few words about|tell me more about the food|tell me a bit about|tell me a bit more about|how would you describe|should know about the food|people should know|anything else about the food|note for recipients|listing description|put as the description|what should (the|i put).{0,20}description|what should the listing|listing say about|say about (this|the) food|sentence about the food|sentence for the (post|listing|description)|short blurb|jot a description|how is it packaged|what'?s included|whats included|say a little about|what'?s the food like|mention on the listing|details for the listing|help me with a listing description|describe what'?s in|\bdescription\??\s*$|descripci[oó]n corta|descripci[oó]n para|describe la comida/.test(t)
+    /short description|add a description|describe the food|describe it|describing the|describing this|description for recipients|one-sentence description|one sentence description|one sentence about|one short sentence|sentence describing|few words about|tell me more about the food|tell me a bit about|tell me a bit more about|how would you describe|should know about the food|people should know|anything else about the food|note for recipients|listing description|put as the description|what should (the|i put).{0,20}description|what should the listing|listing say about|say about (this|the) food|sentence about the food|sentence for the (post|listing|description)|short blurb|jot a description|how is it packaged|how it'?s packed|how it is packed|how fresh|give me one short|what'?s included|whats included|say a little about|what'?s the food like|mention on the listing|details for the listing|help me with a listing description|describe what'?s in|\bdescription\??\s*$|descripci[oó]n corta|descripci[oó]n para|describe la comida/.test(t)
     && !/i'?ll put|in the description|into the description|to the description/.test(t)
   )
   if (descriptionAsk) {
@@ -213,7 +213,7 @@ export function inferChipsFromResponse(responseText, language = 'en') {
       && !/ready to post|shall i post|looks? right|sound good to post|go ahead and share/.test(t))
     && !/profile address|what address|pickup address/.test(t)
   if (postConfirm) {
-    const photoEvidence = /photos received|got your photo|with your photos|with photo|with a photo|photo attached|foto adjunta|fotos recibidas|con tus fotos|image:|https?:\/\//.test(t)
+    const photoEvidence = /photos received|got your photo|got the photo|got a photo|got the picture|got your picture|thanks for the photo|thanks for the picture|photo, thanks|with your photos|with photo|with a photo|photo attached|foto adjunta|fotos recibidas|con tus fotos|image:|https?:\/\//.test(t)
     const photoNudge = !photoEvidence
       && /ready to post|ready to publish|shall i post|should i post|want me to post/.test(t)
       && !/looks? right|does this look|sound good|go ahead and share|your community|list under|linked to/.test(t)
@@ -308,14 +308,17 @@ export function inferChipsFromResponse(responseText, language = 'en') {
 
   // Good-until / expiry
   const allergenAsk = /allerg|alérgen|alergia|dietary restriction/.test(t)
+  const descriptionLike = /describ|short sentence|how fresh|how it'?s packed|how it is packed|short description|add a description/.test(t)
   const expiryCue = /best by|best-by|good until|good for|use by|expir|vence|caduc|how long is it good|how long will it (keep|stay)|stay fresh|fecha de venc|when does it expire|best before/.test(t)
-  const expiryAck = /got it|noted|i'?ll use|set to|set as|confirmed|listed as|using tomorrow|anotado/.test(t)
-  const expiryReAsk = /change|different date|another date|update the|wrong date|want a different|\?|¿|when does|when is|how long/.test(t)
+  const expiryAck = /got it|noted|i'?ll use|i'?ll set|i will set|set the best|set to|set as|confirmed|listed as|using tomorrow|anotado/.test(t)
+  const expiryReAsk = /when does it expire|when will it expire|when is it good|how long is it good|need a date|need the date|give me a date|different date|another date|change the date|wrong date|want a different|prefer a different|update the/.test(t)
   if (
     expiryCue
     && !allergenAsk
+    && !descriptionLike
     && !/what food|donating|sharing|fresh apples|fresh bread/.test(t)
     && !(expiryAck && !expiryReAsk)
+    && (expiryReAsk || !expiryAck)
   ) {
     return es
       ? [chip('Mañana'), chip('En 2 días'), chip('En 3 días'), chip('En un mes')]

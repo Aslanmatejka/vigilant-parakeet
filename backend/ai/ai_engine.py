@@ -4260,7 +4260,12 @@ def _is_expiry_ask(t: str) -> bool:
     if _is_allergen_ask(t):
         return False
     try:
-        from backend.ai.conversation_flow import is_post_success_response
+        from backend.ai.conversation_flow import (
+            _is_description_ask,
+            is_post_success_response,
+        )
+        if _is_description_ask(t):
+            return False
         if is_post_success_response(t):
             return False
     except Exception:
@@ -4288,17 +4293,30 @@ def _is_expiry_ask(t: str) -> bool:
     # Acknowledgement of a date already chosen — don't re-offer date chips
     # unless clearly re-asking / offering to change it.
     ack = any(k in t for k in (
-        "got it", "noted", "i'll use", "i will use", "set to", "set as",
+        "got it", "noted", "i'll use", "i will use", "i'll set", "i will set",
+        "set to", "set as", "set the best", "best-by date as", "best by date as",
         "locked in", "confirmed", "sounds good", "using tomorrow",
         "using that", "saved as", "listed as", "perfecto", "listo —",
         "anotado", "queda",
     ))
-    re_ask = any(k in t for k in (
-        "change", "different date", "or different", "update the", "wrong date",
-        "another date", "new date", "when is", "when does", "how long",
-        "still good", "want a different", "prefer a different", "?", "¿",
+    date_question = any(k in t for k in (
+        "when does it expire", "when will it expire", "when is it good",
+        "how long is it good", "what's the best", "what is the best",
+        "need a date", "need the date", "give me a date",
+        "different date", "another date", "change the date", "wrong date",
+        "want a different", "prefer a different",
+    ))
+    re_ask = date_question or any(k in t for k in (
+        "change", "or different", "update the",
+        "new date", "still good",
     ))
     if ack and not re_ask:
+        return False
+    # A "?" on a description/photo/community question is not an expiry re-ask.
+    if not date_question and any(k in t for k in (
+        "describ", "packaged", "packed", "how fresh", "short sentence",
+        "attach a photo", "upload a photo", "community", "allergen",
+    )):
         return False
     return True
 
