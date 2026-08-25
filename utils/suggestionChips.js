@@ -83,6 +83,82 @@ function chipLabel(chip) {
   return String(chip)
 }
 
+const KNOWN_TURN_FAMILIES = new Set([
+  'fork', 'guided', 'post', 'photo', 'description', 'community',
+  'allergen', 'expiry', 'food_qty', 'food', 'qty', 'address',
+])
+
+function backendChipFamily(chips) {
+  if (!chips || !chips.length) return 'none'
+  const labels = chips.map((c) => chipLabel(c).toLowerCase())
+  if (labels.every((l) => /^(1|2|3|5|10)$/.test(l))) return 'qty'
+  if (labels.every((l) => /^(tomorrow|in 2 days|in 3 days|in a month|mañana|en 2|en 3|en un mes)/i.test(l))) return 'expiry'
+  if (labels.every((l) => /^(still sealed|homemade|assorted leftovers|sigue sellado|casero|sobras)/i.test(l))) return 'description'
+  if (labels.some((l) => /^(attach a photo|adjuntar foto|i'll add a photo)/i.test(l)) && labels.length <= 2) return 'photo'
+  if (labels.some((l) => /^(yes, post it|sí, publícalo|wait, edit)/i.test(l))) return 'post'
+  if (labels.some((l) => /^(no allergens|sin alérgenos|just gluten|dairy|nuts|lácteos|frutos)/i.test(l))) return 'allergen'
+  if (labels.some((l) => /^(do it for me|hazlo por|guide me|guíame|open the form|open find)/i.test(l))) return 'fork'
+  if (labels.some((l) => /^(done|what's next|need help|listo|siguiente|necesito ayuda|i see the form|ya veo)/i.test(l))) return 'guided'
+  if (labels.some((l) => /^(5 apples|2 loaves|vegetables —|eggs —|5 manzanas|2 panes)/i.test(l))) return 'food_qty'
+  if (labels.some((l) => /^(bread|fruit|vegetables|prepared meal|pan|frutas|comida preparada)$/i.test(l))) return 'food'
+  if (labels.some((l) => /different community|otra comunidad|use my profile community/i.test(l))) return 'community'
+  if (labels.some((l) => /address|dirección|use that one|usa esa/i.test(l))) return 'address'
+  return 'other'
+}
+
+function turnFamilyFromText(responseText) {
+  const text = String(responseText || '').toLowerCase().replace(/[-_/]+/g, ' ').replace(/\s+/g, ' ')
+  if (/(do it for me|handle everything).{0,80}(guide me|paso a paso|open the form)/.test(text)
+    || /(how would you like|like to proceed).{0,40}(shar|donat)/.test(text)) return 'fork'
+  if (/ready to post|shall i post|sound good to post|looks? right|does this look|go ahead and share/.test(text)
+    && !/your community|list under|linked to|profile address/.test(text)) return 'post'
+  if (/short description|add a description|describe the food|\bdescription\b|people should know|how is it packaged/.test(text)
+    && !/i'?ll put|into the description/.test(text)) return 'description'
+  if (/photo|picture|foto/.test(text) && /attach|upload|required|please/.test(text)
+    && !/short description|add a description|describe the food|with photo|ready to post/.test(text)) return 'photo'
+  if (/which community|list under|your community|linked to|use that one|for the community/.test(text)
+    && !/ready to post|looks? right/.test(text)) return 'community'
+  if (/profile address|what address|where should|does that look good|pickup address/.test(text)
+    && !/ready to post|community/.test(text)) return 'address'
+  if (/allerg|contain nuts|dietary restriction/.test(text) && !/ready to post|looks? right/.test(text)) return 'allergen'
+  if (/when does it expire|best by|good until|how long is it good|stay fresh/.test(text)
+    && !/allerg|short description|describe/.test(text)) return 'expiry'
+  if (/(what food|tell me what you have).{0,40}(how much|how many)|food and how much|food name and/.test(text)) return 'food_qty'
+  if (/what food|what would you like to share|what are you sharing|tell me the food/.test(text)) return 'food'
+  if (/how many|how much|cuántos|cuántas/.test(text) && !/what food|description/.test(text)) return 'qty'
+  return 'other'
+}
+
+/**
+ * Index of the live unanswered assistant turn, or -1.
+ * Chips belong only to that message: after the user replies, on error, or
+ * while waiting, return -1 so previous chips are not re-shown.
+ */
+export function liveAssistantIndex(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return -1
+  const newest = messages[messages.length - 1]
+  if (newest?.role === 'assistant' && newest?.isError) return -1
+
+  let lastUserIdx = -1
+  let lastOkAssistantIdx = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (lastUserIdx < 0 && m.role === 'user') lastUserIdx = i
+    if (
+      lastOkAssistantIdx < 0
+      && m.role === 'assistant'
+      && !m.isError
+      && m.id !== 'welcome'
+    ) {
+      lastOkAssistantIdx = i
+    }
+  }
+  if (lastOkAssistantIdx < 0) return -1
+  if (lastUserIdx >= 0 && lastOkAssistantIdx < lastUserIdx) return -1
+  if (messages[lastOkAssistantIdx]?.requiresConfirmation) return -1
+  return lastOkAssistantIdx
+}
+
 /**
  * Drop chips that clearly conflict with the assistant's latest reply.
  * Empty is better than Yes/No under a photo or food question.
@@ -95,6 +171,7 @@ export function filterChipsAgainstResponse(responseText, chips) {
   }
   const text = String(responseText || '').toLowerCase().replace(/[-_/]+/g, ' ').replace(/\s+/g, ' ')
   const rawChips = chips
+  const rawFamily = backendChipFamily(rawChips)
 
   // Active guided tutorial — never re-show Open / Do it for me / Guide me.
   const guidedTutorial = (
@@ -106,7 +183,7 @@ export function filterChipsAgainstResponse(responseText, chips) {
     )
     || /(baby step|look at the blue|look at the green|tap the box|type your name)/.test(text)
   )
-  if (guidedTutorial) {
+  if (guidedTutorial && (rawChips.length === 0 || rawFamily === 'guided' || rawFamily === 'none')) {
     const es = /[¿áéíóúñ]|listo|siguiente|ayuda/.test(String(responseText || '').toLowerCase())
     const openStep = /(open the share|open share|open the find|open find|open the request|tap share|tap find|main menu|top menu|see the form)/.test(text)
     const base = es
@@ -140,7 +217,12 @@ export function filterChipsAgainstResponse(responseText, chips) {
     && /(or |want me|would you|prefer|options|three)/.test(text)
   )
   // Don't treat "please open Share Food… say done" as a fresh fork ask.
-  if (isForkAsk && !/(say done|let me know when|when you see|i see the form|next step together)/.test(text)) {
+  // Don't replace food/expiry/description chips the backend already sent.
+  if (
+    isForkAsk
+    && !/(say done|let me know when|when you see|i see the form|next step together)/.test(text)
+    && (rawChips.length === 0 || rawFamily === 'fork' || rawFamily === 'none')
+  ) {
     const es = /[¿áéíóúñ]|hazlo|gu[ií]ame|abrir el formulario|abrir buscar|abrir solicitar/.test(String(responseText || '').toLowerCase())
     const ctx = text
     let path = typeof window !== 'undefined' ? String(window.location?.pathname || '') : ''
@@ -269,50 +351,12 @@ export function resolveInputChips(suggestions, language = 'en', role = null, { a
     })
     .filter(Boolean)
 
-  // Always run conflict filter — injects goal-aware open chips on forks
-  // even when the backend returned food examples or nothing.
+  // Filter may drop conflicts; it must not replace a known backend family
+  // with fork/guided chips (see filterChipsAgainstResponse).
   const filtered = filterChipsAgainstResponse(responseText, normalized)
-  const text = String(responseText || '').toLowerCase().replace(/[-_/]+/g, ' ').replace(/\s+/g, ' ')
 
-  // Classify chip family of backend set vs turn ask — drop when mismatched.
-  const familyOf = (chips) => {
-    if (!chips.length) return 'none'
-    const labels = chips.map((c) => chipLabel(c).toLowerCase())
-    if (labels.every((l) => /^(1|2|3|5|10)$/.test(l))) return 'qty'
-    if (labels.every((l) => /^(tomorrow|in 2 days|in 3 days|in a month|mañana|en 2|en 3|en un mes)/i.test(l))) return 'expiry'
-    if (labels.every((l) => /^(still sealed|homemade|assorted leftovers|sigue sellado|casero|sobras)/i.test(l))) return 'description'
-    if (labels.some((l) => /^(attach a photo|adjuntar foto|i'll add a photo)/i.test(l)) && labels.length <= 2) return 'photo'
-    if (labels.some((l) => /^(yes, post it|sí, publícalo|wait, edit)/i.test(l))) return 'post'
-    if (labels.some((l) => /^(no allergens|sin alérgenos|just gluten|dairy|nuts|lácteos|frutos)/i.test(l))) return 'allergen'
-    if (labels.some((l) => /^(do it for me|hazlo por|guide me|guíame|open the form|open find)/i.test(l))) return 'fork'
-    if (labels.some((l) => /^(5 apples|2 loaves|vegetables —|eggs —|5 manzanas|2 panes)/i.test(l))) return 'food_qty'
-    if (labels.some((l) => /^(bread|fruit|vegetables|prepared meal|pan|frutas|comida preparada)$/i.test(l))) return 'food'
-    if (labels.some((l) => /different community|otra comunidad|use my profile community/i.test(l))) return 'community'
-    if (labels.some((l) => /address|dirección|use that one|usa esa/i.test(l))) return 'address'
-    return 'other'
-  }
-  const turnFamily = (() => {
-    if (/(do it for me|handle everything).{0,80}(guide me|paso a paso|open the form)/.test(text)
-      || /(how would you like|like to proceed).{0,40}(shar|donat)/.test(text)) return 'fork'
-    if (/ready to post|shall i post|sound good to post|looks? right|does this look|go ahead and share/.test(text)
-      && !/your community|list under|linked to|profile address/.test(text)) return 'post'
-    if (/short description|add a description|describe the food|\bdescription\b|people should know|how is it packaged/.test(text)
-      && !/i'?ll put|into the description/.test(text)) return 'description'
-    if (/photo|picture|foto/.test(text) && /attach|upload|required|please/.test(text)
-      && !/short description|add a description|describe the food|with photo|ready to post/.test(text)) return 'photo'
-    if (/which community|list under|your community|linked to|use that one|for the community/.test(text)
-      && !/ready to post|looks? right/.test(text)) return 'community'
-    if (/profile address|what address|where should|does that look good|pickup address/.test(text)
-      && !/ready to post|community/.test(text)) return 'address'
-    if (/allerg|contain nuts|dietary restriction/.test(text) && !/ready to post|looks? right/.test(text)) return 'allergen'
-    if (/when does it expire|best by|good until|how long is it good|stay fresh/.test(text)
-      && !/allerg|short description|describe/.test(text)) return 'expiry'
-    if (/(what food|tell me what you have).{0,40}(how much|how many)|food and how much|food name and/.test(text)) return 'food_qty'
-    if (/what food|what would you like to share|what are you sharing|tell me the food/.test(text)) return 'food'
-    if (/how many|how much|cuántos|cuántas/.test(text) && !/what food|description/.test(text)) return 'qty'
-    return 'other'
-  })()
-
+  const turnFamily = turnFamilyFromText(responseText)
+  const backendFamily = backendChipFamily(filtered)
   const onlyBareQty = filtered.length > 0
     && filtered.every((c) => /^(1|2|3|5|10)$/.test(chipLabel(c)))
   const qtyOnlyAsk = turnFamily === 'qty'
@@ -325,12 +369,10 @@ export function resolveInputChips(suggestions, language = 'en', role = null, { a
   const onlyDescription = filtered.length > 0
     && filtered.every((c) => descriptionChip.test(chipLabel(c)))
 
-  const backendFamily = familyOf(filtered)
   const familyMismatch = (
     filtered.length > 0
-    && turnFamily !== 'other'
+    && KNOWN_TURN_FAMILIES.has(turnFamily)
     && backendFamily !== 'none'
-    && backendFamily !== 'other'
     && backendFamily !== turnFamily
   )
 

@@ -179,3 +179,69 @@ class TestChipTurnRegression:
         assert "do it for me" in joined
         assert "guide" in joined
 
+    def test_classified_expiry_does_not_fall_through_to_help(self):
+        text = (
+            "When does it expire? I'm happy to guide you if you're lost."
+        )
+        out = generate_quick_replies(
+            text,
+            user_message="Do it for me",
+            assistance_reminder="HANDS-ON MODE — SHARE FOOD",
+        )
+        joined = " ".join(out).lower()
+        assert "tomorrow" in joined
+        assert "how does this work" not in joined
+        assert "find food near me" not in joined
+        assert "do it for me" not in joined
+
+    def test_hands_on_reminder_never_returns_fork_on_food_ask(self):
+        out = generate_quick_replies(
+            "What food are you sharing today?",
+            user_message="Do it for me",
+            assistance_reminder="HANDS-ON MODE — SHARE FOOD",
+        )
+        joined = " ".join(out).lower()
+        assert "do it for me" not in joined
+        assert "open the form" not in joined
+        assert "guide me" not in joined
+
+    def test_search_results_do_not_steal_expiry_ask(self):
+        tool_results = [{
+            "tool": "search_food_listings",
+            "ok": True,
+            "result": {
+                "results": [
+                    {"title": "Fresh Bread"},
+                    {"title": "Vegetable Box"},
+                ],
+            },
+        }]
+        chips = build_turn_suggestions(
+            "When does it expire?",
+            "en",
+            tool_results=tool_results,
+            min_chips=0,
+            last_user_message="Do it for me",
+            assistance_reminder="HANDS-ON MODE — SHARE FOOD",
+        )
+        joined = _joined(chips)
+        assert "tomorrow" in joined
+        assert "claim" not in joined
+
+    def test_search_results_do_not_steal_description_ask(self):
+        tool_results = [{
+            "tool": "search_food_listings",
+            "ok": True,
+            "result": {"results": [{"title": "Fresh Bread"}]},
+        }]
+        chips = build_turn_suggestions(
+            "Please add a short description for recipients.",
+            "en",
+            tool_results=tool_results,
+            min_chips=0,
+            last_user_message="Do it for me",
+        )
+        joined = _joined(chips)
+        assert "sealed" in joined
+        assert "claim" not in joined
+

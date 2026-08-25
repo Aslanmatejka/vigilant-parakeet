@@ -25,6 +25,18 @@ CHIP_TURN_CLASSES = (
     "none",
 )
 
+# Classified turns must not fall through to legacy heuristics.
+CLASSIFIED_EXCLUSIVE = frozenset({
+    "fork", "guided", "post_confirm", "photo", "description", "community",
+    "allergen", "expiry", "food_qty", "food", "qty", "address", "success", "edit",
+})
+
+# Share questions whose chips must beat leftover search/claim tool chips.
+SHARE_ASK_CLASSES = frozenset({
+    "post_confirm", "photo", "description", "community", "allergen",
+    "expiry", "food_qty", "food", "qty", "address",
+})
+
 
 def _norm(text: str) -> str:
     return (text or "").lower()

@@ -517,6 +517,10 @@ def _build_action_policy() -> str:
         "a donor-written description (always ask — never invent), and "
         "at least one photo (REQUIRED — never post without images[]). "
         "Ask for the description after expiry, before the photo. "
+        "ONE QUESTION PER TURN: UI suggestion chips are the user's "
+        "shortcuts and must match that question. Never bundle "
+        "description+photo or expiry+allergen. Do not recap another "
+        "step (photo, allergens, school) unless that is the question. "
         "The order of asking is "
         "flexible — parse everything the donor gives you up front, "
         "then ask only what's still missing, in the most natural order. "
@@ -568,9 +572,7 @@ def _build_action_policy() -> str:
         "Description: ALWAYS ask for one short sentence about the food "
         "(condition, packaging, what's included). Do NOT invent it. "
         "Pass their words as `description` on post_food_listing. "
-        "Ask after expiry, before the photo. One question per turn so "
-        "suggestion chips match what you asked — never bundle "
-        "description+photo or expiry+allergen in one ask.\n"
+        "Ask after expiry, before the photo.\n"
         "\n"
         "Food title: accept ANY dish or item they name (leftover lasagna, "
         "biryani, canned chickpeas, 100 boxes of vegetables). Do not "
@@ -4087,6 +4089,8 @@ class ConversationEngine:
                 user_message=user_message or "",
                 communities=communities or None,
                 suggested_community=suggested,
+                assistance_reminder=assistance_reminder,
+                guide_state=guide_state,
             )
 
         return _serialize_suggestion_chips(chips)
@@ -4407,12 +4411,13 @@ def generate_quick_replies(
             assistance_reminder=assistance_reminder or "",
             guide_state=guide_state,
         )
-        if fork:
-            for chip in fork:
-                label = chip.get("label") if isinstance(chip, dict) else str(chip or "")
-                if label:
-                    add(label)
-            return out
+        for chip in fork or []:
+            label = chip.get("label") if isinstance(chip, dict) else str(chip or "")
+            if label:
+                add(label)
+        return out
+    if turn == "guided":
+        return out
     if turn in (
         "post_confirm", "photo", "description", "community", "allergen",
         "expiry", "food_qty", "food", "qty", "address", "success", "edit",
@@ -4426,7 +4431,7 @@ def generate_quick_replies(
         )
         if classified:
             add(*classified)
-            return out
+        return out
 
     # ---- Legacy / claim / search / help paths below (non-share or unmatched) ----
 

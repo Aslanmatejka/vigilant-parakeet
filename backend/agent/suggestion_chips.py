@@ -1218,18 +1218,33 @@ def build_turn_suggestions(
             response_text or "", guided_chips[:_MAX_CHIPS], language,
         )
 
-    # 3) Search / claim tool chips — exclusive when present.
-    search_chips = _chips_from_search_results(tool_results, language)
-    if search_chips:
-        return _filter_chips_to_match_response(
-            response_text or "", search_chips[:_MAX_CHIPS], language,
+    share_ask = False
+    try:
+        from backend.ai.chip_turn import SHARE_ASK_CLASSES, classify_share_chip_turn
+        share_turn = classify_share_chip_turn(
+            response_text or "",
+            user_message=last_user_message or "",
+            assistance_reminder=assistance_reminder or "",
         )
+        share_ask = share_turn in SHARE_ASK_CLASSES
+    except Exception:
+        share_ask = False
 
-    multi_claim_chips = _chips_for_multi_claim_flow(response_text or "", language)
-    if multi_claim_chips:
-        return _filter_chips_to_match_response(
-            response_text or "", multi_claim_chips[:_MAX_CHIPS], language,
-        )
+    # 3) Search / claim tool chips — exclusive when present, unless this
+    #    reply is a share-flow question (leftover search results must not
+    #    replace expiry/description/food chips).
+    if not share_ask:
+        search_chips = _chips_from_search_results(tool_results, language)
+        if search_chips:
+            return _filter_chips_to_match_response(
+                response_text or "", search_chips[:_MAX_CHIPS], language,
+            )
+
+        multi_claim_chips = _chips_for_multi_claim_flow(response_text or "", language)
+        if multi_claim_chips:
+            return _filter_chips_to_match_response(
+                response_text or "", multi_claim_chips[:_MAX_CHIPS], language,
+            )
 
     # 4) Community selection — exclusive.
     list_pick_chips = _chips_for_community_list_pick(

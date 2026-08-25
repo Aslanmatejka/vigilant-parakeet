@@ -11,7 +11,7 @@ import { parseListingsCsv, downloadCsvTemplate, sanitizeListingExpiry, visionDra
 import { assignImagestoRows, assignFoodImage } from '../../utils/foodImages.js'
 import dataService from '../../utils/dataService.js'
 import supabase from '../../utils/supabaseClient.js'
-import { resolveInputChips } from '../../utils/suggestionChips.js'
+import { liveAssistantIndex, resolveInputChips } from '../../utils/suggestionChips.js'
 import { toast } from 'react-toastify'
 import {
   browseCommunityIdsForUser,
@@ -1305,7 +1305,7 @@ function MessageBubble({
 
           {/* Suggested actions — only on the latest assistant turn so stale
               chips from earlier questions don't linger in the scrollback. */}
-          {showSuggestionChips && suggestionItems.length > 0 && !isUser && (
+          {showSuggestionChips && suggestionItems.length > 0 && !isUser && !msg.isError && (
             <div className={`flex flex-wrap gap-1 mt-2 ${suggestionItems.length > 4 ? 'max-h-36 overflow-y-auto pr-1' : ''}`}>
               {suggestionItems.map((action, i) => (
                 <SuggestedActionButton
@@ -2791,43 +2791,15 @@ function AIChatPanel() {
   // fallbacks — empty rail is better than mismatched "Find food" chips).
   // Never fall back to a previous successful turn after an error — that
   // shows chips for the wrong response.
+  const liveChipIdx = useMemo(() => liveAssistantIndex(messages), [messages])
+
   const railChips = useMemo(() => {
     if (isLoading || pendingUpload || voiceMode || pendingChatPhotos.length > 0) return []
     if (messages.length <= 1) {
       return resolveInputChips([], language, communityRole, { allowLazy: true })
     }
-    // Newest message is an error assistant → clear rail (do not reuse prior chips).
-    const newest = messages[messages.length - 1]
-    if (newest?.role === 'assistant' && newest?.isError) return []
-
-    // After a failed turn the last item may be user + error; only show chips
-    // when the latest non-welcome assistant is also the newest non-error reply
-    // after the latest user message.
-    let lastUserIdx = -1
-    let lastOkAssistantIdx = -1
-    let lastErrorAfterUser = false
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i]
-      if (lastUserIdx < 0 && m.role === 'user') lastUserIdx = i
-      if (
-        lastOkAssistantIdx < 0
-        && m.role === 'assistant'
-        && !m.isError
-        && m.id !== 'welcome'
-      ) {
-        lastOkAssistantIdx = i
-      }
-    }
-    if (lastUserIdx >= 0 && lastOkAssistantIdx >= 0 && lastOkAssistantIdx < lastUserIdx) {
-      // User spoke after the last good assistant — waiting for a new reply
-      // (or only errors followed). Do not show previous chips.
-      for (let i = lastUserIdx + 1; i < messages.length; i++) {
-        if (messages[i].role === 'assistant' && messages[i].isError) lastErrorAfterUser = true
-      }
-      if (lastErrorAfterUser || lastOkAssistantIdx < lastUserIdx) return []
-    }
-
-    const lastAssistant = lastOkAssistantIdx >= 0 ? messages[lastOkAssistantIdx] : null
+    if (liveChipIdx < 0) return []
+    const lastAssistant = messages[liveChipIdx]
     if (!lastAssistant || lastAssistant.requiresConfirmation) return []
     const backendSuggestions = Array.isArray(lastAssistant.suggestions) ? lastAssistant.suggestions : []
     const responseText = String(lastAssistant.message || lastAssistant.text || '')
@@ -2835,7 +2807,7 @@ function AIChatPanel() {
       allowLazy: false,
       responseText,
     })
-  }, [messages, isLoading, pendingUpload, voiceMode, language, communityRole, pendingChatPhotos.length])
+  }, [messages, liveChipIdx, isLoading, pendingUpload, voiceMode, language, communityRole, pendingChatPhotos.length])
 
   // ─── File uploads (photo + CSV → bulk-listings) ───────
   // All three uploads require an authenticated user: the vision/enrichment
@@ -4384,9 +4356,8 @@ function AIChatPanel() {
           )}
 
           {(() => {
-            // Find the index of the last non-error, non-welcome assistant
-            // message so we can render the Regenerate affordance on exactly
-            // that one (avoids cluttering every assistant bubble).
+            // Regenerate stays on the last good assistant even after the user
+            // has replied. Suggestion chips only on the live unanswered turn.
             let lastAssistantIdx = -1
             for (let i = messages.length - 1; i >= 0; i--) {
               const m = messages[i]
@@ -4433,7 +4404,9 @@ function AIChatPanel() {
                     onRetry={retryMessage}
                     onRegenerate={regenerateLast}
                     showRegenerate={idx === lastAssistantIdx}
-                    showSuggestionChips={idx === lastAssistantIdx && !isLoading}
+                    showSuggestionChips={
+                      idx === liveChipIdx && !isLoading && !msg.isError
+                    }
                   />
                 </React.Fragment>
               )

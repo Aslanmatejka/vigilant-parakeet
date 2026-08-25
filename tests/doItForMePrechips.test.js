@@ -1,5 +1,9 @@
 import { inferChipsFromResponse } from '../utils/inferSuggestionChips.js'
-import { resolveInputChips } from '../utils/suggestionChips.js'
+import {
+  filterChipsAgainstResponse,
+  liveAssistantIndex,
+  resolveInputChips,
+} from '../utils/suggestionChips.js'
 
 function labels(chips) {
   return chips.map((c) => c.label)
@@ -186,5 +190,77 @@ describe('Do-it-for-me prechips match each AI response', () => {
     expect(
       /saved address|different address|don'?t have|use that/i.test(j),
     ).toBe(true)
+  })
+
+  test('does not inject fork over backend food chips', () => {
+    const backend = [
+      { label: '5 apples', message: '5 apples' },
+      { label: '2 loaves of bread', message: '2 loaves of bread' },
+    ]
+    const resolved = resolveInputChips(backend, 'en', null, {
+      allowLazy: false,
+      responseText: 'What food do you want to share, and how much do you have?',
+    })
+    expect(labels(resolved).some((l) => /apples|loaves/i.test(l))).toBe(true)
+    expect(labels(resolved).some((l) => /do it for me|open the form/i.test(l))).toBe(false)
+  })
+
+  test('empty backend on description infers description not qty or photo', () => {
+    const resolved = resolveInputChips([], 'en', null, {
+      allowLazy: false,
+      responseText: 'Please add a short description for recipients.',
+    })
+    expect(labels(resolved).some((l) => /sealed|homemade/i.test(l))).toBe(true)
+    expect(labels(resolved).some((l) => /attach a photo/i.test(l))).toBe(false)
+    expect(labels(resolved).some((l) => /^(1|3|5|10)$/.test(l))).toBe(false)
+  })
+
+  test('fork is not injected onto a qty ask', () => {
+    const injected = filterChipsAgainstResponse('How many would you like to share?', [])
+    expect(injected.some((c) => /do it for me|open the form/i.test(c.label || ''))).toBe(false)
+    const resolved = resolveInputChips([], 'en', null, {
+      allowLazy: false,
+      responseText: 'How many would you like to share?',
+    })
+    expect(labels(resolved).some((l) => /^(1|2|3|5|10)$/.test(l))).toBe(true)
+    expect(labels(resolved).some((l) => /do it for me|open the form/i.test(l))).toBe(false)
+  })
+
+  test('family other is stale on expiry turn', () => {
+    const stale = [
+      { label: 'Claim #1: Bread', message: 'Claim #1' },
+      { label: 'Show more options', message: 'Show more' },
+    ]
+    const resolved = resolveInputChips(stale, 'en', null, {
+      allowLazy: false,
+      responseText: 'When does it expire?',
+    })
+    expect(labels(resolved).some((l) => /tomorrow/i.test(l))).toBe(true)
+    expect(labels(resolved).some((l) => /claim/i.test(l))).toBe(false)
+  })
+
+  test('liveAssistantIndex hides chips after user replies', () => {
+    const messages = [
+      { role: 'assistant', id: 'a1', isError: false, message: 'When does it expire?' },
+      { role: 'user', id: 'u1', message: 'tomorrow' },
+    ]
+    expect(liveAssistantIndex(messages)).toBe(-1)
+  })
+
+  test('liveAssistantIndex keeps live assistant after last user', () => {
+    const messages = [
+      { role: 'user', id: 'u1', message: 'tomorrow' },
+      { role: 'assistant', id: 'a1', isError: false, message: 'Description?' },
+    ]
+    expect(liveAssistantIndex(messages)).toBe(1)
+  })
+
+  test('liveAssistantIndex hides chips after error', () => {
+    const messages = [
+      { role: 'assistant', id: 'a1', isError: false, message: 'When does it expire?' },
+      { role: 'user', id: 'u1', message: 'tomorrow' },
+      { role: 'assistant', id: 'e1', isError: true, message: 'Something went wrong' },
+    ]
+    expect(liveAssistantIndex(messages)).toBe(-1)
   })
 })
