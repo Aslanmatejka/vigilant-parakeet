@@ -112,7 +112,7 @@ function turnFamilyFromText(responseText) {
     || /(how would you like|like to proceed).{0,40}(shar|donat)/.test(text)) return 'fork'
   if (/ready to post|shall i post|sound good to post|looks? right|does this look|go ahead and share/.test(text)
     && !/your community|list under|linked to|profile address/.test(text)) return 'post'
-  if (/short description|add a description|describe the food|describe it|describing the|describing this|one short sentence|sentence describing|\bdescription\b|people should know|how is it packaged|how it'?s packed|how it is packed|how fresh|give me one short/.test(text)
+  if (/short description|add a description|describe the food|describe it|describing the|describing this|one short sentence|sentence describing|\bdescription\b|people should know|how is it packaged|how it'?s packed|how it is packed|how fresh|give me one short|short description of|in the carton|still in the carton|write one short sentence/.test(text)
       && !/i'?ll put|into the description/.test(text)) return 'description'
   if (/photo|picture|foto/.test(text) && /attach|upload|required|please/.test(text)
     && !/short description|add a description|describe the food|with photo|ready to post/.test(text)) return 'photo'

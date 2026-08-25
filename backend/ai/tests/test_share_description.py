@@ -212,3 +212,59 @@ class TestDescriptionChips:
         )
         assert "Attach a photo" in out
         assert "Still sealed" not in out
+
+
+class TestDescriptionChipNotReasked:
+    def _history_after_leftovers_and_allergen(self):
+        return _share_through_expiry() + [
+            {
+                "role": "assistant",
+                "message": (
+                    "Got it. Could you give me a short description of the eggs? "
+                    "For example, are they fresh, still in the carton, or "
+                    "anything else someone should know?"
+                ),
+            },
+            {"role": "user", "message": "Assorted leftovers"},
+            {
+                "role": "assistant",
+                "message": (
+                    "Perfect, thanks! Are there any allergens in your leftovers "
+                    "— like peanuts, tree nuts, dairy, eggs, wheat/gluten, soy, "
+                    "fish, shellfish, or sesame? If not, just let me know."
+                ),
+            },
+        ]
+
+    def test_leftovers_chip_stays_saved_after_allergen_turn(self):
+        history = self._history_after_leftovers_and_allergen()
+        assert (
+            _best_user_description_from_thread("No allergens", history)
+            == "Assorted leftovers"
+        )
+        state = posting_flow_state("No allergens", history)
+        assert state["description_provided"] is True
+
+    def test_reminder_after_allergen_does_not_reask_description(self):
+        history = self._history_after_leftovers_and_allergen()
+        reminder = build_posting_step_reminder("No allergens", history, lang="en")
+        assert reminder is not None
+        low = reminder.lower()
+        assert "saved description" in low or "assorted leftovers" in low
+        assert "do not ask for a description again" in low
+        assert "now ask for a one-sentence description" not in low
+        assert "ask for a one-sentence description of the food" not in low
+
+    def test_short_description_of_eggs_gets_description_chips(self):
+        text = (
+            "Got it. Could you give me a short description of the eggs? "
+            "For example, are they fresh, still in the carton, or "
+            "anything else someone should know?"
+        )
+        assert _is_description_ask(text)
+        out = generate_quick_replies(text, user_message="Do it for me")
+        joined = " ".join(out).lower()
+        assert "sealed" in joined or "homemade" in joined or "leftover" in joined
+        assert "tomorrow" not in joined
+        assert "no allergens" not in joined
+

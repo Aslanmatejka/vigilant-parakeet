@@ -277,3 +277,15 @@ class TestChipTurnRegression:
         assert "yes, post it" in joined
         assert "attach a photo" not in joined
 
+    def test_short_description_of_eggs_in_carton_is_description_chips(self):
+        text = (
+            "Got it. Could you give me a short description of the eggs? "
+            "For example, are they fresh, still in the carton, or "
+            "anything else someone should know?"
+        )
+        out = generate_quick_replies(text, user_message="Do it for me")
+        joined = " ".join(out).lower()
+        assert "sealed" in joined or "homemade" in joined
+        assert "tomorrow" not in joined
+        assert "no allergens" not in joined
+

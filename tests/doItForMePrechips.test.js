@@ -301,4 +301,14 @@ describe('Do-it-for-me prechips match each AI response', () => {
     expect(labels(resolved).some((l) => /yes, post it/i.test(l))).toBe(true)
     expect(labels(resolved).some((l) => /attach a photo/i.test(l))).toBe(false)
   })
+
+  test('short description of the eggs in the carton is description chips', () => {
+    expectChips(
+      "Got it. Could you give me a short description of the eggs? "
+      + "For example, are they fresh, still in the carton, or "
+      + "anything else someone should know?",
+      ['Still sealed'],
+      ['Tomorrow', 'No allergen'],
+    )
+  })
 })

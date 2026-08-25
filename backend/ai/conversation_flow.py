@@ -1931,9 +1931,12 @@ def build_assistance_mode_reminder(
                     "MODO MANOS A LA OBRA — COMPARTIR:\n"
                     "El usuario quiere que lo hagas tú en el chat. Sigue el "
                     "flujo normal de publicación (preguntar solo lo que falte, "
-                    "luego post_food_listing). SIEMPRE pide una descripción "
+                    "luego post_food_listing). Pide UNA vez una descripción "
                     "corta de la comida — no la inventes; pasa SUS palabras "
-                    "como description. No abras la página Share Food."
+                    "como description. Si ya respondieron (Sigue sellado / "
+                    "Casero / Sobras variadas), ESO es la descripción — no "
+                    "es un alimento nuevo y NO la vuelvas a pedir. "
+                    "No abras la página Share Food."
                 )
             if goal == "request":
                 return (
@@ -1957,9 +1960,12 @@ def build_assistance_mode_reminder(
                 "expiry (Tomorrow / In 2 days / '2 days' / '2 months' / "
                 "Aug 30), any catalog community. Once they give a best-by "
                 "date, SAVE it as expiration_date and NEVER ask again. "
-                "ALWAYS ask the donor for a short description of the food "
+                "Ask ONCE for a short description of the food "
                 "(condition, packaging, what's included) — do NOT invent "
-                "or auto-write one. Pass THEIR words as description on "
+                "or auto-write one. If they already answered — including "
+                "Still sealed / Homemade, refrigerated / Assorted leftovers "
+                "— that IS the description, not a new food title. Never "
+                "ask again. Pass THEIR words as description on "
                 "post_food_listing. Do not open the Share Food page for "
                 "UI coaching."
             )
@@ -3036,10 +3042,27 @@ _DESCRIPTION_ASK_CUES: tuple[str, ...] = (
     "one short sentence", "describing the", "describing this",
     "how fresh", "how it's packed", "how it is packed", "how its packed",
     "give me one short", "sentence describing",
+    "short description of", "in the carton", "still in the carton",
+    "write one short sentence",
     "descripción corta", "descripcion corta", "describe la comida",
     "cuéntame más sobre", "cuentame mas sobre",
     "descripción para", "descripcion para",
 )
+
+
+_DESCRIPTION_CHIP_LABELS = frozenset({
+    "still sealed",
+    "homemade, refrigerated",
+    "assorted leftovers",
+    "sigue sellado",
+    "casero, refrigerado",
+    "sobras variadas",
+})
+
+
+def _is_description_chip_reply(text: str) -> bool:
+    t = (text or "").strip().lower().rstrip(".!")
+    return t in _DESCRIPTION_CHIP_LABELS
 
 
 def _is_description_ask(text: str) -> bool:
@@ -3120,7 +3143,9 @@ def _best_user_description_from_thread(
 ) -> Optional[str]:
     """The donor's own description — never an invented assistant draft."""
     last_asked = _assistant_last_asked_kind(history)
-    if last_asked == "description" and _text_is_usable_description(message):
+    if last_asked == "description" and (
+        _is_description_chip_reply(message) or _text_is_usable_description(message)
+    ):
         return (message or "").strip()
 
     prefixed = re.search(
@@ -3141,9 +3166,9 @@ def _best_user_description_from_thread(
         nxt = hist[i + 1] if i + 1 < len(hist) else None
         if nxt and nxt.get("role") == "user":
             reply = nxt.get("message") or ""
-            if _text_is_usable_description(reply):
+            if _is_description_chip_reply(reply) or _text_is_usable_description(reply):
                 return reply.strip()
-        break
+        # Unanswered re-ask — keep looking for an earlier chip/sentence.
     return None
 
 
@@ -3163,14 +3188,14 @@ def _assistant_last_asked_kind(history: list | None) -> str | None:
             "listo para reclamar", "reclamar estos", "reclamo estos",
         )):
             return "claim_confirm"
+        if _is_description_ask(text):
+            return "description"
         if any(k in text for k in (
             "allerg", "alérgen", "alergen", "alergia", "dietary restriction",
         )):
             return "allergen"
-        if _is_description_ask(text):
-            return "description"
         if any(k in text for k in (
-            "expire", "expiry", "best by", "best-by", "use by", "how fresh",
+            "expire", "expiry", "best by", "best-by", "use by",
             "how long", "when was it made", "good until", "vence", "caduca",
         )):
             return "expiry"
@@ -4964,9 +4989,12 @@ def build_posting_step_reminder(
                     "NO la inventes. Espera su respuesta. Pásala como "
                     "description al publicar. Todavía no pidas foto."
                 )
+            desc = _best_user_description_from_thread(message, history) or ""
             return (
                 "Sugerencia: el donante ya dio la fecha de vencimiento."
-                f"{exp_hint} No la vuelvas a pedir — sigue con foto."
+                f"{exp_hint} Descripción YA GUARDADA"
+                f"{(': ' + desc[:80]) if desc else ''}. "
+                "NO pidas descripción otra vez — sigue con foto."
             )
         if state["expiry_provided"] and not state.get("description_provided") and not ready:
             if last_asked == "description":
@@ -4978,6 +5006,19 @@ def build_posting_step_reminder(
                 "Sugerencia: pide una descripción corta (estado, empaque, "
                 "qué incluye). NO la inventes — espera su respuesta. "
                 "Pásala como description al publicar."
+            )
+        saved_desc = (_best_user_description_from_thread(message, history) or "").strip()
+        if saved_desc and last_asked != "description":
+            photo_bit = (
+                " Siguiente: pide una foto OBLIGATORIA."
+                if (state["awaiting_photo"] or not state["has_photo"])
+                else ""
+            )
+            return (
+                f"Sugerencia: descripción YA GUARDADA: {saved_desc[:80]}. "
+                "NO pidas descripción otra vez (Sigue sellado / Casero / "
+                "Sobras variadas son la descripción, no un alimento nuevo)."
+                f"{photo_bit}"
             )
         if ready and state["has_photo"]:
             exp_hint = (
@@ -5084,6 +5125,19 @@ def build_posting_step_reminder(
             "or auto-write it — wait for THEIR words. Pass it as "
             "description when posting. One question — then continue "
             "with photo."
+        )
+    saved_desc = (_best_user_description_from_thread(message, history) or "").strip()
+    if saved_desc and last_asked != "description":
+        photo_bit = (
+            " Next: a photo is REQUIRED — ask them to attach one in chat."
+            if (state["awaiting_photo"] or not state["has_photo"])
+            else ""
+        )
+        return (
+            f"Nudge: SAVED description={saved_desc[:80]}. Do NOT ask for a "
+            "description again — Still sealed / Homemade / Assorted leftovers "
+            "IS the listing description, not a new food title."
+            f"{photo_bit}"
         )
     if ready and state["has_photo"]:
         exp_hint = (
