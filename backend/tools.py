@@ -207,8 +207,46 @@ def _community_name_from_listing(listing: dict) -> Optional[str]:
     return listing.get("community_name")
 
 
+_US_DATE_RE = re.compile(r"^\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})\s*$")
+
+
+def _parse_american_date(raw: str) -> Optional[str]:
+    """Parse MM/DD/YYYY, M/D/YY, or M-D-YYYY into ISO YYYY-MM-DD.
+
+    Bulk_import_listings donors typically type dates in US format. Handling
+    this directly (rather than via the spoken-text fallback) avoids the
+    recursive call into ``_extract_expiry_from_text`` -> ``_normalize_expiry_date``
+    that used to hit a RecursionError and silently return None.
+    """
+    m = _US_DATE_RE.match(raw or "")
+    if not m:
+        return None
+    try:
+        month = int(m.group(1))
+        day = int(m.group(2))
+        year = int(m.group(3))
+    except (TypeError, ValueError):
+        return None
+    if year < 100:
+        year += 2000
+    if not (1 <= month <= 12 and 1 <= day <= 31 and 1900 <= year <= 2999):
+        return None
+    try:
+        from datetime import date as _date
+        return _date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
 def _normalize_expiry_date(*candidates: Optional[str]) -> Optional[str]:
-    """Return YYYY-MM-DD from the first valid expiry candidate."""
+    """Return YYYY-MM-DD from the first valid expiry candidate.
+
+    Accepts:
+      - ISO ``YYYY-MM-DD``
+      - Anything ``datetime.fromisoformat`` understands (via ``_parse_dt``)
+      - US ``MM/DD/YYYY`` / ``M/D/YY`` (bulk CSV / donor-typed)
+      - Spoken forms ("24th July") via ``_extract_expiry_from_text``
+    """
     for raw in candidates:
         if raw is None:
             continue
@@ -223,6 +261,11 @@ def _normalize_expiry_date(*candidates: Optional[str]) -> Optional[str]:
         dt = _parse_dt(s)
         if dt:
             return dt.date().isoformat()
+        # US MM/DD/YYYY handled directly BEFORE the spoken-text fallback so
+        # the bulk-import path doesn't recurse back into this function.
+        us_iso = _parse_american_date(s)
+        if us_iso:
+            return us_iso
         # Spoken forms: "24th July", "July 24 this year"
         try:
             from backend.ai.conversation_flow import _extract_expiry_from_text
@@ -1344,7 +1387,9 @@ TOOL_DEFINITIONS = [
                 "authenticated user. Accept either a CSV string (csv_text) "
                 "with columns title,quantity,unit,category[,description,"
                 "expiry_date,location] OR a pre-parsed listings array. Use "
-                "after the user confirms a bulk preview."
+                "after the user confirms a bulk preview. Dates in expiry_date "
+                "(row and default) accept American MM/DD/YYYY as well as ISO "
+                "YYYY-MM-DD — the server normalizes to ISO before storage."
             ),
             "parameters": {
                 "type": "object",
@@ -1362,7 +1407,14 @@ TOOL_DEFINITIONS = [
                                 "unit": {"type": "string"},
                                 "category": {"type": "string"},
                                 "description": {"type": "string"},
-                                "expiry_date": {"type": "string"},
+                                "expiry_date": {
+                                    "type": "string",
+                                    "description": (
+                                        "Best-by / expiration date. Accepts "
+                                        "American MM/DD/YYYY (e.g. 9/15/2026) "
+                                        "or ISO YYYY-MM-DD."
+                                    ),
+                                },
                                 "location": {"type": "string"},
                             },
                             "required": ["title", "quantity", "unit", "category"],
@@ -1381,8 +1433,10 @@ TOOL_DEFINITIONS = [
                     "default_expiry_date": {
                         "type": "string",
                         "description": (
-                            "Batch-wide best-by date (YYYY-MM-DD) applied to rows "
-                            "missing expiry_date. Ask the donor before importing."
+                            "Batch-wide best-by date applied to rows missing "
+                            "expiry_date. Accepts American MM/DD/YYYY (e.g. "
+                            "9/15/2026) or ISO YYYY-MM-DD. Ask the donor "
+                            "before importing."
                         ),
                     },
                     "community_name": {

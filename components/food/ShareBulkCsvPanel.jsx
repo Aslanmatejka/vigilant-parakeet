@@ -385,7 +385,7 @@ function ShareBulkCsvPanel({
         </p>
         <ul className="mt-3 text-xs text-gray-500 space-y-1 list-disc list-inside">
           <li>Required columns: title, quantity, unit, category</li>
-          <li>Optional: description, expiry_date, location, community, dietary_tags, allergens</li>
+          <li>Optional: description, expiry_date (MM/DD/YYYY), location, community, dietary_tags, allergens</li>
           <li>Images are assigned automatically when missing (you can still edit rows below)</li>
         </ul>
         <div className="mt-4 flex flex-wrap gap-2">

@@ -21,6 +21,33 @@ class TestNormalizeExpiryDate:
     def test_empty_returns_none(self):
         assert _normalize_expiry_date(None, "", "  ") is None
 
+    # Bulk_import_listings donors typically type dates in American MM/DD/YYYY.
+    # Before this normalizer handled US dates directly it hit a recursion
+    # loop through _extract_expiry_from_text and silently returned None,
+    # letting the batch fall back to category defaults.
+    def test_american_mm_dd_yyyy(self):
+        assert _normalize_expiry_date("9/1/2026") == "2026-09-01"
+
+    def test_american_mm_dd_yyyy_zero_padded(self):
+        assert _normalize_expiry_date("09/01/2026") == "2026-09-01"
+
+    def test_american_hyphenated(self):
+        assert _normalize_expiry_date("9-1-2026") == "2026-09-01"
+
+    def test_american_two_digit_year(self):
+        assert _normalize_expiry_date("9/1/26") == "2026-09-01"
+
+    def test_american_invalid_month_returns_none(self):
+        # 13/1/2026 is not a valid US date; must not silently become
+        # January 13 2026 (that would be EU-style D/M/Y).
+        assert _normalize_expiry_date("13/1/2026") is None
+
+    def test_american_impossible_day_returns_none(self):
+        assert _normalize_expiry_date("2/30/2026") is None
+
+    def test_garbage_returns_none(self):
+        assert _normalize_expiry_date("banana") is None
+
 
 class TestCreateFoodListingExpiry:
     @pytest.mark.asyncio

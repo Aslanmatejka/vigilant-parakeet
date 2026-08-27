@@ -969,7 +969,10 @@ TOOL_DEFINITIONS = [
                 "PRE-FLIGHT validates title + address. Header aliases: "
                 "'food name'→title, 'quantity'→qty, 'pickup location'→address, "
                 "'community'/'school'→per-row community, "
-                "'expiration date'/'best by'→expiration_date."
+                "'expiration date'/'best by'→expiration_date. Dates in "
+                "expiry_date / default_expiry_date accept American MM/DD/YYYY "
+                "(e.g. 9/15/2026) as well as ISO YYYY-MM-DD — the server "
+                "normalizes to ISO before storage."
             ),
             "parameters": {
                 "type": "object",
@@ -977,7 +980,14 @@ TOOL_DEFINITIONS = [
                     "user_id": {"type": "string"},
                     "csv_text": {"type": "string", "description": "Raw CSV text. First row must be the header."},
                     "default_address": {"type": "string", "description": "Optional fallback address used for rows that don't include one."},
-                    "default_expiry_date": {"type": "string", "description": "Optional YYYY-MM-DD fallback expiry for rows missing one."},
+                    "default_expiry_date": {
+                        "type": "string",
+                        "description": (
+                            "Optional fallback expiry for rows missing one. "
+                            "Accepts American MM/DD/YYYY (e.g. 9/15/2026) or "
+                            "ISO YYYY-MM-DD."
+                        ),
+                    },
                     "community_name": {"type": "string", "description": "Batch default community/school. Per-row CSV community overrides this."},
                     "community_id": {"type": "string", "description": "Batch default community id."},
                     "community_confirmed": {"type": "boolean", "description": "Must be true after the donor confirms the community."},

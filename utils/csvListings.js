@@ -146,6 +146,58 @@ function parseListField(val) {
 }
 
 /**
+ * Accept an American-style expiry cell (MM/DD/YYYY, M/D/YY, M-D-YYYY) OR an
+ * ISO YYYY-MM-DD passthrough. Returns ISO YYYY-MM-DD, or null when the input
+ * is empty/unparseable so callers can fall through to their existing default
+ * (sanitizeListingExpiry's category-based fill).
+ *
+ * Bulk CSV donors typing "9/1/2026" used to be silently overwritten with a
+ * category default; parsing US dates here keeps their real expiry.
+ */
+export function parseAmericanDate(raw) {
+  if (raw == null) return null
+  const s = String(raw).trim()
+  if (!s) return null
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (iso) {
+    const y = Number(iso[1])
+    const m = Number(iso[2])
+    const d = Number(iso[3])
+    if (isValidYmd(y, m, d)) return toIso(y, m, d)
+    return null
+  }
+  const us = s.match(/^(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})$/)
+  if (us) {
+    const month = Number(us[1])
+    const day = Number(us[2])
+    let year = Number(us[3])
+    if (year < 100) year += 2000
+    if (isValidYmd(year, month, day)) return toIso(year, month, day)
+    return null
+  }
+  return null
+}
+
+function isValidYmd(y, m, d) {
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return false
+  if (y < 1900 || y > 2999) return false
+  if (m < 1 || m > 12) return false
+  if (d < 1 || d > 31) return false
+  const dt = new Date(Date.UTC(y, m - 1, d))
+  return (
+    dt.getUTCFullYear() === y
+    && dt.getUTCMonth() === m - 1
+    && dt.getUTCDate() === d
+  )
+}
+
+function toIso(y, m, d) {
+  const mm = String(m).padStart(2, '0')
+  const dd = String(d).padStart(2, '0')
+  return `${y}-${mm}-${dd}`
+}
+
+/**
  * Parse a CSV blob of food listings.
  * Auto-detects delimiter (comma, semicolon, tab) and strips BOM.
  * @param {string} text - raw CSV text (header row required)
@@ -228,7 +280,13 @@ export function parseListingsCsv(text) {
       category,
     }
     if (obj.description) row.description = obj.description.slice(0, 2000)
-    if (obj.expiry_date) row.expiry_date = obj.expiry_date.slice(0, 40)
+    if (obj.expiry_date) {
+      // Donors typically write MM/DD/YYYY in a US-format spreadsheet;
+      // convert to ISO here so the rest of the pipeline (sanitizeListingExpiry,
+      // backend _normalize_expiry_date, DB) keeps its ISO contract.
+      const usIso = parseAmericanDate(obj.expiry_date)
+      row.expiry_date = (usIso || obj.expiry_date).slice(0, 40)
+    }
     if (obj.location) row.location = obj.location.slice(0, 200)
     if (obj.dietary_tags) row.dietary_tags = parseListField(obj.dietary_tags)
     if (obj.allergens) row.allergens = parseListField(obj.allergens)
@@ -261,6 +319,17 @@ function datePlusDays(days) {
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
+}
+
+/** MM/DD/YYYY for today + N days — used in the CSV template so donors see
+ * the same format they'll type when editing the file in Excel/Sheets. */
+function datePlusDaysUS(days) {
+  const d = new Date()
+  d.setDate(d.getDate() + days)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${m}/${day}/${y}`
 }
 
 /**
@@ -324,11 +393,13 @@ export function downloadCsvTemplate() {
     'dietary_tags', 'allergens', 'location', 'community',
   ]
   // Keep example expiry dates in the future so the template itself is usable.
+  // Dates are American MM/DD/YYYY — parseListingsCsv converts to ISO on
+  // import, and ISO YYYY-MM-DD still works if a donor prefers it.
   // Different community names show that each row can target a different school.
   const examples = [
-    ['Fresh Apples', '10', 'lbs', 'produce', 'Crisp Fuji apples from local farm', datePlusDays(5), 'vegan,gluten-free', '', '', 'Do Good Warehouse'],
-    ['Whole Wheat Bread', '5', 'loaves', 'bakery', 'Freshly baked today', datePlusDays(3), 'vegetarian', 'gluten', '', ''],
-    ['Canned Beans', '20', 'cans', 'pantry', 'Black beans, unopened', datePlusDays(180), 'vegan,gluten-free', '', '', ''],
+    ['Fresh Apples', '10', 'lbs', 'produce', 'Crisp Fuji apples from local farm', datePlusDaysUS(5), 'vegan,gluten-free', '', '', 'Do Good Warehouse'],
+    ['Whole Wheat Bread', '5', 'loaves', 'bakery', 'Freshly baked today', datePlusDaysUS(3), 'vegetarian', 'gluten', '', ''],
+    ['Canned Beans', '20', 'cans', 'pantry', 'Black beans, unopened', datePlusDaysUS(180), 'vegan,gluten-free', '', '', ''],
   ]
   const csvContent = [
     headers.join(','),
