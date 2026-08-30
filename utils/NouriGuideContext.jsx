@@ -69,6 +69,7 @@ export function NouriGuideProvider({ children }) {
     saveAccessibilitySettings(settings)
     setNouriA11yPrefs({
       preferTextOverVoice: settings.preferTextOverVoice,
+      formVoiceGuideEnabled: settings.formVoiceGuideEnabled,
       simpleLanguage: settings.simpleLanguage,
       alwaysShowCaptions: settings.alwaysShowCaptions,
       preferredLanguage: settings.preferredLanguage,

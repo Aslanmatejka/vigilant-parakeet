@@ -157,12 +157,30 @@ let activeStop = null
 /** @type {Set<(s: NouriGuideState) => void>} */
 const listeners = new Set()
 
-/** @type {{ preferTextOverVoice: boolean, simpleLanguage: boolean, alwaysShowCaptions: boolean, preferredLanguage: string }} */
+/** @type {{ preferTextOverVoice: boolean, formVoiceGuideEnabled: boolean, simpleLanguage: boolean, alwaysShowCaptions: boolean, preferredLanguage: string }} */
 let a11yPrefs = {
   preferTextOverVoice: false,
+  formVoiceGuideEnabled: false,
   simpleLanguage: false,
   alwaysShowCaptions: true,
   preferredLanguage: 'en',
+}
+
+/** Form TTS is opt-in — off unless the user enables it in Accessibility settings. */
+function shouldSpeakFormVoice() {
+  return (
+    a11yPrefs.formVoiceGuideEnabled
+    && !a11yPrefs.preferTextOverVoice
+    && !state.isMuted
+    && !state.isDismissed
+  )
+}
+
+function allowGuideSpeech(speak, { force = false } = {}) {
+  if (!speak && !force) return false
+  if (state.isDismissed || state.isMuted || a11yPrefs.preferTextOverVoice) return false
+  if (state.source === 'form' && !shouldSpeakFormVoice()) return false
+  return true
 }
 
 function notify() {
@@ -274,7 +292,7 @@ export function updateGuide(patch, { speak = false, lang, focusField = true } = 
 
   notify()
 
-  if (speak && !state.isDismissed && !state.isMuted && !a11yPrefs.preferTextOverVoice) {
+  if (allowGuideSpeech(speak)) {
     speakGuideText(state.caption || state.text, { lang: guideLang })
   }
 }
@@ -290,7 +308,7 @@ export async function speakGuideText(text, { lang, force = false, preferLocal } 
   state.caption = caption
   state.text = state.text || caption
 
-  if (!force && (state.isMuted || a11yPrefs.preferTextOverVoice || state.isDismissed)) {
+  if (!allowGuideSpeech(true, { force })) {
     state.isSpeaking = false
     notify()
     return

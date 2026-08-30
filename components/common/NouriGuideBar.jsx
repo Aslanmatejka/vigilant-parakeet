@@ -119,6 +119,15 @@ export default function NouriGuideBar() {
               </p>
             )}
 
+            {source === 'form'
+              && !settings.formVoiceGuideEnabled
+              && !settings.preferTextOverVoice
+              && !isMuted && (
+              <p className="text-xs mt-1 opacity-70">
+                Voice guide is off — enable Form voice guide in Accessibility settings.
+              </p>
+            )}
+
             {showHandoffHint && (
               <p className="text-xs mt-1 opacity-90">
                 Having trouble? A team member can help.

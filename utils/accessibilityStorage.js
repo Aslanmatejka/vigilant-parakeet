@@ -7,6 +7,7 @@
  * @property {boolean} reduceMotion
  * @property {boolean} alwaysShowCaptions
  * @property {boolean} preferTextOverVoice
+ * @property {boolean} formVoiceGuideEnabled
  * @property {boolean} simpleLanguage
  * @property {boolean} easyMode
  * @property {boolean} listFirstFind
@@ -36,6 +37,7 @@ export const DEFAULT_A11Y_SETTINGS = {
   reduceMotion: false,
   alwaysShowCaptions: true,
   preferTextOverVoice: false,
+  formVoiceGuideEnabled: false,
   simpleLanguage: false,
   easyMode: false,
   listFirstFind: true,
@@ -65,6 +67,7 @@ export function buildAccessibilityProfilePayload(settings) {
     reduceMotion: !!settings.reduceMotion,
     alwaysShowCaptions: !!settings.alwaysShowCaptions,
     preferTextOverVoice: !!settings.preferTextOverVoice,
+    formVoiceGuideEnabled: !!settings.formVoiceGuideEnabled,
     simpleLanguage: !!settings.simpleLanguage,
     easyMode: !!settings.easyMode,
     listFirstFind: !!settings.listFirstFind,

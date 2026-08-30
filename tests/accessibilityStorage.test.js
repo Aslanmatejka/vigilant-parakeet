@@ -10,6 +10,7 @@ describe('accessibilityStorage', () => {
     expect(merged.largeText).toBe(true)
     expect(merged.preferredLanguage).toBe('en')
     expect(merged.smsGuideEnabled).toBe(false)
+    expect(merged.formVoiceGuideEnabled).toBe(false)
   })
 
   test('mergeAccessibilitySettings normalizes unknown language', () => {
@@ -26,5 +27,14 @@ describe('accessibilityStorage', () => {
     expect(payload.simpleLanguage).toBe(true)
     expect(payload.preferredLanguage).toBe('vi')
     expect(payload.easyMode).toBe(false)
+    expect(payload.formVoiceGuideEnabled).toBe(false)
+  })
+
+  test('buildAccessibilityProfilePayload includes formVoiceGuideEnabled when on', () => {
+    const payload = buildAccessibilityProfilePayload({
+      ...DEFAULT_A11Y_SETTINGS,
+      formVoiceGuideEnabled: true,
+    })
+    expect(payload.formVoiceGuideEnabled).toBe(true)
   })
 })

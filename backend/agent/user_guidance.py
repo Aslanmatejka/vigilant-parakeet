@@ -327,6 +327,16 @@ def build_accessibility_profile_prompt(profile: dict | None) -> str:
             "- User prefers text over voice: keep replies concise, scannable, "
             "and suitable for on-screen reading (they may not hear audio)."
         )
+    elif profile.get("formVoiceGuideEnabled"):
+        lines.append(
+            "- Form voice guide is ON: the user wants spoken field hints on "
+            "forms — keep written text clear too."
+        )
+    else:
+        lines.append(
+            "- Form voice guide is OFF: give form help as text only; do not "
+            "assume they hear spoken field hints."
+        )
 
     if profile.get("easyMode"):
         lines.append(

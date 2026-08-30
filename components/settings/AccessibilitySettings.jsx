@@ -128,6 +128,17 @@ export default function AccessibilitySettings() {
             onChange={(v) => updateSetting('alwaysShowCaptions', v)}
           />
           <ToggleRow
+            id="a11y-form-voice"
+            label="Form voice guide"
+            description={
+              settings.preferTextOverVoice
+                ? 'Turn off "Prefer text over voice" above to enable spoken form hints.'
+                : 'Nouri reads form field hints aloud when you focus a field. Text hints still appear when this is off.'
+            }
+            checked={settings.formVoiceGuideEnabled}
+            onChange={(v) => updateSetting('formVoiceGuideEnabled', v)}
+          />
+          <ToggleRow
             id="a11y-prefer-text"
             label="Prefer text over voice"
             description="Nouri shows instructions as text instead of playing audio automatically."

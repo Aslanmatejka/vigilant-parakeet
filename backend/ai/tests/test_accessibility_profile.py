@@ -33,3 +33,18 @@ def test_screen_reader_and_text_only():
     })
     assert "Screen reader" in block
     assert "text over voice" in block.lower()
+
+
+def test_form_voice_guide_enabled():
+    block = build_accessibility_profile_prompt({
+        "formVoiceGuideEnabled": True,
+        "preferredLanguage": "en",
+    })
+    assert "Form voice guide is ON" in block
+
+
+def test_form_voice_guide_off_by_default():
+    block = build_accessibility_profile_prompt({
+        "preferredLanguage": "en",
+    })
+    assert "Form voice guide is OFF" in block
