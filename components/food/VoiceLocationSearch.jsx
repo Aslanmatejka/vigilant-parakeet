@@ -3,6 +3,7 @@ import PropTypes from 'prop-types';
 import { useNavigate } from 'react-router-dom';
 import aiChatService from '../../utils/services/aiChatService';
 import { transcribeAudio } from '../../utils/openaiVoice';
+import { createMediaRecorder } from '../../utils/mediaRecorder';
 import { useEffectiveLocation } from '../../utils/hooks/useLocation';
 import { useAuthContext } from '../../utils/AuthContext';
 import { AIThinkingPanel } from '../common/AIThinking.jsx';
@@ -184,7 +185,7 @@ export default function VoiceLocationSearch({
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             streamRef.current = stream;
-            const recorder = new MediaRecorder(stream);
+            const recorder = createMediaRecorder(stream);
             chunksRef.current = [];
             recorder.ondataavailable = (evt) => {
                 if (evt.data && evt.data.size > 0) chunksRef.current.push(evt.data);

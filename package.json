@@ -14,6 +14,8 @@
     "test:a11y": "jest tests/accessibilityStorage.test.js tests/parseGuidedMessage.test.js tests/humanHandoff.test.js tests/guideLang.test.js tests/chatI18n.test.js",
     "test:pa11y:ci": "node scripts/run-pa11y-ci.mjs",
     "test:pa11y": "npm run build && npm run test:pa11y:ci",
+    "test:browsers": "playwright test",
+    "test:browsers:ci": "npm run build && playwright test",
     "test:ui-share-claim": "node --env-file=.env scripts/ui-share-claim-smoke.mjs",
     "lint": "eslint . --ext .js,.jsx",
     "format": "prettier --write .",
@@ -43,6 +45,7 @@
   "devDependencies": {
     "@babel/preset-env": "^7.28.0",
     "@babel/preset-react": "^7.27.1",
+    "@playwright/test": "^1.61.1",
     "@testing-library/jest-dom": "^6.6.4",
     "@testing-library/react": "^16.3.0",
     "@vitejs/plugin-react": "^4.2.0",
@@ -76,5 +79,12 @@
     "supabase"
   ],
   "author": "Aslanmatejka",
-  "license": "MIT"
+  "license": "MIT",
+  "browserslist": [
+    "last 2 Chrome versions",
+    "last 2 Firefox versions",
+    "last 2 Safari versions",
+    "last 2 Edge versions",
+    "iOS >= 15"
+  ]
 }

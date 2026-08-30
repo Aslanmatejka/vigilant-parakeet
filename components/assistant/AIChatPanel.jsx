@@ -31,6 +31,7 @@ import {
   chatLang,
   onlineToneLabel,
 } from '../../utils/chatI18n.js'
+import { createMediaRecorder } from '../../utils/mediaRecorder.js'
 
 // Map accent → tailwind classes so the welcome cards stay on-brand
 // while still being visually distinct from each other.
@@ -3307,18 +3308,7 @@ function AIChatPanel() {
 
       // Prefer formats Whisper accepts reliably. Safari often lacks webm;
       // fall back to mp4 so we don't upload a mystery container labelled .webm.
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : MediaRecorder.isTypeSupported('audio/webm')
-          ? 'audio/webm'
-          : MediaRecorder.isTypeSupported('audio/mp4')
-            ? 'audio/mp4'
-            : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')
-              ? 'audio/ogg;codecs=opus'
-              : ''
-      const recorder = mimeType
-        ? new MediaRecorder(stream, { mimeType })
-        : new MediaRecorder(stream)
+      const recorder = createMediaRecorder(stream)
 
       audioChunksRef.current = []
 

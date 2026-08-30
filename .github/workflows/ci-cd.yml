@@ -2,6 +2,7 @@
 #
 # CI (every push/PR to master|main|develop):
 #   - Frontend: lint → test → unit a11y → build → pa11y WCAG scan (advisory)
+#   - Browser matrix: Playwright smoke on Chromium (blocking), Firefox/WebKit (advisory)
 #   - Backend: hermetic pytest
 #   - Security: npm audit (advisory, non-blocking)
 #
@@ -79,6 +80,36 @@ jobs:
           path: dist
       - run: npm ci
       - run: npm run test:pa11y:ci
+
+  browser-matrix:
+    name: Cross-browser smoke (Playwright)
+    needs: [frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VITE_SUPABASE_URL: https://ifzbpqyuhnxbhdcnmvfs.supabase.co
+      VITE_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlmemJwcXl1aG54YmhkY25tdmZzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYwNTI5NTgsImV4cCI6MjA3MTYyODk1OH0.ivjNXt8z704sVv6Jt2Z3tVkkelUzeb8Ih4SaCQFHerk
+      VITE_MAPBOX_TOKEN: pk.eyJ1Ijoic2lnbndpc2UiLCJhIjoiY21rc2tjNjQ3MGFjajNkcHJ1cTNsbWV6dyJ9.xbJQFP3HCM2jmG87wvwC1Q
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+          cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium firefox webkit
+      - name: Playwright smoke (Chromium)
+        run: npx playwright test --project=chromium
+      - name: Playwright smoke (Firefox, advisory)
+        continue-on-error: true
+        run: npx playwright test --project=firefox
+      - name: Playwright smoke (WebKit, advisory)
+        continue-on-error: true
+        run: npx playwright test --project=webkit
 
   backend:
     name: Backend CI

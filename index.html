@@ -13,6 +13,11 @@
      <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
      <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet" />
      <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+     <script>
+       if (typeof window !== 'undefined' && !window.mapboxgl) {
+         window.__MAPBOX_UNAVAILABLE__ = true;
+       }
+     </script>
     <title>DoGoods - Community Food Sharing Platform</title>
     <meta name="description" content="A community food sharing platform built with React and Supabase" />
     <meta name="keywords" content="food-sharing, community, sustainability, react, supabase" />

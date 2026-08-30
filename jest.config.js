@@ -2,6 +2,7 @@ module.exports = {
   testEnvironment: 'jsdom',
   setupFilesAfterEnv: ['<rootDir>/tests/setup.js'],
   roots: ['<rootDir>/tests'],
+  testPathIgnorePatterns: ['/node_modules/', '/tests/e2e/'],
   testMatch: [
     '**/?(*.)+(spec|test).[jt]s?(x)',
   ],

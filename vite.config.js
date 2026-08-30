@@ -11,6 +11,7 @@ export default defineConfig(({ mode }) => {
     appType: 'spa',
     root: '.',
     build: {
+      target: ['es2020', 'safari15', 'firefox90', 'chrome90', 'edge90'],
       outDir: 'dist',
       rollupOptions: {
         input: {

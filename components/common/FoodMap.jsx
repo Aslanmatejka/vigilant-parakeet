@@ -17,6 +17,11 @@ import CommunityPinIcon, { getCommunityPinDimensions, renderCommunityPinSvg } fr
 // Access it from window.mapboxgl
 const getMapboxgl = () => window.mapboxgl;
 
+function isMapboxUnavailable() {
+    if (typeof window === 'undefined') return false;
+    return Boolean(window.__MAPBOX_UNAVAILABLE__) || !window.mapboxgl;
+}
+
 // Get Mapbox token from centralized config (window.__ENV__ → import.meta.env → hardcoded fallback)
 const MAPBOX_TOKEN = API_CONFIG.MAPBOX.ACCESS_TOKEN;
 
@@ -168,6 +173,7 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
     const [communities, setCommunities] = useState([]);
     const [loading, setLoading] = useState(true);
     const [mapLoaded, setMapLoaded] = useState(false);
+    const [mapUnavailable, setMapUnavailable] = useState(() => isMapboxUnavailable());
     // Tracks listing ids we've already attempted to geocode so the
     // backfill effect never loops on an address Mapbox can't resolve.
     const geocodeAttemptedRef = useRef(new Set());
@@ -197,7 +203,10 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
         }
         
         const mapboxgl = getMapboxgl();
-        if (!mapboxgl || !mapContainer.current) return;
+        if (!mapboxgl || !mapContainer.current) {
+            if (!mapboxgl) setMapUnavailable(true);
+            return;
+        }
 
         if (!MAPBOX_TOKEN) {
             console.error('❌ Mapbox token is missing');
@@ -999,6 +1008,20 @@ function FoodMap({ onMarkerClick, showSignupPrompt = true, highlightedFoodId = n
             className={`dogoods-food-map relative isolate w-full h-full min-h-[280px] sm:min-h-[400px] lg:min-h-[500px] overflow-visible ${className}`.trim()}
             style={{ backgroundColor: '#f0f0f0' }}
         >
+            {mapUnavailable && (
+                <div
+                    className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center bg-gray-100 rounded-2xl border border-gray-200 z-10"
+                    role="status"
+                >
+                    <i className="fas fa-map-marked-alt text-4xl text-gray-400 mb-3" aria-hidden="true" />
+                    <p className="text-sm font-medium text-gray-800">
+                        Map unavailable in this browser or network
+                    </p>
+                    <p className="text-xs text-gray-600 mt-1 max-w-sm">
+                        Use list view to browse food listings, or check that Mapbox is not blocked by your network.
+                    </p>
+                </div>
+            )}
             {/* Static map-like background - shows instantly */}
             <div 
                 className="absolute inset-0 pointer-events-none" 
