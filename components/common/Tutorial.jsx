@@ -71,10 +71,10 @@ const STEPS = [
         target: null,
         icon: 'fa-book-open',
         title: 'Resources',
-        content: 'Check out our recipe page to get inspired, stay up to date on All Good Living Foundation\'s events and programs, and learn about our sponsors.',
+        content: 'Stay up to date on All Good Living Foundation\'s events and programs, and learn about our partners and impact.',
         placement: 'center',
         route: '/',
-        highlightMultiple: ['[href="/impact-story"]', '[href="/recipes"]', '[href="/sponsors"]']
+        highlightMultiple: ['[href="/impact-story"]', '[href="/sponsors"]']
     },
     // 8. You're All Set
     {

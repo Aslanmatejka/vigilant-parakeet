@@ -20,7 +20,6 @@ const SUPPORT_DROPDOWN = {
 const VISITOR_TAIL = [
     SUPPORT_DROPDOWN,
     { label: 'Impact Story', path: '/impact-story' },
-    { label: 'Recipes', path: '/recipes' },
     { label: 'Partners', path: '/sponsors' },
     { label: 'Contact', path: '/contact' }
 ];
@@ -83,7 +82,6 @@ function Header({ menuItems: menuItemsProp }) {
             return [
                 { label: 'Find Food', path: '/find' },
                 { label: 'Request Food', path: '/request' },
-                { label: 'Recipes', path: '/recipes' },
                 { label: 'Receipts & Activity', path: '/receipts' },
                 { label: 'Partners', path: '/sponsors' },
                 { label: 'Impact', path: '/impact-story' },
@@ -97,7 +95,6 @@ function Header({ menuItems: menuItemsProp }) {
                 { label: 'Find Food', path: '/find' },
                 { label: 'Request Food', path: '/request' },
                 { label: 'Community Requests', path: '/community-requests' },
-                { label: 'Recipes', path: '/recipes' },
                 { label: 'Partners', path: '/sponsors' },
                 { label: 'Impact', path: '/impact-story' },
                 SUPPORT_DROPDOWN,
