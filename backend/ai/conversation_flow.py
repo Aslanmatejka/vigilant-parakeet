@@ -5007,6 +5007,21 @@ def build_posting_step_reminder(
                 "qué incluye). NO la inventes — espera su respuesta. "
                 "Pásala como description al publicar."
             )
+        if ready and state["has_photo"]:
+            exp_hint = (
+                f" Usa expiration_date={parsed_exp} exactamente."
+                if parsed_exp else ""
+            )
+            return (
+                "Confirmaron — llama post_food_listing (o post_food_listings "
+                f"si hay 2+ borradores) AHORA.{exp_hint} No vuelvas a pedir "
+                "foto, fecha, comunidad ni confirmación."
+            )
+        if last_asked == "post_confirm" and _is_affirmative_post_confirm(message):
+            return (
+                "Confirmaron — llama post_food_listing (o post_food_listings "
+                "si hay 2+ borradores) AHORA. No vuelvas a pedir confirmación."
+            )
         saved_desc = (_best_user_description_from_thread(message, history) or "").strip()
         if saved_desc and last_asked != "description":
             photo_bit = (
@@ -5019,16 +5034,6 @@ def build_posting_step_reminder(
                 "NO pidas descripción otra vez (Sigue sellado / Casero / "
                 "Sobras variadas son la descripción, no un alimento nuevo)."
                 f"{photo_bit}"
-            )
-        if ready and state["has_photo"]:
-            exp_hint = (
-                f" Usa expiration_date={parsed_exp} exactamente."
-                if parsed_exp else ""
-            )
-            return (
-                "Confirmaron — llama post_food_listing (o post_food_listings "
-                f"si hay 2+ borradores) AHORA.{exp_hint} No vuelvas a pedir "
-                "foto, fecha, comunidad ni confirmación."
             )
         if state["awaiting_photo"] and last_asked == "photo" and _is_short_affirmative(message):
             return (
@@ -5054,11 +5059,6 @@ def build_posting_step_reminder(
                 "Sugerencia: da UN resumen corto y pregunta "
                 "'¿Listo para publicar?' UNA vez. Tras su sí, llama al "
                 "tool de inmediato — no pidas confirmar otra vez."
-            )
-        if last_asked == "post_confirm" and _is_affirmative_post_confirm(message):
-            return (
-                "Confirmaron — llama post_food_listing (o post_food_listings "
-                "si hay 2+ borradores) AHORA. No vuelvas a pedir confirmación."
             )
         return (
             "Sugerencia: conversacional — una pregunta por turno. Si ya "
@@ -5126,6 +5126,23 @@ def build_posting_step_reminder(
             "description when posting. One question — then continue "
             "with photo."
         )
+    if ready and state["has_photo"]:
+        exp_hint = (
+            f" Use expiration_date={parsed_exp} exactly — do not invent another year."
+            if parsed_exp else ""
+        )
+        return (
+            "They confirmed — call post_food_listing now "
+            "(or post_food_listings if 2+ share drafts are queued)."
+            f"{exp_hint} Do NOT re-ask for photos, expiry, community, or "
+            "another confirmation."
+        )
+    if last_asked == "post_confirm" and _is_affirmative_post_confirm(message):
+        return (
+            "They confirmed — call post_food_listing now "
+            "(or post_food_listings if 2+ share drafts are queued). "
+            "Do NOT re-ask for confirmation."
+        )
     saved_desc = (_best_user_description_from_thread(message, history) or "").strip()
     if saved_desc and last_asked != "description":
         photo_bit = (
@@ -5138,17 +5155,6 @@ def build_posting_step_reminder(
             "description again — Still sealed / Homemade / Assorted leftovers "
             "IS the listing description, not a new food title."
             f"{photo_bit}"
-        )
-    if ready and state["has_photo"]:
-        exp_hint = (
-            f" Use expiration_date={parsed_exp} exactly — do not invent another year."
-            if parsed_exp else ""
-        )
-        return (
-            "They confirmed — call post_food_listing now "
-            "(or post_food_listings if 2+ share drafts are queued)."
-            f"{exp_hint} Do NOT re-ask for photos, expiry, community, or "
-            "another confirmation."
         )
     if state["awaiting_photo"] and last_asked == "photo" and _is_short_affirmative(message):
         return (
@@ -5180,12 +5186,6 @@ def build_posting_step_reminder(
             "Nudge: give ONE short summary and ask 'Ready to post?' once. "
             "After they say yes, call the post tool immediately — do NOT "
             "ask them to confirm again."
-        )
-    if last_asked == "post_confirm" and _is_affirmative_post_confirm(message):
-        return (
-            "They confirmed — call post_food_listing now "
-            "(or post_food_listings if 2+ share drafts are queued). "
-            "Do NOT re-ask for confirmation."
         )
     return (
         "Nudge: keep it conversational — one question per turn. If you "

@@ -166,7 +166,7 @@ export function parseAmericanDate(raw) {
     if (isValidYmd(y, m, d)) return toIso(y, m, d)
     return null
   }
-  const us = s.match(/^(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})$/)
+  const us = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/)
   if (us) {
     const month = Number(us[1])
     const day = Number(us[2])
